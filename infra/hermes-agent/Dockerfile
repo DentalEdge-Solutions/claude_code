@@ -16,6 +16,13 @@ USER root
 # Claude Code CLI — Node 22 is present in the base image.
 RUN npm install -g @anthropic-ai/claude-code && claude --version
 
+# Auth bootstrap for the Hermes-launched `claude` executor. Hermes scrubs the
+# env of terminal subprocesses, so `claude` reads its key from settings.json at
+# HOME=/opt/data/home; this script materializes it from $ANTHROPIC_API_KEY.
+# Run once by the `claude-auth-init` compose sidecar before the gateway starts.
+COPY bootstrap-claude-auth.sh /usr/local/bin/bootstrap-claude-auth.sh
+RUN chmod 0755 /usr/local/bin/bootstrap-claude-auth.sh
+
 # Drop back to the non-root runtime user shipped by the base image (UID 10000).
 # NOTE: verify the username (`hermes`) against the base image before building.
 USER hermes

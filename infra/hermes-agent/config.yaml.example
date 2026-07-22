@@ -1,0 +1,29 @@
+# infra/hermes-agent/config.yaml.example
+# Version-controlled TEMPLATE for Hermes's control-plane config.
+#
+# The LIVE file is ./data/config.yaml (gitignored — it lives in HERMES_HOME,
+# /opt/data inside the container). This template exists so a fresh deploy
+# (e.g. the P4 VPS) reproduces the same control-plane setup deterministically.
+#
+# To apply on a fresh box:
+#   cp config.yaml.example data/config.yaml   # then `docker compose up -d`
+#   (or run the `hermes config set` commands in README.md)
+#
+# NO SECRETS HERE. API keys live ONLY in .env:
+#   OPENROUTER_API_KEY  -> Hermes's own control-plane model (OpenRouter credits)
+#   ANTHROPIC_API_KEY   -> `claude -p`, the executor (billed direct to Anthropic)
+
+model:
+  # Control-plane reasoning runs on a cheap OSS model via OpenRouter (D14/D15 economy).
+  # History: local qwen2.5:7b was too weak to orchestrate; Sonnet 5 worked but is expensive.
+  # DeepSeek V3.2 is the cost/reliability pick for tool-orchestration; swap freely if flaky
+  # (alternates: nousresearch/hermes-4-70b, qwen/qwen3-235b-a22b-2507, z-ai/glm-4.6).
+  # NOTE: `claude -p` (the executor) stays DIRECT on Anthropic — this only sets Hermes's brain.
+  default: "deepseek/deepseek-v3.2"
+  provider: "openrouter"
+
+terminal:
+  # Hermes runs `claude -p` in mounted project dirs via the local backend.
+  backend: "local"
+  cwd: "."
+  timeout: 300
