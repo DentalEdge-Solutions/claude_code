@@ -21,12 +21,30 @@ set -eu
 CLAUDE_HOME="${CLAUDE_SETTINGS_HOME:-/opt/data/home}"
 DEST="$CLAUDE_HOME/.claude/settings.json"
 
+# Fail CLOSED on the credential: if no key is provided, remove any existing
+# (possibly stale/rotated-away) settings.json rather than leaving it in place.
+# Exit 0 so the gateway can still run for non-Anthropic (e.g. control-plane)
+# work — but a Hermes-launched `claude -p` will cleanly report "not logged in"
+# instead of silently using a stale key.
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "bootstrap-claude-auth: ANTHROPIC_API_KEY not set; skipping (claude -p will be unauthenticated)" >&2
+  rm -f "$DEST"
+  echo "bootstrap-claude-auth: ANTHROPIC_API_KEY not set — cleared any stale $DEST" >&2
   exit 0
 fi
 
 mkdir -p "$CLAUDE_HOME/.claude"
-umask 177   # 0600 — readable only by the owner
-printf '{\n  "env": {\n    "ANTHROPIC_API_KEY": "%s"\n  }\n}\n' "$ANTHROPIC_API_KEY" > "$DEST"
+
+# Build the JSON with json.dumps so the key value is properly escaped (a value
+# containing " \ or newline can neither corrupt nor inject into the document).
+# Write to a temp file, lock down perms explicitly (umask only affects NEW
+# files; a pre-existing DEST would otherwise keep its old mode), then move
+# atomically into place so there is never a window with content + wrong perms.
+TMP="$DEST.tmp.$$"
+umask 177
+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" python3 -c '
+import json, os
+print(json.dumps({"env": {"ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"]}}, indent=2))
+' > "$TMP"
+chmod 600 "$TMP"
+mv -f "$TMP" "$DEST"
 echo "bootstrap-claude-auth: wrote $DEST (0600)"
