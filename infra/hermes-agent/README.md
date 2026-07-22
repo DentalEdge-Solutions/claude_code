@@ -24,6 +24,10 @@ execution. See the project plan for the full rationale.
 - `docker-compose.yml` — loopback-only, read-only project mount, `env_file: .env`.
 - `.env.example` — copy to `.env` (gitignored) and fill in keys.
 - `config.yaml.example` — version-controlled template for the live `./data/config.yaml` (gitignored).
+- `bootstrap-claude-auth.sh` — init-sidecar script; projects the executor key from `.env` into claude's config.
+- `registry/projects.yaml` — project registry (which projects Hermes may operate, workdir, scope, model).
+- `skills/claude-code-operator/` — the operator skill (registry-aware, read-only, model-tiered).
+- `bin/monitor-runs.py` — read-only monitor over cron job/run history.
 - `SECURITY-AUDIT.md` — P0 audit of the base image / posture.
 - `data/` — Hermes state (HERMES_HOME ↔ `/opt/data`), **gitignored**.
 
@@ -80,6 +84,49 @@ startup (wired as the `claude-auth-init` sidecar in `docker-compose.yml`, which
 - `data/home/.claude/settings.json` is a **generated** artifact (gitignored,
   0600) — never hand-edited, never committed, never stale after a rotation.
 - Rotating a key = edit `.env`, then `docker compose up -d --force-recreate`.
+
+## P2 — operating projects (registry, scheduling, monitoring)
+
+The management layer that lets you drive projects by talking to Hermes.
+
+**Registry** (`registry/projects.yaml`, mounted read-only at `/opt/registry`) —
+the source of truth for which projects Hermes may operate: `workdir`, `scope`
+(`read` | `write`), `default_model`, description. Add a project by adding an
+entry (and, until P5, keep `scope: read`).
+
+**Operator skill** (`skills/claude-code-operator`, mounted into `SKILLS_DIR`) —
+resolves a project NAME → workdir from the registry, enforces the read-only
+guardrail (`--permission-mode plan --allowedTools 'Read,Grep,Glob'`), picks the
+cheap model tier, and delegates the `claude -p` mechanics to the bundled
+`claude-code` skill. Just ask naturally:
+
+```bash
+docker compose exec hermes-agent hermes --accept-hooks -z \
+  "In the claude_code project, what are the five metrics skill-eval computes?"
+```
+
+Write requests are refused (scope gated to P5); unregistered projects are
+rejected with the available list.
+
+**Scheduling** (native `hermes cron`) — register unattended workflows:
+
+```bash
+docker compose exec hermes-agent hermes cron create '0 9 * * *' \
+  --name cc-testing-digest --deliver local \
+  --workdir /projects/claude_code --skill claude-code-operator \
+  "In the claude_code project (read-only), summarize how tests are run."
+# trigger once:  hermes cron run <name> && hermes cron tick
+# pause/resume:  hermes cron pause|resume <name>
+```
+
+**Monitoring** — durable run history + reports:
+
+```bash
+docker compose exec hermes-agent python3 /opt/cc-bin/monitor-runs.py        # digest
+docker compose exec hermes-agent python3 /opt/cc-bin/monitor-runs.py --json # machine-readable
+```
+
+Run reports are written to `data/cron/output/<job_id>/<timestamp>.md`.
 
 ## Security
 

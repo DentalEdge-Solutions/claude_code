@@ -28,7 +28,10 @@ services:
         condition: service_completed_successfully   # auth file exists before gateway boots
     volumes:
       - ./data:/opt/data                # Hermes state (gitignored)
-      - ../..:/projects/claude_code:ro  # THIS repo, READ-ONLY for the first smoke
+      - ../..:/projects/claude_code:ro  # THIS repo, READ-ONLY (P2; writes gated to P5)
+      - ./registry:/opt/registry:ro     # project registry (version-controlled, read-only)
+      - ./skills/claude-code-operator:/opt/data/skills/claude-code-operator:ro  # operator skill
+      - ./bin:/opt/cc-bin:ro            # operational helpers (run monitor, read-only)
     ports:
       - "127.0.0.1:9119:9119"           # dashboard, loopback only (optional)
     restart: unless-stopped

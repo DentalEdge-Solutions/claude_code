@@ -1,0 +1,27 @@
+# Hermes project registry
+#
+# The source of truth for which Claude Code projects Hermes may operate, where
+# they live inside the container, and with what scope. Version-controlled and
+# mounted READ-ONLY into the container at /opt/registry/projects.yaml. The
+# operator resolves a project NAME → workdir + scope from here.
+#
+# SCOPE (enforced by the operator policy, see skills/claude-code-operator):
+#   read   -> `claude -p` runs read-only: --permission-mode plan and
+#             --allowedTools 'Read,Grep,Glob'. This is all P2 allows.
+#   write  -> DEFERRED to plan P5 (writable mount + approval guardrails). Not yet
+#             permitted; the operator must refuse write-scope requests for now.
+#
+# MODELS: `claude -p` (the executor) stays direct on Anthropic. default_model is
+# the cheap tier for routine read/summary/inventory work; the operator may step
+# up to a stronger tier for genuinely hard analysis (see the operator policy).
+version: 1
+
+projects:
+  claude_code:
+    workdir: /projects/claude_code
+    scope: read
+    default_model: claude-haiku-4-5
+    description: >
+      Skill & Agent Pipeline Toolkit — THIS repo. Sources, vets, adapts,
+      measures, and auto-improves Claude Code skills and agents. Mounted
+      read-only at /projects/claude_code.
