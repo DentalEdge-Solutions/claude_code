@@ -1,6 +1,8 @@
 ---
 type: decision
-status: candidate
+status: superseded
+superseded_by: canon/2026-07-23-hermes-memory-corrections-d1-d5.md
+superseded_reason: "Custom-kernel framing (D-3). 'Hermes' is Nous Research's adopted Hermes Agent, not a custom-built kernel. Replaced by the adoption candidate + the D-1…D-5 correction (now canon)."
 title: "Hermes definitive roadmap — credential-free kernel now, multi-tenant Operate track deferred, LLM-agnostic engine"
 description: "The definitive plan for implementing Hermes: build a credential-free runtime KERNEL (run agents/teams + serve pack knowledge) now, and defer the credential-bearing execution services (vault, HITL, budget, pack-execution adapter, money/write) to a shared, multi-tenant, just-in-time Operate track initiated with the first spawned operator project. The engine is a pluggable adapter (claude -p default) with capability-tiered, eval-gated model routing."
 tags: [hermes, roadmap, architecture, kernel, operate-track, multi-tenant, llm-agnostic, model-routing, governance, deferred]
