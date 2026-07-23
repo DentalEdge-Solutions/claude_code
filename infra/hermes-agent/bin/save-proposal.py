@@ -31,7 +31,8 @@ def main(argv=None):
         return 1
 
     base = os.environ.get("PROPOSALS_DIR", "/opt/data/proposals")
-    ts = args.now or datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    # --now is a test hook; slug it so a path-like value can't escape dest_dir.
+    ts = slug(args.now) if args.now else datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
     dest_dir = os.path.join(base, slug(args.project))
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, f"{ts}.md")

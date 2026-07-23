@@ -37,6 +37,18 @@ class TestProposalsIndex(unittest.TestCase):
             self.assertEqual(r.returncode, 0)
             self.assertIn("No proposals yet", r.stdout)
 
+    def test_open_refuses_path_outside_base(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as outside:
+            outside.write("secret outside base")
+            outside_path = outside.name
+        try:
+            r = run(["--open", outside_path], {"PROPOSALS_DIR": self.d})
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("outside PROPOSALS_DIR", r.stderr)
+            self.assertNotIn("secret outside base", r.stdout)
+        finally:
+            os.unlink(outside_path)
+
 
 if __name__ == "__main__":
     unittest.main()

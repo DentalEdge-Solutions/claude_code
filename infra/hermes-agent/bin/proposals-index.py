@@ -56,10 +56,16 @@ def main(argv=None):
     base = os.environ.get("PROPOSALS_DIR", "/opt/data/proposals")
 
     if args.open:
-        if not os.path.isfile(args.open):
+        base_real = os.path.realpath(base)
+        target = os.path.realpath(args.open)
+        if target != base_real and not target.startswith(base_real + os.sep):
+            print(f"proposals-index: refusing to open path outside PROPOSALS_DIR: {args.open}",
+                  file=sys.stderr)
+            return 1
+        if not os.path.isfile(target):
             print(f"proposals-index: not found: {args.open}", file=sys.stderr)
             return 1
-        sys.stdout.write(open(args.open).read())
+        sys.stdout.write(open(target).read())
         return 0
 
     rows = collect(base, args.project)

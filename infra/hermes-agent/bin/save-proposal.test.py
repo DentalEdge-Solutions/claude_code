@@ -31,6 +31,15 @@ class TestSaveProposal(unittest.TestCase):
             r = run(["--project", "x", "--now", "t"], "   ", {"PROPOSALS_DIR": d})
             self.assertEqual(r.returncode, 1)
 
+    def test_now_cannot_escape_dest_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = run(["--project", "p", "--now", "../../evil"], "x", {"PROPOSALS_DIR": d})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            written = r.stdout.strip()
+            # stays under <base>/p/ — no traversal
+            self.assertTrue(written.startswith(os.path.join(d, "p") + os.sep), written)
+            self.assertEqual(os.path.basename(written), "evil.md")
+
 
 if __name__ == "__main__":
     unittest.main()
