@@ -29,6 +29,7 @@ services:
     volumes:
       - ./data:/opt/data                # Hermes state (gitignored)
       - ../..:/projects/claude_code:ro  # THIS repo, READ-ONLY (P2; writes gated to P5)
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro  # DentalEdge Google Ads (client-adjacent; secrets gitignored, not in tree)
       - ./registry:/opt/registry:ro     # project registry (version-controlled, read-only)
       - ./skills/claude-code-operator:/opt/data/skills/claude-code-operator:ro  # operator skill
       - ./bin:/opt/cc-bin:ro            # operational helpers (run monitor, read-only)

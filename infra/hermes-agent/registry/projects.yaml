@@ -25,3 +25,14 @@ projects:
       Skill & Agent Pipeline Toolkit — THIS repo. Sources, vets, adapts,
       measures, and auto-improves Claude Code skills and agents. Mounted
       read-only at /projects/claude_code.
+
+  claude_google_ads:
+    workdir: /projects/claude_google_ads
+    scope: read
+    default_model: claude-haiku-4-5
+    description: >
+      Google Ads API integration for the DentalEdge Solutions MCC (Python,
+      google-ads SDK) — lets Claude Code read reporting and apply Ads changes.
+      Client-adjacent: credentials are kept OUT of the tree (gitignored .env),
+      so nothing sensitive is mounted. READ-ONLY via Hermes (P2); a future
+      AIOS integration target.
