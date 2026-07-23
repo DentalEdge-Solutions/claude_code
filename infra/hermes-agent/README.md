@@ -128,6 +128,32 @@ docker compose exec hermes-agent python3 /opt/cc-bin/monitor-runs.py --json # ma
 
 Run reports are written to `data/cron/output/<job_id>/<timestamp>.md`.
 
+## Improvement proposals (Track A)
+
+The `claude-code-proposer` skill (`skills/claude-code-proposer`) reviews a
+registered project **read-only** and writes a structured improvement proposal
+— never a code change in the project itself. Ask Hermes directly:
+
+```bash
+docker compose exec hermes-agent hermes --accept-hooks -z \
+  "Use the claude-code-proposer skill. Review the claude_google_ads project \
+   and propose improvements. Then tell me the summary and the saved path."
+```
+
+Proposals are saved via `bin/save-proposal.py` to
+`/opt/data/proposals/<project>/<timestamp>.md` (each with a `## Summary`, a
+prioritized `## Items` list — `[P1]`/`[P2]`/`[P3]` — and `## Sources
+consulted`), and are listable/filterable with `bin/proposals-index.py`:
+
+```bash
+docker compose exec hermes-agent python3 /opt/cc-bin/proposals-index.py --project claude_google_ads
+docker compose exec hermes-agent python3 /opt/cc-bin/proposals-index.py --json
+```
+
+End-to-end verified: the project's git working tree stays clean
+(`git status --porcelain` unchanged) before and after a proposal run —
+the mount's read-only guardrail holds even for this analysis-and-write-elsewhere flow.
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
