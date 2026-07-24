@@ -10,12 +10,12 @@
 
 ## Global Constraints
 
-- **Worker confinement (five layers, must all hold):** `:ro` project mounts; a `review-readonly` toolset = ONLY `read_file, search_files, skill_view, kanban_show, kanban_complete, kanban_comment, kanban_heartbeat, kanban_block` (NO `write_file`/`patch`/`terminal`/`process`/`execute_code`/`delegate_task`/browser/web); NO fan-out tools (`kanban_create`/`kanban_link`/`kanban_unblock`); `--workspace scratch`; `--max-runtime`.
+- **Worker confinement (RESOLVED — hardened group-level Branch B; spike 2026-07-24 proved a custom hand-picked toolset is infeasible without forking Hermes):** (1) `:ro` project mounts = the kernel-enforced hard guarantee (projects unwritable). (2) Each profile's `config.yaml` sets `platform_toolsets.cli: [file, skills]` (allow-list) + `agent.disabled_toolsets: [terminal, code_execution, browser, web, delegation, computer_use, memory, vision, image_gen, video, video_gen, x_search, tts, todo, context_engine, session_search, cronjob, homeassistant, spotify, discord, discord_admin, yuanbao]` (deny-list) — NO terminal/`execute_code`/`delegate_task`/browser/web. (3) kanban is auto-injected for workers as a whole group; the fan-out tools (`kanban_create`/`link`/`unblock`) come with it and are **not separable** — mitigated by a post-run assertion (no worker-authored cards), NOT by absence. (4) `--workspace scratch`. (5) `--max-runtime`. **Documented residuals:** `write_file`/`patch` present via `file` but `:ro`-contained to `/opt/data`+scratch (can never touch a project); kanban fan-out present (asserted-against).
 - **No `claude -p` in workers** (it needs the terminal tool → breaks confinement). Workers analyze directly.
 - **Read-only on projects:** the project's git tree must be clean before AND after; the only writes are Kanban state + the proposal under `/opt/data/proposals`.
 - **Never-duplicate boundary rules** (in the skill): no `skill-refine`/`agent-refine`/skill mutation; no brain `canon`/`active` writes; no reinventing telemetry/`skill-eval` (read+cite).
 - **Python:** stdlib only; scripts read `PROPOSALS_DIR` default `/opt/data/proposals`; kanban DB at `/opt/data/kanban.db` overridable via `HERMES_KANBAN_DB` for tests.
-- **Determinism:** decomposition is a fixed template — no LLM orchestrator; workers get no fan-out tools.
+- **Determinism:** decomposition is a fixed template — no LLM orchestrator. (Workers *hold* kanban fan-out tools but their use is asserted-against post-run — see confinement above.)
 
 ## File Structure
 
@@ -27,40 +27,18 @@
 
 ---
 
-### Task 1: Confirm the `review-readonly` toolset mechanism (spike → create or fall back)
+### Task 1: Toolset mechanism — ✅ RESOLVED (spike 2026-07-24, decision approved)
 
-**Files:** none yet (produces a decision + a created toolset or a documented fallback).
+**Files:** none (decision recorded in the spec + these Global Constraints).
 
-The custom-toolset registration path is the one unconfirmed piece. Resolve it before building on it.
+**Spike outcome (evidence from the running container):**
+- Built-in toolsets are fixed **groups**; `CONFIGURABLE_TOOLSETS` shows `file` = `read, write, patch, search` as one unit — **read cannot be taken without write**.
+- `platform_toolsets` only selects *which groups* are enabled per platform (`platform_toolsets.<platform>: [groups]`); it does **not** define custom tool lists.
+- Plugins can add **new** tools but `register_tool` **cannot override built-ins** (`plugins.py:422`) — so no plugin can re-bundle a read-only subset of existing `read_file`/`kanban_*` tools. A true hand-picked toolset ⇒ **forking Hermes**, which governance forbids.
+- **The hard guarantee is OS-level and confirmed:** `/proc/mounts` shows `/projects/*` = `ro`, `/opt/data` = `rw`. Workers physically cannot write any project.
+- `agent.disabled_toolsets` (config.yaml) subtracts whole groups (`tools_config.py:1984`) — the real per-profile confinement knob.
 
-- [ ] **Step 1: Probe how custom toolsets are registered**
-
-Run (in `infra/hermes-agent`):
-```bash
-docker compose exec -T hermes-agent sh -c 'hermes tools --help 2>&1; echo ---; grep -rniE "platform_toolsets|save.*toolset|custom.*toolset|register_toolset|user.*toolset" /opt/hermes/hermes_cli/tools_config.py 2>/dev/null | head -20'
-```
-Determine whether a named custom toolset with an explicit tool list can be saved (via `hermes tools`, a `platform_toolsets` config entry, or a plugin `plugin.yaml`).
-
-- [ ] **Step 2: Decide and record the branch**
-
-- **Branch A — custom toolset supported:** create `review-readonly` with EXACTLY the 8 tools in Global Constraints. Record the exact command/config used.
-- **Branch B — not cleanly supported:** fall back to group-level `toolsets: [file, kanban]` and **update the spec's confinement claim**: the residual is `write_file`/`patch` able to write `/opt/data` (projects stay protected by `:ro`), and `kanban_create`/`link` remain (fan-out) unless a `disabled_toolsets`/per-tool gate removes them. Document this honestly; do not claim "no write" if Branch B.
-
-- [ ] **Step 3: Verify the toolset resolves to the intended tool set**
-
-Run:
-```bash
-docker compose exec -T hermes-agent sh -c 'hermes tools list 2>&1 | grep -iE "review-readonly|read_file|write_file|terminal" | head'
-```
-Expected (Branch A): `review-readonly` present; includes `read_file`, excludes `write_file`/`terminal`.
-
-- [ ] **Step 4: Commit the decision**
-
-Record the outcome in the spec's "Deferred / open" section (edit `docs/superpowers/specs/2026-07-24-hermes-kanban-review-pipeline-design.md`), then:
-```bash
-git add docs/superpowers/specs/2026-07-24-hermes-kanban-review-pipeline-design.md
-git commit -m "docs(hermes): record review-readonly toolset mechanism (Task 1 spike)"
-```
+**Decision (Hardened Branch B — Nous-native, no fork):** confine at the group level — per-profile `platform_toolsets.cli: [file, skills]` allow-list + `agent.disabled_toolsets` deny-list of every dangerous group; OS `:ro` as the hard guarantee; a post-run assertion for the kanban fan-out residual. Confinement details + residuals are now the resolved Global Constraints above; the spec's confinement section, Components, Verification, and "Deferred / open" are updated to match. **No custom toolset is created; Task 2 writes this config directly into each profile.**
 
 ---
 
@@ -68,28 +46,55 @@ git commit -m "docs(hermes): record review-readonly toolset mechanism (Task 1 sp
 
 **Files:** Create `infra/hermes-agent/bin/setup-review-team.sh`
 
-**Interfaces:** Produces profiles `architect`, `test-analyst`, `risk-analyst`, `synthesizer`, each `--no-skills`, described, and pinned to the confined toolset from Task 1.
+**Interfaces:** Produces profiles `architect`, `test-analyst`, `risk-analyst`, `synthesizer`, each `--no-skills`, described, and confined via its own `config.yaml` (allow-list + deny-list, per resolved Global Constraints). No custom toolset is created (Task 1 spike: infeasible without forking Hermes).
 
 - [ ] **Step 1: Write the script**
 
-Create `infra/hermes-agent/bin/setup-review-team.sh`:
+The confinement is written **directly into each profile's `config.yaml`** (deterministic + idempotent — more robust than depending on CLI flags). Create `infra/hermes-agent/bin/setup-review-team.sh`:
 ```bash
 #!/bin/sh
 # Create the four confined review-team profiles (idempotent). Each profile is
-# no-skills, described for its role, and pinned to the confined toolset from
-# Task 1 (default: review-readonly). Run inside the container.
+# no-skills, described for its role, and confined at the GROUP level via its own
+# config.yaml: allow-list platform_toolsets.cli=[file, skills] + a deny-list of
+# every dangerous group (agent.disabled_toolsets). kanban is auto-injected for
+# kanban workers. Run inside the container (HERMES_HOME=/opt/data).
 set -eu
-TOOLSET="${REVIEW_TOOLSET:-review-readonly}"
+PROFILES_ROOT="${HERMES_HOME:-/opt/data}/profiles"
+
+# The deny-list: every configurable group that a read-only analyst must NOT hold.
+DENY='terminal, code_execution, browser, web, delegation, computer_use, memory, vision, image_gen, video, video_gen, x_search, tts, todo, context_engine, session_search, cronjob, homeassistant, spotify, discord, discord_admin, yuanbao'
 
 set_profile() {  # name  description
   name="$1"; desc="$2"
   hermes profile show "$name" >/dev/null 2>&1 || hermes profile create "$name" --no-skills
   hermes profile describe "$name" "$desc" || true
-  # Pin the confined toolset in the profile's own config.yaml.
-  hermes --ignore-user-config config set --profile "$name" toolsets "[$TOOLSET]" \
-    2>/dev/null || hermes config set model.toolsets "[$TOOLSET]" --profile "$name" 2>/dev/null || \
-    echo "WARN: could not pin toolsets for $name via CLI; set profiles/$name/config.yaml manually" >&2
-  echo "profile ready: $name (toolset=$TOOLSET)"
+  cfg="$PROFILES_ROOT/$name/config.yaml"
+  mkdir -p "$PROFILES_ROOT/$name"
+  # Merge the confinement keys into any existing config.yaml (idempotent).
+  DENY="$DENY" python3 - "$cfg" <<'PY'
+import os, sys
+try:
+    import yaml
+except Exception:
+    yaml = None
+path = sys.argv[1]
+deny = [t.strip() for t in os.environ["DENY"].split(",") if t.strip()]
+data = {}
+if yaml and os.path.exists(path):
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+data.setdefault("platform_toolsets", {})["cli"] = ["file", "skills"]  # allow-list
+data.setdefault("agent", {})["disabled_toolsets"] = deny             # deny-list
+if yaml:
+    with open(path, "w") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+else:  # stdlib fallback — write a minimal valid YAML
+    with open(path, "w") as f:
+        f.write("platform_toolsets:\n  cli: [file, skills]\n")
+        f.write("agent:\n  disabled_toolsets: [" + ", ".join(deny) + "]\n")
+print("confined:", path)
+PY
+  echo "profile ready: $name"
 }
 
 set_profile architect     "Read-only software architecture analyst: structure, boundaries, coupling, design risks. Never writes."
@@ -98,21 +103,21 @@ set_profile risk-analyst  "Read-only risk/security analyst: failure modes, unsaf
 set_profile synthesizer   "Read-only synthesis coordinator: fuses specialist handoffs into one prioritized improvement proposal. Never writes."
 ```
 
-- [ ] **Step 2: Run it and verify confinement**
+- [ ] **Step 2: Run it and verify the profiles exist**
 
 ```bash
 cd infra/hermes-agent
-docker compose exec -T hermes-agent sh -c 'chmod +x /opt/cc-bin/setup-review-team.sh 2>/dev/null; REVIEW_TOOLSET='"${REVIEW_TOOLSET:-review-readonly}"' /opt/cc-bin/setup-review-team.sh'
+docker compose exec -T hermes-agent sh -c '/opt/cc-bin/setup-review-team.sh'
 docker compose exec -T hermes-agent sh -c 'hermes profile list 2>&1 | grep -iE "architect|test-analyst|risk-analyst|synthesizer"'
 ```
-Expected: 4 profiles listed. (If Step 1's CLI toolset-pin path failed, set each `/opt/data/profiles/<name>/config.yaml` `toolsets: [<TOOLSET>]` directly and re-verify.)
+Expected: 4 profiles listed.
 
-- [ ] **Step 3: Prove a profile's resolved toolset excludes write/terminal**
+- [ ] **Step 3: Prove each profile's config carries the allow-list + deny-list**
 
 ```bash
-docker compose exec -T hermes-agent sh -c 'grep -nE "toolsets" /opt/data/profiles/architect/config.yaml 2>/dev/null; echo "must NOT include write_file/terminal"'
+docker compose exec -T hermes-agent sh -c 'for p in architect test-analyst risk-analyst synthesizer; do echo "== $p =="; cat /opt/data/profiles/$p/config.yaml; done'
 ```
-Expected: `toolsets: [review-readonly]` (or the Task 1 fallback), not `hermes-cli`.
+Expected: each shows `platform_toolsets.cli: [file, skills]` and `agent.disabled_toolsets` including `terminal`, `code_execution`, `delegation`, `browser`, `web`. (write_file is NOT excludable — it rides the `file` group — but is `:ro`-contained; the behavioral proof is Task 6's git-clean check.)
 
 - [ ] **Step 4: Commit**
 
@@ -480,12 +485,12 @@ docker compose exec -T hermes-agent hermes kanban list 2>&1 | tail -20
 ```
 Expected: the four tasks progress to `done`; `synthesize` completes only after the three analyses.
 
-- [ ] **Step 3: Confinement proof — a worker's resolved toolset excludes write/terminal**
+- [ ] **Step 3: Confinement proof — each profile config carries the allow-list + deny-list**
 
 ```bash
-docker compose exec -T hermes-agent sh -c 'hermes kanban runs 2>&1 | head; grep -nE "toolsets" /opt/data/profiles/architect/config.yaml'
+docker compose exec -T hermes-agent sh -c 'for p in architect test-analyst risk-analyst synthesizer; do echo "== $p =="; grep -nE "platform_toolsets|cli:|disabled_toolsets|terminal|code_execution|delegation" /opt/data/profiles/$p/config.yaml; done'
 ```
-Expected: `architect` toolset is the confined set (no `write_file`/`terminal`). (If Task 1 = Branch B, assert the documented fallback instead.)
+Expected: each profile shows `platform_toolsets.cli: [file, skills]` and a `disabled_toolsets` list containing `terminal`, `code_execution`, `delegation`, `browser`, `web`. (Hardened Branch B — `write_file` rides the `file` group and is NOT excluded here; its harmlessness is proven behaviorally by Step 5's git-clean check, since `:ro` blocks all project writes.)
 
 - [ ] **Step 4: Persist + verify the proposal**
 
@@ -508,13 +513,24 @@ docker compose exec -T hermes-agent python3 /opt/cc-bin/proposals-index.py --pro
 ```
 Expected: a saved proposal path under `/opt/data/proposals/claude_code/`, listable.
 
-- [ ] **Step 5: Read-only proof — project untouched + no fan-out**
+- [ ] **Step 5: Read-only proof — project untouched (hard guarantee) + fan-out compensating assertion**
 
 ```bash
+# (a) HARD GUARANTEE: the project's git tree is byte-identical (kernel :ro).
 docker compose exec -T hermes-agent sh -c 'cd /projects/claude_code && git status --porcelain | wc -l'
-docker compose exec -T hermes-agent sh -c 'grep -nE "kanban_create|kanban_link" /opt/data/profiles/*/config.yaml || echo "no fan-out tools in profiles (expected)"'
+# (b) FAN-OUT COMPENSATING ASSERTION: no kanban card was AUTHORED by a worker
+#     profile (fan-out tools are present but their USE must be zero).
+docker compose exec -T hermes-agent sh -c 'python3 - <<PY
+import sqlite3
+c=sqlite3.connect("/opt/data/kanban.db"); c.row_factory=sqlite3.Row
+workers={"architect","test-analyst","risk-analyst","synthesizer"}
+bad=[dict(r) for r in c.execute("SELECT id,title,created_by FROM tasks") if (dict(r).get("created_by") or "") in workers]
+print("worker-authored cards:", len(bad))
+assert not bad, f"FAN-OUT VIOLATION: {bad}"
+print("PASS: no worker-authored cards")
+PY'
 ```
-Expected: `0` (clean); no fan-out tools.
+Expected: `(a)` prints `0` (project clean); `(b)` prints `worker-authored cards: 0` and `PASS`. A non-zero worker-authored count is a confinement failure to investigate before merge.
 
 - [ ] **Step 6: Document + commit**
 
@@ -531,4 +547,4 @@ git commit -m "docs(hermes): document the Kanban review pipeline workflow"
 - **Spec coverage:** confined profiles (T2) ✓; custom toolset (T1 spike, with honest fallback) ✓; reviewer skill w/ analysis+synthesis+boundaries (T3) ✓; deterministic board incl. workspace/max-runtime/skill (T4) ✓; out-of-worker persistence reusing save-proposal (T5) ✓; five-layer confinement + read-only + fan-out proofs (Global Constraints, T6) ✓; alignment/purpose live in the spec. Deferred (dynamic decomposition, domain-specialist profiles, auto-persist hook, write pipelines) intentionally out of scope.
 - **Placeholder scan:** Task 1 is a genuine spike with two explicit branches + a concrete success check — not a placeholder; every code/command step is literal.
 - **Type/name consistency:** `PROPOSALS_DIR`, `--project`, `--content-file`, `--dry-run`, the four profile names, the `review-readonly` toolset name, and the `claude-code-reviewer` skill name are used identically across tasks. `save-proposal.py` invoked with the same `--project` contract as its own tests.
-- **Known risk carried into execution:** if Task 1 = Branch B (no custom toolset), the confinement is group-level with a documented `/opt/data`-write + fan-out residual — the plan says to update the spec's claim rather than overstate the guarantee.
+- **Resolved before execution (was the one risk):** Task 1 spike settled the confinement to hardened group-level Branch B (custom toolset infeasible without forking Hermes). Global Constraints, Task 2, Task 6, and the spec are all updated to the real guarantee — OS `:ro` as the hard "project untouched" proof, allow-list + deny-list for dangerous groups, and a post-run assertion for the fan-out residual. No overstated claim remains.

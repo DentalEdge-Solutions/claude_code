@@ -48,18 +48,31 @@ A Kanban worker is a full Hermes agent; **its own capabilities are the security 
 analysis it performs.** Every worker is bounded by **five independent layers** so the AIOS objectives
 are *provable, not hoped-for*:
 
-1. **`:ro` project mounts** — OS-enforced; a worker cannot modify any project regardless of behavior.
-2. **Custom `review-readonly` toolset** — the worker profile's `config.yaml` enables ONLY a custom
-   toolset containing `read_file`, `search_files`, `skill_view`, and the **minimal kanban subset**
-   (below). It therefore has **no `write_file`/`patch`, no terminal/Bash, no `execute_code`, no
-   `delegate_task`, no browser, no web/network.** (Stock `file` bundles read+write, so a custom
-   toolset is required; Hermes supports custom toolsets via `platform_toolsets` — the exact
-   registration step is pinned in the plan.)
-3. **Minimal kanban subset** — `kanban_show, kanban_complete, kanban_comment, kanban_heartbeat,
-   kanban_block` only. The **fan-out** tools (`kanban_create`, `kanban_link`, `kanban_unblock`) are
-   withheld — workers can't spawn spurious tasks. (Safe because decomposition is deterministic.)
+1. **`:ro` project mounts (the hard guarantee)** — OS/kernel-enforced; a worker cannot modify any
+   project regardless of behavior. Confirmed live: `/projects/*` mount `ro`, `/opt/data` mounts `rw`.
+2. **Group-level toolset confinement (Nous-native, no fork).** *Spike finding (2026-07-24): Hermes
+   built-in toolsets are fixed groups — `file` bundles read+write+patch+search and cannot be split,
+   and plugins cannot re-bundle or override built-ins, so a hand-picked custom toolset is not
+   achievable without forking the adopted runtime (governance forbids). Resolved decision (approved):
+   confine at the group level via each profile's `config.yaml` — an allow-list
+   `platform_toolsets.cli: [file, skills]` plus `agent.disabled_toolsets` explicitly stripping every
+   dangerous group (`terminal`, `code_execution`, `browser`, `web`, `delegation`, `computer_use`,
+   `memory`, `vision`, `image_gen`, …).* Net: **no terminal/Bash, no `execute_code`, no
+   `delegate_task`, no browser, no web/network.**
+3. **kanban worker toolset** — auto-injected for kanban workers (`HERMES_KANBAN_TASK`) as a whole
+   group; the fan-out tools (`kanban_create`/`link`/`unblock`) come with it and are **not separable
+   at group granularity**. Compensating control: a deterministic post-run assertion fails if any
+   worker-authored card exists (see Verification) — spurious fan-out is *detected*, not hoped against.
 4. **`scratch` workspace** — ephemeral cwd, deleted on completion.
 5. **`--max-runtime` + `--failure-limit`** — the dispatcher SIGKILLs overruns and bounds retries.
+
+**Residuals under this model (stated honestly, not hidden):** (a) `write_file`/`patch` remain enabled
+via the `file` group — but the OS `:ro` mounts mean they **cannot touch any project**; their only
+writable targets are `/opt/data` (Hermes state) and the ephemeral scratch workspace. (b) kanban
+fan-out tools are present (mitigated by the post-run assertion). **The guarantee that matters — the
+project is provably untouched — is delivered by layer 1 at the kernel level, independent of worker
+behavior.** The other dangerous capabilities (shell, code-exec, delegation, network, browser) are
+removed by the layer-2 allow-list + deny-list.
 
 **Why no `claude -p`:** running it needs the terminal tool, which reopens Bash and breaks confinement.
 Workers analyze **directly** (read the project with `read_file`/`search_files`, reason with their
@@ -80,12 +93,12 @@ The three never-duplicate rules carry over and become **partly hard-enforced** b
 
 ## Components
 
-1. **Custom toolset `review-readonly`** — registered in Hermes (`platform_toolsets`): exactly
-   `read_file, search_files, skill_view, kanban_show, kanban_complete, kanban_comment,
-   kanban_heartbeat, kanban_block`.
+1. **Group-level confinement config** (no custom toolset — see spike finding): each profile's
+   `config.yaml` sets `platform_toolsets.cli: [file, skills]` (allow-list) + `agent.disabled_toolsets`
+   (deny-list of every dangerous group). kanban is auto-added for workers.
 2. **Four confined profiles** — `architect`, `test-analyst`, `risk-analyst`, `synthesizer`, each
-   created `--no-skills`, `describe`d for their role, and pinned to `toolsets: [review-readonly]` in
-   their per-profile `config.yaml` (+ a capable OpenRouter model).
+   created `--no-skills`, `describe`d for their role, and given the group-level confinement config
+   above in their per-profile `config.yaml` (+ a capable OpenRouter model).
 3. **`claude-code-reviewer` skill** (`infra/hermes-agent/skills/claude-code-reviewer/SKILL.md`) —
    force-loaded per task (`--skill`). Two modes: **analysis** (read the project for your assigned
    dimension; `kanban_complete` with a structured handoff `{dimension, findings[], evidence[]}`) and
@@ -131,17 +144,24 @@ read the result via `proposals-index.py`.
 
 - Board created with the exact 4-task shape; parallel specialists complete with structured handoffs;
   synthesizer promoted only after all three; combined proposal persisted + listable.
-- **Confinement proof:** a worker's resolved toolset contains none of `write_file`/`patch`/`terminal`/
-  `process`/`execute_code`/`delegate_task`/browser/web; the project's git tree is clean before AND
-  after; no writes outside `/opt/data`.
-- **Fan-out proof:** workers lack `kanban_create`/`kanban_link`.
+- **Confinement proof (Branch B reality):** a worker's resolved toolset contains none of `terminal`/
+  `process`/`execute_code`/`delegate_task`/browser/web; the project's git tree is byte-identical
+  before AND after (kernel `:ro` guarantee); the only writes are under `/opt/data`. `write_file`/
+  `patch` remain present but are `:ro`-contained to `/opt/data` + scratch — asserted by the
+  git-clean check, not by their absence.
+- **Fan-out compensating assertion:** after the run, zero kanban cards were authored by a worker
+  profile (`created_by` ∈ the four profiles) — since the fan-out tools cannot be removed at group
+  granularity, their *use* is what's checked.
 - Visible on the dashboard Kanban board.
 
 ## Deferred / open
 
-- **Custom-toolset registration mechanism** — confirm the exact `platform_toolsets` definition step
-  (referenced as supported) during implementation; if unavailable, fall back to group-level
-  `[file, kanban, skills]` + document the `write_file`→`/opt/data` residual honestly.
+- **Custom-toolset registration mechanism — RESOLVED (spike 2026-07-24).** Not achievable on the
+  adopted runtime: built-in toolsets are fixed groups (`file` = read+write+patch+search, unsplittable)
+  and plugins cannot re-bundle/override built-ins, so a hand-picked minimal toolset would require
+  forking Hermes (governance forbids). Adopted **hardened group-level Branch B**: per-profile
+  `platform_toolsets.cli: [file, skills]` allow-list + `agent.disabled_toolsets` deny-list, OS `:ro`
+  as the hard guarantee, + the fan-out post-run assertion. Residuals documented above.
 - Dynamic LLM decomposition; write-capable pipelines (dev orchestration); **domain-specialist
   profiles** for client-services (the monetizable re-instantiation); a persistence hook wired into the
   gateway dispatcher (vs. the manual follow-up call).
