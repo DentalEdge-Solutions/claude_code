@@ -57,7 +57,9 @@ def _row_content(row):
 def _project_match(body, metadata_project, project):
     if metadata_project == project:
         return True
-    return bool(body) and f"Project: {project}" in body
+    # Match the full delimited token the board writes ("... Project: <p>. ..."),
+    # not a bare prefix — so "claude_code" does not match "claude_code_v2".
+    return bool(body) and f"Project: {project}." in body
 
 
 def read_content_db(project):
@@ -88,19 +90,18 @@ def read_content_db(project):
     finally:
         conn.close()
 
-    fallback = None
+    # Return ONLY a row that project-matches. 'synthesize' is a title shared by
+    # every project's board, so a cross-project fallback could silently persist
+    # another project's proposal under this --project — never do that.
     for row in rows:
         content, meta_project = _row_content(row)
         if content is None:
             continue
         if _project_match(row["body"], meta_project, project):
             return content
-        if fallback is None:
-            fallback = content
 
-    if fallback is not None:
-        return fallback
-    print("persist-review-proposal: no completed synthesize proposal found", file=sys.stderr)
+    print(f"persist-review-proposal: no completed synthesize proposal for project {project!r}",
+          file=sys.stderr)
     return None
 
 

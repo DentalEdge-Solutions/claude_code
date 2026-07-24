@@ -59,6 +59,19 @@ class TestPersist(unittest.TestCase):
             with open(written) as f:
                 self.assertIn("from result field.", f.read())
 
+    def test_does_not_persist_other_projects_proposal(self):
+        # A synthesize row exists, but for a DIFFERENT project. --project claude_code
+        # must NOT persist it (no cross-project fallback).
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "kanban.db")
+            _make_kanban_db(db, body="MODE: synthesis. Project: other_proj.",
+                            result="# Other project proposal\n## Summary\nnot yours.\n")
+            env = {**os.environ, "PROPOSALS_DIR": d, "HERMES_KANBAN_DB": db}
+            r = subprocess.run([sys.executable, SCRIPT, "--project", "claude_code"],
+                               capture_output=True, text=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertFalse(os.path.isdir(os.path.join(d, "claude_code")))
+
 
 if __name__ == "__main__":
     unittest.main()

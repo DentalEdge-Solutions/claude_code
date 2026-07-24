@@ -17,6 +17,8 @@ set_profile() {  # name  description
   cfg="$PROFILES_ROOT/$name/config.yaml"
   mkdir -p "$PROFILES_ROOT/$name"
   # Merge the confinement keys into any existing config.yaml (idempotent).
+  # Prefers PyYAML (present in the Hermes container) for a true key-merge that
+  # preserves other config keys; the stdlib fallback writes a minimal config.
   DENY="$DENY" python3 - "$cfg" <<'PY'
 import os, sys
 try:

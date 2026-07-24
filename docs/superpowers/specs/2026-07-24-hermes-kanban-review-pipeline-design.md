@@ -98,7 +98,9 @@ The three never-duplicate rules carry over and become **partly hard-enforced** b
    (deny-list of every dangerous group). kanban is auto-added for workers.
 2. **Four confined profiles** — `architect`, `test-analyst`, `risk-analyst`, `synthesizer`, each
    created `--no-skills`, `describe`d for their role, and given the group-level confinement config
-   above in their per-profile `config.yaml` (+ a capable OpenRouter model).
+   above in their per-profile `config.yaml`. Model: each inherits the control-plane
+   default OpenRouter model (economical); a stronger per-profile model is a tunable
+   (raises analysis quality) but is not set by `setup-review-team.sh`.
 3. **`claude-code-reviewer` skill** (`infra/hermes-agent/skills/claude-code-reviewer/SKILL.md`) —
    force-loaded per task (`--skill`). Two modes: **analysis** (read the project for your assigned
    dimension; `kanban_complete` with a structured handoff `{dimension, findings[], evidence[]}`) and
