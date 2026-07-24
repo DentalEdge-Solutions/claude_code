@@ -13,7 +13,7 @@ DENY='terminal, code_execution, browser, web, delegation, computer_use, memory, 
 set_profile() {  # name  description
   name="$1"; desc="$2"
   hermes profile show "$name" >/dev/null 2>&1 || hermes profile create "$name" --no-skills
-  hermes profile describe "$name" "$desc" || true
+  hermes profile describe "$name" --text "$desc" || true
   cfg="$PROFILES_ROOT/$name/config.yaml"
   mkdir -p "$PROFILES_ROOT/$name"
   # Merge the confinement keys into any existing config.yaml (idempotent).
@@ -40,6 +40,14 @@ else:  # stdlib fallback — write a minimal valid YAML
         f.write("agent:\n  disabled_toolsets: [" + ", ".join(deny) + "]\n")
 print("confined:", path)
 PY
+  # A kanban worker runs under its profile's HERMES_HOME, so it resolves skills
+  # from the profile's OWN skills dir ($HERMES_HOME/profiles/<name>/skills), not
+  # the global mount. Symlink the read-only reviewer skill in so `--skill
+  # claude-code-reviewer` resolves for the worker (idempotent). Without this the
+  # worker crashes at spawn with "Unknown skill(s): claude-code-reviewer".
+  mkdir -p "$PROFILES_ROOT/$name/skills"
+  ln -sfn "${HERMES_HOME:-/opt/data}/skills/claude-code-reviewer" \
+    "$PROFILES_ROOT/$name/skills/claude-code-reviewer"
   echo "profile ready: $name"
 }
 
