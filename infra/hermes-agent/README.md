@@ -175,6 +175,50 @@ Published to **loopback only** (`127.0.0.1:9119`), reachable only from this
 machine, and it **auto-restarts with the container**. Read your password with
 `grep HERMES_DASHBOARD_BASIC_AUTH_PASSWORD .env`.
 
+## Kanban review pipeline (first multi-agent orchestration — C2)
+
+The first AIOS multi-agent use-case: a fixed-template, **read-only** review pipeline
+where three provably-confined specialists analyze a project in parallel
+(architecture / tests / risks) and a synthesizer fuses their handoffs into one
+prioritized improvement proposal — the single-agent proposer (Track A), elevated to
+a team on Hermes's durable Kanban runtime.
+
+```bash
+cd infra/hermes-agent
+# 1) one-time: create the four confined worker profiles (idempotent)
+docker compose exec -T hermes-agent sh /opt/cc-bin/setup-review-team.sh
+# 2) build the fixed 4-task board for a registered project
+docker compose exec -T hermes-agent python3 /opt/cc-bin/make-review-board.py --project claude_code
+# 3) run the confined workers (native dispatcher; or `hermes kanban dispatch --max 2` per pass)
+docker compose exec -d hermes-agent hermes kanban daemon --interval 15 --max 2
+# watch on the dashboard Kanban board, or: hermes kanban list
+# 4) when `synthesize` is done, persist the proposal + list it
+docker compose exec -T hermes-agent python3 /opt/cc-bin/persist-review-proposal.py --project claude_code
+docker compose exec -T hermes-agent python3 /opt/cc-bin/proposals-index.py --project claude_code
+```
+
+**Board shape:** `analyze-architecture→architect`, `analyze-tests→test-analyst`,
+`analyze-risks→risk-analyst` (parallel), then `synthesize→synthesizer` created with
+`--parent` on all three, so the native Kanban fan-in auto-promotes it to `ready`
+only when every analysis is `done` — no LLM orchestrator, no polling.
+
+**Worker confinement (hardened group-level "Branch B" — a custom hand-picked toolset
+is not achievable without forking Hermes):**
+- **OS `:ro` project mounts = the hard guarantee** — workers physically cannot write
+  any project (kernel-enforced; verified byte-identical git tree before/after a run).
+- Each profile's `config.yaml` pins an **allow-list** `platform_toolsets.cli: [file,
+  skills]` + a **deny-list** `agent.disabled_toolsets` stripping every dangerous
+  group (`terminal`, `code_execution`, `browser`, `web`, `delegation`, `computer_use`,
+  …). Workers analyze **directly** (no `claude -p`, which needs the terminal tool).
+- **Documented residuals:** `write_file`/`patch` ride the `file` group but are
+  `:ro`-contained to `/opt/data`+scratch; kanban fan-out tools are present but their
+  use is asserted-against (a post-run check requires zero worker-authored cards).
+
+Each worker runs under its own profile `HERMES_HOME`, so the reviewer skill is
+symlinked into each profile's `skills/` dir by `setup-review-team.sh` (workers
+resolve `--skill` from the profile dir, not the global mount). Design + plan:
+`docs/superpowers/{specs,plans}/2026-07-24-hermes-kanban-review-pipeline*`.
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
