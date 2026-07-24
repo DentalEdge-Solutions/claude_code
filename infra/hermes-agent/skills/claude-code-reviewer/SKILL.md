@@ -47,7 +47,10 @@ Your dimension is in the title: `analyze-architecture` | `analyze-tests` | `anal
    `## Items (prioritized)` with `[P#] type: enhancement|correction|feature|new-project`,
    title, rationale, evidence, impact — deduped/merged across dimensions /
    `## Sources consulted`.
-3. Call `kanban_complete` with `metadata` = {"proposal_markdown": "<the full doc>"}.
+3. Call `kanban_complete` and pass your full proposal markdown as BOTH the
+   completion `summary`/`result` (the reliable carrier for the large document)
+   AND `metadata` = {"proposal_markdown": "<the full doc>", "project": "<project>"}
+   (a structured copy). Persistence reads whichever is present — result first.
    Do NOT try to write a file — persistence is handled outside you.
 
 ## Boundaries (never duplicate claude_code's machinery)
