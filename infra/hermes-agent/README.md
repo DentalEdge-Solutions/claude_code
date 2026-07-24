@@ -154,6 +154,27 @@ End-to-end verified: the project's git working tree stays clean
 (`git status --porcelain` unchanged) before and after a proposal run —
 the mount's read-only guardrail holds even for this analysis-and-write-elsewhere flow.
 
+## Web dashboard (P3 — the browser UI)
+
+An s6-supervised web dashboard is the **unified browser surface**: a **Chat** tab
+that embeds the full Hermes TUI (via xterm.js — real conversations in the
+browser), plus Config, API Keys, Sessions, Logs, Analytics, Cron, Skills, MCP,
+Channels, System — and the bundled **Kanban** board.
+
+Enable it in `.env` (see `.env.example`): `HERMES_DASHBOARD=1` plus
+`HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD`. It is **off by default**,
+and per the June-2026 hardening its `0.0.0.0` bind (required by the container
+port-map) **requires basic auth** (`--insecure` no longer bypasses it). Then:
+
+```bash
+docker compose up -d          # s6 auto-starts + supervises the dashboard
+open http://127.0.0.1:9119    # log in with the basic-auth credentials
+```
+
+Published to **loopback only** (`127.0.0.1:9119`), reachable only from this
+machine, and it **auto-restarts with the container**. Read your password with
+`grep HERMES_DASHBOARD_BASIC_AUTH_PASSWORD .env`.
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
