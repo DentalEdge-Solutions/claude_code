@@ -25,6 +25,14 @@ projects:
       Skill & Agent Pipeline Toolkit — THIS repo. Sources, vets, adapts,
       measures, and auto-improves Claude Code skills and agents. Mounted
       read-only at /projects/claude_code.
+    # Draft-PR delivery target (Increment 2). The mount stays scope: read — the
+    # write path never touches the mount; it operates on a fresh clone of this
+    # repo via the bot PAT. {repo, base, path} is structured so client repos
+    # (e.g. a different base/path) need no schema migration.
+    pr_target:
+      repo: DentalEdge-Solutions/claude_code
+      base: main
+      path: .project-brain/decisions/candidates
 
   claude_google_ads:
     workdir: /projects/claude_google_ads
