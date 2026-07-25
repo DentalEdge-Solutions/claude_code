@@ -21,7 +21,7 @@ branch, push, PAT, PR) on a **zero-code-risk payload** before anything ever writ
 
 - **Payload = the proposal document itself** (a markdown file). **No code changes.** Track A
   stays "Hermes proposes; the human + Claude Code develop." Code-writing PRs are Track B.
-- **Target = `dentaledgesolutions/claude_code`** (our own repo; the Inc-1 proposals are
+- **Target = `DentalEdge-Solutions/claude_code`** (our own repo; the Inc-1 proposals are
   *about* it). A draft, doc-only PR is fully reversible (close PR + delete branch) and
   human-gated, so no throwaway sandbox is needed. `claude-google-ads` (the client repo) is
   the **second** target, reached in a later increment once this flow is proven.
@@ -31,7 +31,7 @@ branch, push, PAT, PR) on a **zero-code-risk payload** before anything ever writ
 ## Goal (this increment)
 
 `open-proposal-pr.py --project claude_code [--proposal latest]` takes a persisted proposal,
-opens a **draft** PR on `dentaledgesolutions/claude_code` that adds exactly one
+opens a **draft** PR on `DentalEdge-Solutions/claude_code` that adds exactly one
 brain-candidate markdown file — with the production `:ro` mount provably untouched, `main`
 protected, and the PAT never exposed.
 
@@ -40,7 +40,7 @@ protected, and the PAT never exposed.
 | Decision | Choice |
 |---|---|
 | PR payload | The **proposal document** (doc-only add). No code changes. |
-| Target repo | `dentaledgesolutions/claude_code` (ours). Client repo = later. |
+| Target repo | `DentalEdge-Solutions/claude_code` (ours). Client repo = later. |
 | **Bot identity** | A **dedicated machine account**, added as a **collaborator** (write, not admin) on the user-owned repo. The PAT is generated from the bot account — it is NOT the owner's token. |
 | Landing path | `.project-brain/decisions/candidates/YYYY-MM-DD-<slug>.md` (existing candidate convention; feeds brain governance) |
 | Write mechanism | **Trusted deterministic script** — no LLM in the write path |
@@ -49,20 +49,28 @@ protected, and the PAT never exposed.
 
 ### Identity model (why a machine account is required — change from the first draft)
 
-`dentaledgesolutions` is a **User** account with the owner as sole admin. A fine-grained PAT
-minted from the owner's account **acts as the owner** — so a `main` ruleset either bypasses
-for the owner (and therefore the token) or blocks the owner (a PR gate on ~5 owner pushes/day
-— a non-starter). **There is no branch-protection setting that separates the owner's token
-from the owner.** So server-side rejection of the bot's direct `main` pushes is only real if
-the bot is a **different actor**:
+The original owner (`dentaledgesolutions`) is a **User** account with the owner as sole admin.
+A fine-grained PAT minted from the owner's account **acts as the owner** — so a `main` ruleset
+either bypasses for the owner (and therefore the token) or blocks the owner (a PR gate on ~5
+owner pushes/day — a non-starter). **There is no branch-protection setting that separates the
+owner's token from the owner.** So server-side rejection of the bot's direct `main` pushes is
+only real if the bot is a **different actor**:
 
-- Create a **dedicated machine account**; add it as a **collaborator** on
-  `dentaledgesolutions/claude_code`. Collaborators on a user-owned repo get **write, not
-  admin**.
+- A **dedicated machine account** (`dentaledge-bot`) with **write** on the repo (not admin).
 - A **ruleset on `main`** requires a pull request, with **bypass = repo admin** (the owner).
-  The owner keeps pushing to `main` directly as today; the **bot cannot bypass** (it is not
-  an admin and genuinely cannot grant itself the bypass).
+  The owner keeps pushing to `main` directly; the **bot cannot bypass** (not an admin).
 - The PAT is minted **from the bot account**, scoped to this one repo.
+
+**Org requirement (finding, 2026-07-25):** the bot's write is exercised via a fine-grained PAT
+— but fine-grained PATs do **not** grant write to a repo owned by a *different USER account*
+where the token creator is only a collaborator (verified live: even with Contents Read/Write
+set, both a `git push` and the `git/refs` API returned `403 "Resource not accessible by
+personal access token"`). GitHub honors fine-grained-PAT write only for repos owned by the
+token creator or by **organizations** they belong to. So `claude_code` was **moved to the
+`DentalEdge-Solutions` org**; `dentaledge-bot` is an org collaborator with write, and an
+org-scoped fine-grained single-repo PAT now grants real write — verified (positive control
+passes; a `main` push is rejected by the ruleset with *"Changes must be made through a pull
+request"*, not a 403). This also positions the repo correctly for the multi-project client fleet.
 
 This is verified empirically before any script is built (see Verification / plan Task 1):
 push a throwaway branch to `main` **using the bot PAT** and confirm GitHub rejects it. All
@@ -92,7 +100,7 @@ and byte-identical.
 4. **Client-side pre-push hook** (installed into the ephemeral clone) — refuses any push
    whose target is `main`; defense-in-depth before a push even reaches GitHub.
 5. **Scoped fine-grained PAT minted from the bot account** (not the owner) — single repo
-   (`dentaledgesolutions/claude_code`), **Contents + Pull-requests: write** only (no
+   (`DentalEdge-Solutions/claude_code`), **Contents + Pull-requests: write** only (no
    admin/delete/workflow/actions), **90-day expiry** (rotation in the README). **The PAT is
    NOT in the gateway's environment.** It lives in a separate gitignored
    `infra/hermes-agent/.env.pr` that `docker-compose`'s `env_file` does **not** load, and is
@@ -134,13 +142,13 @@ other repo. No path to a code change or a merge without human action.
    container-mounted `bin/`): sources `.env.pr` and runs
    `docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent python3 /opt/cc-bin/open-proposal-pr.py "$@"`.
    The day-to-day entry point; keeps the token off the host argv (`-e NAME` passthrough).
-3. **`main` branch protection** on `dentaledgesolutions/claude_code` — a one-time setup step
+3. **`main` branch protection** on `DentalEdge-Solutions/claude_code` — a one-time setup step
    (via `gh api` or the GitHub UI), documented in the README.
 4. **Registry** (`registry/projects.yaml`): `claude_code` gains a **structured** `pr_target`
    (not a bare slug — generalized now so `claude-google-ads` needs no schema migration):
    ```yaml
    pr_target:
-     repo: dentaledgesolutions/claude_code
+     repo: DentalEdge-Solutions/claude_code
      base: main
      path: .project-brain/decisions/candidates   # where the proposal file lands (repo-specific)
    ```
@@ -219,10 +227,10 @@ open-proposal-pr.py --project claude_code --proposal latest
 
 - **Identity model FIRST (plan Task 1, before any script exists):** using the **bot PAT**
   (never the owner's credentials), push a throwaway branch to `main` on
-  `dentaledgesolutions/claude_code` and confirm GitHub **rejects it server-side**. If it is
+  `DentalEdge-Solutions/claude_code` and confirm GitHub **rejects it server-side**. If it is
   not rejected, the identity model is wrong — stop and fix before building. **Every guardrail
   test runs as the bot; testing as the owner proves nothing.**
-- A **draft** PR appears on `dentaledgesolutions/claude_code` whose diff is **only** the new
+- A **draft** PR appears on `DentalEdge-Solutions/claude_code` whose diff is **only** the new
   `.project-brain/decisions/candidates/YYYY-MM-DD-<slug>.md` file, carrying `author: hermes` +
   the `hermes-generated` tag, with `sources` naming the originating proposal path + run id.
 - **`main` is unwritable by the bot:** the pre-push hook refuses a push targeting the base
@@ -243,7 +251,7 @@ open-proposal-pr.py --project claude_code --proposal latest
 ## Deferred / open
 
 - **One-time human setup (prerequisite; OWNER-performed, never by Hermes):** create the
-  machine account, add it as a collaborator on `dentaledgesolutions/claude_code`, mint the
+  machine account, add it as a collaborator on `DentalEdge-Solutions/claude_code`, mint the
   90-day fine-grained **bot** PAT (Contents + Pull-requests write, single repo), and add the
   `main` ruleset (PR required, bypass = repo admin). The plan sequences these as explicit
   human steps; **plan Task 1 verifies them as the bot before any script is written.**

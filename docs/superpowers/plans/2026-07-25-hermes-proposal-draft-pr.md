@@ -4,7 +4,7 @@
 >
 > **Spec authority:** the design is authoritative in `docs/superpowers/specs/2026-07-24-hermes-proposal-draft-pr-design.md` as of commit `dbc19d3` (bot-identity model — Layer 3/5/residual + "Identity model" section). This plan *implements* that spec and does not re-edit it; if the identity mechanism changes during implementation, update the spec section in the same commit.
 
-**Goal:** A trusted deterministic script `open-proposal-pr.py` opens a **draft** PR on `dentaledgesolutions/claude_code` that adds one machine-authored brain-candidate markdown file (a persisted improvement proposal) — with the `:ro` production mount provably untouched, `main` unwritable by the bot, and the bot PAT never exposed.
+**Goal:** A trusted deterministic script `open-proposal-pr.py` opens a **draft** PR on `DentalEdge-Solutions/claude_code` that adds one machine-authored brain-candidate markdown file (a persisted improvement proposal) — with the `:ro` production mount provably untouched, `main` unwritable by the bot, and the bot PAT never exposed.
 
 **Architecture:** No LLM in the write path. The script reads a persisted proposal from Hermes state, clones the target repo into an **ephemeral workspace** via a **bot-account** PAT (never the `:ro` mount), writes the candidate file, commits on a `proposal/<ts>` branch, pushes, and opens a draft PR. A dedicated **machine account** (collaborator = write, not admin) plus a **`main` ruleset with admin-only bypass** make the bot's direct `main` pushes server-side-rejectable — the owner keeps pushing to `main`. Design: `docs/superpowers/specs/2026-07-24-hermes-proposal-draft-pr-design.md`.
 
@@ -25,8 +25,8 @@
 Do these by hand only after approving this plan; the plan's tasks assume they exist. **No task creates the machine account, PAT, or GitHub settings.**
 
 1. Create a dedicated machine account (e.g. `dentaledge-hermes-bot`) with its own email/2FA.
-2. Add it as a **collaborator** on `dentaledgesolutions/claude_code` (Settings → Collaborators). On a user-owned repo this grants **write, not admin**.
-3. As the machine account, mint a **fine-grained PAT**: resource owner = `dentaledgesolutions`, repository = `claude_code` only, permissions = **Contents: Read/Write** + **Pull requests: Read/Write** (nothing else), **expiry = 90 days**. Put it in a NEW **gitignored** file `infra/hermes-agent/.env.pr` as `CLAUDE_CODE_PR_PAT=...` — **NOT in `.env`.** (`.env` is the gateway's `env_file`; anything there is inherited by agent-launched processes — Task 1 Step 1 proved Hermes does not scrub this name. `.env.pr` is not loaded by `env_file`.) Confirm `.env.pr` is gitignored (add it if the ignore pattern doesn't already cover it).
+2. Add it as a **collaborator** on `DentalEdge-Solutions/claude_code` (Settings → Collaborators). On a user-owned repo this grants **write, not admin**.
+3. As the machine account, mint a **fine-grained PAT**: resource owner = the **`DentalEdge-Solutions` org** (the repo was moved to this org — see the spec's Identity model note; fine-grained PATs do NOT grant write to a repo owned by a *different user account* where you're a collaborator, so an org is required), repository = `claude_code` only, permissions = **Contents: Read/Write** + **Pull requests: Read/Write** (nothing else), **expiry = 90 days**. Put it in a NEW **gitignored** file `infra/hermes-agent/.env.pr` as `CLAUDE_CODE_PR_PAT=...` — **NOT in `.env`.** (`.env` is the gateway's `env_file`; anything there is inherited by agent-launched processes — Task 1 Step 1 proved Hermes does not scrub this name. `.env.pr` is not loaded by `env_file`.) Confirm `.env.pr` is gitignored (add it if the ignore pattern doesn't already cover it).
 4. Add a **ruleset** on `main` (Settings → Rules → Rulesets): target `main`, require a pull request before merging, **bypass list = Repository admin** (the owner). Do NOT add the bot to the bypass list.
 5. Ensure the PAT is **absent** from the gateway env: it must not be in `.env`; then `cd infra/hermes-agent && docker compose up -d --force-recreate` — this **purges** any prior copy of the PAT from the running gateway (the token is supplied per-invocation, so the recreate REMOVES it from the gateway env, it does not load it). **Rotate the PAT** if the old one was ever in `.env` (it was proven agent-readable).
 
@@ -78,14 +78,14 @@ Do NOT run Step 3 until this returns a ruleset. If `main` has no ruleset, Step 3
 # (PAT loaded host-side per the preamble; passed via -e)
 # ruleset count (fine-grained rulesets), plus classic branch-protection as a fallback signal
 docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c '
-n=$(GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh api repos/dentaledgesolutions/claude_code/rulesets --jq "length" 2>/dev/null || echo "?")
-GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh api repos/dentaledgesolutions/claude_code/branches/main/protection --jq ".url" >/dev/null 2>&1 && c=present || c=none
+n=$(GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh api repos/DentalEdge-Solutions/claude_code/rulesets --jq "length" 2>/dev/null || echo "?")
+GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh api repos/DentalEdge-Solutions/claude_code/branches/main/protection --jq ".url" >/dev/null 2>&1 && c=present || c=none
 echo "rulesets=$n classic_protection=$c"
 if [ "$n" = "0" ] || [ "$n" = "?" ]; then
   if [ "$c" = "none" ]; then echo "PREREQUISITE MISSING: no main ruleset — complete prereq 4 before Step 3"; fi
 fi'
 ```
-Expected: `rulesets=<N≥1>` (or `classic_protection=present`). If you see **`PREREQUISITE MISSING`**, STOP and complete prereq 4 — this is deliberately NOT the same signal as Step 3's `IDENTITY MODEL WRONG`. (No `gh`? Use `curl -s -H "Authorization: Bearer $CLAUDE_CODE_PR_PAT" https://api.github.com/repos/dentaledgesolutions/claude_code/rulesets` and confirm a non-empty array.)
+Expected: `rulesets=<N≥1>` (or `classic_protection=present`). If you see **`PREREQUISITE MISSING`**, STOP and complete prereq 4 — this is deliberately NOT the same signal as Step 3's `IDENTITY MODEL WRONG`. (No `gh`? Use `curl -s -H "Authorization: Bearer $CLAUDE_CODE_PR_PAT" https://api.github.com/repos/DentalEdge-Solutions/claude_code/rulesets` and confirm a non-empty array.)
 
 - [ ] **Step 3: As the bot, a direct push to `main` is REJECTED server-side** (only after Step 2 confirms a ruleset)
 
@@ -95,7 +95,7 @@ set -e
 W=$(mktemp -d); cd "$W"
 printf "#!/bin/sh\nprintf %%s \"\$CLAUDE_CODE_PR_PAT\"\n" > askpass; chmod 700 askpass
 export GIT_ASKPASS="$W/askpass" GIT_TERMINAL_PROMPT=0
-git clone --depth 1 "https://x-access-token@github.com/dentaledgesolutions/claude_code" repo >/dev/null 2>&1
+git clone --depth 1 "https://x-access-token@github.com/DentalEdge-Solutions/claude_code" repo >/dev/null 2>&1
 cd repo
 git config user.email bot@dentaledge.local; git config user.name hermes-bot
 git commit --allow-empty -m "guardrail probe (should be rejected)" >/dev/null
@@ -114,15 +114,15 @@ set -e
 W=$(mktemp -d); cd "$W"
 printf "#!/bin/sh\nprintf %%s \"\$CLAUDE_CODE_PR_PAT\"\n" > askpass; chmod 700 askpass
 export GIT_ASKPASS="$W/askpass" GIT_TERMINAL_PROMPT=0
-git clone --depth 1 "https://x-access-token@github.com/dentaledgesolutions/claude_code" repo >/dev/null 2>&1
+git clone --depth 1 "https://x-access-token@github.com/DentalEdge-Solutions/claude_code" repo >/dev/null 2>&1
 cd repo; git config user.email bot@dentaledge.local; git config user.name hermes-bot
 B="probe/guardrail-$(date +%s)"; git checkout -b "$B" >/dev/null 2>&1
 git commit --allow-empty -m "guardrail probe branch" >/dev/null
 git push origin "$B" >/dev/null 2>&1 && echo "PUSH-BRANCH: OK"
 # open + immediately close a draft PR (gh if present, else REST). Records which mechanism Task 3 uses.
 if command -v gh >/dev/null 2>&1; then
-  GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr create --repo dentaledgesolutions/claude_code --draft --base main --head "$B" --title "guardrail probe" --body "probe" && \
-  GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr close --repo dentaledgesolutions/claude_code "$B"
+  GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr create --repo DentalEdge-Solutions/claude_code --draft --base main --head "$B" --title "guardrail probe" --body "probe" && \
+  GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr close --repo DentalEdge-Solutions/claude_code "$B"
   echo "GH: available"
 else
   echo "GH: absent — plan will use REST for PR creation"
@@ -151,7 +151,7 @@ Append the results (env-scrub, ruleset-present, main-rejected, branch+PR-ok, gh-
 In `infra/hermes-agent/registry/projects.yaml`, under the `claude_code` entry (mount stays `scope: read`), add:
 ```yaml
     pr_target:
-      repo: dentaledgesolutions/claude_code
+      repo: DentalEdge-Solutions/claude_code
       base: main
       path: .project-brain/decisions/candidates
 ```
@@ -162,7 +162,7 @@ Create `infra/hermes-agent/.env.pr.example` (template for the gitignored `.env.p
 ```bash
 # --- Draft-PR delivery (Increment 2) — bot-account PAT, NOT the owner's ---
 # Fine-grained PAT minted from the machine collaborator account: single repo
-# (dentaledgesolutions/claude_code), Contents+Pull-requests write only, 90-day expiry.
+# (DentalEdge-Solutions/claude_code), Contents+Pull-requests write only, 90-day expiry.
 # This file is NOT loaded by docker-compose's env_file — it is sourced per-invocation by
 # open-proposal-pr.sh and passed via `docker compose exec -e`, so the token never enters the
 # gateway env (agent-launched processes cannot read it). Copy to .env.pr (gitignored), fill in.
@@ -210,12 +210,12 @@ PROPOSAL = ("# Improvement proposal — claude_code — 2026-07-24\n"
 class TestOfflineCore(unittest.TestCase):
     def test_read_pr_target(self):
         reg = ("version: 1\nprojects:\n  claude_code:\n    workdir: /projects/claude_code\n"
-               "    scope: read\n    pr_target:\n      repo: dentaledgesolutions/claude_code\n"
+               "    scope: read\n    pr_target:\n      repo: DentalEdge-Solutions/claude_code\n"
                "      base: main\n      path: .project-brain/decisions/candidates\n")
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
             f.write(reg); p = f.name
         t = mod["read_pr_target"](p, "claude_code")
-        self.assertEqual(t, {"repo": "dentaledgesolutions/claude_code",
+        self.assertEqual(t, {"repo": "DentalEdge-Solutions/claude_code",
                              "base": "main", "path": ".project-brain/decisions/candidates"})
         os.unlink(p)
 
@@ -273,14 +273,14 @@ class TestOfflineCore(unittest.TestCase):
             open(pf, "w").write(PROPOSAL)
             reg = os.path.join(d, "projects.yaml")
             open(reg, "w").write("version: 1\nprojects:\n  claude_code:\n    scope: read\n"
-                                 "    pr_target:\n      repo: dentaledgesolutions/claude_code\n"
+                                 "    pr_target:\n      repo: DentalEdge-Solutions/claude_code\n"
                                  "      base: main\n      path: docs/proposals\n")
             env = {**os.environ, "PROPOSALS_DIR": d, "PR_REGISTRY": reg}
             r = subprocess.run([sys.executable, SCRIPT, "--project", "claude_code",
                                 "--proposal", "latest", "--dry-run"],
                                capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn("dentaledgesolutions/claude_code", r.stdout)
+            self.assertIn("DentalEdge-Solutions/claude_code", r.stdout)
             self.assertIn("proposal/", r.stdout)          # branch name
             self.assertIn("docs/proposals/2026-07-25-", r.stdout)  # candidate path
             self.assertNotIn(os.environ.get("CLAUDE_CODE_PR_PAT", "NO_TOKEN_SET"), r.stdout)
@@ -523,7 +523,7 @@ class TestSecretHandling(unittest.TestCase):
             reg = os.path.join(d, "projects.yaml")
             with open(reg, "w") as f:
                 f.write("version: 1\nprojects:\n  claude_code:\n    scope: read\n"
-                        "    pr_target:\n      repo: dentaledgesolutions/claude_code\n"
+                        "    pr_target:\n      repo: DentalEdge-Solutions/claude_code\n"
                         "      base: main\n      path: docs/proposals\n")
             SENTINEL = "ghp_SENTINELtoken000000000000000000000000"
             env = {**os.environ, "PROPOSALS_DIR": d, "PR_REGISTRY": reg,
@@ -718,7 +718,7 @@ docker compose exec -T hermes-agent sh -c 'ls -d /tmp/proposal-pr-* 2>/dev/null 
 #     URL or a bare number; the token stays off argv (GH_TOKEN env / 0600 curl config).
 PR="<PR url or number from Step 2>"
 docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c '
-PR="$1"; N="${PR##*/}"; R=dentaledgesolutions/claude_code
+PR="$1"; N="${PR##*/}"; R=DentalEdge-Solutions/claude_code
 if command -v gh >/dev/null 2>&1; then
   GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr view "$N" --repo "$R" --json isDraft,files \
     --jq "{draft:.isDraft, n:(.files|length), path:(.files[0].path)}"
