@@ -31,6 +31,44 @@ class TestOfflineCore(unittest.TestCase):
             mod["read_pr_target"](p, "claude_code")
         os.unlink(p)
 
+    def test_read_pr_target_mapping_sibling_after_pr_target_no_bleed(self):
+        # Review finding #1: a mapping-valued sibling AFTER pr_target must not bleed its
+        # indent-6 children into pr_target's fields. The correct target must survive.
+        reg = ("version: 1\nprojects:\n  claude_code:\n    scope: read\n"
+               "    pr_target:\n      repo: DentalEdge-Solutions/claude_code\n"
+               "      base: main\n      path: .project-brain/decisions/candidates\n"
+               "    notify:\n      repo: SOME/other-repo\n      base: dev\n      path: /wrong\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(reg); p = f.name
+        t = mod["read_pr_target"](p, "claude_code")
+        self.assertEqual(t, {"repo": "DentalEdge-Solutions/claude_code",
+                             "base": "main", "path": ".project-brain/decisions/candidates"})
+        os.unlink(p)
+
+    def test_read_pr_target_empty_value_rejected(self):
+        # Review finding #5: a present-but-empty scalar (repo:) must be rejected, not
+        # silently accepted into a broken clone URL.
+        reg = ("version: 1\nprojects:\n  claude_code:\n    pr_target:\n"
+               "      repo:\n      base: main\n      path: docs\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(reg); p = f.name
+        with self.assertRaises(SystemExit):
+            mod["read_pr_target"](p, "claude_code")
+        os.unlink(p)
+
+    def test_resolve_proposal_rejects_path_traversal(self):
+        # Review finding #4: --proposal must be a bare filename; a path escapes the dir.
+        with tempfile.TemporaryDirectory() as d:
+            pdir = os.path.join(d, "claude_code"); os.makedirs(pdir)
+            with open(os.path.join(pdir, "2026-07-24_22-54-03.md"), "w") as f:
+                f.write(PROPOSAL)
+            os.environ["PROPOSALS_DIR"] = d
+            try:
+                with self.assertRaises(SystemExit):
+                    mod["resolve_proposal"]("claude_code", "../../etc/passwd")
+            finally:
+                del os.environ["PROPOSALS_DIR"]
+
     def test_render_candidate_filename_and_frontmatter(self):
         now = datetime.datetime(2026, 7, 25, 9, 30, 0)
         fn, content = mod["render_candidate"](
@@ -155,6 +193,31 @@ class TestRestFallback(unittest.TestCase):
         self.assertIn('"draft": true', captured["data"])
         self.assertIn("proposal/x", captured["data"])
         self.assertEqual(captured["auth"], "Bearer SENTINELPAT")
+
+    def test_open_draft_pr_rest_httperror_is_scrubbed(self):
+        # Review finding #3: a REST failure must raise a clean SystemExit that surfaces
+        # GitHub's body but never leaks the PAT (even if the body echoed it).
+        import io, urllib.request as ur, urllib.error
+        SENTINEL = "ghp_SENTINELtoken000000000000000000000000"
+        def fake_urlopen(req):
+            raise urllib.error.HTTPError(
+                req.full_url, 422, "Unprocessable Entity", {},
+                io.BytesIO(b'{"message":"No commits between main and head; token=' +
+                           SENTINEL.encode() + b'"}'))
+        orig_which, orig_urlopen = mod["shutil"].which, ur.urlopen
+        mod["shutil"].which = lambda name: None
+        ur.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                mod["_open_draft_pr"]({"repo": "o/r", "base": "main"},
+                                      {"title": "T", "branch": "proposal/x",
+                                       "dest": "docs/x.md", "proposal_path": "/p/x.md"},
+                                      SENTINEL)
+        finally:
+            mod["shutil"].which, ur.urlopen = orig_which, orig_urlopen
+        msg = str(cm.exception)
+        self.assertIn("422", msg)
+        self.assertNotIn(SENTINEL, msg)          # PAT scrubbed even out of the echoed body
 
 
 if __name__ == "__main__":

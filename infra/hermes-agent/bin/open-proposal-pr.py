@@ -33,13 +33,15 @@ def read_pr_target(path, project):
                 cur_project = line.strip()[:-1]; in_pr = False
             elif indent == 4 and cur_project == project and line.strip() == "pr_target:":
                 in_pr = True
-            elif indent == 4 and cur_project == project and not line.rstrip().endswith(":"):
-                in_pr = False                                    # a sibling scalar of pr_target
+            elif indent <= 4:
+                in_pr = False                                    # ANY sibling/shallower line closes pr_target scope
+                # — including a mapping-valued sibling (ends in ':'); guards against key bleed
             elif indent == 6 and in_pr and cur_project == project:
                 k, _, v = line.strip().partition(":")
                 got[k.strip()] = v.strip()
-    if not {"repo", "base", "path"} <= set(got):
-        raise SystemExit(f"open-proposal-pr: no pr_target(repo,base,path) for project {project!r}")
+    missing = [k for k in ("repo", "base", "path") if not got.get(k)]
+    if missing:
+        raise SystemExit(f"open-proposal-pr: pr_target for project {project!r} missing/empty: {', '.join(missing)}")
     return {"repo": got["repo"], "base": got["base"], "path": got["path"]}
 
 
@@ -55,6 +57,8 @@ def resolve_proposal(project, which):
     if not files:
         raise SystemExit(f"open-proposal-pr: no proposals under {d}")
     fn = files[-1] if which in (None, "latest") else (which if which.endswith(".md") else which + ".md")
+    if os.path.basename(fn) != fn:                              # reject path separators / traversal in --proposal
+        raise SystemExit(f"open-proposal-pr: --proposal must be a bare filename, got {which!r}")
     p = os.path.join(d, fn)
     if not os.path.isfile(p):
         raise SystemExit(f"open-proposal-pr: proposal not found: {p}")
@@ -152,13 +156,16 @@ def _git(repo, *args, env=None, secret=None):
 
 def _open_draft_pr(tgt, plan, pat):
     if shutil.which("gh"):
-        out = subprocess.run(
-            ["gh", "pr", "create", "--repo", tgt["repo"], "--draft",
-             "--base", tgt["base"], "--head", plan["branch"],
-             "--title", f"Proposal: {plan['title']} (machine-generated)",
-             "--body", f"Machine-generated improvement proposal from Hermes AIOS.\n\n"
-                       f"Source: `{plan['proposal_path']}`. Adds `{plan['dest']}` as a brain candidate."],
-            check=True, capture_output=True, text=True, env={**os.environ, "GH_TOKEN": pat})
+        try:
+            out = subprocess.run(
+                ["gh", "pr", "create", "--repo", tgt["repo"], "--draft",
+                 "--base", tgt["base"], "--head", plan["branch"],
+                 "--title", f"Proposal: {plan['title']} (machine-generated)",
+                 "--body", f"Machine-generated improvement proposal from Hermes AIOS.\n\n"
+                           f"Source: `{plan['proposal_path']}`. Adds `{plan['dest']}` as a brain candidate."],
+                check=True, capture_output=True, text=True, env={**os.environ, "GH_TOKEN": pat})
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(f"open-proposal-pr: gh pr create failed: {_scrub((e.stderr or '').strip(), pat)}")
         return out.stdout.strip()
     # REST fallback (no gh in the container)
     import urllib.request, urllib.error
@@ -170,11 +177,18 @@ def _open_draft_pr(tgt, plan, pat):
                                  headers={"Authorization": f"Bearer {pat}",
                                           "Accept": "application/vnd.github+json",
                                           "User-Agent": "hermes-aios"})
-    with urllib.request.urlopen(req) as r:
-        return json.loads(r.read()).get("html_url", "(PR created)")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read()).get("html_url", "(PR created)")
+    except urllib.error.HTTPError as e:
+        # Surface GitHub's explanation (the 422 body says WHY) — scrubbed, never a bare traceback.
+        detail = _scrub((e.read().decode(errors="replace") or "").strip(), pat)
+        code = e.code
+        e.close()
+        raise SystemExit(f"open-proposal-pr: GitHub API PR create failed ({code}): {detail}")
 
 
-def _run_live(plan, project):
+def _run_live(plan):
     pat = os.environ.get("CLAUDE_CODE_PR_PAT")
     if not pat:
         raise SystemExit("open-proposal-pr: CLAUDE_CODE_PR_PAT not in env (operator-invoked only)")
@@ -217,7 +231,15 @@ def _run_live(plan, project):
              env=genv, secret=pat)
         _git(repo, "push", "origin", plan["branch"],
              env={**genv, "PREPUSH_BASE": tgt["base"]}, secret=pat)
-        print(_open_draft_pr(tgt, plan, pat))
+        try:
+            print(_open_draft_pr(tgt, plan, pat))
+        except SystemExit as e:
+            # Branch is already on the remote; the re-run guard would block a naive retry.
+            # Give the operator the exact recovery path instead of a dead end.
+            raise SystemExit(
+                f"{e}\nopen-proposal-pr: branch {plan['branch']} WAS pushed but the draft PR was NOT created. "
+                f"Open the PR manually from that branch, or delete the remote branch to retry:\n"
+                f"    git push origin --delete {plan['branch']}")
         return 0
     finally:
         shutil.rmtree(ws, ignore_errors=True)   # cleanup on success AND failure
@@ -239,7 +261,7 @@ def main(argv=None):
         print(f"add:    {plan['dest']}")
         print(f"title:  {plan['title']}")
         return 0
-    return _run_live(plan, args.project)  # noqa: F821  (defined in Task 3)
+    return _run_live(plan)
 
 
 if __name__ == "__main__":
