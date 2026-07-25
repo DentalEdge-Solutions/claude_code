@@ -93,14 +93,20 @@ and byte-identical.
    whose target is `main`; defense-in-depth before a push even reaches GitHub.
 5. **Scoped fine-grained PAT minted from the bot account** (not the owner) — single repo
    (`dentaledgesolutions/claude_code`), **Contents + Pull-requests: write** only (no
-   admin/delete/workflow/actions), **90-day expiry** (rotation step documented in the README).
-   Because the write step is **operator-invoked** (`docker compose exec`), the PAT is present
-   in the container env from `.env` (`env_file`) and read directly by the script; never in git
-   or logs. (Verified: Hermes's *agent-launched* subprocess env scrubbing covers
-   `CLAUDE_CODE_PR_PAT` by name/pattern — an agent-launched process cannot read it today, not
-   merely won't be asked to; see Verification. IF this step is later auto-invoked **through**
-   Hermes's terminal tool, it would need the executor-key bootstrap-projection — deferred with
-   the auto-trigger.)
+   admin/delete/workflow/actions), **90-day expiry** (rotation in the README). **The PAT is
+   NOT in the gateway's environment.** It lives in a separate gitignored
+   `infra/hermes-agent/.env.pr` that `docker-compose`'s `env_file` does **not** load, and is
+   supplied to the **operator-invoked** write step per-invocation via
+   `docker compose exec -e CLAUDE_CODE_PR_PAT` (a thin `open-proposal-pr.sh` wrapper sources
+   `.env.pr` and adds the flag; `-e NAME` with no `=value`, so the token isn't in the host
+   argv either). Because the gateway starts from `env_file` and the token isn't there, **no
+   agent-launched process can ever inherit it — by construction, independent of Hermes's scrub
+   list.** This is empirically necessary: Task 1 Step 1 proved Hermes does **not** scrub
+   `CLAUDE_CODE_PR_PAT` when it is in the gateway env (it only scrubs known-provider names like
+   `ANTHROPIC_API_KEY`/`GH_TOKEN`), so keeping the token out of the gateway env is the only
+   robust fix — and it survives `hermes update`/VPS moves unchanged. Never in git or logs.
+   (A future auto-trigger runs *through* Hermes and so must get its own deliberate, scoped
+   projection — deferred with the auto-trigger.)
 6. **Doc-only payload** — adds one markdown file under `.project-brain/decisions/candidates/`;
    no code, no executables. The script writes the file itself (proposal content is data).
 7. **Ephemeral workspace** — the clone is deleted after the PR is opened (success or failure).
@@ -121,9 +127,13 @@ other repo. No path to a code change or a merge without human action.
    `commit` → `git push origin proposal/<ts>` → opens a **draft** PR (`gh pr create --draft`
    or the GitHub REST API via `curl` if `gh` is absent) → prints the PR URL → `rm -rf` the
    workspace. Exits non-zero without side effects if the PAT/proposal is missing.
-2. **PAT config** in `.env` (`CLAUDE_CODE_PR_PAT`), fine-grained, single-repo, documented in
-   `.env.example` as write-scoped and gitignored. Present in the container env via `env_file`
-   for the operator-invoked `docker compose exec` path.
+2. **PAT config** in `infra/hermes-agent/.env.pr` (`CLAUDE_CODE_PR_PAT`), gitignored and **NOT**
+   loaded by `docker-compose`'s `env_file` — documented via `.env.pr.example`. Supplied to the
+   operator-invoked step per-invocation; never in the gateway env.
+2a. **`open-proposal-pr.sh` wrapper** (host-side, sibling of `docker-compose.yml`, NOT under the
+   container-mounted `bin/`): sources `.env.pr` and runs
+   `docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent python3 /opt/cc-bin/open-proposal-pr.py "$@"`.
+   The day-to-day entry point; keeps the token off the host argv (`-e NAME` passthrough).
 3. **`main` branch protection** on `dentaledgesolutions/claude_code` — a one-time setup step
    (via `gh api` or the GitHub UI), documented in the README.
 4. **Registry** (`registry/projects.yaml`): `claude_code` gains a **structured** `pr_target`
@@ -220,11 +230,13 @@ open-proposal-pr.py --project claude_code --proposal latest
   (admin-only bypass) — both verified **as the bot**.
 - **`:ro` mount untouched:** `/projects/claude_code` git tree byte-identical before AND after
   (writes went to the ephemeral clone, never the mount).
-- **PAT never exposed + env-scrub verified:** `grep` of container logs, the proposal, and the
-  repo turns up no token; the PAT lives only in `.env` (gitignored) and the process env of the
-  operator-invoked step. An **agent-launched** subprocess (Hermes terminal tool) cannot read
-  `CLAUDE_CODE_PR_PAT` today — `printenv CLAUDE_CODE_PR_PAT` inside the terminal tool returns
-  empty — so the operator-only invocation boundary is real, not merely intended.
+- **PAT never exposed + not in the gateway env:** `grep` of container logs, the proposal, and
+  the repo turns up no token; the PAT lives only in gitignored `.env.pr` (host-side) and the
+  process env of the operator-invoked step. An **agent-launched** subprocess (Hermes terminal
+  tool) sees it **empty** — `printenv CLAUDE_CODE_PR_PAT` returns nothing — because the token
+  is not in the gateway's `env_file`, so no agent inherits it (by construction). (Corrected
+  model: Hermes does NOT scrub `CLAUDE_CODE_PR_PAT` when it IS in the gateway env — proven in
+  Task 1 Step 1 — so keeping it out of that env is what makes the boundary real.)
 - **PAT expiry:** the token carries a 90-day expiry; the README documents the rotation step.
 - **Cleanup:** the ephemeral workspace no longer exists after the run — on success AND failure.
 

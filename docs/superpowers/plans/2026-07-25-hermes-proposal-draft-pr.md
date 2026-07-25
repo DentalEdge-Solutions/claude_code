@@ -17,7 +17,7 @@
 - **Payload is doc-only:** exactly one markdown file added under the repo's `pr_target.path`; no code, no executables. Proposal content is DATA — never executed.
 - **PR is draft only.** The script never marks a PR ready, never merges, never pushes to `pr_target.base`.
 - **Python stdlib only** (no PyYAML/requests): hand-render YAML frontmatter using `json.dumps` for safe scalar escaping; hand-parse the registry.
-- **Secrets:** the bot PAT lives only in `infra/hermes-agent/.env` (gitignored, `env_file`) as `CLAUDE_CODE_PR_PAT`, read directly by the operator-invoked script; never printed, logged, committed, or embedded in a URL that gets echoed.
+- **Secrets:** the bot PAT lives only in gitignored `infra/hermes-agent/.env.pr` (**NOT** loaded by `env_file`) as `CLAUDE_CODE_PR_PAT`, supplied to the operator-invoked script per-invocation via `docker compose exec -e CLAUDE_CODE_PR_PAT` (the `open-proposal-pr.sh` wrapper). It is **never in the gateway env**, so no agent-launched process can read it (by construction — Hermes does not scrub this name). Never printed, logged, committed, or embedded in a URL that gets echoed.
 - **Candidate file provenance:** every generated file carries `author: hermes`, a `hermes-generated` tag, and `sources` naming the originating proposal path + run id.
 
 ## Prerequisites (HUMAN-performed, gated on plan review — NOT done by any worker)
@@ -26,9 +26,9 @@ Do these by hand only after approving this plan; the plan's tasks assume they ex
 
 1. Create a dedicated machine account (e.g. `dentaledge-hermes-bot`) with its own email/2FA.
 2. Add it as a **collaborator** on `dentaledgesolutions/claude_code` (Settings → Collaborators). On a user-owned repo this grants **write, not admin**.
-3. As the machine account, mint a **fine-grained PAT**: resource owner = `dentaledgesolutions`, repository = `claude_code` only, permissions = **Contents: Read/Write** + **Pull requests: Read/Write** (nothing else), **expiry = 90 days**. Put it in `infra/hermes-agent/.env` as `CLAUDE_CODE_PR_PAT=...`.
+3. As the machine account, mint a **fine-grained PAT**: resource owner = `dentaledgesolutions`, repository = `claude_code` only, permissions = **Contents: Read/Write** + **Pull requests: Read/Write** (nothing else), **expiry = 90 days**. Put it in a NEW **gitignored** file `infra/hermes-agent/.env.pr` as `CLAUDE_CODE_PR_PAT=...` — **NOT in `.env`.** (`.env` is the gateway's `env_file`; anything there is inherited by agent-launched processes — Task 1 Step 1 proved Hermes does not scrub this name. `.env.pr` is not loaded by `env_file`.) Confirm `.env.pr` is gitignored (add it if the ignore pattern doesn't already cover it).
 4. Add a **ruleset** on `main` (Settings → Rules → Rulesets): target `main`, require a pull request before merging, **bypass list = Repository admin** (the owner). Do NOT add the bot to the bypass list.
-5. `cd infra/hermes-agent && docker compose up -d --force-recreate` so the container env picks up `CLAUDE_CODE_PR_PAT`.
+5. Ensure the PAT is **absent** from the gateway env: it must not be in `.env`; then `cd infra/hermes-agent && docker compose up -d --force-recreate` — this **purges** any prior copy of the PAT from the running gateway (the token is supplied per-invocation, so the recreate REMOVES it from the gateway env, it does not load it). **Rotate the PAT** if the old one was ever in `.env` (it was proven agent-readable).
 
 ## File Structure
 
@@ -36,8 +36,9 @@ Do these by hand only after approving this plan; the plan's tasks assume they ex
 - `infra/hermes-agent/bin/open-proposal-pr.test.py` — unit tests for the offline logic (resolution, rendering, hook, dry-run). New.
 - `infra/hermes-agent/bin/pre-push-refuse-base.sh` — the pre-push hook installed into the ephemeral clone; refuses pushes to the base branch. New.
 - `infra/hermes-agent/registry/projects.yaml` — add structured `pr_target` to `claude_code`. Modify.
-- `infra/hermes-agent/.env.example` — document `CLAUDE_CODE_PR_PAT` (write-scoped, gitignored). Modify.
-- `infra/hermes-agent/README.md` — setup, rotation, usage. Modify.
+- `infra/hermes-agent/.env.pr.example` — template for the gitignored `.env.pr` (bot PAT; NOT loaded by `env_file`). New.
+- `infra/hermes-agent/open-proposal-pr.sh` — host-side wrapper: sources `.env.pr`, `docker compose exec -e CLAUDE_CODE_PR_PAT` passthrough. New.
+- `infra/hermes-agent/README.md` — setup, rotation, usage (via the wrapper). Modify.
 
 ---
 
@@ -47,26 +48,36 @@ Do these by hand only after approving this plan; the plan's tasks assume they ex
 
 **Interfaces:** Produces a verified go/no-go. Consumes the human prerequisites.
 
-- [ ] **Step 1: Confirm env-scrub — an agent-launched process cannot read the PAT**
+**PAT passing (all bot commands in Steps 2–4):** the PAT is not in the gateway env — load it host-side once per shell and pass it through with `-e`:
+```bash
+cd infra/hermes-agent; set -a; . ./.env.pr; set +a    # loads CLAUDE_CODE_PR_PAT into the HOST shell
+```
+Then every bot `docker compose exec` uses `-e CLAUDE_CODE_PR_PAT` (name only — the value stays off the argv). `unset CLAUDE_CODE_PR_PAT` when the Task-1 shell is done.
 
-Operator-invoked path CAN read it; agent-launched path CANNOT.
+- [ ] **Step 1: Confirm the PAT is NOT in the gateway env, and the operator passthrough works**
+
+Corrected model (Hermes does NOT scrub this name): the PAT lives in host-side `.env.pr`, never the gateway env — so agents can't read it (by construction), and the operator supplies it per-invocation via `-e`.
 ```bash
 cd infra/hermes-agent
-# operator-invoked (docker exec): expect the token's LENGTH (not the value) printed
-docker compose exec -T hermes-agent sh -c 'printf "operator sees len=%s\n" "${#CLAUDE_CODE_PR_PAT}"'
-# agent-launched (Hermes terminal tool): expect EMPTY
+# (a) gateway env has NO token (plain exec, no -e): expect len=0
+docker compose exec -T hermes-agent sh -c 'printf "gateway env len=%s\n" "${#CLAUDE_CODE_PR_PAT}"'
+# (b) agent-launched (Hermes terminal tool inherits the gateway env): expect EMPTY
 docker compose exec -T hermes-agent hermes --accept-hooks -z \
-  "Use your terminal tool to run exactly: printf 'agent sees [%s]\n' \"\$CLAUDE_CODE_PR_PAT\" — return only that line."
+  "Use your terminal tool to run exactly this and return only its output line: printf 'agent-sees[%s]\n' \"\$CLAUDE_CODE_PR_PAT\""
+# (c) operator passthrough (source .env.pr, -e NAME with no value): expect len=<nonzero>
+set -a; . ./.env.pr; set +a
+docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c 'printf "operator sees len=%s\n" "${#CLAUDE_CODE_PR_PAT}"'
+unset CLAUDE_CODE_PR_PAT
 ```
-Expected: operator `len=<nonzero>`; agent `agent sees []` (empty). If the agent sees the token, STOP — do not proceed to any auto-trigger; the operator-only boundary is the whole basis for reading the PAT from env.
+Expected: (a) `gateway env len=0`; (b) `agent-sees[]` (EMPTY — no agent inherits it); (c) `operator sees len=<nonzero>`. If (a) or (b) shows a token, STOP — the PAT is still in the gateway env: remove it from `.env` and recreate the container (prereq 5), then rotate. If (c) is empty, the wrapper/passthrough is misconfigured.
 
 - [ ] **Step 2: PRECONDITION — the `main` ruleset must EXIST (distinct signal from "identity broken")**
 
 Do NOT run Step 3 until this returns a ruleset. If `main` has no ruleset, Step 3's push would be *accepted* — indistinguishable from a broken identity model unless the signals differ. This step makes "prerequisite missing" and "identity model wrong" two different messages.
 ```bash
-cd infra/hermes-agent
+# (PAT loaded host-side per the preamble; passed via -e)
 # ruleset count (fine-grained rulesets), plus classic branch-protection as a fallback signal
-docker compose exec -T hermes-agent sh -c '
+docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c '
 n=$(GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh api repos/dentaledgesolutions/claude_code/rulesets --jq "length" 2>/dev/null || echo "?")
 GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh api repos/dentaledgesolutions/claude_code/branches/main/protection --jq ".url" >/dev/null 2>&1 && c=present || c=none
 echo "rulesets=$n classic_protection=$c"
@@ -79,14 +90,16 @@ Expected: `rulesets=<N≥1>` (or `classic_protection=present`). If you see **`PR
 - [ ] **Step 3: As the bot, a direct push to `main` is REJECTED server-side** (only after Step 2 confirms a ruleset)
 
 ```bash
-docker compose exec -T hermes-agent sh -c '
+docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c '
 set -e
 W=$(mktemp -d); cd "$W"
-git clone --depth 1 "https://x-access-token:${CLAUDE_CODE_PR_PAT}@github.com/dentaledgesolutions/claude_code" repo >/dev/null 2>&1
+printf "#!/bin/sh\nprintf %%s \"\$CLAUDE_CODE_PR_PAT\"\n" > askpass; chmod 700 askpass
+export GIT_ASKPASS="$W/askpass" GIT_TERMINAL_PROMPT=0
+git clone --depth 1 "https://x-access-token@github.com/dentaledgesolutions/claude_code" repo >/dev/null 2>&1
 cd repo
 git config user.email bot@dentaledge.local; git config user.name hermes-bot
 git commit --allow-empty -m "guardrail probe (should be rejected)" >/dev/null
-# Attempt the forbidden push; capture result WITHOUT leaking the token
+# Attempt the forbidden push; token-free URL means push.err cannot contain the token
 if git push origin HEAD:main 2>push.err; then echo "PUSH-TO-MAIN: ACCEPTED (IDENTITY MODEL WRONG)"; else echo "PUSH-TO-MAIN: REJECTED (expected)"; fi
 grep -oiE "protected branch|required|pull request|ruleset|denied" push.err | head -1
 cd /; rm -rf "$W"'
@@ -96,15 +109,17 @@ Expected: `PUSH-TO-MAIN: REJECTED (expected)` and a ruleset/protected-branch rea
 - [ ] **Step 4: As the bot, a non-base branch push + draft PR SUCCEEDS, then clean up**
 
 ```bash
-docker compose exec -T hermes-agent sh -c '
+docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c '
 set -e
 W=$(mktemp -d); cd "$W"
-git clone --depth 1 "https://x-access-token:${CLAUDE_CODE_PR_PAT}@github.com/dentaledgesolutions/claude_code" repo >/dev/null 2>&1
+printf "#!/bin/sh\nprintf %%s \"\$CLAUDE_CODE_PR_PAT\"\n" > askpass; chmod 700 askpass
+export GIT_ASKPASS="$W/askpass" GIT_TERMINAL_PROMPT=0
+git clone --depth 1 "https://x-access-token@github.com/dentaledgesolutions/claude_code" repo >/dev/null 2>&1
 cd repo; git config user.email bot@dentaledge.local; git config user.name hermes-bot
 B="probe/guardrail-$(date +%s)"; git checkout -b "$B" >/dev/null 2>&1
 git commit --allow-empty -m "guardrail probe branch" >/dev/null
 git push origin "$B" >/dev/null 2>&1 && echo "PUSH-BRANCH: OK"
-# open + immediately close a draft PR (gh if present, else REST)
+# open + immediately close a draft PR (gh if present, else REST). Records which mechanism Task 3 uses.
 if command -v gh >/dev/null 2>&1; then
   GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr create --repo dentaledgesolutions/claude_code --draft --base main --head "$B" --title "guardrail probe" --body "probe" && \
   GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr close --repo dentaledgesolutions/claude_code "$B"
@@ -141,16 +156,39 @@ In `infra/hermes-agent/registry/projects.yaml`, under the `claude_code` entry (m
       path: .project-brain/decisions/candidates
 ```
 
-- [ ] **Step 2: Document the PAT in `.env.example`**
+- [ ] **Step 2: `.env.pr.example`, gitignore, and the host-side wrapper**
 
-Append to `infra/hermes-agent/.env.example`:
+Create `infra/hermes-agent/.env.pr.example` (template for the gitignored `.env.pr`, which is **not** loaded by `env_file`):
 ```bash
 # --- Draft-PR delivery (Increment 2) — bot-account PAT, NOT the owner's ---
 # Fine-grained PAT minted from the machine collaborator account: single repo
 # (dentaledgesolutions/claude_code), Contents+Pull-requests write only, 90-day expiry.
-# Read only by the OPERATOR-invoked open-proposal-pr.py (Hermes scrubs agent-launched env).
-# CLAUDE_CODE_PR_PAT=
+# This file is NOT loaded by docker-compose's env_file — it is sourced per-invocation by
+# open-proposal-pr.sh and passed via `docker compose exec -e`, so the token never enters the
+# gateway env (agent-launched processes cannot read it). Copy to .env.pr (gitignored), fill in.
+CLAUDE_CODE_PR_PAT=
 ```
+
+Ensure `.env.pr` is gitignored (the root ignore has `.env`, which does NOT match `.env.pr`):
+```bash
+grep -qxF 'infra/hermes-agent/.env.pr' .gitignore || printf '\ninfra/hermes-agent/.env.pr\n' >> .gitignore
+git check-ignore infra/hermes-agent/.env.pr   # must print the path (i.e. it IS ignored)
+```
+
+Create the host-side wrapper `infra/hermes-agent/open-proposal-pr.sh` (NOT under `bin/`, which is container-mounted):
+```sh
+#!/bin/sh
+# Host-side operator entry point for the draft-PR write step. Sources the gitignored
+# .env.pr (NOT in the gateway env_file) and passes the bot PAT into a one-off container
+# exec via `-e CLAUDE_CODE_PR_PAT` (name only — the value never lands on the host argv).
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -f "$here/.env.pr" ] || { echo "missing $here/.env.pr (copy .env.pr.example, add the bot PAT)" >&2; exit 1; }
+set -a; . "$here/.env.pr"; set +a
+exec docker compose -f "$here/docker-compose.yml" exec -e CLAUDE_CODE_PR_PAT -T \
+  hermes-agent python3 /opt/cc-bin/open-proposal-pr.py "$@"
+```
+`chmod +x infra/hermes-agent/open-proposal-pr.sh`.
 
 - [ ] **Step 3: Write the failing tests**
 
@@ -428,8 +466,10 @@ Expected: PASS (all offline tests).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add infra/hermes-agent/bin/open-proposal-pr.py infra/hermes-agent/bin/open-proposal-pr.test.py infra/hermes-agent/registry/projects.yaml infra/hermes-agent/.env.example
-git commit -m "feat(hermes): open-proposal-pr.py offline core — resolution, candidate rendering, dry-run"
+git add infra/hermes-agent/bin/open-proposal-pr.py infra/hermes-agent/bin/open-proposal-pr.test.py \
+  infra/hermes-agent/registry/projects.yaml infra/hermes-agent/.env.pr.example \
+  infra/hermes-agent/open-proposal-pr.sh .gitignore
+git commit -m "feat(hermes): open-proposal-pr.py offline core + host wrapper (PAT out of gateway env)"
 ```
 
 ---
@@ -641,32 +681,32 @@ docker compose exec -T hermes-agent sh -c 'cd /projects/claude_code && git statu
 ```
 Record the hash.
 
-- [ ] **Step 2: Open the draft PR from a real proposal**
+- [ ] **Step 2: Open the draft PR from a real proposal (via the wrapper)**
 
 ```bash
-docker compose exec -T hermes-agent python3 /opt/cc-bin/open-proposal-pr.py --project claude_code --proposal latest
+./infra/hermes-agent/open-proposal-pr.sh --project claude_code --proposal latest
 ```
-Expected: a single line — the draft PR URL. Open it: the diff is EXACTLY one added file under `.project-brain/decisions/candidates/YYYY-MM-DD-<slug>.md`, PR is **draft**, frontmatter shows `author: hermes` + `hermes-generated` + `sources` (proposal path + run id).
+The wrapper sources `.env.pr` and passes the PAT via `-e`. Expected: a single line — the draft PR URL. Open it: the diff is EXACTLY one added file under `.project-brain/decisions/candidates/YYYY-MM-DD-<slug>.md`, PR is **draft**, frontmatter shows `author: hermes` + `hermes-generated` + `sources` (proposal path + run id).
 
 - [ ] **Step 3: Prove the guarantees**
 
 ```bash
 cd infra/hermes-agent
-# (a) :ro mount byte-identical (must equal Step 1's hash)
+set -a; . ./.env.pr; set +a          # load the PAT host-side for the leak/PR checks (per Task 1 preamble)
+# (a) :ro mount byte-identical (must equal Step 1's hash) — no token needed
 docker compose exec -T hermes-agent sh -c 'cd /projects/claude_code && git status --porcelain | sort | sha256sum'
 
-# (b) PAT not exposed — pattern read from a 0600 FILE (never a ps-visible argv), require the
-#     var set (no vacuous pass), and check BOTH in-container logs AND `docker compose logs`
-#     (where a traceback would land — review item #8).
-docker compose exec -T hermes-agent sh -c '[ -n "$CLAUDE_CODE_PR_PAT" ] || { echo "PAT NOT SET — check inconclusive"; exit 2; }
+# (b) PAT not exposed — the token is NOT in the gateway env, so pass it via -e for the grep;
+#     pattern read from a 0600 FILE (never a ps-visible argv). Check in-container logs AND
+#     `docker compose logs` (where a traceback would land — review item #8).
+docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c '[ -n "$CLAUDE_CODE_PR_PAT" ] || { echo "PAT NOT PASSED — check inconclusive"; exit 2; }
 umask 077; printf %s "$CLAUDE_CODE_PR_PAT" > /tmp/.tok
 grep -rlFf /tmp/.tok /opt/data/logs 2>/dev/null && echo "LEAK: /opt/data/logs" || echo "clean: /opt/data/logs"
 rm -f /tmp/.tok'
-# guard so an unset PAT can't produce a vacuous "clean" (follow-up #3, mirrors (b)'s exit-2)
-if [ "$(docker compose exec -T hermes-agent sh -c 'printf %s "${CLAUDE_CODE_PR_PAT:+set}"')" != "set" ]; then
-  echo "docker-logs check inconclusive — PAT not set"
-else
-  docker compose logs --no-color 2>&1 | grep -Ff <(docker compose exec -T hermes-agent sh -c 'printf %s "$CLAUDE_CODE_PR_PAT"') >/dev/null && echo "LEAK: docker logs" || echo "clean: docker logs"
+if [ -z "${CLAUDE_CODE_PR_PAT:-}" ]; then echo "docker-logs check inconclusive — PAT not loaded"; else
+  umask 077; printf %s "$CLAUDE_CODE_PR_PAT" > /tmp/.hosttok    # printf builtin — token off argv
+  docker compose logs --no-color 2>&1 | grep -Ff /tmp/.hosttok >/dev/null && echo "LEAK: docker logs" || echo "clean: docker logs"
+  rm -f /tmp/.hosttok
 fi
 
 # (c) ephemeral workspace gone
@@ -677,25 +717,34 @@ docker compose exec -T hermes-agent sh -c 'ls -d /tmp/proposal-pr-* 2>/dev/null 
 #     exists precisely because gh may be absent (follow-up #1). PR accepts a .../pull/<n>
 #     URL or a bare number; the token stays off argv (GH_TOKEN env / 0600 curl config).
 PR="<PR url or number from Step 2>"
-docker compose exec -T hermes-agent sh -c '
+docker compose exec -e CLAUDE_CODE_PR_PAT -T hermes-agent sh -c '
 PR="$1"; N="${PR##*/}"; R=dentaledgesolutions/claude_code
 if command -v gh >/dev/null 2>&1; then
   GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr view "$N" --repo "$R" --json isDraft,files \
     --jq "{draft:.isDraft, n:(.files|length), path:(.files[0].path)}"
 else
   umask 077; printf "header = \"Authorization: Bearer %s\"\n" "$CLAUDE_CODE_PR_PAT" > /tmp/.curlrc
-  curl -s -K /tmp/.curlrc "https://api.github.com/repos/$R/pulls/$N"       > /tmp/pr.json
-  curl -s -K /tmp/.curlrc "https://api.github.com/repos/$R/pulls/$N/files" > /tmp/prf.json
-  rm -f /tmp/.curlrc
-  python3 -c "import json; pr=json.load(open(\"/tmp/pr.json\")); f=json.load(open(\"/tmp/prf.json\")); print({\"draft\": pr.get(\"draft\"), \"n\": len(f), \"path\": (f[0][\"filename\"] if f else None)})"
-  rm -f /tmp/pr.json /tmp/prf.json
+  # -sf (--fail): an auth/404 error exits non-zero instead of writing an error body that
+  # parses into data-shaped garbage like {"draft": None, "n": 2} (optional nit).
+  if curl -sf -K /tmp/.curlrc "https://api.github.com/repos/$R/pulls/$N"       > /tmp/pr.json \
+  && curl -sf -K /tmp/.curlrc "https://api.github.com/repos/$R/pulls/$N/files" > /tmp/prf.json; then
+    python3 -c "import json; pr=json.load(open(\"/tmp/pr.json\")); f=json.load(open(\"/tmp/prf.json\")); print({\"draft\": pr.get(\"draft\"), \"n\": len(f), \"path\": (f[0][\"filename\"] if f else None)})"
+  else
+    echo "PR assertion FAILED — GitHub API call errored (auth/404), not a data answer"
+  fi
+  rm -f /tmp/.curlrc /tmp/pr.json /tmp/prf.json
 fi' _ "$PR"
 ```
 Expected: (a) hash matches Step 1; (b) `clean: /opt/data/logs` AND `clean: docker logs`; (c) `workspace cleaned`; (d) `{'draft': True, 'n': 1, 'path': '.project-brain/decisions/candidates/2026-...'}` — draft, one file, candidate path (identical shape from gh or curl).
 
 - [ ] **Step 4: Write the README section**
 
-Add an "Improvement proposals as draft PRs (Increment 2)" section to `infra/hermes-agent/README.md` covering: the one-time human setup (machine account → collaborator → fine-grained bot PAT with 90-day expiry → `main` ruleset with admin-only bypass), the **90-day PAT rotation step** (mint new → update `.env` → `docker compose up -d --force-recreate`), the usage (`open-proposal-pr.py --project claude_code --proposal latest`), the safety model (bot ≠ owner; `:ro` mount never written; draft-only; operator-invoked because Hermes scrubs agent-launched env), and the **test invocation** — `python3 infra/hermes-agent/bin/open-proposal-pr.test.py` (review item #10: the hermes `bin/` tests are not auto-discovered by `run-all-tests.js`, which only scans `skills/` and `scripts/` for `*.test.js`; run them directly, as with the other hermes bin tests).
+Add an "Improvement proposals as draft PRs (Increment 2)" section to `infra/hermes-agent/README.md` covering:
+- **One-time human setup:** machine account → collaborator (write, not admin) → fine-grained bot PAT (Contents+PR write, single repo, 90-day expiry) placed in gitignored `infra/hermes-agent/.env.pr` (NOT `.env`) → `main` ruleset with admin-only bypass.
+- **90-day PAT rotation:** mint a new bot PAT → replace the value in `.env.pr`. No container recreate needed (the PAT is not in the gateway env; it's sourced per-invocation).
+- **Usage:** `./infra/hermes-agent/open-proposal-pr.sh --project claude_code --proposal latest` (the wrapper sources `.env.pr` and passes the PAT via `docker compose exec -e`).
+- **Safety model:** bot ≠ owner; `:ro` mount never written; draft-only; and — importantly — the PAT is kept **OUT of the gateway env** (in `.env.pr`, not loaded by `env_file`) so no agent-launched process can read it. This is by construction, because **Hermes does NOT scrub the `CLAUDE_CODE_PR_PAT` name** (it only scrubs known-provider names) — proven in Task 1 Step 1.
+- **Test invocation:** `python3 infra/hermes-agent/bin/open-proposal-pr.test.py` (review item #10: the hermes `bin/` tests are not auto-discovered by `run-all-tests.js`, which only scans `skills/` and `scripts/` for `*.test.js`; run them directly).
 
 - [ ] **Step 5: Commit**
 
@@ -709,7 +758,7 @@ git commit -m "docs(hermes): document draft-PR delivery — setup, rotation, usa
 ## Self-Review
 
 - **Spec text (separate from this plan's implementation — review item #2):** the bot-identity model is corrected in the *spec* at commit `dbc19d3` (Layer 3/5/residual + "Identity model" section). This plan does not re-edit the spec; it implements what the spec now says. If the identity mechanism changes during implementation, the spec section is updated in the same commit.
-- **Plan coverage:** machine-account identity + admin-bypass ruleset (Prereqs + Task 1 Steps 2–4) ✓; two-signal gate — `PREREQUISITE MISSING` vs `IDENTITY MODEL WRONG` (Task 1 Step 2 vs 3) ✓; env-scrub verified as the bot (Task 1 Step 1) ✓; structured `pr_target` + parser test (Task 2) ✓; candidate filename strips trailing timestamps + full-title frontmatter + date-only `timestamp` + provenance (Task 2 `render_candidate`; tests incl. the REAL H1) ✓; **no token leak on clone failure** — `GIT_ASKPASS` (token never in argv/URL/config/stderr) + `_scrub` + regression test (Task 3 `TestSecretHandling`) ✓; re-run guard on existing branch (Task 3) ✓; pre-push base refusal (hook + tests) ✓; draft-only PR via gh|REST, REST unit-tested (Task 3 `TestRestFallback`) ✓; `:ro` never written / ephemeral clone / cleanup on success+failure (`_run_live` finally) ✓; draft + one-file diff ASSERTED via `gh --json` (Task 4 Step 3d) ✓; log-leak check covers `/opt/data/logs` AND `docker compose logs`, token off argv (Task 4 Step 3b) ✓; 90-day expiry + rotation + test-invocation doc (Task 4 README) ✓.
+- **Plan coverage:** machine-account identity + admin-bypass ruleset (Prereqs + Task 1 Steps 2–4) ✓; two-signal gate — `PREREQUISITE MISSING` vs `IDENTITY MODEL WRONG` (Task 1 Step 2 vs 3) ✓; PAT kept OUT of the gateway env (gitignored `.env.pr`, not `env_file`; `open-proposal-pr.sh` wrapper + `-e` passthrough) so no agent can read it — verified in Task 1 Step 1 (gateway len=0, agent empty, operator passthrough works); corrects the false "Hermes scrubs it" premise ✓; structured `pr_target` + parser test (Task 2) ✓; candidate filename strips trailing timestamps + full-title frontmatter + date-only `timestamp` + provenance (Task 2 `render_candidate`; tests incl. the REAL H1) ✓; **no token leak on clone failure** — `GIT_ASKPASS` (token never in argv/URL/config/stderr) + `_scrub` + regression test (Task 3 `TestSecretHandling`) ✓; re-run guard on existing branch (Task 3) ✓; pre-push base refusal (hook + tests) ✓; draft-only PR via gh|REST, REST unit-tested (Task 3 `TestRestFallback`) ✓; `:ro` never written / ephemeral clone / cleanup on success+failure (`_run_live` finally) ✓; draft + one-file diff ASSERTED via `gh --json` (Task 4 Step 3d) ✓; log-leak check covers `/opt/data/logs` AND `docker compose logs`, token off argv (Task 4 Step 3b) ✓; 90-day expiry + rotation + test-invocation doc (Task 4 README) ✓.
 - **Placeholder scan:** none — every code/command step is literal. `_run_live`/`_scrub`/`_git` are introduced in Task 3 (Task 2's `main` returns before calling `_run_live` under `--dry-run`, so Task 2 tests pass without it).
 - **Type/name consistency:** `read_pr_target`, `resolve_proposal`, `render_candidate`, `_strip_trailing_dates`, `slugify`, `build_plan`, `_run_live`, `_git`, `_scrub`, `_open_draft_pr`, the `{repo,base,path}` dict, `PROPOSALS_DIR`/`PR_REGISTRY`/`PR_GIT_HOST`/`CLAUDE_CODE_PR_PAT`/`PREPUSH_BASE` env vars, and the `proposal/<ts>` branch name are used identically across tasks.
 - **Ambiguity check:** gh-vs-REST is resolved empirically in Task 1 Step 4 AND the REST path is unit-tested (item #9), so it ships covered regardless of `gh` presence; the registry hand-parser and the timestamp-stripping slug are unit-tested for the exact real inputs.
@@ -719,5 +768,6 @@ git commit -m "docs(hermes): document draft-PR delivery — setup, rotation, usa
 - **Do NOT perform the Prerequisites** — they are the owner's to do after reviewing this plan (create bot account, PAT, ruleset). Every task assumes they exist and tests **as the bot**.
 - Task 1 is a two-signal gate: **Step 2** (precondition) fails with `PREREQUISITE MISSING` if no `main` ruleset exists; **Step 3** fails with `IDENTITY MODEL WRONG` only if a ruleset exists AND the bot still pushed to `main`. Never run Step 3 before Step 2 confirms a ruleset.
 - Never echo `$CLAUDE_CODE_PR_PAT`; the `GIT_ASKPASS` mechanism keeps it out of argv/URL/`.git/config`/git-stderr; the `_scrub` + the leak test are the regression guard.
+- **The PAT is NOT in the gateway env.** It lives in gitignored `infra/hermes-agent/.env.pr` (NOT loaded by `env_file`) and is sourced per-invocation by the `open-proposal-pr.sh` wrapper, passed via `docker compose exec -e CLAUDE_CODE_PR_PAT`. Hermes does NOT scrub this name (Task 1 Step 1 proved it), so keeping it out of `env_file` is the ONLY thing preventing agent-launched processes from reading it. **Never add `CLAUDE_CODE_PR_PAT` to `.env`.** (General lesson: any operator-only secret placed in the gateway's `env_file` is agent-readable unless it's a Hermes known-provider name.)
 - **Spec is already corrected (review item #2):** the bot-identity model lives in `docs/superpowers/specs/2026-07-24-hermes-proposal-draft-pr-design.md` as of commit `dbc19d3` (rewritten Layer 3, Layer 5, residual + an "Identity model" section) — committed BEFORE this plan. No spec-edit task is needed; if the identity mechanism changes during implementation, update that spec section in the same commit.
 - **`proposals-index.py` reuse (review item #11):** `resolve_proposal` re-implements newest/explicit selection inline rather than shelling `proposals-index.py`, to avoid a subprocess dependency for one-line selection logic. Intentional divergence — if `proposals-index.py`'s selection semantics change, mirror them here.
