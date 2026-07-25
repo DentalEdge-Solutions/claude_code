@@ -75,11 +75,13 @@ class TestOfflineCore(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             pdir = os.path.join(d, "claude_code"); os.makedirs(pdir)
             pf = os.path.join(pdir, "2026-07-24_22-54-03.md")
-            open(pf, "w").write(PROPOSAL)
+            with open(pf, "w") as f:
+                f.write(PROPOSAL)
             reg = os.path.join(d, "projects.yaml")
-            open(reg, "w").write("version: 1\nprojects:\n  claude_code:\n    scope: read\n"
-                                 "    pr_target:\n      repo: DentalEdge-Solutions/claude_code\n"
-                                 "      base: main\n      path: docs/proposals\n")
+            with open(reg, "w") as f:
+                f.write("version: 1\nprojects:\n  claude_code:\n    scope: read\n"
+                        "    pr_target:\n      repo: DentalEdge-Solutions/claude_code\n"
+                        "      base: main\n      path: docs/proposals\n")
             env = {**os.environ, "PROPOSALS_DIR": d, "PR_REGISTRY": reg}
             r = subprocess.run([sys.executable, SCRIPT, "--project", "claude_code",
                                 "--proposal", "latest", "--dry-run"],
@@ -89,6 +91,70 @@ class TestOfflineCore(unittest.TestCase):
             self.assertIn("proposal/", r.stdout)          # branch name
             self.assertIn("docs/proposals/2026-07-25-", r.stdout)  # candidate path
             self.assertNotIn(os.environ.get("CLAUDE_CODE_PR_PAT", "NO_TOKEN_SET"), r.stdout)
+
+
+class TestPrePushHook(unittest.TestCase):
+    HOOK = os.path.join(HERE, "pre-push-refuse-base.sh")
+    def _run(self, remote_ref):
+        stdin = f"refs/heads/x deadbeef {remote_ref} 0000000\n"
+        return subprocess.run(["sh", self.HOOK], input=stdin, capture_output=True, text=True,
+                              env={**os.environ, "PREPUSH_BASE": "main"})
+    def test_refuses_main(self):
+        self.assertEqual(self._run("refs/heads/main").returncode, 1)
+    def test_allows_feature_branch(self):
+        self.assertEqual(self._run("refs/heads/proposal/2026-07-24_22-54-03").returncode, 0)
+
+
+class TestSecretHandling(unittest.TestCase):
+    def test_no_token_leak_on_clone_failure(self):
+        # Blocking review item #1: force a clone failure (bogus .invalid host = fast NXDOMAIN)
+        # and assert the token appears in NEITHER stdout NOR stderr — including any traceback.
+        with tempfile.TemporaryDirectory() as d:
+            pdir = os.path.join(d, "claude_code"); os.makedirs(pdir)
+            with open(os.path.join(pdir, "2026-07-24_22-54-03.md"), "w") as f:
+                f.write(PROPOSAL)
+            reg = os.path.join(d, "projects.yaml")
+            with open(reg, "w") as f:
+                f.write("version: 1\nprojects:\n  claude_code:\n    scope: read\n"
+                        "    pr_target:\n      repo: DentalEdge-Solutions/claude_code\n"
+                        "      base: main\n      path: docs/proposals\n")
+            SENTINEL = "ghp_SENTINELtoken000000000000000000000000"
+            env = {**os.environ, "PROPOSALS_DIR": d, "PR_REGISTRY": reg,
+                   "CLAUDE_CODE_PR_PAT": SENTINEL, "PR_GIT_HOST": "example.invalid"}
+            r = subprocess.run([sys.executable, SCRIPT, "--project", "claude_code", "--proposal", "latest"],
+                               capture_output=True, text=True, env=env)
+            self.assertNotEqual(r.returncode, 0)          # clone must fail
+            self.assertNotIn(SENTINEL, r.stdout)
+            self.assertNotIn(SENTINEL, r.stderr)
+
+
+class TestRestFallback(unittest.TestCase):
+    def test_open_draft_pr_rest_posts_draft(self):
+        # Review item #9: the REST path never runs live when gh is present, so unit-test it
+        # with gh forced absent and a stubbed urlopen.
+        import urllib.request as ur
+        captured = {}
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"html_url": "https://github.com/o/r/pull/7"}'
+        def fake_urlopen(req):
+            captured["data"] = req.data.decode(); captured["auth"] = req.headers.get("Authorization")
+            return FakeResp()
+        orig_which, orig_urlopen = mod["shutil"].which, ur.urlopen
+        mod["shutil"].which = lambda name: None
+        ur.urlopen = fake_urlopen
+        try:
+            out = mod["_open_draft_pr"](
+                {"repo": "o/r", "base": "main"},
+                {"title": "T", "branch": "proposal/x", "dest": "docs/x.md", "proposal_path": "/p/x.md"},
+                "SENTINELPAT")
+        finally:
+            mod["shutil"].which, ur.urlopen = orig_which, orig_urlopen
+        self.assertIn("pull/7", out)
+        self.assertIn('"draft": true', captured["data"])
+        self.assertIn("proposal/x", captured["data"])
+        self.assertEqual(captured["auth"], "Bearer SENTINELPAT")
 
 
 if __name__ == "__main__":

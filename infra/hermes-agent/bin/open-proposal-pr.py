@@ -136,6 +136,93 @@ def build_plan(project, which, run_id, now):
             "proposal_path": ppath, "title": _title(text), "desc": _description(text)}
 
 
+def _scrub(text, secret):
+    return text.replace(secret, "***") if secret else text
+
+
+def _git(repo, *args, env=None, secret=None):
+    """Run git; never let the PAT surface in an exception. With GIT_ASKPASS the token
+    is never in argv/URL/config, so stderr is already token-free — the scrub is
+    belt-and-suspenders for the 90-day-expiry failure path."""
+    r = subprocess.run(["git", "-C", repo, *args], env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"open-proposal-pr: git {args[0]} failed: {_scrub(r.stderr.strip(), secret)}")
+    return r
+
+
+def _open_draft_pr(tgt, plan, pat):
+    if shutil.which("gh"):
+        out = subprocess.run(
+            ["gh", "pr", "create", "--repo", tgt["repo"], "--draft",
+             "--base", tgt["base"], "--head", plan["branch"],
+             "--title", f"Proposal: {plan['title']} (machine-generated)",
+             "--body", f"Machine-generated improvement proposal from Hermes AIOS.\n\n"
+                       f"Source: `{plan['proposal_path']}`. Adds `{plan['dest']}` as a brain candidate."],
+            check=True, capture_output=True, text=True, env={**os.environ, "GH_TOKEN": pat})
+        return out.stdout.strip()
+    # REST fallback (no gh in the container)
+    import urllib.request, urllib.error
+    body = json.dumps({"title": f"Proposal: {plan['title']} (machine-generated)",
+                       "head": plan["branch"], "base": tgt["base"], "draft": True,
+                       "body": f"Machine-generated proposal. Source: {plan['proposal_path']}. "
+                               f"Adds {plan['dest']}."}).encode()
+    req = urllib.request.Request(f"https://api.github.com/repos/{tgt['repo']}/pulls", data=body,
+                                 headers={"Authorization": f"Bearer {pat}",
+                                          "Accept": "application/vnd.github+json",
+                                          "User-Agent": "hermes-aios"})
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read()).get("html_url", "(PR created)")
+
+
+def _run_live(plan, project):
+    pat = os.environ.get("CLAUDE_CODE_PR_PAT")
+    if not pat:
+        raise SystemExit("open-proposal-pr: CLAUDE_CODE_PR_PAT not in env (operator-invoked only)")
+    tgt = plan["target"]
+    host = os.environ.get("PR_GIT_HOST", "github.com")            # test seam only
+    ws = tempfile.mkdtemp(prefix="proposal-pr-")
+    repo = os.path.join(ws, "repo")
+    try:
+        # GIT_ASKPASS supplies the token at runtime; the askpass FILE embeds no token
+        # (it reads $CLAUDE_CODE_PR_PAT from env), and the clone URL carries NO token —
+        # so the token never lands in argv, the remote URL, .git/config, or git stderr.
+        askpass = os.path.join(ws, ".askpass")
+        with open(askpass, "w") as f:
+            f.write('#!/bin/sh\nprintf "%s" "$CLAUDE_CODE_PR_PAT"\n')
+        os.chmod(askpass, 0o700)
+        genv = {**os.environ, "GIT_ASKPASS": askpass, "GIT_TERMINAL_PROMPT": "0"}
+        url = f"https://x-access-token@{host}/{tgt['repo']}"       # username only, NO token
+        cl = subprocess.run(["git", "clone", "--depth", "1", url, repo],
+                            env=genv, capture_output=True, text=True)
+        if cl.returncode != 0:
+            raise SystemExit(f"open-proposal-pr: clone failed: {_scrub(cl.stderr.strip(), pat)}")
+        # pre-push hook (refuse the base branch); .git/hooks is git's default path
+        hook_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pre-push-refuse-base.sh")
+        hook_dst = os.path.join(repo, ".git", "hooks", "pre-push")
+        shutil.copyfile(hook_src, hook_dst); os.chmod(hook_dst, 0o755)
+        _git(repo, "config", "user.email", "bot@dentaledge.local", env=genv, secret=pat)
+        _git(repo, "config", "user.name", "hermes-bot", env=genv, secret=pat)
+        # re-run guard: refuse if the proposal branch already exists remotely
+        ls = _git(repo, "ls-remote", "--heads", "origin", plan["branch"], env=genv, secret=pat)
+        if ls.stdout.strip():
+            raise SystemExit(f"open-proposal-pr: branch {plan['branch']} already exists on the remote — "
+                             f"close/delete its PR (or pick a different --proposal); not re-pushing")
+        _git(repo, "checkout", "-b", plan["branch"], env=genv, secret=pat)
+        dest = os.path.join(repo, plan["dest"])
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(plan["content"])
+        _git(repo, "add", plan["dest"], env=genv, secret=pat)
+        _git(repo, "commit", "-m", f"proposal: {plan['title']} (Hermes AIOS, machine-generated)",
+             env=genv, secret=pat)
+        _git(repo, "push", "origin", plan["branch"],
+             env={**genv, "PREPUSH_BASE": tgt["base"]}, secret=pat)
+        print(_open_draft_pr(tgt, plan, pat))
+        return 0
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)   # cleanup on success AND failure
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True)
