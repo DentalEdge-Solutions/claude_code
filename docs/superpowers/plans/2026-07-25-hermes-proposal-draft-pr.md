@@ -1,6 +1,8 @@
 # Proposals as Draft PRs — Implementation Plan (Increment 2 · first write capability)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Spec authority:** the design is authoritative in `docs/superpowers/specs/2026-07-24-hermes-proposal-draft-pr-design.md` as of commit `dbc19d3` (bot-identity model — Layer 3/5/residual + "Identity model" section). This plan *implements* that spec and does not re-edit it; if the identity mechanism changes during implementation, update the spec section in the same commit.
 
 **Goal:** A trusted deterministic script `open-proposal-pr.py` opens a **draft** PR on `dentaledgesolutions/claude_code` that adds one machine-authored brain-candidate markdown file (a persisted improvement proposal) — with the `:ro` production mount provably untouched, `main` unwritable by the bot, and the bot PAT never exposed.
 
@@ -361,7 +363,8 @@ def render_candidate(proposal_text, proposal_path, run_id, now):
     date = now.strftime("%Y-%m-%d")
     filename = f"{date}-{slugify(_strip_trailing_dates(title))}.md"
     # Hand-rendered YAML frontmatter; json.dumps gives valid double-quoted YAML scalars.
-    # timestamp is DATE-ONLY to match the recent candidate convention (2026-07-17, 2026-07-21).
+    # timestamp is DATE-ONLY by choice (existing candidates are mixed date/datetime;
+    # brain-promote accepts either) — date-only for brevity.
     fm = (
         "---\n"
         "type: decision\n"
@@ -659,17 +662,36 @@ docker compose exec -T hermes-agent sh -c '[ -n "$CLAUDE_CODE_PR_PAT" ] || { ech
 umask 077; printf %s "$CLAUDE_CODE_PR_PAT" > /tmp/.tok
 grep -rlFf /tmp/.tok /opt/data/logs 2>/dev/null && echo "LEAK: /opt/data/logs" || echo "clean: /opt/data/logs"
 rm -f /tmp/.tok'
-docker compose logs --no-color 2>&1 | grep -Ff <(docker compose exec -T hermes-agent sh -c 'printf %s "$CLAUDE_CODE_PR_PAT"') >/dev/null && echo "LEAK: docker logs" || echo "clean: docker logs"
+# guard so an unset PAT can't produce a vacuous "clean" (follow-up #3, mirrors (b)'s exit-2)
+if [ "$(docker compose exec -T hermes-agent sh -c 'printf %s "${CLAUDE_CODE_PR_PAT:+set}"')" != "set" ]; then
+  echo "docker-logs check inconclusive — PAT not set"
+else
+  docker compose logs --no-color 2>&1 | grep -Ff <(docker compose exec -T hermes-agent sh -c 'printf %s "$CLAUDE_CODE_PR_PAT"') >/dev/null && echo "LEAK: docker logs" || echo "clean: docker logs"
+fi
 
 # (c) ephemeral workspace gone
 docker compose exec -T hermes-agent sh -c 'ls -d /tmp/proposal-pr-* 2>/dev/null && echo "LEFTOVER" || echo "workspace cleaned"'
 
 # (d) Layers 2 & 6 ASSERTED, not eyeballed (review item #5): draft==true AND exactly one
-#     changed file whose path is the candidate path. PR = the URL/number Step 2 printed.
+#     changed file at the candidate path. Same curl fallback as _open_draft_pr — Task 1
+#     exists precisely because gh may be absent (follow-up #1). PR accepts a .../pull/<n>
+#     URL or a bare number; the token stays off argv (GH_TOKEN env / 0600 curl config).
 PR="<PR url or number from Step 2>"
-docker compose exec -T hermes-agent sh -c "GH_TOKEN=\"\$CLAUDE_CODE_PR_PAT\" gh pr view \"$PR\" --repo dentaledgesolutions/claude_code --json isDraft,files --jq '{draft:.isDraft, n:(.files|length), path:(.files[0].path)}'"
+docker compose exec -T hermes-agent sh -c '
+PR="$1"; N="${PR##*/}"; R=dentaledgesolutions/claude_code
+if command -v gh >/dev/null 2>&1; then
+  GH_TOKEN="$CLAUDE_CODE_PR_PAT" gh pr view "$N" --repo "$R" --json isDraft,files \
+    --jq "{draft:.isDraft, n:(.files|length), path:(.files[0].path)}"
+else
+  umask 077; printf "header = \"Authorization: Bearer %s\"\n" "$CLAUDE_CODE_PR_PAT" > /tmp/.curlrc
+  curl -s -K /tmp/.curlrc "https://api.github.com/repos/$R/pulls/$N"       > /tmp/pr.json
+  curl -s -K /tmp/.curlrc "https://api.github.com/repos/$R/pulls/$N/files" > /tmp/prf.json
+  rm -f /tmp/.curlrc
+  python3 -c "import json; pr=json.load(open(\"/tmp/pr.json\")); f=json.load(open(\"/tmp/prf.json\")); print({\"draft\": pr.get(\"draft\"), \"n\": len(f), \"path\": (f[0][\"filename\"] if f else None)})"
+  rm -f /tmp/pr.json /tmp/prf.json
+fi' _ "$PR"
 ```
-Expected: (a) hash matches Step 1; (b) `clean: /opt/data/logs` AND `clean: docker logs`; (c) `workspace cleaned`; (d) `{"draft":true,"n":1,"path":".project-brain/decisions/candidates/2026-..."}` — draft, one file, candidate path.
+Expected: (a) hash matches Step 1; (b) `clean: /opt/data/logs` AND `clean: docker logs`; (c) `workspace cleaned`; (d) `{'draft': True, 'n': 1, 'path': '.project-brain/decisions/candidates/2026-...'}` — draft, one file, candidate path (identical shape from gh or curl).
 
 - [ ] **Step 4: Write the README section**
 

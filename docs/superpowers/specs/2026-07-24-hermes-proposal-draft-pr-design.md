@@ -175,15 +175,18 @@ decision, and that provenance must be legible to whoever reviews the promote-to-
 open-proposal-pr.py --project claude_code --proposal latest
   read /opt/data/proposals/claude_code/<ts>.md
   resolve pr_target from registry -> {repo, base, path}
-  workspace=$(mktemp -d)
-  git clone --depth 1 https://<BOT_PAT>@github.com/<pr_target.repo> $workspace   # bot account, not owner
-  install .git/hooks/pre-push  (refuse pushing to <pr_target.base>)
-  git -C $workspace checkout -b proposal/<ts>
-  write $workspace/<pr_target.path>/YYYY-MM-DD-<slug>.md   (candidate format + provenance)
-  git -C $workspace add + commit -m "proposal: <summary> (Hermes AIOS, machine-generated)"
-  git -C $workspace push origin proposal/<ts>              # hook allows non-base branches
+  ws=$(mktemp -d); write $ws/.askpass  (0700; prints $CLAUDE_CODE_PR_PAT — no token on disk)
+  GIT_ASKPASS=$ws/.askpass GIT_TERMINAL_PROMPT=0 \
+    git clone --depth 1 https://x-access-token@github.com/<pr_target.repo> $ws/repo
+      # username only — NO token in the URL/argv/.git/config; askpass supplies it at runtime
+  install $ws/repo/.git/hooks/pre-push  (refuse pushing to <pr_target.base>)
+  ls-remote --heads origin proposal/<ts>  → abort if it already exists (re-run guard)
+  git -C $ws/repo checkout -b proposal/<ts>
+  write $ws/repo/<pr_target.path>/YYYY-MM-DD-<slug>.md   (candidate format + provenance)
+  git -C $ws/repo add + commit -m "proposal: <summary> (Hermes AIOS, machine-generated)"
+  PREPUSH_BASE=<base> git -C $ws/repo push origin proposal/<ts>   # hook allows non-base branches
   gh pr create --draft --base <pr_target.base> --head proposal/<ts>   # or REST API
-  print PR URL; rm -rf $workspace   # cleanup on success AND failure
+  print PR URL; rm -rf $ws   # cleanup on success AND failure
 ```
 
 ## Boundaries (Track A stays proposals, not development)
