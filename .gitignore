@@ -24,3 +24,6 @@ fixtures/*/SKILL.md.baseline
 # Hermes Agent runtime (infra/hermes-agent): secrets + persistent state, never committed
 infra/hermes-agent/.env
 infra/hermes-agent/data/
+
+# operator-only bot PAT — NEVER committed (Increment 2)
+infra/hermes-agent/.env.pr
