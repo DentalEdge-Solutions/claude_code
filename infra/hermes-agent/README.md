@@ -219,6 +219,40 @@ symlinked into each profile's `skills/` dir by `setup-review-team.sh` (workers
 resolve `--skill` from the profile dir, not the global mount). Design + plan:
 `docs/superpowers/{specs,plans}/2026-07-24-hermes-kanban-review-pipeline*`.
 
+## Improvement proposals as draft PRs (Increment 2 — first write capability)
+
+Deliver a persisted proposal (from the Track-A proposer or the Kanban review pipeline)
+to GitHub as a **draft PR** that adds one machine-authored brain-candidate file — the
+project's `:ro` mount is never touched (the write happens in a fresh ephemeral clone).
+
+**One-time human setup:** a dedicated machine account (`dentaledge-bot`) added as an
+org collaborator with **write** (not admin); a **fine-grained** bot PAT (Contents +
+Pull-requests write, single repo, 90-day expiry) — note fine-grained PATs only grant
+write to **org-owned** repos for collaborators, so `claude_code` lives under the
+`DentalEdge-Solutions` org; the PAT goes in gitignored `infra/hermes-agent/.env.pr`
+(**not** `.env`); a `main` **ruleset** requiring a PR with bypass = repo admin only
+(bot **not** on the bypass list).
+
+**Usage** (operator-invoked; the wrapper sources `.env.pr` and passes the PAT via
+`docker compose exec -e` — it never enters the gateway env):
+
+```bash
+./infra/hermes-agent/open-proposal-pr.sh --project claude_code --proposal latest
+# prints the draft PR URL; add --dry-run to preview without any git/network.
+```
+
+**90-day PAT rotation:** mint a new bot PAT → replace the value in `.env.pr`. No
+container recreate needed (the PAT isn't in the gateway env).
+
+**Safety model:** bot ≠ owner; `:ro` mount never written (ephemeral clone only);
+draft-only (a human marks ready + merges); `main` unwritable by the bot (pre-push
+hook + server-side ruleset); and the PAT is kept **out of the gateway env** so no
+agent-launched process can read it — necessary because **Hermes does NOT scrub the
+`CLAUDE_CODE_PR_PAT` name** (it only scrubs known-provider names).
+
+**Tests:** `python3 infra/hermes-agent/bin/open-proposal-pr.test.py` (the hermes
+`bin/` tests aren't auto-discovered by `run-all-tests.js`; run them directly).
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
