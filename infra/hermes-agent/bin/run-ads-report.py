@@ -8,7 +8,7 @@ all six GOOGLE_ADS_* credential values from captured output before persisting.
 STDLIB ONLY. Never writes the :ro project mount; writes only under /opt/data.
 See docs/superpowers/specs/2026-08-03-hermes-ads-read-execute-design.md
 """
-import argparse, datetime, os, shutil, subprocess, sys, tempfile
+import argparse, datetime, os, re, shutil, subprocess, sys, tempfile
 
 DEFAULT_REGISTRY = "/opt/registry/projects.yaml"
 DEFAULT_REPORTS = "/opt/data/reports"
@@ -27,6 +27,15 @@ def reports_dir():
     return os.environ.get("REPORTS_DIR", DEFAULT_REPORTS)
 
 
+def _strip_inline_comment(stripped):
+    """Remove a trailing inline YAML comment (# preceded by whitespace).
+
+    A '#' flush against a value (no preceding whitespace) is part of the value,
+    not a comment, per YAML inline-comment semantics.
+    """
+    return re.sub(r"\s+#.*$", "", stripped)
+
+
 def read_workdir(path, project):
     """Stdlib line-parser for projects.<project>.workdir."""
     cur = None
@@ -36,7 +45,7 @@ def read_workdir(path, project):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             indent = len(line) - len(line.lstrip(" "))
-            stripped = line.strip()
+            stripped = _strip_inline_comment(line.strip())
             if indent == 2 and stripped.endswith(":"):
                 cur = stripped[:-1]
             elif indent == 4 and cur == project and stripped.startswith("workdir:"):
@@ -60,7 +69,7 @@ def read_read_execute(path, project):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             indent = len(line) - len(line.lstrip(" "))
-            stripped = line.strip()
+            stripped = _strip_inline_comment(line.strip())
             if indent == 2 and stripped.endswith(":"):        # a project name
                 cur = stripped[:-1]; in_re = False; in_allow = False
             elif indent == 4 and cur == project and stripped == "read_execute:":

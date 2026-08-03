@@ -55,6 +55,30 @@ class TestParse(unittest.TestCase):
         self.assertNotIn("claude-haiku-4-5", cfg["allow"])
         os.unlink(p)
 
+    def test_inline_comments_stripped(self):
+        # Regression (Inc 3 Task 3 review): the REAL registry has inline `#
+        # comments` on runner/script_dir/allow lines. A pre-fix parser would
+        # append comment text onto runner/script_dir and would fail the
+        # `stripped == "allow:"` check, corrupting the allow list.
+        reg_with_comments = (
+            "version: 1\nprojects:\n"
+            "  claude_google_ads:\n"
+            "    workdir: /projects/claude_google_ads\n"
+            "    scope: read-execute\n"
+            "    read_execute:\n"
+            "      runner: /opt/ads-venv/bin/python3   # pinned build-time venv (Task 1), NOT base python\n"
+            "      script_dir: code             # relative to workdir\n"
+            "      allow:                       # EXACT basenames; fail-closed; READERS ONLY\n"
+            "        - test_connection\n"
+            "        - account_overview\n"
+        )
+        p = _reg(reg_with_comments)
+        cfg = mod["read_read_execute"](p, "claude_google_ads")
+        self.assertEqual(cfg["runner"], "/opt/ads-venv/bin/python3")
+        self.assertEqual(cfg["script_dir"], "code")
+        self.assertEqual(cfg["allow"], ["test_connection", "account_overview"])
+        os.unlink(p)
+
 
 class TestAllowList(unittest.TestCase):
     CFG = {"runner": "/opt/ads-venv/bin/python3", "script_dir": "code",
