@@ -350,6 +350,9 @@ and credential scope are enforced independently of it.
   container, and the target's git working tree was byte-identical
   before/after a run — read-execute never wrote the `:ro` mount.
 
+**Tests:** `python3 infra/hermes-agent/bin/run-ads-report.test.py` (like the other
+hermes `bin/` tests, run directly — not auto-discovered by `run-all-tests.js`).
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
