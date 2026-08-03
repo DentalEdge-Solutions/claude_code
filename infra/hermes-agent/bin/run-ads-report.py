@@ -106,6 +106,22 @@ def _scrub(text, secrets):
     return text
 
 
+_RUNTIME_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
+                     "SSL_CERT_FILE", "SSL_CERT_DIR", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
+                     "REQUESTS_CA_BUNDLE")
+
+
+def _child_env():
+    """Env for the reader subprocess: the six injected credentials + a minimal benign
+    runtime whitelist. Deliberately EXCLUDES the rest of the parent env so other
+    container secrets (ANTHROPIC_API_KEY, OpenRouter key) are never handed to the
+    content-untrusted reader. Callers guarantee all six CRED_VARS are present."""
+    env = {k: os.environ[k] for k in _RUNTIME_ENV_KEYS if k in os.environ}
+    for v in CRED_VARS:
+        env[v] = os.environ[v]
+    return env
+
+
 def build_plan(project, report):
     workdir = read_workdir(registry_path(), project)
     cfg = read_read_execute(registry_path(), project)
@@ -130,13 +146,13 @@ def run_report(plan, now):
     scratch = tempfile.mkdtemp(prefix="ads-report-")   # defense-in-depth cwd; guarantee is override=False
     try:
         proc = subprocess.run([plan["runner"], plan["script"]],
-                              cwd=scratch, env=dict(os.environ),
+                              cwd=scratch, env=_child_env(),
                               capture_output=True, text=True)
-        out = _scrub(proc.stdout, secrets)
         err = _scrub(proc.stderr, secrets)
         if proc.returncode != 0:
             raise SystemExit(f"run-ads-report: reader {plan['report']} failed "
                              f"(exit {proc.returncode}):\n{err}")
+        out = _scrub(proc.stdout, secrets)
         dest_dir = os.path.join(reports_dir(), plan["project"])
         os.makedirs(dest_dir, exist_ok=True)
         ts = now.strftime("%Y-%m-%d_%H-%M-%S")

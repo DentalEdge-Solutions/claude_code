@@ -197,6 +197,76 @@ class TestRunReport(unittest.TestCase):
             finally:
                 os.environ.clear(); os.environ.update(old)
 
+    def test_run_report_scrubs_stderr_on_failure(self):
+        # Regression: the earlier non-zero-exit test used a reader that wrote nothing
+        # to stderr, so the stderr-scrub path (secret must not leak into the raised
+        # SystemExit message) was unverified. This reader echoes the developer token
+        # to stderr and exits non-zero.
+        with tempfile.TemporaryDirectory() as d:
+            self._workdir_with_fake_reader(
+                d, "import os, sys\nsys.stderr.write('token=' + os.environ['GOOGLE_ADS_DEVELOPER_TOKEN'])\n"
+                   "sys.exit(2)\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = self._env_with_creds({"GOOGLE_ADS_DEVELOPER_TOKEN": "STDERRSENTINEL"})
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                with self.assertRaises(SystemExit) as cm:
+                    mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+                self.assertNotIn("STDERRSENTINEL", str(cm.exception))
+            finally:
+                os.environ.clear(); os.environ.update(old)
+
+    def test_run_report_refuses_single_missing_cred(self):
+        # Proves the missing-cred check is ANY-missing, not all-missing: removing
+        # exactly one of the six CRED_VARS must still raise SystemExit.
+        with tempfile.TemporaryDirectory() as d:
+            self._workdir_with_fake_reader(d, "print('hi')\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = self._env_with_creds({})
+            env.pop(mod["CRED_VARS"][0], None)
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                with self.assertRaises(SystemExit):
+                    mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+            finally:
+                os.environ.clear(); os.environ.update(old)
+
+    def test_run_report_no_scratch_leak_on_success_or_failure(self):
+        def _leftover():
+            return [d for d in os.listdir(tempfile.gettempdir()) if d.startswith("ads-report-")]
+
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            self._workdir_with_fake_reader(d, "print('ok')\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = self._env_with_creds({"REPORTS_DIR": out})
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                rc = mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+                self.assertEqual(rc, 0)
+                self.assertEqual(_leftover(), [])
+            finally:
+                os.environ.clear(); os.environ.update(old)
+
+        with tempfile.TemporaryDirectory() as d:
+            self._workdir_with_fake_reader(d, "import sys\nsys.exit(2)\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = self._env_with_creds({})
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                with self.assertRaises(SystemExit):
+                    mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+                self.assertEqual(_leftover(), [])
+            finally:
+                os.environ.clear(); os.environ.update(old)
+
 
 if __name__ == "__main__":
     unittest.main()
