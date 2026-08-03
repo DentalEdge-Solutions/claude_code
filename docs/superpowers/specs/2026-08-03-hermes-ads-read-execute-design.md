@@ -91,7 +91,7 @@ Add to `registry/projects.yaml` on the `claude_google_ads` entry:
 ```yaml
     scope: read-execute            # NEW tier: run allow-listed reader scripts only
     read_execute:
-      runner: python3
+      runner: /opt/ads-venv/bin/python3   # pinned build-time venv (§5.6), NOT base python
       script_dir: code             # relative to workdir
       allow:                       # EXACT basenames; fail-closed; readers ONLY
         - test_connection
@@ -110,8 +110,10 @@ to the runner — never to `claude -p`.
   reject bare-filename violations / path separators (the Inc-2 traversal fix).
 - Requires the complete injected credential set present in env; refuses if any of
   the six `GOOGLE_ADS_*` vars is missing (so nothing falls through to `.env`).
-- Runs `python3 <workdir>/<script_dir>/<R>.py` with **cwd = an empty scratch dir**
-  so `load_dotenv()` discovers no `.env`; passes only the injected read-only env.
+- Runs `<runner> <workdir>/<script_dir>/<R>.py` from a scratch cwd (defense-in-depth)
+  passing the injected read-only env. **The guarantee is the complete injected set +
+  `override=False`** (§5.3), not the cwd — `find_dotenv()` may still locate the
+  in-tree `.env`, but it cannot overwrite an already-set var.
 - `_scrub()` removes every one of the six credential values from captured
   stdout+stderr before persist or print (belt-and-suspenders; values should never
   appear, but a stack trace could echo an id).
@@ -125,15 +127,33 @@ to the runner — never to `claude -p`.
 - `run-ads-report.sh` sources `.env.ga` and passes the six vars via
   `docker compose exec -e GOOGLE_ADS_DEVELOPER_TOKEN -e … -T`. Add `.env.ga` to
   `.gitignore`; ship `.env.ga.example` (placeholders only).
-- **Why injection wins over the in-tree `.env`:** the target's scripts call
-  `load_dotenv()` (default `override=False`) then `os.getenv()`. A var already in
-  the environment is **not** overwritten by `.env`. Injecting the full set +
-  running from a no-`.env` cwd means the in-tree full-access token is never used.
+- **Why injection wins over the in-tree `.env` (the guarantee):** the target's
+  scripts call `load_dotenv()` (default `override=False`) then `os.getenv()`. A var
+  already in the environment is **not** overwritten by `.env`. Injecting the
+  **complete** set (all six) means every var the reader reads is our read-only
+  value, even if `find_dotenv()` locates the in-tree `.env`. The scratch cwd is
+  defense-in-depth only. The runner **refuses** if any of the six is not injected,
+  so nothing can fall through — verified as gate item G3.
 
 ### 5.4 Platform backstop — read-only Google Ads user (§9 prerequisite)
 The refresh token in `.env.ga` belongs to a Google account granted **Read-only**
 access to the MCC/client. Any mutate then returns `USER_PERMISSION_DENIED` at the
 API — the guarantee that survives our bugs, `hermes update`, and the VPS.
+
+### 5.6 Python execution environment — pinned build-time venv (decided at review)
+The container's base Python has **no** `google-ads`/`python-dotenv` and **no pip
+or runtime network** (verified), and the target's host `.venv` is host-bound and
+unusable in the container. Resolved by a **build-time venv** in our Dockerfile
+layer:
+- Vendor a pinned copy of the target's deps as `infra/hermes-agent/ads-requirements.txt`
+  (`google-ads==31.1.0`, `google-auth-oauthlib==1.3.1`, `python-dotenv==1.2.1`).
+- Dockerfile (root layer, before `USER hermes`): `python3 -m venv /opt/ads-venv`
+  then `pip install -r /opt/ads-requirements.txt`, with a build-time import check.
+- The runner uses `/opt/ads-venv/bin/python3` (from the registry `runner` field),
+  isolated from the Hermes base runtime.
+- **Resync discipline:** the vendored `ads-requirements.txt` is *our* pin point,
+  like the allow-list — updated deliberately when the target's deps change, not
+  auto-tracked. Requires an image rebuild (`docker compose build`) + a re-pin note.
 
 ### 5.5 Output persistence + scan
 Reports land under `/opt/data/reports/<project>/` (dated, mirrors the proposals
@@ -216,6 +236,8 @@ as a broken capability, the Inc-2 Step-3 false-positive lesson):
 ## 12. Global constraints (bind every task)
 
 - Stdlib-only in `run-ads-report.py`; no changes to the `claude-google-ads` repo.
+- Reader deps live in a pinned build-time venv (`/opt/ads-venv`) from a vendored
+  `ads-requirements.txt`; resync + rebuild deliberately on target dep churn.
 - Read-only credential is the mutation backstop; allow-list is the second layer.
 - Creds never in the gateway env, `env_file`, git, logs, reports, telemetry, or
   memory/brain; `.env.ga` gitignored; `_scrub()` on all captured output.
