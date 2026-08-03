@@ -46,6 +46,14 @@ project to an entry.
 - `scope: read` → read-only analysis ONLY. Every `claude -p` call MUST include
   `--permission-mode plan` and `--allowedTools 'Read,Grep,Glob'`. Never pass
   write tools (`Edit`/`Write`/`Bash`) or `--dangerously-skip-permissions`.
+- `scope: read-execute` → the project may run ALLOW-LISTED reporting scripts via
+  the runner, NOT via `claude`. You (the operator) do **not** get Bash for this:
+  invoke the host wrapper `run-ads-report.sh --project <name> --report <name>`,
+  which runs `run-ads-report.py` against the registry `read_execute` allow-list
+  under a READ-ONLY credential. Never run a script that is not on the allow-list;
+  never pass write tools to `claude`. `claude` may only READ the persisted report
+  afterward (`--permission-mode plan --allowedTools 'Read,Grep,Glob'`). If asked to
+  change the account or run a mutator, REFUSE — mutation is not a capability here.
 - `scope: write` → NOT YET PERMITTED (gated, plan P5). If the user asks to
   change/fix/refactor/commit, REFUSE and explain write access is gated and not
   yet enabled; offer a read-only plan of what WOULD change instead.

@@ -253,6 +253,103 @@ agent-launched process can read it — necessary because **Hermes does NOT scrub
 **Tests:** `python3 infra/hermes-agent/bin/open-proposal-pr.test.py` (the hermes
 `bin/` tests aren't auto-discovered by `run-all-tests.js`; run them directly).
 
+## Read-execute — Google Ads reporting (Increment 3)
+
+A second, narrower write-adjacent capability alongside the draft-PR path
+(Increment 2): a new `scope: read-execute` registry tier lets Hermes run
+**allow-listed reporting scripts** against the live Google Ads API — not via
+`claude -p` (which gets no Bash for this at all), but via a host wrapper that
+shells straight into a pinned Python venv. `claude` is only ever allowed to
+*read* the persisted report afterward.
+
+**Prerequisite — a READ-ONLY Google Ads credential (spec §9).** The entire
+safety model rests on the refresh token belonging to a Google account whose
+access to the MCC/client is READ-ONLY at the platform level, so any mutate
+call — however it got triggered — is refused **server-side** by Google, not
+just by this code. This is the backstop underneath everything else. Mint it
+by adding a **Viewer**-only user (not Standard/Admin) to the Google Ads MCC
+and generating a refresh token for that user; the developer token is the same
+MCC-scoped token already used by the project's own `.env`. Task 2's gate
+proved this holds: a `validate_only` mutate was refused with
+`authorization_error: ACTION_NOT_PERMITTED` (positive control: a plain read
+succeeded first, ruling out a token/scope misconfiguration as the cause).
+
+**`.env.ga` setup** — copy the template and fill in the six credential values:
+
+```bash
+cd infra/hermes-agent
+cp .env.ga.example .env.ga   # gitignored — never commit this file
+$EDITOR .env.ga              # GOOGLE_ADS_DEVELOPER_TOKEN / CLIENT_ID / CLIENT_SECRET /
+                              # REFRESH_TOKEN / LOGIN_CUSTOMER_ID / CUSTOMER_ID (no dashes)
+```
+
+`.env.ga` is **not** `docker-compose.yml`'s `env_file` and is never loaded into
+the gateway/agent environment. `run-ads-report.sh` sources it on the host and
+injects the six values **per-invocation** via `docker compose exec -e`, so
+they reach only the one exec'd reader process — the same pattern as the
+Increment-2 PAT in `.env.pr`.
+
+**Usage:**
+
+```bash
+./run-ads-report.sh --project claude_google_ads --report account_overview
+# -> prints /opt/data/reports/claude_google_ads/<ts>-account_overview.md ; exit 0
+```
+
+The report is a scrubbed markdown file under `/opt/data/reports/<project>/`.
+`claude -p` may then be pointed at it read-only (`--permission-mode plan
+--allowedTools 'Read,Grep,Glob'`) to summarize or answer questions about it.
+
+**Allow-list** — each project's `read_execute` block in `registry/projects.yaml`
+pins `runner` (the venv interpreter), `script_dir`, and an `allow` list of exact
+script basenames. `run-ads-report.py` resolves `--report` against that list and
+refuses (fail-closed, before any subprocess or API call) anything not on it.
+The list is **readers only** — no mutating script is ever added to it, in this
+project or any future one.
+
+**Safety model (defense in depth, each layer independent of the others):**
+
+- **Platform read-only backstop** — the credential itself cannot mutate (see
+  Prerequisite above); this holds even if every other layer below failed.
+- **Allow-list, fail-closed** — unknown/mutator report names are rejected
+  before exec; path separators / traversal in `--report` are rejected too.
+- **No shell for `claude`** — the reader always runs via the wrapper +
+  `run-ads-report.py`, never through a `claude -p` Bash tool call; the operator
+  skill's `read-execute` branch enforces this (§2 above).
+- **Credential scrub** — `_scrub()` replaces all six credential values with
+  `***` in both captured stdout and stderr before anything is persisted or
+  printed; verified clean against the report file, `docker compose logs
+  hermes-agent`, and `data/logs`.
+- **`:ro` project mount** — the reader subprocess runs with a scratch cwd and a
+  restricted child env (the six credentials + a minimal runtime whitelist,
+  excluding `ANTHROPIC_API_KEY`/OpenRouter keys); the project mount stays
+  read-only regardless, so nothing under it can be written even if a reader
+  script tried.
+
+**Pinned venv** — the reader runs under `/opt/ads-venv/bin/python3`, a
+build-time virtualenv baked into the image (Task 1), not the base
+interpreter. If the target project's `google-ads`/dependency pins change,
+rebuild the image (`docker compose up -d --build`) to resync the venv —
+a stale venv is a correctness issue, not a security one, since the allow-list
+and credential scope are enforced independently of it.
+
+**Proofs (this session, live):**
+
+- `account_overview` produced a real report —
+  `data/reports/claude_google_ads/2026-08-03_20-22-41-account_overview.md`
+  (host path; `/opt/data/reports/...` in-container) — containing real account
+  data ("Palmetto Dental Studio") with the customer id scrubbed to `***`.
+- Credential scan clean: none of the six `GOOGLE_ADS_*` values appear in the
+  report or in `docker compose logs`.
+- Allow-list fail-closed, live: `./run-ads-report.sh --project
+  claude_google_ads --report apply_negatives` exits non-zero with `report
+  'apply_negatives' not in read_execute allow-list ['test_connection',
+  'account_overview'] — readers only; mutators are never allow-listed` — a
+  pre-exec rejection, so no credential is ever used for this call.
+- Confinement: the `/projects/claude_google_ads` mount is `ro` in the running
+  container, and the target's git working tree was byte-identical
+  before/after a run — read-execute never wrote the `:ro` mount.
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
