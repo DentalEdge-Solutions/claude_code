@@ -23,6 +23,16 @@ RUN npm install -g @anthropic-ai/claude-code && claude --version
 COPY bootstrap-claude-auth.sh /usr/local/bin/bootstrap-claude-auth.sh
 RUN chmod 0755 /usr/local/bin/bootstrap-claude-auth.sh
 
+# Read-execute (Increment 3): a pinned, isolated venv carrying the target's Google
+# Ads reader deps, so run-ads-report.py can execute reader scripts without pip or
+# runtime network. Deps pinned from a vendored copy of the target's requirements
+# (resync + rebuild on target churn). Built as root; world-readable so the hermes
+# UID (10000) can execute it. Isolated from the Hermes base python.
+COPY ads-requirements.txt /opt/ads-requirements.txt
+RUN python3 -m venv /opt/ads-venv \
+ && /opt/ads-venv/bin/pip install --no-cache-dir -r /opt/ads-requirements.txt \
+ && /opt/ads-venv/bin/python3 -c "import google.ads.googleads, dotenv; print('ads-venv OK')"
+
 # Drop back to the non-root runtime user shipped by the base image (UID 10000).
 # NOTE: verify the username (`hermes`) against the base image before building.
 USER hermes
