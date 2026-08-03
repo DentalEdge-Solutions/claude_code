@@ -27,3 +27,4 @@ infra/hermes-agent/data/
 
 # operator-only bot PAT — NEVER committed (Increment 2)
 infra/hermes-agent/.env.pr
+infra/hermes-agent/.env.ga
