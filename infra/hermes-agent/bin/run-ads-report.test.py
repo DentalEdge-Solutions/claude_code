@@ -129,5 +129,74 @@ class TestDryRun(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)       # mutator refused even in dry-run
 
 
+import datetime
+
+
+class TestRunReport(unittest.TestCase):
+    def _workdir_with_fake_reader(self, d, body):
+        code = os.path.join(d, "code"); os.makedirs(code)
+        with open(os.path.join(code, "fake_reader.py"), "w") as f:
+            f.write(body)
+        return d
+
+    def _env_with_creds(self, extra):
+        env = {**os.environ, **extra}
+        for i, v in enumerate(mod["CRED_VARS"]):
+            env[v] = env.get(v) or f"SECRET{i}"
+        return env
+
+    def test_run_report_scrubs_and_persists(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            # fake reader echoes the injected developer token (a "secret") + a benign line
+            self._workdir_with_fake_reader(
+                d, "import os\nprint('token=' + os.environ['GOOGLE_ADS_DEVELOPER_TOKEN'])\nprint('campaigns=3')\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = self._env_with_creds({"GOOGLE_ADS_DEVELOPER_TOKEN": "TOPSECRETTOKEN",
+                                        "REPORTS_DIR": out})
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                rc = mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+            finally:
+                os.environ.clear(); os.environ.update(old)
+            self.assertEqual(rc, 0)
+            report_dir = os.path.join(out, "claude_google_ads")
+            files = os.listdir(report_dir)
+            self.assertEqual(len(files), 1)
+            content = open(os.path.join(report_dir, files[0])).read()
+            self.assertNotIn("TOPSECRETTOKEN", content)     # secret scrubbed
+            self.assertIn("***", content)
+            self.assertIn("campaigns=3", content)           # benign output preserved
+
+    def test_run_report_refuses_missing_cred(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._workdir_with_fake_reader(d, "print('hi')\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = {k: v for k, v in os.environ.items() if k not in mod["CRED_VARS"]}
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                with self.assertRaises(SystemExit):
+                    mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+            finally:
+                os.environ.clear(); os.environ.update(old)
+
+    def test_run_report_nonzero_reader_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._workdir_with_fake_reader(d, "import sys\nsys.exit(2)\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = self._env_with_creds({})
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                with self.assertRaises(SystemExit):
+                    mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+            finally:
+                os.environ.clear(); os.environ.update(old)
+
+
 if __name__ == "__main__":
     unittest.main()

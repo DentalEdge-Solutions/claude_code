@@ -115,6 +115,43 @@ def build_plan(project, report):
             "report": report, "project": project}
 
 
+def run_report(plan, now):
+    missing = [v for v in CRED_VARS if not os.environ.get(v)]
+    if missing:
+        raise SystemExit("run-ads-report: missing injected credential vars: "
+                         f"{', '.join(missing)} (operator-invoked via run-ads-report.sh only). "
+                         "The complete set is required so nothing falls through to the in-tree .env.")
+    secrets = [os.environ[v] for v in CRED_VARS]
+    if not os.path.isfile(plan["runner"]):
+        raise SystemExit(f"run-ads-report: runner interpreter not found: {plan['runner']} "
+                         "(build the /opt/ads-venv image layer — Task 1)")
+    if not os.path.isfile(plan["script"]):
+        raise SystemExit(f"run-ads-report: reader not found: {plan['script']}")
+    scratch = tempfile.mkdtemp(prefix="ads-report-")   # defense-in-depth cwd; guarantee is override=False
+    try:
+        proc = subprocess.run([plan["runner"], plan["script"]],
+                              cwd=scratch, env=dict(os.environ),
+                              capture_output=True, text=True)
+        out = _scrub(proc.stdout, secrets)
+        err = _scrub(proc.stderr, secrets)
+        if proc.returncode != 0:
+            raise SystemExit(f"run-ads-report: reader {plan['report']} failed "
+                             f"(exit {proc.returncode}):\n{err}")
+        dest_dir = os.path.join(reports_dir(), plan["project"])
+        os.makedirs(dest_dir, exist_ok=True)
+        ts = now.strftime("%Y-%m-%d_%H-%M-%S")
+        dest = os.path.join(dest_dir, f"{ts}-{plan['report']}.md")
+        header = (f"# Google Ads read report — {plan['project']} — {plan['report']}\n\n"
+                  f"_Generated {ts} UTC by Hermes read-execute (read-only credential). "
+                  f"Credential values scrubbed._\n\n")
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(header + "```\n" + out + "\n```\n")
+        print(dest)
+        return 0
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)   # cleanup on success AND failure
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True)
@@ -129,7 +166,7 @@ def main(argv=None):
         print(f"report:  {plan['report']}")
         print(f"writes:  {os.path.join(reports_dir(), plan['project'])}/<ts>-{plan['report']}.md")
         return 0
-    return run_report(plan, datetime.datetime.now(datetime.timezone.utc))  # noqa: F821 (Task 4)
+    return run_report(plan, datetime.datetime.now(datetime.timezone.utc))
 
 
 if __name__ == "__main__":
