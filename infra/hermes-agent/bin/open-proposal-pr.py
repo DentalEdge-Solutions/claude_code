@@ -18,6 +18,12 @@ def registry_path():
         else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "registry", "projects.yaml"))
 
 
+def _strip_inline_comment(s):
+    """Remove a trailing inline YAML comment (# preceded by whitespace); a '#' flush
+    against a value is part of the value, not a comment (YAML inline-comment semantics)."""
+    return re.sub(r"\s+#.*$", "", s)
+
+
 def read_pr_target(path, project):
     """Stdlib line-parser for projects.<project>.pr_target.{repo,base,path}."""
     cur_project = None
@@ -29,15 +35,15 @@ def read_pr_target(path, project):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             indent = len(line) - len(line.lstrip(" "))
-            if indent == 2 and line.rstrip().endswith(":"):      # a project name
-                cur_project = line.strip()[:-1]; in_pr = False
-            elif indent == 4 and cur_project == project and line.strip() == "pr_target:":
+            stripped = _strip_inline_comment(line.strip())
+            if indent == 2 and stripped.endswith(":"):           # a project name
+                cur_project = stripped[:-1]; in_pr = False
+            elif indent == 4 and cur_project == project and stripped == "pr_target:":
                 in_pr = True
             elif indent <= 4:
                 in_pr = False                                    # ANY sibling/shallower line closes pr_target scope
-                # — including a mapping-valued sibling (ends in ':'); guards against key bleed
             elif indent == 6 and in_pr and cur_project == project:
-                k, _, v = line.strip().partition(":")
+                k, _, v = stripped.partition(":")
                 got[k.strip()] = v.strip()
     missing = [k for k in ("repo", "base", "path") if not got.get(k)]
     if missing:

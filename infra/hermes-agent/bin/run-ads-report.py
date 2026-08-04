@@ -15,6 +15,13 @@ DEFAULT_REPORTS = "/opt/data/reports"
 CRED_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
              "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN",
              "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
+# Values scrubbed from captured output. The two *_CUSTOMER_ID vars are account
+# IDENTIFIERS (not secrets — they appear in Google Ads URLs and the account name
+# already identifies the client), so they are deliberately EXCLUDED: scrubbing them
+# masked useful report context as `***` and could false-scrub any unrelated 10-digit
+# number in a report. The four real secrets stay scrubbed.
+SECRET_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
+               "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN")
 
 
 def registry_path():
@@ -125,7 +132,7 @@ def _child_env():
 def build_plan(project, report):
     workdir = read_workdir(registry_path(), project)
     cfg = read_read_execute(registry_path(), project)
-    resolve_report(cfg, report)
+    report = resolve_report(cfg, report)                       # validated bare name
     script = os.path.join(workdir, cfg["script_dir"], report + ".py")
     return {"workdir": workdir, "runner": cfg["runner"], "script": script,
             "report": report, "project": project}
@@ -137,7 +144,7 @@ def run_report(plan, now):
         raise SystemExit("run-ads-report: missing injected credential vars: "
                          f"{', '.join(missing)} (operator-invoked via run-ads-report.sh only). "
                          "The complete set is required so nothing falls through to the in-tree .env.")
-    secrets = [os.environ[v] for v in CRED_VARS]
+    secrets = [os.environ[v] for v in SECRET_VARS]
     if not os.path.isfile(plan["runner"]):
         raise SystemExit(f"run-ads-report: runner interpreter not found: {plan['runner']} "
                          "(build the /opt/ads-venv image layer — Task 1)")

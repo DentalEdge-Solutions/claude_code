@@ -169,6 +169,30 @@ class TestRunReport(unittest.TestCase):
             self.assertIn("***", content)
             self.assertIn("campaigns=3", content)           # benign output preserved
 
+    def test_run_report_keeps_account_ids_scrubs_secrets(self):
+        # Account IDs are identifiers, not secrets — they must survive into the report;
+        # the four real secrets must still be scrubbed.
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            self._workdir_with_fake_reader(
+                d, "import os\nprint('CID=' + os.environ['GOOGLE_ADS_CUSTOMER_ID'])\n"
+                   "print('DEV=' + os.environ['GOOGLE_ADS_DEVELOPER_TOKEN'])\n")
+            plan = {"workdir": d, "runner": sys.executable,
+                    "script": os.path.join(d, "code", "fake_reader.py"),
+                    "report": "fake_reader", "project": "claude_google_ads"}
+            env = self._env_with_creds({"GOOGLE_ADS_CUSTOMER_ID": "9998887776",
+                                        "GOOGLE_ADS_DEVELOPER_TOKEN": "DEVSECRETXYZ",
+                                        "REPORTS_DIR": out})
+            old = dict(os.environ); os.environ.clear(); os.environ.update(env)
+            try:
+                rc = mod["run_report"](plan, datetime.datetime(2026, 8, 3, 12, 0, 0))
+            finally:
+                os.environ.clear(); os.environ.update(old)
+            self.assertEqual(rc, 0)
+            report_dir = os.path.join(out, "claude_google_ads")
+            content = open(os.path.join(report_dir, os.listdir(report_dir)[0])).read()
+            self.assertIn("9998887776", content)            # account id preserved
+            self.assertNotIn("DEVSECRETXYZ", content)        # real secret scrubbed
+
     def test_run_report_refuses_missing_cred(self):
         with tempfile.TemporaryDirectory() as d:
             self._workdir_with_fake_reader(d, "print('hi')\n")

@@ -24,6 +24,20 @@ class TestOfflineCore(unittest.TestCase):
                              "base": "main", "path": ".project-brain/decisions/candidates"})
         os.unlink(p)
 
+    def test_read_pr_target_inline_comments(self):
+        # Alignment with the Inc-3 parser: inline comments on pr_target lines must be stripped.
+        reg = ("version: 1\nprojects:\n  claude_code:\n    scope: read  # mount stays read\n"
+               "    pr_target:   # draft-PR delivery target\n"
+               "      repo: DentalEdge-Solutions/claude_code   # org repo\n"
+               "      base: main   # protected\n"
+               "      path: .project-brain/decisions/candidates   # brain candidates\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(reg); p = f.name
+        t = mod["read_pr_target"](p, "claude_code")
+        self.assertEqual(t, {"repo": "DentalEdge-Solutions/claude_code",
+                             "base": "main", "path": ".project-brain/decisions/candidates"})
+        os.unlink(p)
+
     def test_read_pr_target_missing_project(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
             f.write("version: 1\nprojects:\n  other:\n    scope: read\n"); p = f.name
@@ -127,7 +141,9 @@ class TestOfflineCore(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("DentalEdge-Solutions/claude_code", r.stdout)
             self.assertIn("proposal/", r.stdout)          # branch name
-            self.assertIn("docs/proposals/2026-07-25-", r.stdout)  # candidate path
+            # candidate path is dated with TODAY (date-agnostic assertion — the filename
+            # date is `now`, so don't pin a build-day date here).
+            self.assertRegex(r.stdout, r"docs/proposals/\d{4}-\d{2}-\d{2}-improvement-proposal-claude-code\.md")
             self.assertNotIn(os.environ.get("CLAUDE_CODE_PR_PAT", "NO_TOKEN_SET"), r.stdout)
 
 
