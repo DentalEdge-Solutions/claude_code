@@ -18,6 +18,7 @@
 - **Hermes never writes the client tree.** The only host-side write is `audit_data/` by the project's **own unmodified** collector, run on the host (not in-container). The `:ro` mount is never written. All Hermes outputs go under `/opt/data`.
 - **No changes to the `claude-google-ads` repo.** Collection *invokes* its collector; the analyst *reads* its SOP docs.
 - **Credentials never** reach the analyst, the deliverable, logs, memory, or telemetry. The analyst reads Inc-3-scrubbed reports only; `.env.ga` is parsed (never sourced) and injected only into the collector process.
+- **Client-private data governance (hard rule).** The reports and the audit draft contain real client business data (ad spend, performance). They live ONLY under `/opt/data` (gitignored) and on the host — NEVER committed to git, NEVER written to the brain/memory/telemetry. The Task-5 brain-capture records ONLY the meta outcome (pipeline worked, benchmark verdict, go/no-go) — never client data.
 - **The deliverable is a DRAFT** with a mandatory human-review gate; it carries a DRAFT banner + data-provenance line and is never auto-sent.
 - **Reader/collector sets are finalized by the Task-1 gate.** The candidate set used below is: collector `audit_discovery.py`; readers `account_overview`, `audit_search_terms`, `audit_analyze`, `negatives_audit`, `negatives_coverage`. If the gate drops/adds any, the finalized set governs Tasks 2–4.
 - `.env.ga` (read-only credential) is already provisioned + gitignored from Increment 3.
@@ -322,10 +323,11 @@ exec docker compose -f "$here/docker-compose.yml" exec -T hermes-agent sh -lc '
   set -eu
   proj="'"$PROJECT"'"
   skill="'"$SKILL"'"
+  ls /opt/data/reports/"$proj"/*.md >/dev/null 2>&1 || { echo "run-ads-audit: no reports in /opt/data/reports/$proj — run ./run-audit-bundle.sh first" >&2; exit 1; }
   mkdir -p /opt/data/audits/"$proj"
   out=/opt/data/audits/"$proj"/$(date -u +%Y-%m-%d_%H-%M-%S)-audit.md
   claude -p "Read and follow $skill EXACTLY. Produce the Google Ads audit DRAFT for project $proj using the scrubbed reports in /opt/data/reports/$proj/ and the SOP/benchmark docs in /projects/$proj/. Output ONLY the deliverable markdown, no preamble." \
-    --allowedTools "Read,Grep,Glob" --permission-mode plan --model claude-sonnet-5 > "$out"
+    --allowedTools "Read,Grep,Glob" --permission-mode plan --model claude-opus-4-8 > "$out"
   echo "$out"
 '
 ```
@@ -383,7 +385,7 @@ Present the draft to the operator for validation against the raw reports BEFORE 
 
 - [ ] **Step 8: Capture the pilot outcome to the brain**
 
-Run `brain-capture` (or write a decision candidate under `.project-brain/decisions/candidates/`) recording: the pilot result, the benchmark verdict, and the go/no-go recommendation on the fixed-fee-audit product. Promotable to canon only via `brain-promote --approve` — never write `canon/` directly.
+Run `brain-capture` (or write a decision candidate under `.project-brain/decisions/candidates/`) recording ONLY the META outcome: whether the pipeline worked, the benchmark verdict, and the go/no-go recommendation on the fixed-fee-audit product. **NEVER** write client business data (spend, performance, the audit content) into the brain — that is a hard-rule violation. Promotable to canon only via `brain-promote --approve` — never write `canon/` directly.
 
 - [ ] **Step 9: Commit**
 
