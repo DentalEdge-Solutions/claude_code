@@ -103,8 +103,10 @@ set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 project_dir="${ADS_PROJECT_DIR:-$(cd "$here/../../../claude-google-ads" 2>/dev/null && pwd || true)}"
 env_file="$here/.env.ga"
-# Finalized collector set from the Task-1 gate (edit if the gate found more):
-COLLECTORS="audit_discovery.py"
+# Finalized collector set (Task-1 gate): audit_discovery.py (main dump) +
+# negatives_audit.py (writes shared-negative coverage into audit_data/). Both are
+# SELECT-only and verified working on the host under the read-only credential.
+COLLECTORS="audit_discovery.py negatives_audit.py"
 
 [ -n "$project_dir" ] && [ -d "$project_dir" ] || { echo "collect-audit-data: project dir not found (set ADS_PROJECT_DIR)" >&2; exit 1; }
 [ -f "$env_file" ] || { echo "collect-audit-data: $env_file not found — provision the read-only credential (Inc-3)" >&2; exit 1; }
@@ -179,14 +181,15 @@ git commit -m "feat(hermes): host-side read-only audit_data collection wrapper (
         - account_overview
         - audit_search_terms
         - audit_analyze
-        - negatives_audit
-        - negatives_coverage
 ```
+(Task-1 gate finalized this set: `negatives_audit` is a *collector* — it writes
+`audit_data/` and the `:ro` mount refuses it in-container — so it lives in
+`collect-audit-data.sh`, NOT here; `negatives_coverage` was dropped (input-doc bug).)
 
 - [ ] **Step 2: Verify the runner resolves each new reader (offline dry-run)**
 
-Run: `cd infra/hermes-agent/bin && for r in account_overview audit_search_terms audit_analyze negatives_audit negatives_coverage; do python3 run-ads-report.py --project claude_google_ads --report "$r" --dry-run >/dev/null && echo "$r OK" || echo "$r FAIL"; done`
-Expected: each prints `OK` (the Inc-3 parser + allow-list accept them). Also confirm a mutator is still refused: `python3 run-ads-report.py --project claude_google_ads --report apply_negatives --dry-run; echo "exit=$?"` → non-zero.
+Run: `cd infra/hermes-agent/bin && for r in account_overview audit_search_terms audit_analyze; do python3 run-ads-report.py --project claude_google_ads --report "$r" --dry-run >/dev/null && echo "$r OK" || echo "$r FAIL"; done`
+Expected: each prints `OK` (the Inc-3 parser + allow-list accept them). Also confirm a mutator AND a now-non-listed script are refused: `for r in apply_negatives negatives_audit negatives_coverage; do python3 run-ads-report.py --project claude_google_ads --report "$r" --dry-run >/dev/null 2>&1 && echo "$r NOT-REFUSED(bad)" || echo "$r refused OK"; done` → all `refused OK`.
 
 - [ ] **Step 3: Confirm the Inc-3 offline suite still passes** (the registry change must not break it)
 
@@ -204,7 +207,7 @@ Expected: `OK`.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 PROJECT="${1:-claude_google_ads}"
-READERS="account_overview audit_search_terms audit_analyze negatives_audit negatives_coverage"
+READERS="account_overview audit_search_terms audit_analyze"   # Task-1 finalized (matches read_execute.allow)
 echo "run-audit-bundle: producing report set for $PROJECT" >&2
 for r in $READERS; do
   echo "  -> $r" >&2
