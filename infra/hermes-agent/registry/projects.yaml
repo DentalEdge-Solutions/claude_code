@@ -48,6 +48,7 @@ projects:
       runner: /opt/ads-venv/bin/python3   # pinned build-time venv (Task 1), NOT base python
       script_dir: code             # relative to workdir
       allow:                       # EXACT basenames; fail-closed; READERS ONLY
+        - test_connection          # Inc-3 connectivity smoke (kept; not in the audit bundle)
         - account_overview
         - audit_search_terms
         - audit_analyze
