@@ -206,7 +206,7 @@ Expected: `OK`.
 # registry read_execute.allow (finalized in the Task-1 gate).
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
-PROJECT="${1:-claude_google_ads}"
+PROJECT="${1-claude_google_ads}"   # default only when UNSET; an explicit '' is rejected below
 READERS="account_overview audit_search_terms audit_analyze"   # Task-1 finalized (matches read_execute.allow)
 echo "run-audit-bundle: producing report set for $PROJECT" >&2
 for r in $READERS; do
@@ -320,7 +320,7 @@ Expected: prints the `---` frontmatter opener (skill is mounted + readable in-co
 # writes to /opt/data (writable state volume), never the :ro project mount.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
-PROJECT="${1:-claude_google_ads}"
+PROJECT="${1-claude_google_ads}"   # default only when UNSET; an explicit '' is rejected below
 # Validate the project name up front: it flows into container paths and the inner
 # shell/prompt, so reject anything that could inject shell or traverse paths.
 case "$PROJECT" in
