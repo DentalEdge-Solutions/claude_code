@@ -4,6 +4,12 @@
 # the HOST (must write the project tree); Hermes stays :ro. Parses .env.ga (never
 # sources it). No mutation possible: read-only cred + SELECT-only collector.
 set -eu
+# Reject unknown args so a typo (e.g. --dryrun) fails CLOSED instead of silently
+# falling through to a live run — the dry-run gate must not be bypassable.
+case "${1:-}" in
+  ''|--dry-run) : ;;
+  *) echo "collect-audit-data: unknown argument: $1 (only --dry-run is accepted)" >&2; exit 1 ;;
+esac
 here="$(cd "$(dirname "$0")" && pwd)"
 project_dir="${ADS_PROJECT_DIR:-$(cd "$here/../../../claude-google-ads" 2>/dev/null && pwd || true)}"
 env_file="$here/.env.ga"
@@ -16,6 +22,10 @@ COLLECTORS="audit_discovery.py negatives_audit.py"
 [ -f "$env_file" ] || { echo "collect-audit-data: $env_file not found — provision the read-only credential (Inc-3)" >&2; exit 1; }
 py="$project_dir/.venv/bin/python"
 [ -x "$py" ] || { echo "collect-audit-data: $py not found — the ads project's .venv must exist on the host" >&2; exit 1; }
+# Pre-flight: ALL collectors must exist before we run ANY (no partial refresh).
+for c in $COLLECTORS; do
+  [ -f "$project_dir/code/$c" ] || { echo "collect-audit-data: collector not found: code/$c" >&2; exit 1; }
+done
 
 # Parse .env.ga as DATA (not shell code): assign the complete read-only set literally.
 while IFS= read -r _l || [ -n "$_l" ]; do
@@ -31,7 +41,6 @@ if [ "${1:-}" = "--dry-run" ]; then
 fi
 
 for c in $COLLECTORS; do
-  [ -f "$project_dir/code/$c" ] || { echo "collect-audit-data: collector not found: code/$c" >&2; exit 1; }
   echo "collect-audit-data: running code/$c under the read-only credential…" >&2
   ( cd "$project_dir" && .venv/bin/python "code/$c" )
 done
