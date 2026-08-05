@@ -353,6 +353,54 @@ and credential scope are enforced independently of it.
 **Tests:** `python3 infra/hermes-agent/bin/run-ads-report.test.py` (like the other
 hermes `bin/` tests, run directly — not auto-discovered by `run-all-tests.js`).
 
+## Google Ads audit pilot (P6 — monetization)
+
+Builds on read-execute to produce a **client-grade Google Ads audit DRAFT** (executive
+summary + top-5 prioritized actions + "do NOT change yet" + evidence appendix) for a
+dental practice — the first monetization pilot (fixed-fee one-off audit). **Read-only
+end-to-end; the ad account is never mutated; Hermes never writes the client tree.**
+
+Three host commands, run in order:
+
+```bash
+cd infra/hermes-agent
+./collect-audit-data.sh                                 # 1. refresh audit_data/ (host, read-only cred)
+./run-audit-bundle.sh claude_google_ads                 # 2. produce the scrubbed report set
+./run-ads-audit.sh   claude_google_ads                  # 3. opus analyst -> DRAFT in /opt/data/audits/
+```
+
+- **Collection (`collect-audit-data.sh`)** runs the ads project's OWN collectors
+  (`audit_discovery.py`, `negatives_audit.py` — SELECT-only) on the **host** under the
+  read-only credential from `.env.ga`, refreshing `<project>/audit_data/`. It runs on the
+  host (not in-container) because it must WRITE the project tree; Hermes itself stays `:ro`.
+  It parses `.env.ga` (never sources it) and rejects unknown args (the `--dry-run` gate
+  can't be bypassed by a typo). Prints an ISO-8601 collection timestamp = the deliverable's
+  data provenance.
+- **Bundle (`run-audit-bundle.sh`)** loops the allow-listed audit readers
+  (`account_overview`, `audit_search_terms`, `audit_analyze`) through the Inc-3 wrapper,
+  producing credential-scrubbed reports under `/opt/data/reports/<project>/`.
+- **Analyst (`run-ads-audit.sh`)** runs `claude -p` (`--permission-mode plan
+  --allowedTools 'Read,Grep,Glob'`, model `claude-opus-4-8`) over the scrubbed reports +
+  the project's SOP/benchmark docs, following the `claude-code-ads-analyst` skill, and
+  emits the DRAFT. `claude` never writes — a shell redirect persists the output to
+  `/opt/data/audits/<project>/` (writable), never the `:ro` mount. The project arg is
+  charset-validated (rejects path/shell metacharacters) and passed via `docker exec -e`.
+
+**Safety model (defense in depth, each layer independent):** read-only Google Ads
+credential (mutation refused server-side) · allow-list readers only, fail-closed ·
+collection SELECT-only · analyst is read-only `claude` (no Bash/Write) · `_scrub` removes
+credential values from every report · `:ro` project mount · **human-review gate** (the
+output is a DRAFT; an operator validates it against the raw reports before any client use).
+
+**Client-private data governance (hard rule):** the reports and the audit draft contain
+real client business data. They live ONLY under `/opt/data` (gitignored) — NEVER committed
+to git, NEVER written to the brain/memory/telemetry. Only the meta pilot outcome is captured.
+
+**Allow-list:** the audit readers are in `registry/projects.yaml` under the
+`claude_google_ads` `read_execute.allow` block; mutators are never listed. The reader deps
+run in the pinned `/opt/ads-venv`. When the ads project's collectors/readers change, re-run
+the Task-1-style verification before trusting the pipeline.
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
