@@ -5,7 +5,7 @@
 # registry read_execute.allow (finalized in the Task-1 gate).
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
-PROJECT="${1:-claude_google_ads}"
+PROJECT="${1-claude_google_ads}"   # default only when UNSET (aligns with run-ads-audit.sh); bad/empty names fail closed in run-ads-report.py
 READERS="account_overview audit_search_terms audit_analyze"   # Task-1 finalized (matches read_execute.allow)
 echo "run-audit-bundle: producing report set for $PROJECT" >&2
 for r in $READERS; do

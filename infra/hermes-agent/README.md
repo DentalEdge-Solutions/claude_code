@@ -391,6 +391,11 @@ credential (mutation refused server-side) · allow-list readers only, fail-close
 collection SELECT-only · analyst is read-only `claude` (no Bash/Write) · `_scrub` removes
 credential values from every report · `:ro` project mount · **human-review gate** (the
 output is a DRAFT; an operator validates it against the raw reports before any client use).
+Note: report *content* (search terms are whatever the public typed into Google) is
+untrusted input to the analyst — well-contained here (the analyst has no Bash/Write and no
+credential, and the draft is human-reviewed), so the worst case is a misleading line a
+reviewer catches, never mutation or exfiltration. Treat the draft's claims as a starting
+point to verify, not gospel.
 
 **Client-private data governance (hard rule):** the reports and the audit draft contain
 real client business data. They live ONLY under `/opt/data` (gitignored) — NEVER committed
