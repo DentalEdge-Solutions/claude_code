@@ -1,0 +1,41 @@
+# Hermes Agent control plane — local development compose.
+# Safe defaults (confirmed): read-only project mount, API server OFF, dashboard
+# on loopback only, secrets in the gitignored .env. Write access + more surface
+# are added later, gated (see plan P5).
+services:
+  # Init sidecar: projects the executor's Anthropic key from .env into claude's
+  # own config (settings.json at HOME=/opt/data/home) BEFORE the gateway starts.
+  # Needed because Hermes scrubs secrets from terminal-subprocess env, so a
+  # Hermes-launched `claude -p` can only read its key from that file. Runs to
+  # completion and exits; overrides the base /init entrypoint (it must NOT boot
+  # s6/hermes — it only writes one file to the shared data volume).
+  claude-auth-init:
+    build: .
+    image: hermes-agent-claude
+    entrypoint: ["/usr/local/bin/bootstrap-claude-auth.sh"]
+    env_file: .env                      # provides ANTHROPIC_API_KEY (gitignored)
+    volumes:
+      - ./data:/opt/data                # same state volume the gateway uses
+    restart: "no"
+
+  hermes-agent:
+    build: .
+    image: hermes-agent-claude          # derived: official base + claude CLI
+    command: ["gateway", "run"]         # persistent backend (there is no `hermes serve`)
+    env_file: .env                      # ANTHROPIC_API_KEY + Hermes provider key (gitignored)
+    depends_on:
+      claude-auth-init:
+        condition: service_completed_successfully   # auth file exists before gateway boots
+    volumes:
+      - ./data:/opt/data                # Hermes state (gitignored)
+      - ../..:/projects/claude_code:ro  # THIS repo, READ-ONLY (P2; writes gated to P5)
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro  # DentalEdge Google Ads (client-adjacent; secrets gitignored, not in tree)
+      - ./registry:/opt/registry:ro     # project registry (version-controlled, read-only)
+      - ./skills/claude-code-operator:/opt/data/skills/claude-code-operator:ro  # operator skill
+      - ./skills/claude-code-proposer:/opt/data/skills/claude-code-proposer:ro  # proposer skill (read-only)
+      - ./skills/claude-code-reviewer:/opt/data/skills/claude-code-reviewer:ro  # kanban review worker skill (read-only)
+      - ./skills/claude-code-ads-analyst:/opt/data/skills/claude-code-ads-analyst:ro  # ads-analyst skill (read-only)
+      - ./bin:/opt/cc-bin:ro            # operational helpers (run monitor, read-only)
+    ports:
+      - "127.0.0.1:9119:9119"           # dashboard, loopback only (optional)
+    restart: unless-stopped

@@ -1,0 +1,6 @@
+# Vendored + pinned from claude-google-ads/requirements.txt.
+# This is OUR pin point (like the allow-list): resync DELIBERATELY when the
+# target's deps change, then rebuild the image. Do not auto-track the target.
+google-ads==31.1.0
+google-auth-oauthlib==1.3.1
+python-dotenv==1.2.1
