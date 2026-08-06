@@ -6,12 +6,12 @@ M = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(M)
 class T(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
-        # two campaigns: costMicros 100_000_000 (=100.0) + 300_000_000 (=300.0) => spend 400.0
+        # two campaigns: costMicros 100_000_000 (=100.0) + 200_000_000 (=200.0) => spend 300.0
         perf = [
           {"campaign":{"id":"1"},"metrics":{"costMicros":"100000000","conversions":10.0,
             "impressions":"1000","clicks":"100","ctr":0.1,"searchImpressionShare":0.5}},
-          {"campaign":{"id":"2"},"metrics":{"costMicros":"300000000","conversions":30.0,
-            "impressions":"3000","clicks":"300","ctr":0.1,"searchImpressionShare":0.9}},
+          {"campaign":{"id":"2"},"metrics":{"costMicros":"200000000","conversions":40.0,
+            "impressions":"3000","clicks":"150","ctr":0.05,"searchImpressionShare":0.9}},
         ]
         with open(os.path.join(self.d,"campaign_perf_cur30.json"),"w") as f:
             json.dump(perf, f)
@@ -19,13 +19,13 @@ class T(unittest.TestCase):
             json.dump([{"campaign":{"id":"1"}},{"campaign":{"id":"2"}}], f)
     def test_aggregation(self):
         s = M.snapshot(self.d, "6764977319", collected_at="2026-08-06T00:00:00Z")
-        self.assertEqual(s["spend"], 400.0)
-        self.assertEqual(s["conversions"], 40.0)
+        self.assertEqual(s["spend"], 300.0)
+        self.assertEqual(s["conversions"], 50.0)
         self.assertEqual(s["impressions"], 4000)
-        self.assertEqual(s["clicks"], 400)
-        self.assertEqual(s["cost_per_conv"], 10.0)          # 400/40
-        self.assertEqual(s["ctr"], 0.1)                      # 400/4000 recomputed
-        self.assertEqual(s["conv_rate"], 0.1)                # 40/400
+        self.assertEqual(s["clicks"], 250)
+        self.assertEqual(s["cost_per_conv"], 6.0)           # 300/50
+        self.assertEqual(s["ctr"], 0.0625)                  # 250/4000 recomputed
+        self.assertEqual(s["conv_rate"], 0.2)               # 50/250
         self.assertEqual(s["impression_share"], 0.8)         # (0.5*1000+0.9*3000)/4000
         self.assertEqual(s["campaign_count"], 2)
         self.assertEqual(s["customer_id"], "6764977319")
