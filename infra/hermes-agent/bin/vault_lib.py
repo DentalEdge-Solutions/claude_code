@@ -18,12 +18,12 @@ def registry_path():
     return os.path.join(vault_root(), "_registry", "clients.json")
 
 def validate_slug(slug):
-    if not isinstance(slug, str) or not SLUG_RE.match(slug):
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
         raise ValueError(f"invalid client slug: {slug!r} (allowed ^[a-z0-9][a-z0-9_-]{{0,63}}$)")
     return slug
 
 def validate_customer_id(cid):
-    if not isinstance(cid, str) or not CID_RE.match(cid):
+    if not isinstance(cid, str) or not CID_RE.fullmatch(cid):
         raise ValueError(f"invalid customer_id: {cid!r} (digits only, no dashes)")
     return cid
 
@@ -42,10 +42,11 @@ def resolve(slug, path=None):
     validate_slug(slug)
     clients = load_registry(path)
     if slug not in clients:
-        raise KeyError(f"unknown client slug: {slug!r} (known: {sorted(clients)})")
+        raise KeyError(f"unknown client slug: {slug!r}")
     rec = dict(clients[slug])
-    validate_customer_id(str(rec.get("customer_id", "")))
-    rec["customer_id"] = str(rec["customer_id"])
+    customer_id = str(rec.get("customer_id", ""))
+    validate_customer_id(customer_id)
+    rec["customer_id"] = customer_id
     rec["slug"] = slug
     rec["vault_path"] = os.path.join(vault_root(), slug)
     return rec
@@ -58,7 +59,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         rec = resolve(args.client, args.registry)
-    except (ValueError, KeyError, FileNotFoundError) as e:
+    except (ValueError, KeyError, OSError, TypeError) as e:
         print(f"vault-lib: {e}", file=sys.stderr); return 2
     if args.field:
         if args.field not in rec:

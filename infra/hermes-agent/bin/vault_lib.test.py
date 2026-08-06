@@ -23,9 +23,19 @@ class T(unittest.TestCase):
         self.assertEqual(r["slug"], "acme-dental")
     def test_unknown_slug_raises(self):
         with self.assertRaises(KeyError): V.resolve("nope", self.reg)
+    def test_unknown_slug_does_not_leak_known_slugs(self):
+        reg = _reg(self.tmp, {
+            "acme-dental": {"customer_id": "6764977319"},
+            "beta-health": {"customer_id": "12345"},
+        })
+        with self.assertRaises(KeyError) as ctx: V.resolve("nope", reg)
+        self.assertNotIn("beta-health", str(ctx.exception))
     def test_bad_slugs_rejected(self):
         for bad in ["../x", "a/b", "a b", "a;b", "A", "-x", "", "x"*65]:
             with self.assertRaises(ValueError): V.validate_slug(bad)
+    def test_trailing_newline_rejected(self):
+        with self.assertRaises(ValueError): V.validate_slug("acme-dental\n")
+        with self.assertRaises(ValueError): V.validate_customer_id("6764977319\n")
     def test_bad_customer_id_rejected(self):
         for bad in ["", "12-34", "abc", "12 34", "1"*16]:
             with self.assertRaises(ValueError): V.validate_customer_id(bad)
@@ -39,6 +49,10 @@ class T(unittest.TestCase):
     def test_cli_bad_slug_exit2(self):
         out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "vault_lib.py"),
                               "--client", "../etc", "--registry", self.reg], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 2)
+    def test_cli_registry_directory_exit2(self):
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "vault_lib.py"),
+                              "--client", "acme-dental", "--registry", self.tmp], capture_output=True, text=True)
         self.assertEqual(out.returncode, 2)
 
 if __name__ == "__main__": unittest.main()
