@@ -7,6 +7,12 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vault_lib
 
+class PostPurgeError(Exception):
+    """Raised when destruction (export+delete) succeeded but post-delete bookkeeping failed."""
+    def __init__(self, tar_path, cause):
+        self.tar_path = tar_path; self.cause = cause
+        super().__init__(str(cause))
+
 def _dir_bytes(path):
     total = 0
     for root,_,files in os.walk(path):
@@ -28,18 +34,21 @@ def purge(client, export_to, confirm, force, registry=None):
     nbytes = _dir_bytes(vault)
     with tarfile.open(tar_path, "w:gz") as tar:       # 1. EXPORT
         tar.add(vault, arcname=client)
-    shutil.rmtree(vault)                               # 2. HARD DELETE
-    gov = os.path.join(vault_lib.vault_root(), "_governance")
-    os.makedirs(gov, exist_ok=True)
-    with open(os.path.join(gov, "deletions.log"), "a") as f:   # 3. AUDIT LOG
-        f.write(json.dumps({"slug": client, "ts": ts, "operator": getpass.getuser(),
-                            "bytes_exported": nbytes, "export": tar_path}) + "\n")
-    path = registry or vault_lib.registry_path()       # 4. STATUS FLIP
-    with open(path) as f:
-        data = json.load(f)
-    data["clients"][client]["status"] = "offboarded"
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    shutil.rmtree(vault)                               # 2. HARD DELETE (irreversible)
+    try:
+        gov = os.path.join(vault_lib.vault_root(), "_governance")
+        os.makedirs(gov, exist_ok=True)
+        with open(os.path.join(gov, "deletions.log"), "a") as f:   # 3. AUDIT LOG
+            f.write(json.dumps({"slug": client, "ts": ts, "operator": getpass.getuser(),
+                                "bytes_exported": nbytes, "export": tar_path}) + "\n")
+        path = registry or vault_lib.registry_path()       # 4. STATUS FLIP
+        with open(path) as f:
+            data = json.load(f)
+        data["clients"][client]["status"] = "offboarded"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        raise PostPurgeError(tar_path, e)
     return tar_path
 
 def main(argv=None):
@@ -52,7 +61,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         tar = purge(args.client, args.export_to, args.confirm, args.force, args.registry)
-    except (ValueError, KeyError, FileNotFoundError) as e:
+    except PostPurgeError as e:
+        print(f"vault-purge: WARNING — vault was EXPORTED to {e.tar_path} and DELETED, but "
+              f"post-delete bookkeeping failed: {e.cause}. Complete the audit-log/status flip manually.",
+              file=sys.stderr)
+        return 3
+    except (ValueError, KeyError, FileNotFoundError, OSError, TypeError, tarfile.TarError) as e:
         print(f"vault-purge: {e}", file=sys.stderr); return 2
     print(tar); return 0
 

@@ -36,5 +36,22 @@ class T(unittest.TestCase):
         r=subprocess.run([sys.executable, os.path.join(HERE,"vault-purge.py"),"--client","live",
             "--export-to",self.exp,"--registry",reg,"--confirm"], capture_output=True, text=True, env={**os.environ})
         self.assertEqual(r.returncode, 2)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "live")))     # not deleted
+        self.assertFalse(any(f.endswith(".tar.gz") for f in os.listdir(self.exp)))  # not exported
+        with open(reg) as f:
+            self.assertEqual(json.load(f)["clients"]["live"]["status"], "active")
+    def test_post_delete_failure_exits_3(self):
+        reg = _reg(self.tmp, {"gone":{"project":"p","customer_id":"1","status":"offboarded"}})
+        v = os.path.join(self.tmp,"gone","audits"); os.makedirs(v, exist_ok=True)
+        with open(os.path.join(v,"a-audit.md"),"w") as f: f.write("data")
+        os.chmod(reg, 0o444)   # step-4 registry write fails -> PostPurgeError
+        r = subprocess.run([sys.executable, os.path.join(HERE,"vault-purge.py"),"--client","gone",
+            "--export-to",self.exp,"--registry",reg,"--confirm"], capture_output=True, text=True, env={**os.environ})
+        os.chmod(reg, 0o644)   # restore so tempdir cleanup/other tests aren't affected
+        self.assertEqual(r.returncode, 3)                                   # distinct signal
+        self.assertFalse(os.path.exists(os.path.join(self.tmp,"gone")))     # destruction happened
+        self.assertTrue(any(f.endswith(".tar.gz") for f in os.listdir(self.exp)))  # exported
+        with open(os.path.join(self.tmp,"_governance","deletions.log")) as f:
+            self.assertIn("gone", f.read())                                 # logged before flip failed
 
 if __name__ == "__main__": unittest.main()
