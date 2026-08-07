@@ -17,7 +17,12 @@ def _num(x):
     except (TypeError, ValueError): return 0.0
 
 def snapshot(audit_data_dir, customer_id, collected_at=None):
-    perf = _load(audit_data_dir, "campaign_perf_cur30.json")
+    # campaign_perf_30d.json is the file the collector (audit_discovery.py) actually
+    # refreshes and that audit_analyze reads for its 30-day numbers — so the snapshot
+    # stays in lockstep with a fresh collection. (campaign_perf_cur30.json is written by
+    # a different path and is NOT refreshed by collect-audit-data.sh — reading it yielded
+    # stale KPIs; caught by the live gate.)
+    perf = _load(audit_data_dir, "campaign_perf_30d.json")
     spend = conv = impr = clicks = 0.0
     is_num = is_den = 0.0
     for row in perf:

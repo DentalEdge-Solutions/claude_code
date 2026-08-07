@@ -13,7 +13,7 @@ class T(unittest.TestCase):
           {"campaign":{"id":"2"},"metrics":{"costMicros":"200000000","conversions":40.0,
             "impressions":"3000","clicks":"150","ctr":0.05,"searchImpressionShare":0.9}},
         ]
-        with open(os.path.join(self.d,"campaign_perf_cur30.json"),"w") as f:
+        with open(os.path.join(self.d,"campaign_perf_30d.json"),"w") as f:
             json.dump(perf, f)
         with open(os.path.join(self.d,"campaigns.json"),"w") as f:
             json.dump([{"campaign":{"id":"1"}},{"campaign":{"id":"2"}}], f)
@@ -31,7 +31,7 @@ class T(unittest.TestCase):
         self.assertEqual(s["customer_id"], "6764977319")
         self.assertEqual(s["collected_at"], "2026-08-06T00:00:00Z")
     def test_div0_guarded(self):
-        with open(os.path.join(self.d,"campaign_perf_cur30.json"),"w") as f:
+        with open(os.path.join(self.d,"campaign_perf_30d.json"),"w") as f:
             json.dump([{"campaign":{"id":"1"},"metrics":{"costMicros":"0","conversions":0.0,
                 "impressions":"0","clicks":"0"}}], f)
         s = M.snapshot(self.d, "1")
