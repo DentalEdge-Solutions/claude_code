@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic KPI snapshot from an ads project's audit_data/ dir. Stdlib-only.
 
-Aggregates campaign_perf_cur30.json (current-30d per-campaign metrics) into
+Aggregates campaign_perf_30d.json (current-30d per-campaign metrics) into
 account-level KPIs. Ratios are RECOMPUTED from summed totals (never averaged
 across campaigns); impression_share is impression-weighted. Emits JSON.
 """
