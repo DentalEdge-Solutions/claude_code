@@ -25,6 +25,12 @@ SNAP="$(mktemp)"; trap 'rm -f "$SNAP"' EXIT
 python3 "$here/bin/ads-metrics-snapshot.py" --audit-data "$ADS_DIR" --customer "$CID" > "$SNAP"
 
 echo "run-trend-audit: [$CLIENT] producing report set…" >&2
+# Isolate this run's inputs: clear any stale (possibly other-client) reports for this
+# project so the analyst reads ONLY this client's fresh reports — soft isolation at the
+# source, not relying on the model to exclude a stray cross-client report. PROJECT is
+# registry-derived + charset-checked and passed via -e (never spliced).
+docker compose -f "$here/docker-compose.yml" exec -e PROJECT="$PROJECT" -T hermes-agent \
+  sh -lc 'rm -f /opt/data/reports/"$PROJECT"/*.md 2>/dev/null || true'
 "$here/run-audit-bundle.sh" "$PROJECT" --customer "$CID"
 
 echo "run-trend-audit: [$CLIENT] trend audit (opus, plan mode)…" >&2
