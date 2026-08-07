@@ -21,7 +21,7 @@ echo "run-trend-audit: [$CLIENT] collecting fresh data (read-only)…" >&2
 ADS_CUSTOMER_ID_OVERRIDE="$CID" "$here/collect-audit-data.sh"
 
 ADS_DIR="${ADS_PROJECT_DIR:-$(cd "$here/../../../claude-google-ads" && pwd)}/audit_data"
-SNAP="$(mktemp)"
+SNAP="$(mktemp)"; trap 'rm -f "$SNAP"' EXIT
 python3 "$here/bin/ads-metrics-snapshot.py" --audit-data "$ADS_DIR" --customer "$CID" > "$SNAP"
 
 echo "run-trend-audit: [$CLIENT] producing report set…" >&2
@@ -44,7 +44,7 @@ docker compose -f "$here/docker-compose.yml" exec \
   echo "$out"
 '
 DRAFT="$here/data/audits/$PROJECT/$TS-audit.md"
-[ -f "$DRAFT" ] || { echo "run-trend-audit: draft not produced: $DRAFT" >&2; rm -f "$SNAP"; exit 1; }
+[ -f "$DRAFT" ] || { echo "run-trend-audit: draft not produced: $DRAFT" >&2; exit 1; }
 # (VAULT_ROOT was exported to the host path "$here/data/vaults" at the top.)
 
 # Sole vault writer: ingest draft + metrics + timeline into the client vault.
@@ -52,16 +52,20 @@ DRAFT="$here/data/audits/$PROJECT/$TS-audit.md"
 # the host registry and writes host-side under data/vaults/<slug>/.
 python3 "$here/bin/vault-write.py" \
   --client "$CLIENT" --audit-file "$DRAFT" --metrics-file "$SNAP" --ts "$TS"
-rm -f "$SNAP"
 
-# Cheap per-run soft-isolation assertion: the draft must not name ANOTHER client slug.
-for other in $(python3 - "$here/data/vaults/_registry/clients.json" "$CLIENT" <<'PY'
-import json,sys
-reg,me=sys.argv[1],sys.argv[2]
-print(" ".join(s for s in json.load(open(reg)).get("clients",{}) if s!=me))
+# Cross-client soft-isolation assertion — MUST fail closed (a security check).
+VAULT_AUDIT="$here/data/vaults/$CLIENT/audits/$TS-audit.md"
+[ -f "$VAULT_AUDIT" ] || { echo "run-trend-audit: vault audit not written where expected: $VAULT_AUDIT" >&2; exit 1; }
+others="$(python3 - "$here/data/vaults/_registry/clients.json" "$CLIENT" <<'PY'
+import json, sys
+reg, me = sys.argv[1], sys.argv[2]
+with open(reg) as f:
+    clients = json.load(f).get("clients", {})
+print(" ".join(s for s in clients if s != me))
 PY
-); do
-  if grep -qiw "$other" "$here/data/vaults/$CLIENT/audits/$TS-audit.md"; then
+)" || { echo "run-trend-audit: could not enumerate clients for isolation check" >&2; exit 1; }
+for other in $others; do
+  if grep -qiw -- "$other" "$VAULT_AUDIT"; then
     echo "run-trend-audit: ASSERTION FAIL — draft references other client '$other'" >&2; exit 1
   fi
 done
