@@ -22,6 +22,14 @@ CRED_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
 # number in a report. The four real secrets stay scrubbed.
 SECRET_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
                "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN")
+_CID_RE = re.compile(r"^[0-9]{1,15}$")
+
+
+def validate_customer_override(cid):
+    if not _CID_RE.fullmatch(cid or ""):
+        print(f"run-ads-report: invalid --customer {cid!r} (digits only)", file=sys.stderr)
+        raise SystemExit(2)
+    return cid
 
 
 def registry_path():
@@ -179,8 +187,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True)
     ap.add_argument("--report", required=True)
+    ap.add_argument("--customer", help="override GOOGLE_ADS_CUSTOMER_ID for this run (digits)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
+    if args.customer is not None:
+        os.environ["GOOGLE_ADS_CUSTOMER_ID"] = validate_customer_override(args.customer)
     plan = build_plan(args.project, args.report)
     if args.dry_run:
         print(f"project: {plan['project']}")

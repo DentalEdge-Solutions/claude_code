@@ -35,7 +35,17 @@ while IFS= read -r _l || [ -n "$_l" ]; do
   export "$_k=$_v"
 done < "$env_file"
 
+# Per-client override (digits only). run-trend-audit.sh sets this to target one
+# client's account; it wins over the .env.ga CUSTOMER_ID for this invocation.
+if [ "${ADS_CUSTOMER_ID_OVERRIDE+x}" = "x" ]; then
+  case "$ADS_CUSTOMER_ID_OVERRIDE" in
+    *[!0-9]*|'') echo "collect-audit-data: invalid ADS_CUSTOMER_ID_OVERRIDE (digits only)" >&2; exit 1 ;;
+  esac
+  export GOOGLE_ADS_CUSTOMER_ID="$ADS_CUSTOMER_ID_OVERRIDE"
+fi
+
 if [ "${1:-}" = "--dry-run" ]; then
+  echo "effective GOOGLE_ADS_CUSTOMER_ID: $GOOGLE_ADS_CUSTOMER_ID"
   for c in $COLLECTORS; do echo "would run (read-only cred): (cd $project_dir && .venv/bin/python code/$c)"; done
   exit 0
 fi
