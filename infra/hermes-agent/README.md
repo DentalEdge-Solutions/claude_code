@@ -338,7 +338,7 @@ and credential scope are enforced independently of it.
 - `account_overview` produced a real report —
   `data/reports/claude_google_ads/2026-08-03_20-22-41-account_overview.md`
   (host path; `/opt/data/reports/...` in-container) — containing real account
-  data ("Palmetto Dental Studio") with the customer id scrubbed to `***`.
+  data (a dental practice's account name) with the customer id scrubbed to `***`.
 - Credential scan clean: none of the six `GOOGLE_ADS_*` values appear in the
   report or in `docker compose logs`.
 - Allow-list fail-closed, live: `./run-ads-report.sh --project
