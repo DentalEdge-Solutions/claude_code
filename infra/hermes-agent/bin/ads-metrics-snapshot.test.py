@@ -18,7 +18,7 @@ class T(unittest.TestCase):
         with open(os.path.join(self.d,"campaigns.json"),"w") as f:
             json.dump([{"campaign":{"id":"1"}},{"campaign":{"id":"2"}}], f)
     def test_aggregation(self):
-        s = M.snapshot(self.d, "6764977319", collected_at="2026-08-06T00:00:00Z")
+        s = M.snapshot(self.d, "1234567890", collected_at="2026-08-06T00:00:00Z")
         self.assertEqual(s["spend"], 300.0)
         self.assertEqual(s["conversions"], 50.0)
         self.assertEqual(s["impressions"], 4000)
@@ -28,7 +28,7 @@ class T(unittest.TestCase):
         self.assertEqual(s["conv_rate"], 0.2)               # 50/250
         self.assertEqual(s["impression_share"], 0.8)         # (0.5*1000+0.9*3000)/4000
         self.assertEqual(s["campaign_count"], 2)
-        self.assertEqual(s["customer_id"], "6764977319")
+        self.assertEqual(s["customer_id"], "1234567890")
         self.assertEqual(s["collected_at"], "2026-08-06T00:00:00Z")
     def test_div0_guarded(self):
         with open(os.path.join(self.d,"campaign_perf_30d.json"),"w") as f:

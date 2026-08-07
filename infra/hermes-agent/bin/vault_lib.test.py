@@ -13,19 +13,19 @@ class T(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         os.environ["VAULT_ROOT"] = self.tmp
         self.reg = _reg(self.tmp, {
-            "acme-dental": {"project": "claude_google_ads", "customer_id": "6764977319",
+            "acme-dental": {"project": "claude_google_ads", "customer_id": "1234567890",
                             "currency": "USD", "timezone": "America/New_York", "status": "active"},
         })
     def test_resolve_ok(self):
         r = V.resolve("acme-dental", self.reg)
-        self.assertEqual(r["customer_id"], "6764977319")
+        self.assertEqual(r["customer_id"], "1234567890")
         self.assertEqual(r["vault_path"], os.path.join(self.tmp, "acme-dental"))
         self.assertEqual(r["slug"], "acme-dental")
     def test_unknown_slug_raises(self):
         with self.assertRaises(KeyError): V.resolve("nope", self.reg)
     def test_unknown_slug_does_not_leak_known_slugs(self):
         reg = _reg(self.tmp, {
-            "acme-dental": {"customer_id": "6764977319"},
+            "acme-dental": {"customer_id": "1234567890"},
             "beta-health": {"customer_id": "12345"},
         })
         with self.assertRaises(KeyError) as ctx: V.resolve("nope", reg)
@@ -35,7 +35,7 @@ class T(unittest.TestCase):
             with self.assertRaises(ValueError): V.validate_slug(bad)
     def test_trailing_newline_rejected(self):
         with self.assertRaises(ValueError): V.validate_slug("acme-dental\n")
-        with self.assertRaises(ValueError): V.validate_customer_id("6764977319\n")
+        with self.assertRaises(ValueError): V.validate_customer_id("1234567890\n")
     def test_bad_customer_id_rejected(self):
         for bad in ["", "12-34", "abc", "12 34", "1"*16]:
             with self.assertRaises(ValueError): V.validate_customer_id(bad)
@@ -45,7 +45,7 @@ class T(unittest.TestCase):
         out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "vault_lib.py"),
                               "--client", "acme-dental", "--field", "customer_id", "--registry", self.reg],
                              capture_output=True, text=True, env={**os.environ})
-        self.assertEqual(out.returncode, 0); self.assertEqual(out.stdout.strip(), "6764977319")
+        self.assertEqual(out.returncode, 0); self.assertEqual(out.stdout.strip(), "1234567890")
     def test_cli_bad_slug_exit2(self):
         out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "vault_lib.py"),
                               "--client", "../etc", "--registry", self.reg], capture_output=True, text=True)

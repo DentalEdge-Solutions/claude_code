@@ -61,7 +61,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         snap = snapshot(args.audit_data, args.customer, args.collected_at)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
         print(f"ads-metrics-snapshot: {e}", file=sys.stderr); return 2
     print(json.dumps(snap, indent=2)); return 0
 

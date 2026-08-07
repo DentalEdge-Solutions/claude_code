@@ -41,12 +41,14 @@ def purge(client, export_to, confirm, force, registry=None):
         with open(os.path.join(gov, "deletions.log"), "a") as f:   # 3. AUDIT LOG
             f.write(json.dumps({"slug": client, "ts": ts, "operator": getpass.getuser(),
                                 "bytes_exported": nbytes, "export": tar_path}) + "\n")
-        path = registry or vault_lib.registry_path()       # 4. STATUS FLIP
+        path = registry or vault_lib.registry_path()       # 4. STATUS FLIP (atomic)
         with open(path) as f:
             data = json.load(f)
         data["clients"][client]["status"] = "offboarded"
-        with open(path, "w") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, path)
     except Exception as e:
         raise PostPurgeError(tar_path, e)
     return tar_path

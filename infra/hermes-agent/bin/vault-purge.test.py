@@ -11,7 +11,7 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.mkdtemp(); os.environ["VAULT_ROOT"]=self.tmp
         self.reg=_reg(self.tmp, {"acme-dental":{"project":"claude_google_ads",
-            "customer_id":"6764977319","status":"offboarded"}})
+            "customer_id":"1234567890","status":"offboarded"}})
         v=os.path.join(self.tmp,"acme-dental","audits"); os.makedirs(v,exist_ok=True)
         with open(os.path.join(v,"x-audit.md"),"w") as f:
             f.write("data")
@@ -44,10 +44,10 @@ class T(unittest.TestCase):
         reg = _reg(self.tmp, {"gone":{"project":"p","customer_id":"1","status":"offboarded"}})
         v = os.path.join(self.tmp,"gone","audits"); os.makedirs(v, exist_ok=True)
         with open(os.path.join(v,"a-audit.md"),"w") as f: f.write("data")
-        os.chmod(reg, 0o444)   # step-4 registry write fails -> PostPurgeError
+        regdir = os.path.dirname(reg); os.chmod(regdir, 0o500)   # read-only dir -> step-4 tmp-write fails -> PostPurgeError
         r = subprocess.run([sys.executable, os.path.join(HERE,"vault-purge.py"),"--client","gone",
             "--export-to",self.exp,"--registry",reg,"--confirm"], capture_output=True, text=True, env={**os.environ})
-        os.chmod(reg, 0o644)   # restore so tempdir cleanup/other tests aren't affected
+        os.chmod(regdir, 0o700)   # restore for cleanup
         self.assertEqual(r.returncode, 3)                                   # distinct signal
         self.assertFalse(os.path.exists(os.path.join(self.tmp,"gone")))     # destruction happened
         self.assertTrue(any(f.endswith(".tar.gz") for f in os.listdir(self.exp)))  # exported

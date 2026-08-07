@@ -11,13 +11,13 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(); os.environ["VAULT_ROOT"] = self.tmp
         self.reg = _reg(self.tmp, {"acme-dental":{"project":"claude_google_ads",
-            "customer_id":"6764977319","status":"active"}})
+            "customer_id":"1234567890","status":"active"}})
         self.audit = os.path.join(self.tmp,"draft.md")
         with open(self.audit, "w") as f:
             f.write("> DRAFT\n## Overall\nok\n")
         self.metrics = os.path.join(self.tmp,"m.json")
         with open(self.metrics, "w") as f:
-            json.dump({"spend":400.0,"customer_id":"6764977319",
+            json.dump({"spend":400.0,"customer_id":"1234567890",
                 "collected_at":"2026-08-06T00:00:00Z"}, f)
     def _run(self, client, ts="2026-08-06_10-00-00"):
         return subprocess.run([sys.executable, os.path.join(HERE,"vault-write.py"),

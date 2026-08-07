@@ -33,7 +33,7 @@ class TestParse(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("rar", p)
         m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         # valid digits accepted
-        self.assertEqual(m.validate_customer_override("7564982296"), "7564982296")
+        self.assertEqual(m.validate_customer_override("9999999999"), "9999999999")
         # non-digits rejected
         for bad in ["75-64", "abc", "", "1 2"]:
             with self.assertRaises(SystemExit):

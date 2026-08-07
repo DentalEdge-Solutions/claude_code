@@ -54,12 +54,12 @@ class T(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         os.environ["VAULT_ROOT"] = self.tmp
         self.reg = _reg(self.tmp, {
-            "acme-dental": {"project": "claude_google_ads", "customer_id": "6764977319",
+            "acme-dental": {"project": "claude_google_ads", "customer_id": "1234567890",
                             "currency": "USD", "timezone": "America/New_York", "status": "active"},
         })
     def test_resolve_ok(self):
         r = V.resolve("acme-dental", self.reg)
-        self.assertEqual(r["customer_id"], "6764977319")
+        self.assertEqual(r["customer_id"], "1234567890")
         self.assertEqual(r["vault_path"], os.path.join(self.tmp, "acme-dental"))
         self.assertEqual(r["slug"], "acme-dental")
     def test_unknown_slug_raises(self):
@@ -76,7 +76,7 @@ class T(unittest.TestCase):
         out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "vault_lib.py"),
                               "--client", "acme-dental", "--field", "customer_id", "--registry", self.reg],
                              capture_output=True, text=True, env={**os.environ})
-        self.assertEqual(out.returncode, 0); self.assertEqual(out.stdout.strip(), "6764977319")
+        self.assertEqual(out.returncode, 0); self.assertEqual(out.stdout.strip(), "1234567890")
     def test_cli_bad_slug_exit2(self):
         out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "vault_lib.py"),
                               "--client", "../etc", "--registry", self.reg], capture_output=True, text=True)
@@ -189,7 +189,7 @@ git commit -m "feat(vault): client registry resolver + slug/customer_id validati
 
 **Interfaces:**
 - Produces: `snapshot(audit_data_dir, customer_id, collected_at=None)->dict` with keys `collected_at, customer_id, spend, conversions, cost_per_conv, ctr, conv_rate, impression_share, impressions, clicks, campaign_count`. CLI: `python3 ads-metrics-snapshot.py --audit-data <dir> --customer <digits> [--collected-at <iso>]` → JSON to stdout; exit 2 if a required input file is missing.
-- Consumes: an ads project `audit_data/` dir containing `campaign_perf_cur30.json` (list of `{campaign, metrics:{costMicros,conversions,impressions,clicks,ctr,searchImpressionShare,...}}`) and optional `campaigns.json`.
+- Consumes: an ads project `audit_data/` dir containing `campaign_perf_30d.json` (list of `{campaign, metrics:{costMicros,conversions,impressions,clicks,ctr,searchImpressionShare,...}}`) and optional `campaigns.json`.
 
 **Determinism rule:** ratios are RECOMPUTED from summed totals (never averaged across campaigns); `impression_share` is impression-weighted; all values machine-derived, never from model prose.
 
@@ -212,11 +212,11 @@ class T(unittest.TestCase):
           {"campaign":{"id":"2"},"metrics":{"costMicros":"300000000","conversions":30.0,
             "impressions":"3000","clicks":"300","ctr":0.1,"searchImpressionShare":0.9}},
         ]
-        json.dump(perf, open(os.path.join(self.d,"campaign_perf_cur30.json"),"w"))
+        json.dump(perf, open(os.path.join(self.d,"campaign_perf_30d.json"),"w"))
         json.dump([{"campaign":{"id":"1"}},{"campaign":{"id":"2"}}],
                   open(os.path.join(self.d,"campaigns.json"),"w"))
     def test_aggregation(self):
-        s = M.snapshot(self.d, "6764977319", collected_at="2026-08-06T00:00:00Z")
+        s = M.snapshot(self.d, "1234567890", collected_at="2026-08-06T00:00:00Z")
         self.assertEqual(s["spend"], 400.0)
         self.assertEqual(s["conversions"], 40.0)
         self.assertEqual(s["impressions"], 4000)
@@ -226,11 +226,11 @@ class T(unittest.TestCase):
         self.assertEqual(s["conv_rate"], 0.1)                # 40/400
         self.assertEqual(s["impression_share"], 0.8)         # (0.5*1000+0.9*3000)/4000
         self.assertEqual(s["campaign_count"], 2)
-        self.assertEqual(s["customer_id"], "6764977319")
+        self.assertEqual(s["customer_id"], "1234567890")
         self.assertEqual(s["collected_at"], "2026-08-06T00:00:00Z")
     def test_div0_guarded(self):
         json.dump([{"campaign":{"id":"1"},"metrics":{"costMicros":"0","conversions":0.0,
-            "impressions":"0","clicks":"0"}}], open(os.path.join(self.d,"campaign_perf_cur30.json"),"w"))
+            "impressions":"0","clicks":"0"}}], open(os.path.join(self.d,"campaign_perf_30d.json"),"w"))
         s = M.snapshot(self.d, "1")
         self.assertEqual(s["cost_per_conv"], 0.0); self.assertEqual(s["ctr"], 0.0)
         self.assertEqual(s["conv_rate"], 0.0); self.assertEqual(s["impression_share"], 0.0)
@@ -254,7 +254,7 @@ Expected: FAIL (module/file not found).
 #!/usr/bin/env python3
 """Deterministic KPI snapshot from an ads project's audit_data/ dir. Stdlib-only.
 
-Aggregates campaign_perf_cur30.json (current-30d per-campaign metrics) into
+Aggregates campaign_perf_30d.json (current-30d per-campaign metrics) into
 account-level KPIs. Ratios are RECOMPUTED from summed totals (never averaged
 across campaigns); impression_share is impression-weighted. Emits JSON.
 """
@@ -270,7 +270,7 @@ def _num(x):
     except (TypeError, ValueError): return 0.0
 
 def snapshot(audit_data_dir, customer_id, collected_at=None):
-    perf = _load(audit_data_dir, "campaign_perf_cur30.json")
+    perf = _load(audit_data_dir, "campaign_perf_30d.json")
     spend = conv = impr = clicks = 0.0
     is_num = is_den = 0.0
     for row in perf:
@@ -355,9 +355,9 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(); os.environ["VAULT_ROOT"] = self.tmp
         self.reg = _reg(self.tmp, {"acme-dental":{"project":"claude_google_ads",
-            "customer_id":"6764977319","status":"active"}})
+            "customer_id":"1234567890","status":"active"}})
         self.audit = os.path.join(self.tmp,"draft.md"); open(self.audit,"w").write("> DRAFT\n## Overall\nok\n")
-        self.metrics = os.path.join(self.tmp,"m.json"); json.dump({"spend":400.0,"customer_id":"6764977319",
+        self.metrics = os.path.join(self.tmp,"m.json"); json.dump({"spend":400.0,"customer_id":"1234567890",
             "collected_at":"2026-08-06T00:00:00Z"}, open(self.metrics,"w"))
     def _run(self, client, ts="2026-08-06_10-00-00"):
         return subprocess.run([sys.executable, os.path.join(HERE,"vault-write.py"),
@@ -483,7 +483,7 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.mkdtemp(); os.environ["VAULT_ROOT"]=self.tmp
         self.reg=_reg(self.tmp, {"acme-dental":{"project":"claude_google_ads",
-            "customer_id":"6764977319","status":"offboarded"}})
+            "customer_id":"1234567890","status":"offboarded"}})
         v=os.path.join(self.tmp,"acme-dental","audits"); os.makedirs(v,exist_ok=True)
         open(os.path.join(v,"x-audit.md"),"w").write("data")
         self.exp=tempfile.mkdtemp()
@@ -613,7 +613,7 @@ Add to `infra/hermes-agent/bin/run-ads-report.test.py` (a new test method; impor
         spec = importlib.util.spec_from_file_location("rar", p)
         m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         # valid digits accepted
-        self.assertEqual(m.validate_customer_override("7564982296"), "7564982296")
+        self.assertEqual(m.validate_customer_override("9999999999"), "9999999999")
         # non-digits rejected
         for bad in ["75-64", "abc", "", "1 2"]:
             with self.assertRaises(SystemExit):
@@ -711,7 +711,7 @@ fi
 Run:
 ```bash
 cd infra/hermes-agent
-ADS_CUSTOMER_ID_OVERRIDE=7564982296 ./collect-audit-data.sh --dry-run | grep "effective GOOGLE_ADS_CUSTOMER_ID: 7564982296"
+ADS_CUSTOMER_ID_OVERRIDE=9999999999 ./collect-audit-data.sh --dry-run | grep "effective GOOGLE_ADS_CUSTOMER_ID: 9999999999"
 ADS_CUSTOMER_ID_OVERRIDE=bad-id ./collect-audit-data.sh --dry-run; echo "exit=$?"   # expect exit=1
 ```
 Expected: the grep matches; the bad-id run exits 1.
