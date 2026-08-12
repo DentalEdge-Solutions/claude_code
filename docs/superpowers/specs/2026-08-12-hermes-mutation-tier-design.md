@@ -47,7 +47,7 @@ through.
 | Action scope | Campaign-level negative criterion | Narrowest blast radius; undo is exact by resource name. |
 | Provenance | **Operator-authored; no model in the mutation path** | In v1 no model output can become a mutation, even in principle. |
 | Mutator location | `claude-google-ads/code/` (separate repo), committed and pushed | Target-model #2: the project performs its own function. Hermes keeps the entire safety rail. |
-| Caps | All four (per-change-set, per-client daily, kill switch, expiry) | The backstop is gone; layered limits replace it. |
+| Caps | All four (per-change-set, per-client daily, kill switch, expiry), **config-driven** | The backstop is gone; layered limits replace it. Numbers live in config, not code (§7.2). |
 | Rail shape | New `mutate_execute` tier parallel to `read_execute` | Keeps Inc-3's "readers only; mutators are never allow-listed" invariant literally true. |
 
 **Recorded deviation from the Task-2 handoff.** The handoff said "prove it on a TEST / low-stakes
@@ -67,7 +67,7 @@ obviously-fake keyword; undo proven in the same gate; and the client-data hard r
 | `bin/approve-changeset.py` | none | Writes the approval record (operator, timestamp, `expires_at`, sha256). |
 | `bin/apply-changeset.py` | **write** | The only credentialed entry point. Runs all guards, `validate_only` first, then applies. Also carries `--undo`. |
 | `run-ads-mutate.sh` | **write** | Host wrapper: parses gitignored `.env.gaw` as data (never sources it), injects per-invocation via `docker compose exec -e`, charset-validates args. Mirrors `run-ads-report.sh`. |
-| `registry/projects.yaml` | — | New `mutate_execute` block: `runner`, `script_dir`, `allow` — exactly one entry. |
+| `registry/projects.yaml` | — | New `mutate_execute` block: `runner`, `script_dir`, `allow` (exactly one entry), and `caps` (§7.2). |
 
 `propose` and `approve` hold no credential and cannot reach Google at all. Only `apply` can.
 
@@ -178,11 +178,11 @@ every refusal happens before Google is reachable:
 
 1. Kill switch `/opt/data/vaults/_governance/mutation-enabled` present and readable — else refuse
 2. Slug validated and resolved via `vault_lib`; client status must be `active`
-3. Change-set loads, schema-validates, ≤ 10 actions
+3. Change-set loads, schema-validates, within the per-change-set action cap (§7.2)
 4. `changeset.client` == `--client` **and** `changeset.customer_id` == the resolved customer id
    (cross-client bleed guard, mirroring two-tier §7)
 5. Approval exists, hash matches, not expired
-6. Daily caps satisfied, counted from `log.jsonl`: ≤ 3 applies and ≤ 25 actions per client per UTC day
+6. Daily caps satisfied, counted from `log.jsonl` for the current UTC day (§7.2)
 7. Mutator resolves in `mutate_execute.allow`; allow-lists disjoint
 8. All write-credential vars present — else refuse, so nothing falls through to the in-tree `.env`
 9. **`validate_only` pass over every action.** Any failure aborts the entire change-set, nothing applied
@@ -219,6 +219,35 @@ never *reversing* it — a tripped kill switch that also blocked cleanup would b
 a bad situation worse. Undo therefore has no pre-flight state that can refuse a cleanup the operator
 needs.
 
+### 7.2 Caps are configuration, not constants
+
+Cap values live in `registry/projects.yaml` under `mutate_execute.caps` — git-versioned, reviewable,
+per-project, consistent with mechanism-in-git. Code and tests read them; no test hardcodes a number,
+so tuning after real mileage is a config edit rather than a code change plus re-review.
+
+```yaml
+    caps:
+      actions_per_changeset: 25      # largest batch a human can genuinely review in one sitting
+      actions_per_client_day: 100
+      applies_per_client_day: 5
+      approval_ttl_hours: 24
+```
+
+Sizing rationale, so future tuning argues against the right thing:
+
+- **Caps and review do different jobs.** Review catches bad judgment — 30 well-chosen negatives are
+  fine, 3 careless ones are not, and no integer separates those. Caps bound *malfunction*: a loop, a
+  bad parse, a wrong-account resolution.
+- **`applies_per_client_day` is the load-bearing cap** against malfunction, because a malfunction
+  repeats rather than batches.
+- **`actions_per_changeset` is sized by reviewability**, not by risk appetite. A cap high enough to
+  invite rubber-stamping is worse than none, because it launders the review that is the actual control.
+- Real negative-keyword work batches 20–40 terms after a 90-day search-terms cleanup; caps below that
+  add friction without adding safety, since every term is individually reviewed and hash-bound.
+
+Missing, malformed, or non-integer caps are a **fail-closed refusal**, never a silent default — an
+unreadable limit must not become an unlimited one.
+
 ## 8 · Verification gate (controller-run, live)
 
 Binding conditions from §3 apply throughout. In order:
@@ -242,8 +271,10 @@ Step 5 is the moment the increment becomes real: the same call Inc-3 proved retu
 Stdlib-only, run directly (not auto-discovered by `run-all-tests.js`), like the other `bin/` suites.
 
 - **`changeset_lib.test.py`** — schema rejection (unknown type, bad match type, non-digit ids, oversize
-  keyword, control characters, > 10 actions); hash determinism and invalidation on any byte edit;
-  expiry; caps accounting from a synthetic log; kill-switch fail-closed; allow-list disjointness.
+  keyword, control characters, over the configured action cap); hash determinism and invalidation on
+  any byte edit; expiry; caps accounting from a synthetic log; **missing/malformed caps refuse rather
+  than default**; kill-switch fail-closed; allow-list disjointness. Cap tests are **parameterized from
+  config** — no test hardcodes a cap value.
 - **`apply-changeset.test.py`** — for every pre-flight refusal, assert the mutator subprocess is
   **never spawned** (stub records invocation) — stronger than asserting an exit code; a `validate_only`
   failure produces zero live calls; per-action log writes precede the next action; post-mutation
