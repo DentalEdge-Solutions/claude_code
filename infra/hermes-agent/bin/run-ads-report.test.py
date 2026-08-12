@@ -27,6 +27,18 @@ def _reg(text=REG):
 
 
 class TestParse(unittest.TestCase):
+    def test_customer_override_validates_and_sets(self):
+        import importlib.util, os
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-ads-report.py")
+        spec = importlib.util.spec_from_file_location("rar", p)
+        m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+        # valid digits accepted
+        self.assertEqual(m.validate_customer_override("9999999999"), "9999999999")
+        # non-digits rejected
+        for bad in ["75-64", "abc", "", "1 2"]:
+            with self.assertRaises(SystemExit):
+                m.validate_customer_override(bad)
+
     def test_read_workdir(self):
         p = _reg()
         self.assertEqual(mod["read_workdir"](p, "claude_google_ads"), "/projects/claude_google_ads")

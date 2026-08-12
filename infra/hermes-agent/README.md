@@ -338,7 +338,7 @@ and credential scope are enforced independently of it.
 - `account_overview` produced a real report —
   `data/reports/claude_google_ads/2026-08-03_20-22-41-account_overview.md`
   (host path; `/opt/data/reports/...` in-container) — containing real account
-  data ("Palmetto Dental Studio") with the customer id scrubbed to `***`.
+  data (a dental practice's account name) with the customer id scrubbed to `***`.
 - Credential scan clean: none of the six `GOOGLE_ADS_*` values appear in the
   report or in `docker compose logs`.
 - Allow-list fail-closed, live: `./run-ads-report.sh --project
@@ -405,6 +405,77 @@ to git, NEVER written to the brain/memory/telemetry. Only the meta pilot outcome
 `claude_google_ads` `read_execute.allow` block; mutators are never listed. The reader deps
 run in the pinned `/opt/ads-venv`. When the ads project's collectors/readers change, re-run
 the Task-1-style verification before trusting the pipeline.
+
+## Two-tier memory / per-client vaults
+
+Hermes keeps two separate memory tiers so client-private data never reaches the
+shared, git-versioned project brain:
+
+- **Shared project brain** (`.project-brain/`, git) — META only: how the pipeline
+  operates, methodology, what "good" looks like. No client data, ever.
+- **Per-client vaults** (gitignored, Obsidian-flavored markdown) — one client's
+  audits, metrics history, timeline, and opportunities. They live only under
+  `/opt/data/vaults/<slug>/` (host `data/vaults/<slug>/`, which opens directly in
+  Obsidian), never in git.
+
+The **client roster is itself client-private**, so it lives in the vault tier, not
+git: `data/vaults/_registry/clients.json` (gitignored). `registry/projects.yaml`
+stays project-level and client-agnostic. Shape:
+
+```json
+{ "clients": {
+    "<slug>": { "project": "<project>", "customer_id": "<digits>",
+                "currency": "USD", "timezone": "America/New_York",
+                "status": "active" }
+} }
+```
+
+**Vault layout** (`data/vaults/<slug>/`):
+
+```
+index.md               # client profile
+timeline.md            # one line per run (the analyst reads this first)
+audits/<ts>-audit.md   # audit DRAFTs over time
+metrics/<ts>.json      # deterministic KPI snapshot per run (enables trend deltas)
+```
+
+**Trend audit** — the operator entry point re-collects fresh data (read-only
+credential, this client's account), produces the scrubbed report set, runs the opus
+analyst in plan mode over the fresh reports **plus this client's prior `metrics/` +
+`audits/`** (so the draft references change-over-time; a first run establishes a
+baseline), and persists the new draft + snapshot into the vault via `bin/vault-write.py`
+(the sole vault writer):
+
+```bash
+cd infra/hermes-agent
+./run-trend-audit.sh --client <slug>
+```
+
+**Offboarding / retention** — export-then-hard-purge a client's vault, with a
+deletion audit log and a registry status flip. Export always precedes deletion; a
+distinct **exit 3** signals a failure that occurred *after* the irreversible delete
+(vs exit 2 for a pre-flight refusal):
+
+```bash
+python3 bin/vault-purge.py --client <slug> --export-to <dir> --confirm
+```
+
+**Safety model:** read-only end-to-end — the trend audit never mutates the ad
+account (platform mutation is a separate, future increment); `claude` runs plan-mode
+`Read,Grep,Glob` only and writes the draft via a redirect to `/opt/data`, never a
+`:ro` mount. Soft cross-client isolation now (one `VAULT_DIR` per run + a fail-closed
+assertion that the draft names no other client), with hard per-client container
+isolation deferred. The deliverable is a DRAFT behind a human-review gate. No client
+name, account id, metric, or draft is ever committed to git, the brain, or telemetry.
+
+**Tests** (run directly — not auto-discovered by `run-all-tests.js`):
+
+```bash
+python3 infra/hermes-agent/bin/vault_lib.test.py
+python3 infra/hermes-agent/bin/ads-metrics-snapshot.test.py
+python3 infra/hermes-agent/bin/vault-write.test.py
+python3 infra/hermes-agent/bin/vault-purge.test.py
+```
 
 ## Security
 
