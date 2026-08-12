@@ -64,3 +64,6 @@ If the run points you at a client vault (`/opt/data/vaults/<slug>/`) containing
 - Run a script, take Bash, or use Write/Edit — you only Read/Grep/Glob and emit text.
 - Recommend *executing* a mutation; "apply the changes" is out of scope.
 - State the draft is final or client-ready.
+- Emit ANY preamble or meta-narration — including notes about ExitPlanMode, plan mode,
+  your tools, or the environment. Your FIRST output line is the DRAFT banner
+  (output-contract item 1); output only the deliverable markdown.
