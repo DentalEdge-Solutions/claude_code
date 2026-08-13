@@ -287,5 +287,127 @@ class TestDisjointness(unittest.TestCase):
         self.assertTrue(read_allow, "read_execute allow-list should not be empty")
         C.assert_allow_lists_disjoint(read_allow, mut["allow"])
 
+import datetime
+
+NOW = datetime.datetime(2026, 8, 12, 10, 15, 0, tzinfo=datetime.timezone.utc)
+
+class TestKillSwitch(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+
+    def test_absent_switch_is_not_ok(self):
+        self.assertFalse(C.kill_switch_ok(self.root))
+
+    def test_present_switch_is_ok(self):
+        d = os.path.join(self.root, C.GOVERNANCE_DIR)
+        os.makedirs(d)
+        with open(os.path.join(d, C.KILL_SWITCH), "w") as f:
+            f.write("enabled\n")
+        self.assertTrue(C.kill_switch_ok(self.root))
+
+    def test_directory_in_place_of_switch_is_not_ok(self):
+        os.makedirs(os.path.join(self.root, C.GOVERNANCE_DIR, C.KILL_SWITCH))
+        self.assertFalse(C.kill_switch_ok(self.root))
+
+class TestApproval(unittest.TestCase):
+    def setUp(self):
+        self.vault = tempfile.mkdtemp()
+        os.makedirs(C.changes_dir(self.vault))
+        self.cs = os.path.join(C.changes_dir(self.vault), "20260812-101500-abcd1234.json")
+        with open(self.cs, "wb") as f:
+            f.write(C.canonical_bytes(_cs()))
+        self.digest = C.file_digest(self.cs)
+
+    def test_write_then_verify_roundtrip(self):
+        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        rec = C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+        self.assertEqual(rec["operator"], "erick")
+
+    def test_missing_approval_refused(self):
+        with self.assertRaises(ValueError):
+            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+
+    def test_hash_mismatch_refused(self):
+        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        with open(self.cs, "ab") as f:
+            f.write(b" ")                     # a single whitespace byte
+        new_digest = C.file_digest(self.cs)
+        with self.assertRaises(ValueError) as ctx:
+            C.verify_approval(self.vault, "20260812-101500-abcd1234", new_digest, NOW)
+        self.assertIn("modified after approval", str(ctx.exception))
+
+    def test_expired_approval_refused(self):
+        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        later = NOW + datetime.timedelta(hours=24, seconds=1)
+        with self.assertRaises(ValueError) as ctx:
+            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, later)
+        self.assertIn("expired", str(ctx.exception))
+
+    def test_within_ttl_accepted(self):
+        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        later = NOW + datetime.timedelta(hours=23, minutes=59)
+        self.assertEqual(
+            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, later)["operator"],
+            "erick")
+
+    def test_bad_operator_rejected(self):
+        for bad in ["", "a b", "rm -rf /", "x" * 65, "erick\n"]:
+            with self.assertRaises(ValueError):
+                C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, bad, NOW, 24)
+
+    def test_non_string_approval_datetime_refused_cleanly(self):
+        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), encoding="utf-8") as f:
+            rec = json.load(f)
+        rec["expires_at"] = 123
+        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        with self.assertRaises(ValueError) as ctx:
+            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+        self.assertIn("expires_at must be a JSON string", str(ctx.exception))
+
+class TestLog(unittest.TestCase):
+    def setUp(self):
+        self.vault = tempfile.mkdtemp()
+
+    def _line(self, **kw):
+        rec = {"ts": "2026-08-12T10:15:00Z", "changeset_id": "20260812-101500-abcd1234",
+               "action_index": 0, "type": "add_campaign_negative",
+               "resource_name": "customers/1234567890/campaignCriteria/1~2",
+               "status": "applied", "operator": "erick"}
+        rec.update(kw)
+        return rec
+
+    def test_empty_log_counts_zero(self):
+        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+
+    def test_counts_actions_and_distinct_applies(self):
+        C.append_log(self.vault, self._line(action_index=0))
+        C.append_log(self.vault, self._line(action_index=1))
+        C.append_log(self.vault, self._line(changeset_id="20260812-120000-beef0001"))
+        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 2, "actions": 3})
+
+    def test_other_days_not_counted(self):
+        C.append_log(self.vault, self._line(ts="2026-08-11T23:59:59Z"))
+        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+
+    def test_undone_lines_not_counted_as_applies(self):
+        C.append_log(self.vault, self._line(status="undone"))
+        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+
+    def test_corrupt_log_refuses_rather_than_undercounting(self):
+        C.append_log(self.vault, self._line())
+        with open(C.log_path(self.vault), "a") as f:
+            f.write("{not json\n")
+        with self.assertRaises(ValueError) as ctx:
+            C.day_counts(self.vault, "2026-08-12")
+        self.assertIn("corrupt", str(ctx.exception))
+
+    def test_append_is_durable_and_one_line_per_record(self):
+        C.append_log(self.vault, self._line())
+        C.append_log(self.vault, self._line(action_index=1))
+        with open(C.log_path(self.vault)) as f:
+            self.assertEqual(len([x for x in f.read().splitlines() if x.strip()]), 2)
+
 if __name__ == "__main__":
     unittest.main()
