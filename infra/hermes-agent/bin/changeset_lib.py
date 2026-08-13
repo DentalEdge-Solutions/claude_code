@@ -92,3 +92,108 @@ def canonical_bytes(cs):
     exact form to disk, so hashing the raw file bytes later is both canonical and
     byte-exact."""
     return json.dumps(cs, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+CAP_KEYS = ("actions_per_changeset", "actions_per_client_day",
+            "applies_per_client_day", "approval_ttl_hours")
+_CAP_VALUE_RE = re.compile(r"^[0-9]{1,6}$")
+
+
+def _strip_inline_comment(stripped):
+    """Remove a trailing inline YAML comment (# preceded by whitespace). A '#' flush
+    against a value is part of the value, per YAML inline-comment semantics."""
+    return re.sub(r"\s+#.*$", "", stripped)
+
+
+def _iter_project_lines(path, project):
+    """Yield (indent, stripped) for each meaningful line inside projects.<project>.
+
+    The single registry walker for this tier. run-ads-report.py has its own copy for
+    read_execute and stays frozen (Inc-3 is unchanged by this increment), but nothing
+    NEW duplicates it: read_workdir, read_block, read_mutate_execute, and
+    read_allow_list are all built on this one generator.
+    """
+    cur = None
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip(" "))
+            stripped = _strip_inline_comment(line.strip())
+            if indent == 2 and stripped.endswith(":"):          # a project name
+                cur = stripped[:-1]
+                continue
+            if cur == project:
+                yield indent, stripped
+
+
+def read_workdir(path, project):
+    for indent, stripped in _iter_project_lines(path, project):
+        if indent == 4 and stripped.startswith("workdir:"):
+            return stripped.split(":", 1)[1].strip()
+    raise ValueError(f"no workdir for project {project!r}")
+
+
+def read_block(path, project, block):
+    """Parse projects.<project>.<block> into scalars plus `allow` and `caps`.
+
+    Scope discipline (from run-ads-report.py's Inc-2 review fix): ANY sibling or
+    shallower line closes the block, so a later key cannot bleed into `allow`.
+    Returns empty structures when the block is absent — callers decide whether that
+    is a refusal (read_mutate_execute) or simply nothing to check (read_allow_list).
+    """
+    inside = False
+    sub = None
+    got = {"allow": [], "caps": {}}
+    for indent, stripped in _iter_project_lines(path, project):
+        if indent == 4 and stripped == f"{block}:":
+            inside = True; sub = None
+        elif indent <= 4:                                        # sibling/shallower closes scope
+            inside = False; sub = None
+        elif indent == 6 and inside:
+            if stripped in ("allow:", "caps:"):
+                sub = stripped[:-1]
+            else:
+                sub = None
+                k, _, v = stripped.partition(":")
+                got[k.strip()] = v.strip()
+        elif indent == 8 and inside:
+            if sub == "allow" and stripped.startswith("- "):
+                got["allow"].append(stripped[2:].strip())
+            elif sub == "caps":
+                k, _, v = stripped.partition(":")
+                got["caps"][k.strip()] = v.strip()
+    return got
+
+
+def read_allow_list(path, project, block):
+    """Allow-list for any block. Used for the read_execute side of the disjointness
+    check; a project with no such block yields [] — nothing to overlap with."""
+    return read_block(path, project, block)["allow"]
+
+
+def read_mutate_execute(path, project):
+    got = read_block(path, project, "mutate_execute")
+    if not got.get("runner") or not got.get("script_dir") or not got["allow"]:
+        raise ValueError(
+            f"no mutate_execute(runner, script_dir, allow) for project {project!r}")
+    caps = {}
+    for k in CAP_KEYS:
+        v = got["caps"].get(k)
+        if v is None:
+            raise ValueError(f"missing cap {k!r} for project {project!r} — caps are fail-closed; "
+                             "an unreadable limit must never become an unlimited one")
+        if not _CAP_VALUE_RE.fullmatch(v) or int(v) < 1:
+            raise ValueError(f"invalid cap {k}={v!r} — must be a positive integer")
+        caps[k] = int(v)
+    return {"runner": got["runner"], "script_dir": got["script_dir"],
+            "allow": got["allow"], "caps": caps}
+
+
+def assert_allow_lists_disjoint(read_allow, mutate_allow):
+    """Inc-3's read allow-list states 'readers only; mutators are never allow-listed'.
+    This keeps that sentence literally true rather than merely asserted."""
+    both = sorted(set(read_allow) & set(mutate_allow))
+    if both:
+        raise ValueError(f"allow-list overlap between read_execute and mutate_execute: {both} — "
+                         "a script must never be both reader and mutator")

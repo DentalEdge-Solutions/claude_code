@@ -52,3 +52,18 @@ projects:
         - account_overview
         - audit_search_terms
         - audit_analyze
+    # MUTATION TIER (Task 2 increment). Separate from read_execute by design: the
+    # read allow-list's invariant is "readers only; mutators are never allow-listed",
+    # and apply-changeset.py refuses if any name appears in BOTH lists.
+    # Runs under a SEPARATE Standard-access write credential (.env.gaw), injected
+    # per-invocation. Never the read-only .env.ga, never the gateway env.
+    mutate_execute:
+      runner: /opt/ads-venv/bin/python3   # pinned build-time venv, NOT base python
+      script_dir: code             # relative to workdir
+      allow:                       # EXACT basenames; fail-closed; ONE typed mutator
+        - mutate_campaign_negative
+      caps:                        # fail-closed: missing or malformed => refuse
+        actions_per_changeset: 25      # largest batch a human can review in one sitting
+        actions_per_client_day: 100
+        applies_per_client_day: 5      # load-bearing cap against malfunction
+        approval_ttl_hours: 24

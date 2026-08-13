@@ -133,5 +133,123 @@ class TestCanonical(unittest.TestCase):
         self.assertNotEqual(C.canonical_bytes(_cs()),
                             C.canonical_bytes(_cs(actions=[_action(keyword="free consult")])))
 
+import tempfile
+
+REG = """version: 1
+
+projects:
+  claude_code:
+    workdir: /projects/claude_code
+    scope: read
+  claude_google_ads:
+    workdir: /projects/claude_google_ads
+    scope: read-execute
+    read_execute:
+      runner: /opt/ads-venv/bin/python3
+      script_dir: code
+      allow:
+        - account_overview
+        - audit_analyze
+    mutate_execute:
+      runner: /opt/ads-venv/bin/python3   # inline comment must be stripped
+      script_dir: code
+      allow:
+        - mutate_campaign_negative
+      caps:
+        actions_per_changeset: 25
+        actions_per_client_day: 100
+        applies_per_client_day: 5
+        approval_ttl_hours: 24
+"""
+
+def _reg_file(text):
+    fd, p = tempfile.mkstemp(suffix=".yaml")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    return p
+
+class TestRegistry(unittest.TestCase):
+    def setUp(self):
+        self.p = _reg_file(REG)
+
+    def test_reads_mutate_execute(self):
+        cfg = C.read_mutate_execute(self.p, "claude_google_ads")
+        self.assertEqual(cfg["runner"], "/opt/ads-venv/bin/python3")
+        self.assertEqual(cfg["script_dir"], "code")
+        self.assertEqual(cfg["allow"], ["mutate_campaign_negative"])
+
+    def test_reads_caps_as_ints(self):
+        caps = C.read_mutate_execute(self.p, "claude_google_ads")["caps"]
+        self.assertEqual(caps["actions_per_changeset"], 25)
+        self.assertEqual(caps["applies_per_client_day"], 5)
+        self.assertIsInstance(caps["approval_ttl_hours"], int)
+
+    def test_read_execute_entries_do_not_bleed_into_mutate_allow(self):
+        cfg = C.read_mutate_execute(self.p, "claude_google_ads")
+        self.assertNotIn("account_overview", cfg["allow"])
+
+    def test_project_without_mutate_execute_refused(self):
+        with self.assertRaises(ValueError):
+            C.read_mutate_execute(self.p, "claude_code")
+
+    def test_unknown_project_refused(self):
+        with self.assertRaises(ValueError):
+            C.read_mutate_execute(self.p, "no_such_project")
+
+    def test_missing_cap_refuses_rather_than_defaults(self):
+        text = REG.replace("        applies_per_client_day: 5\n", "")
+        with self.assertRaises(ValueError) as ctx:
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+        self.assertIn("applies_per_client_day", str(ctx.exception))
+
+    def test_malformed_cap_refuses(self):
+        for bad in ["many", "-1", "0", "2.5", ""]:
+            text = REG.replace("actions_per_changeset: 25", f"actions_per_changeset: {bad}")
+            with self.assertRaises(ValueError):
+                C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+
+    def test_missing_allow_refuses(self):
+        text = REG.replace("        - mutate_campaign_negative\n", "")
+        with self.assertRaises(ValueError):
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+
+    def test_read_workdir(self):
+        self.assertEqual(C.read_workdir(self.p, "claude_google_ads"), "/projects/claude_google_ads")
+        self.assertEqual(C.read_workdir(self.p, "claude_code"), "/projects/claude_code")
+
+    def test_read_workdir_unknown_project_refused(self):
+        with self.assertRaises(ValueError):
+            C.read_workdir(self.p, "no_such_project")
+
+    def test_read_allow_list_reads_each_block_separately(self):
+        self.assertEqual(C.read_allow_list(self.p, "claude_google_ads", "read_execute"),
+                         ["account_overview", "audit_analyze"])
+        self.assertEqual(C.read_allow_list(self.p, "claude_google_ads", "mutate_execute"),
+                         ["mutate_campaign_negative"])
+
+    def test_read_allow_list_absent_block_is_empty(self):
+        self.assertEqual(C.read_allow_list(self.p, "claude_code", "mutate_execute"), [])
+
+    def test_walker_ignores_other_projects(self):
+        """A block belonging to another project must never leak into this one."""
+        self.assertEqual(C.read_allow_list(self.p, "claude_code", "read_execute"), [])
+
+class TestDisjointness(unittest.TestCase):
+    def test_disjoint_lists_pass(self):
+        C.assert_allow_lists_disjoint(["account_overview"], ["mutate_campaign_negative"])
+
+    def test_overlap_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            C.assert_allow_lists_disjoint(["account_overview", "shared"], ["shared"])
+        self.assertIn("shared", str(ctx.exception))
+
+    def test_real_registry_lists_are_disjoint(self):
+        """The shipped registry must never list a script as both reader and mutator."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        real = os.path.join(here, "..", "registry", "projects.yaml")
+        mut = C.read_mutate_execute(real, "claude_google_ads")
+        read_allow = ["test_connection", "account_overview", "audit_search_terms", "audit_analyze"]
+        C.assert_allow_lists_disjoint(read_allow, mut["allow"])
+
 if __name__ == "__main__":
     unittest.main()
