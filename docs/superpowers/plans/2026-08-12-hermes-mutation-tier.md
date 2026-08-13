@@ -309,9 +309,11 @@ git commit -m "feat(hermes): typed change-set schema and canonical hashing"
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: `CAP_KEYS`, `read_mutate_execute(path, project) -> {"runner": str, "script_dir": str, "allow": [str], "caps": {str: int}}`, `assert_allow_lists_disjoint(read_allow, mutate_allow) -> None`. Both raise `ValueError`.
+- Produces: `CAP_KEYS`, `_strip_inline_comment(s)`, `_iter_project_lines(path, project)`, `read_workdir(path, project) -> str`, `read_block(path, project, block) -> dict`, `read_allow_list(path, project, block) -> [str]`, `read_mutate_execute(path, project) -> {"runner": str, "script_dir": str, "allow": [str], "caps": {str: int}}`, `assert_allow_lists_disjoint(read_allow, mutate_allow) -> None`. All raise `ValueError` on rejection.
 
-**Context:** the parser mirrors `read_read_execute()` in `run-ads-report.py:71-105` — same stdlib line-parsing approach and the same scope discipline (any sibling or shallower line closes the block, so a later key cannot bleed into `allow`). The difference is a second nested sub-block, `caps`. Do not import from `run-ads-report.py`; it is a script, not a module.
+**Context:** the parsing approach mirrors `read_read_execute()` in `run-ads-report.py:71-105` — same stdlib line-parsing and the same scope discipline (any sibling or shallower line closes the block, so a later key cannot bleed into `allow`). The difference is a second nested sub-block, `caps`. Do not import from `run-ads-report.py`; it is a script, not a module, and Inc-3 is frozen by the Global Constraints.
+
+**One walker, not four.** Everything this tier needs to read from the registry — the workdir, the mutate block, and the read_execute allow-list for the disjointness check — is built on the single `_iter_project_lines` generator, in this file. Task 7's applier calls `C.read_workdir` and `C.read_allow_list`; it must not define parsers of its own. Parsers that change together live together.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -398,6 +400,27 @@ class TestRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.read_mutate_execute(_reg_file(text), "claude_google_ads")
 
+    def test_read_workdir(self):
+        self.assertEqual(C.read_workdir(self.p, "claude_google_ads"), "/projects/claude_google_ads")
+        self.assertEqual(C.read_workdir(self.p, "claude_code"), "/projects/claude_code")
+
+    def test_read_workdir_unknown_project_refused(self):
+        with self.assertRaises(ValueError):
+            C.read_workdir(self.p, "no_such_project")
+
+    def test_read_allow_list_reads_each_block_separately(self):
+        self.assertEqual(C.read_allow_list(self.p, "claude_google_ads", "read_execute"),
+                         ["account_overview", "audit_analyze"])
+        self.assertEqual(C.read_allow_list(self.p, "claude_google_ads", "mutate_execute"),
+                         ["mutate_campaign_negative"])
+
+    def test_read_allow_list_absent_block_is_empty(self):
+        self.assertEqual(C.read_allow_list(self.p, "claude_code", "mutate_execute"), [])
+
+    def test_walker_ignores_other_projects(self):
+        """A block belonging to another project must never leak into this one."""
+        self.assertEqual(C.read_allow_list(self.p, "claude_code", "read_execute"), [])
+
 class TestDisjointness(unittest.TestCase):
     def test_disjoint_lists_pass(self):
         C.assert_allow_lists_disjoint(["account_overview"], ["mutate_campaign_negative"])
@@ -462,17 +485,15 @@ def _strip_inline_comment(stripped):
     return re.sub(r"\s+#.*$", "", stripped)
 
 
-def read_mutate_execute(path, project):
-    """Stdlib line-parser for projects.<project>.mutate_execute.
+def _iter_project_lines(path, project):
+    """Yield (indent, stripped) for each meaningful line inside projects.<project>.
 
-    Mirrors read_read_execute() in run-ads-report.py, including its scope discipline:
-    ANY sibling or shallower line closes the block, so a later key cannot bleed into
-    `allow`. Adds a second nested sub-block, `caps`.
+    The single registry walker for this tier. run-ads-report.py has its own copy for
+    read_execute and stays frozen (Inc-3 is unchanged by this increment), but nothing
+    NEW duplicates it: read_workdir, read_block, read_mutate_execute, and
+    read_allow_list are all built on this one generator.
     """
     cur = None
-    in_me = False
-    sub = None
-    got = {"allow": [], "caps": {}}
     with open(path, encoding="utf-8") as f:
         for raw in f:
             line = raw.rstrip("\n")
@@ -481,24 +502,59 @@ def read_mutate_execute(path, project):
             indent = len(line) - len(line.lstrip(" "))
             stripped = _strip_inline_comment(line.strip())
             if indent == 2 and stripped.endswith(":"):          # a project name
-                cur = stripped[:-1]; in_me = False; sub = None
-            elif indent == 4 and cur == project and stripped == "mutate_execute:":
-                in_me = True; sub = None
-            elif indent <= 4:                                    # sibling/shallower closes scope
-                in_me = False; sub = None
-            elif indent == 6 and in_me and cur == project:
-                if stripped in ("allow:", "caps:"):
-                    sub = stripped[:-1]
-                else:
-                    sub = None
-                    k, _, v = stripped.partition(":")
-                    got[k.strip()] = v.strip()
-            elif indent == 8 and in_me and cur == project:
-                if sub == "allow" and stripped.startswith("- "):
-                    got["allow"].append(stripped[2:].strip())
-                elif sub == "caps":
-                    k, _, v = stripped.partition(":")
-                    got["caps"][k.strip()] = v.strip()
+                cur = stripped[:-1]
+                continue
+            if cur == project:
+                yield indent, stripped
+
+
+def read_workdir(path, project):
+    for indent, stripped in _iter_project_lines(path, project):
+        if indent == 4 and stripped.startswith("workdir:"):
+            return stripped.split(":", 1)[1].strip()
+    raise ValueError(f"no workdir for project {project!r}")
+
+
+def read_block(path, project, block):
+    """Parse projects.<project>.<block> into scalars plus `allow` and `caps`.
+
+    Scope discipline (from run-ads-report.py's Inc-2 review fix): ANY sibling or
+    shallower line closes the block, so a later key cannot bleed into `allow`.
+    Returns empty structures when the block is absent — callers decide whether that
+    is a refusal (read_mutate_execute) or simply nothing to check (read_allow_list).
+    """
+    inside = False
+    sub = None
+    got = {"allow": [], "caps": {}}
+    for indent, stripped in _iter_project_lines(path, project):
+        if indent == 4 and stripped == f"{block}:":
+            inside = True; sub = None
+        elif indent <= 4:                                        # sibling/shallower closes scope
+            inside = False; sub = None
+        elif indent == 6 and inside:
+            if stripped in ("allow:", "caps:"):
+                sub = stripped[:-1]
+            else:
+                sub = None
+                k, _, v = stripped.partition(":")
+                got[k.strip()] = v.strip()
+        elif indent == 8 and inside:
+            if sub == "allow" and stripped.startswith("- "):
+                got["allow"].append(stripped[2:].strip())
+            elif sub == "caps":
+                k, _, v = stripped.partition(":")
+                got["caps"][k.strip()] = v.strip()
+    return got
+
+
+def read_allow_list(path, project, block):
+    """Allow-list for any block. Used for the read_execute side of the disjointness
+    check; a project with no such block yields [] — nothing to overlap with."""
+    return read_block(path, project, block)["allow"]
+
+
+def read_mutate_execute(path, project):
+    got = read_block(path, project, "mutate_execute")
     if not got.get("runner") or not got.get("script_dir") or not got["allow"]:
         raise ValueError(
             f"no mutate_execute(runner, script_dir, allow) for project {project!r}")
@@ -1592,7 +1648,7 @@ Do not push yet, and do not touch the pre-existing WIP. Pushing happens in Task 
 - Test: `infra/hermes-agent/bin/apply-changeset.test.py`
 
 **Interfaces:**
-- Consumes: everything from `changeset_lib`; the Task-6 mutator CLI contract.
+- Consumes: everything from `changeset_lib` — including `read_workdir`, `read_allow_list`, and `read_mutate_execute`; this file defines **no registry parser of its own**. Also the Task-6 mutator CLI contract.
 - Produces: `PostMutationError`, `build_plan(client, changeset_id, now, ...) -> dict`, `apply(plan, now) -> int`, CLI `--client (--changeset | --undo) [--registry] [--projects] [--dry-run]`, exit 0 / 1 / 2 / 3.
 
 **Guard order (spec §7) — implement exactly this sequence, so every refusal happens before the credential is used:**
@@ -1947,31 +2003,6 @@ def _child_env():
     return env
 
 
-def _read_allow(projects_path, project):
-    """Read the read_execute allow-list for the disjointness check. Same scope
-    discipline as read_mutate_execute. A project with no read_execute block returns
-    an empty list — nothing to overlap with."""
-    allow, cur, in_re, in_allow = [], None, False, False
-    with open(projects_path, encoding="utf-8") as f:
-        for raw in f:
-            line = raw.rstrip("\n")
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
-            indent = len(line) - len(line.lstrip(" "))
-            stripped = C._strip_inline_comment(line.strip())
-            if indent == 2 and stripped.endswith(":"):
-                cur = stripped[:-1]; in_re = False; in_allow = False
-            elif indent == 4 and cur == project and stripped == "read_execute:":
-                in_re = True; in_allow = False
-            elif indent <= 4:
-                in_re = False; in_allow = False
-            elif indent == 6 and in_re and cur == project:
-                in_allow = (stripped == "allow:")
-            elif indent == 8 and in_allow and in_re and cur == project and stripped.startswith("- "):
-                allow.append(stripped[2:].strip())
-    return allow
-
-
 def build_plan(client, changeset_id, now, registry=None, projects=None, undo=None):
     """Guards 1-8. Returns everything apply() needs; raises SystemExit(2) on any refusal."""
     target = undo or changeset_id
@@ -2047,10 +2078,11 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
     if os.path.basename(name) != name:
         _refuse(f"mutator name must be a bare basename, got {name!r}")
     try:
-        C.assert_allow_lists_disjoint(_read_allow(projects_path, rec["project"]), cfg["allow"])
-    except ValueError as e:
+        C.assert_allow_lists_disjoint(
+            C.read_allow_list(projects_path, rec["project"], "read_execute"), cfg["allow"])
+        workdir = C.read_workdir(projects_path, rec["project"])
+    except (ValueError, OSError) as e:
         _refuse(str(e))
-    workdir = _read_workdir(projects_path, rec["project"])
     script = os.path.join(workdir, cfg["script_dir"], name + ".py")
     if not os.path.isfile(cfg["runner"]):
         _refuse(f"runner interpreter not found: {cfg['runner']}")
@@ -2069,22 +2101,6 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
     return {"vault": vault, "changeset_id": target, "runner": cfg["runner"], "script": script,
             "actions": actions, "undo": bool(undo), "operator": operator,
             "customer_id": rec["customer_id"]}
-
-
-def _read_workdir(path, project):
-    cur = None
-    with open(path, encoding="utf-8") as f:
-        for raw in f:
-            line = raw.rstrip("\n")
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
-            indent = len(line) - len(line.lstrip(" "))
-            stripped = C._strip_inline_comment(line.strip())
-            if indent == 2 and stripped.endswith(":"):
-                cur = stripped[:-1]
-            elif indent == 4 and cur == project and stripped.startswith("workdir:"):
-                return stripped.split(":", 1)[1].strip()
-    _refuse(f"no workdir for project {project!r}")
 
 
 def _undo_targets(vault, changeset_id):
