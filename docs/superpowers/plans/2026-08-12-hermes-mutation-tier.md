@@ -128,6 +128,17 @@ class TestAction(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.validate_action(_action(bid_micros=1000))
 
+    def test_numeric_campaign_id_refused(self):
+        """A JSON number must not pass a digits-only check via str() coercion — it
+        would serialize unquoted and break the schema the approval hash covers."""
+        with self.assertRaises(ValueError):
+            C.validate_action(_action(campaign_id=22233344455))
+
+    def test_non_string_keyword_refused(self):
+        for bad in [12345, None, ["free"], {"t": "free"}]:
+            with self.assertRaises(ValueError):
+                C.validate_action(_action(keyword=bad))
+
 class TestChangeset(unittest.TestCase):
     def test_valid_changeset_accepted(self):
         self.assertEqual(len(C.validate_changeset(_cs(), 25)["actions"]), 1)
@@ -163,6 +174,19 @@ class TestChangeset(unittest.TestCase):
     def test_unknown_top_level_field_rejected(self):
         with self.assertRaises(ValueError):
             C.validate_changeset(_cs(approved=True), 25)
+
+    def test_non_string_identity_fields_refused(self):
+        """Type is validated, not coerced — every identity field must be a JSON string."""
+        for field, bad in [("changeset_id", 20260812), ("client", 123),
+                           ("project", 7), ("customer_id", 1234567890),
+                           ("created_at", 20260812101500)]:
+            with self.assertRaises(ValueError):
+                C.validate_changeset(_cs(**{field: bad}), 25)
+
+    def test_null_identity_fields_refused(self):
+        for field in ("changeset_id", "client", "project", "customer_id", "created_at"):
+            with self.assertRaises(ValueError):
+                C.validate_changeset(_cs(**{field: None}), 25)
 
 class TestCanonical(unittest.TestCase):
     def test_canonical_is_key_order_independent(self):
@@ -226,6 +250,16 @@ ACTION_FIELDS = {"type", "campaign_id", "keyword", "match_type"}
 CHANGESET_FIELDS = {"changeset_id", "client", "project", "customer_id", "created_at", "actions"}
 
 
+def _require_str(v, field):
+    """Refuse non-string JSON types outright. A validator that silently coerces
+    accepts inputs it never specified: `str(22233344455)` would let a JSON NUMBER
+    pass a digits-only check and then serialize unquoted, breaking the schema
+    contract the approval hash is taken over. Fail closed on type, not just shape."""
+    if not isinstance(v, str):
+        raise ValueError(f"{field} must be a JSON string, got {type(v).__name__}")
+    return v
+
+
 def validate_keyword(kw):
     if not isinstance(kw, str) or not kw.strip():
         raise ValueError("keyword must be a non-empty string")
@@ -247,7 +281,7 @@ def validate_action(a):
         raise ValueError(f"unknown action fields: {sorted(extra)}")
     if a.get("type") not in ACTION_TYPES:
         raise ValueError(f"unknown action type: {a.get('type')!r} (allowed {list(ACTION_TYPES)})")
-    if not ID_RE.fullmatch(str(a.get("campaign_id", ""))):
+    if not ID_RE.fullmatch(_require_str(a.get("campaign_id"), "campaign_id")):
         raise ValueError(f"invalid campaign_id: {a.get('campaign_id')!r} (digits only)")
     if a.get("match_type") not in MATCH_TYPES:
         raise ValueError(f"invalid match_type: {a.get('match_type')!r} (allowed {list(MATCH_TYPES)})")
@@ -261,13 +295,13 @@ def validate_changeset(cs, max_actions):
     extra = set(cs) - CHANGESET_FIELDS
     if extra:
         raise ValueError(f"unknown change-set fields: {sorted(extra)}")
-    if not CHANGESET_ID_RE.fullmatch(str(cs.get("changeset_id", ""))):
+    if not CHANGESET_ID_RE.fullmatch(_require_str(cs.get("changeset_id"), "changeset_id")):
         raise ValueError(f"invalid changeset_id: {cs.get('changeset_id')!r}")
-    vault_lib.validate_slug(str(cs.get("client", "")))
-    if not PROJECT_RE.fullmatch(str(cs.get("project", ""))):
+    vault_lib.validate_slug(cs.get("client"))          # vault_lib already isinstance-checks
+    if not PROJECT_RE.fullmatch(_require_str(cs.get("project"), "project")):
         raise ValueError(f"invalid project: {cs.get('project')!r}")
-    vault_lib.validate_customer_id(str(cs.get("customer_id", "")))
-    datetime.datetime.strptime(str(cs.get("created_at", "")), ISO)   # raises ValueError
+    vault_lib.validate_customer_id(cs.get("customer_id"))            # ditto
+    datetime.datetime.strptime(_require_str(cs.get("created_at"), "created_at"), ISO)
     actions = cs.get("actions")
     if not isinstance(actions, list) or not actions:
         raise ValueError("actions must be a non-empty list")
@@ -1417,6 +1451,12 @@ class TestParseAction(unittest.TestCase):
         with self.assertRaises(ValueError):
             M.parse_action(json.dumps(dict(GOOD, campaign_id="22-33")))
 
+    def test_numeric_campaign_id_refused(self):
+        """Must match changeset_lib: fail closed on TYPE, not just shape. A JSON
+        number must never coerce its way past a digits-only check."""
+        with self.assertRaises(ValueError):
+            M.parse_action(json.dumps(dict(GOOD, campaign_id=22233344455)))
+
     def test_malformed_json_refused(self):
         with self.assertRaises(ValueError):
             M.parse_action("{not json")
@@ -1517,8 +1557,11 @@ def parse_action(s):
         raise ValueError("--action must be a JSON object")
     if a.get("type") not in ACTION_TYPES:
         raise ValueError(f"unknown action type: {a.get('type')!r}")
-    if not ID_RE.fullmatch(str(a.get("campaign_id", ""))):
-        raise ValueError(f"invalid campaign_id: {a.get('campaign_id')!r}")
+    cid = a.get("campaign_id")
+    if not isinstance(cid, str):        # fail closed on TYPE, not just shape — a JSON
+        raise ValueError("campaign_id must be a JSON string")   # number must not coerce
+    if not ID_RE.fullmatch(cid):
+        raise ValueError(f"invalid campaign_id: {cid!r}")
     if a.get("match_type") not in MATCH_TYPES:
         raise ValueError(f"invalid match_type: {a.get('match_type')!r}")
     kw = a.get("keyword")
