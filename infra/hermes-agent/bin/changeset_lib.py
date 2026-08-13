@@ -258,6 +258,17 @@ def log_path(vault):
     return os.path.join(changes_dir(vault), "log.jsonl")
 
 
+DEFAULT_PROJECTS_REGISTRY = "/opt/registry/projects.yaml"
+
+
+def registry_projects_path():
+    """Container path when mounted, else the in-repo copy — mirrors
+    run-ads-report.py:registry_path()."""
+    return os.environ.get("ADS_REGISTRY") or (
+        DEFAULT_PROJECTS_REGISTRY if os.path.exists(DEFAULT_PROJECTS_REGISTRY)
+        else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "registry", "projects.yaml"))
+
+
 def file_digest(path):
     """sha256 over the raw file bytes.
 

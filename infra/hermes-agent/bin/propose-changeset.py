@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Validate an operator-authored actions file into a typed change-set in the client
+vault. Stdlib-only. HOLDS NO CREDENTIAL and performs no network I/O — this command
+is structurally incapable of touching the ad account.
+
+The operator supplies ONLY the actions array. Identity fields (client, project,
+customer_id) come from the client resolver, so an operator cannot typo a customer id
+into a change-set, and the apply-time identity check becomes a tamper check.
+"""
+import argparse, datetime, json, os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import changeset_lib as C
+import vault_lib
+
+ALLOWED_INPUT_FIELDS = {"actions"}
+
+
+def propose(client, actions_file, now, registry=None, projects=None):
+    rec = vault_lib.resolve(client, registry)          # validates slug + customer_id
+    projects_path = projects or C.registry_projects_path()
+    caps = C.read_mutate_execute(projects_path, rec["project"])["caps"]
+    with open(actions_file, encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("actions file must be a JSON object with an 'actions' key")
+    extra = set(payload) - ALLOWED_INPUT_FIELDS
+    if extra:
+        raise ValueError(f"actions file may only contain 'actions'; identity fields are "
+                         f"supplied by the resolver, not the operator (got {sorted(extra)})")
+    cs = {
+        "changeset_id": f"{now.strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}",
+        "client": rec["slug"],
+        "project": rec["project"],
+        "customer_id": rec["customer_id"],
+        "created_at": now.strftime(C.ISO),
+        "actions": payload.get("actions"),
+    }
+    C.validate_changeset(cs, caps["actions_per_changeset"])
+    vault = rec["vault_path"]
+    os.makedirs(C.changes_dir(vault), exist_ok=True)
+    path = C.changeset_path(vault, cs["changeset_id"])
+    with open(path, "wb") as f:                        # canonical bytes; hashed later
+        f.write(C.canonical_bytes(cs))
+        f.flush()
+        os.fsync(f.fileno())
+    return cs
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--client", required=True)
+    ap.add_argument("--from", dest="actions_file", required=True)
+    ap.add_argument("--registry", help="clients.json (default: <VAULT_ROOT>/_registry)")
+    ap.add_argument("--projects", help="projects.yaml (default: /opt/registry or ../registry)")
+    args = ap.parse_args(argv)
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    try:
+        cs = propose(args.client, args.actions_file, now, args.registry, args.projects)
+    except (ValueError, KeyError, OSError, TypeError, json.JSONDecodeError) as e:
+        print(f"propose-changeset: {e}", file=sys.stderr)
+        return 2
+    rec = vault_lib.resolve(cs["client"], args.registry)
+    print(C.changeset_path(rec["vault_path"], cs["changeset_id"]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
