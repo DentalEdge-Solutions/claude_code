@@ -170,8 +170,10 @@ class TestCanonical(unittest.TestCase):
         b = {"a": 2, "b": 1}
         self.assertEqual(C.canonical_bytes(a), C.canonical_bytes(b))
 
-    def test_canonical_has_no_whitespace(self):
-        self.assertNotIn(b" ", C.canonical_bytes(_cs()))
+    def test_canonical_uses_compact_separators(self):
+        """Exact bytes prove compact separators WITHOUT forbidding spaces inside string
+        values — a keyword is free text and legitimately contains them."""
+        self.assertEqual(C.canonical_bytes({"b": 1, "a": "x y"}), b'{"a":"x y","b":1}')
 
     def test_canonical_roundtrips(self):
         self.assertEqual(json.loads(C.canonical_bytes(_cs()).decode()), _cs())
