@@ -25,6 +25,16 @@ ACTION_FIELDS = {"type", "campaign_id", "keyword", "match_type"}
 CHANGESET_FIELDS = {"changeset_id", "client", "project", "customer_id", "created_at", "actions"}
 
 
+def _require_str(v, field):
+    """Refuse non-string JSON types outright. A validator that silently coerces
+    accepts inputs it never specified: `str(22233344455)` would let a JSON NUMBER
+    pass a digits-only check and then serialize unquoted, breaking the schema
+    contract the approval hash is taken over. Fail closed on type, not just shape."""
+    if not isinstance(v, str):
+        raise ValueError(f"{field} must be a JSON string, got {type(v).__name__}")
+    return v
+
+
 def validate_keyword(kw):
     if not isinstance(kw, str) or not kw.strip():
         raise ValueError("keyword must be a non-empty string")
@@ -46,7 +56,7 @@ def validate_action(a):
         raise ValueError(f"unknown action fields: {sorted(extra)}")
     if a.get("type") not in ACTION_TYPES:
         raise ValueError(f"unknown action type: {a.get('type')!r} (allowed {list(ACTION_TYPES)})")
-    if not ID_RE.fullmatch(str(a.get("campaign_id", ""))):
+    if not ID_RE.fullmatch(_require_str(a.get("campaign_id"), "campaign_id")):
         raise ValueError(f"invalid campaign_id: {a.get('campaign_id')!r} (digits only)")
     if a.get("match_type") not in MATCH_TYPES:
         raise ValueError(f"invalid match_type: {a.get('match_type')!r} (allowed {list(MATCH_TYPES)})")
@@ -60,13 +70,13 @@ def validate_changeset(cs, max_actions):
     extra = set(cs) - CHANGESET_FIELDS
     if extra:
         raise ValueError(f"unknown change-set fields: {sorted(extra)}")
-    if not CHANGESET_ID_RE.fullmatch(str(cs.get("changeset_id", ""))):
+    if not CHANGESET_ID_RE.fullmatch(_require_str(cs.get("changeset_id"), "changeset_id")):
         raise ValueError(f"invalid changeset_id: {cs.get('changeset_id')!r}")
-    vault_lib.validate_slug(str(cs.get("client", "")))
-    if not PROJECT_RE.fullmatch(str(cs.get("project", ""))):
+    vault_lib.validate_slug(cs.get("client"))
+    if not PROJECT_RE.fullmatch(_require_str(cs.get("project"), "project")):
         raise ValueError(f"invalid project: {cs.get('project')!r}")
-    vault_lib.validate_customer_id(str(cs.get("customer_id", "")))
-    datetime.datetime.strptime(str(cs.get("created_at", "")), ISO)   # raises ValueError
+    vault_lib.validate_customer_id(cs.get("customer_id"))
+    datetime.datetime.strptime(_require_str(cs.get("created_at"), "created_at"), ISO)   # raises ValueError
     actions = cs.get("actions")
     if not isinstance(actions, list) or not actions:
         raise ValueError("actions must be a non-empty list")

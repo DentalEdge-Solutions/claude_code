@@ -53,6 +53,18 @@ class TestAction(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.validate_action(_action(bid_micros=1000))
 
+
+    def test_numeric_campaign_id_refused(self):
+        """A JSON number must not pass a digits-only check via str() coercion — it
+        would serialize unquoted and break the schema the approval hash covers."""
+        with self.assertRaises(ValueError):
+            C.validate_action(_action(campaign_id=22233344455))
+
+    def test_non_string_keyword_refused(self):
+        for bad in [12345, None, ["free"], {"t": "free"}]:
+            with self.assertRaises(ValueError):
+                C.validate_action(_action(keyword=bad))
+
 class TestChangeset(unittest.TestCase):
     def test_valid_changeset_accepted(self):
         self.assertEqual(len(C.validate_changeset(_cs(), 25)["actions"]), 1)
@@ -88,6 +100,20 @@ class TestChangeset(unittest.TestCase):
     def test_unknown_top_level_field_rejected(self):
         with self.assertRaises(ValueError):
             C.validate_changeset(_cs(approved=True), 25)
+
+    def test_non_string_identity_fields_refused(self):
+        """Type is validated, not coerced — every identity field must be a JSON string."""
+        for field, bad in [("changeset_id", 20260812), ("client", 123),
+                           ("project", 7), ("customer_id", 1234567890),
+                           ("created_at", 20260812101500)]:
+            with self.assertRaises(ValueError):
+                C.validate_changeset(_cs(**{field: bad}), 25)
+
+    def test_null_identity_fields_refused(self):
+        for field in ("changeset_id", "client", "project", "customer_id", "created_at"):
+            with self.assertRaises(ValueError):
+                C.validate_changeset(_cs(**{field: None}), 25)
+
 
 class TestCanonical(unittest.TestCase):
     def test_canonical_is_key_order_independent(self):
