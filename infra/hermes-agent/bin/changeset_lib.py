@@ -141,18 +141,32 @@ def read_block(path, project, block):
     shallower line closes the block, so a later key cannot bleed into `allow`.
     Returns empty structures when the block is absent — callers decide whether that
     is a refusal (read_mutate_execute) or simply nothing to check (read_allow_list).
+
+    DUPLICATE KEYS REFUSE. A repeated `allow:` header would otherwise ACCUMULATE,
+    silently admitting a second mutator; a repeated scalar would silently take the
+    last value, quietly swapping the interpreter. In a file that decides what may
+    mutate a live account, a duplicate key is a mistake — a merge artifact or a bad
+    hand-edit — not an intent, so it is loud rather than resolved.
     """
     inside = False
     sub = None
+    seen = set()
     got = {"allow": [], "caps": {}}
     for indent, stripped in _iter_project_lines(path, project):
         if indent == 4 and stripped == f"{block}:":
+            if inside or seen:
+                raise ValueError(f"duplicate {block!r} block for project {project!r} — refusing")
             inside = True; sub = None
         elif indent <= 4:                                        # sibling/shallower closes scope
             inside = False; sub = None
         elif indent == 6 and inside:
+            key = stripped[:-1] if stripped in ("allow:", "caps:") else stripped.partition(":")[0].strip()
+            if key in seen:
+                raise ValueError(f"duplicate {key!r} key in {block} for project {project!r} — "
+                                 "refusing rather than merging or taking the last value")
+            seen.add(key)
             if stripped in ("allow:", "caps:"):
-                sub = stripped[:-1]
+                sub = key
             else:
                 sub = None
                 k, _, v = stripped.partition(":")
