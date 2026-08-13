@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Typed change-set validation, canonical serialization, and hashing for the
+Hermes mutation tier. Stdlib-only. Holds NO credential and performs no network
+I/O — this library is used by propose/approve (uncredentialed) and by apply.
+
+The mutation tier removes the read-only-credential backstop, so validation here
+is fail-closed on every field: unknown action types, unknown fields, non-digit
+ids, and control characters are all refusals, never coercions.
+See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
+"""
+import datetime, json, os, re, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vault_lib
+
+ACTION_TYPES = ("add_campaign_negative",)
+MATCH_TYPES = ("EXACT", "PHRASE", "BROAD")
+ISO = "%Y-%m-%dT%H:%M:%SZ"
+KEYWORD_MAX = 80                      # Google Ads keyword text limit
+
+ID_RE = re.compile(r"^[0-9]{1,15}$")
+CHANGESET_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$")
+PROJECT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+ACTION_FIELDS = {"type", "campaign_id", "keyword", "match_type"}
+CHANGESET_FIELDS = {"changeset_id", "client", "project", "customer_id", "created_at", "actions"}
+
+
+def validate_keyword(kw):
+    if not isinstance(kw, str) or not kw.strip():
+        raise ValueError("keyword must be a non-empty string")
+    if len(kw) > KEYWORD_MAX:
+        raise ValueError(f"keyword exceeds {KEYWORD_MAX} characters (got {len(kw)})")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in kw):
+        raise ValueError("keyword contains control characters")
+    return kw
+
+
+def validate_action(a):
+    """Fail-closed validation of one typed action. Keyword text is free-form (it is
+    whatever the public typed into Google), so it travels as JSON to the mutator and
+    is never spliced into a shell command."""
+    if not isinstance(a, dict):
+        raise ValueError("action must be an object")
+    extra = set(a) - ACTION_FIELDS
+    if extra:
+        raise ValueError(f"unknown action fields: {sorted(extra)}")
+    if a.get("type") not in ACTION_TYPES:
+        raise ValueError(f"unknown action type: {a.get('type')!r} (allowed {list(ACTION_TYPES)})")
+    if not ID_RE.fullmatch(str(a.get("campaign_id", ""))):
+        raise ValueError(f"invalid campaign_id: {a.get('campaign_id')!r} (digits only)")
+    if a.get("match_type") not in MATCH_TYPES:
+        raise ValueError(f"invalid match_type: {a.get('match_type')!r} (allowed {list(MATCH_TYPES)})")
+    validate_keyword(a.get("keyword"))
+    return a
+
+
+def validate_changeset(cs, max_actions):
+    if not isinstance(cs, dict):
+        raise ValueError("change-set must be an object")
+    extra = set(cs) - CHANGESET_FIELDS
+    if extra:
+        raise ValueError(f"unknown change-set fields: {sorted(extra)}")
+    if not CHANGESET_ID_RE.fullmatch(str(cs.get("changeset_id", ""))):
+        raise ValueError(f"invalid changeset_id: {cs.get('changeset_id')!r}")
+    vault_lib.validate_slug(str(cs.get("client", "")))
+    if not PROJECT_RE.fullmatch(str(cs.get("project", ""))):
+        raise ValueError(f"invalid project: {cs.get('project')!r}")
+    vault_lib.validate_customer_id(str(cs.get("customer_id", "")))
+    datetime.datetime.strptime(str(cs.get("created_at", "")), ISO)   # raises ValueError
+    actions = cs.get("actions")
+    if not isinstance(actions, list) or not actions:
+        raise ValueError("actions must be a non-empty list")
+    if len(actions) > max_actions:
+        raise ValueError(f"{len(actions)} actions exceeds cap actions_per_changeset={max_actions}")
+    for a in actions:
+        validate_action(a)
+    return cs
+
+
+def canonical_bytes(cs):
+    """Deterministic serialization: sorted keys, no whitespace. propose writes this
+    exact form to disk, so hashing the raw file bytes later is both canonical and
+    byte-exact."""
+    return json.dumps(cs, sort_keys=True, separators=(",", ":")).encode("utf-8")
