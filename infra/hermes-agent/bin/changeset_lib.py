@@ -315,15 +315,15 @@ def verify_approval(vault, cid, digest, now):
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
     p = approval_path(vault, cid)
-    if not os.path.exists(p):
+    if not os.path.isfile(p):
         raise ValueError(f"no approval record for change-set {cid!r} — run approve-changeset.py first")
-    try:
+    try:                       # unreadable / directory-in-place must REFUSE, not leak an OSError
         with open(p, encoding="utf-8") as f:
             rec = json.load(f)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"corrupt approval record at {p} ({e})") from e
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(f"unreadable approval record for {cid!r}: {e}")
     if not isinstance(rec, dict):
-        raise ValueError(f"approval record at {p} must be a JSON object")
+        raise ValueError(f"malformed approval record for {cid!r}: expected a JSON object")
     if _require_str(rec.get("changeset_id"), "changeset_id") != cid:
         raise ValueError(f"approval record changeset_id does not match {cid!r}")
     approved_digest = _require_str(rec.get("sha256"), "sha256")
@@ -344,11 +344,21 @@ def verify_approval(vault, cid, digest, now):
 
 def append_log(vault, rec):
     """Append one audit-log record and fsync before returning."""
-    os.makedirs(changes_dir(vault), exist_ok=True)
+    d = changes_dir(vault)
+    os.makedirs(d, exist_ok=True)
     with open(log_path(vault), "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, sort_keys=True) + "\n")
         f.flush()
         os.fsync(f.fileno())
+    # fsync the DIRECTORY too: on the first append the log file is newly created, and
+    # fsyncing its contents does not persist the directory entry that names it. Losing
+    # that entry loses the whole reversibility record, which day_counts would then read
+    # as a legitimate zero.
+    dfd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def day_counts(vault, day):

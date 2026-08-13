@@ -327,6 +327,27 @@ class TestApproval(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
 
+    def test_directory_in_place_of_approval_refused(self):
+        os.makedirs(C.approval_path(self.vault, "20260812-101500-abcd1234"))
+        with self.assertRaises(ValueError):
+            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+
+    def test_unreadable_approval_refused(self):
+        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        p = C.approval_path(self.vault, "20260812-101500-abcd1234")
+        os.chmod(p, 0)
+        try:
+            with self.assertRaises(ValueError):
+                C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+        finally:
+            os.chmod(p, 0o600)      # restore so tempdir cleanup succeeds
+
+    def test_non_object_approval_refused(self):
+        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), "w") as f:
+            f.write('["not", "an", "object"]')
+        with self.assertRaises(ValueError):
+            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+
     def test_hash_mismatch_refused(self):
         C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
         with open(self.cs, "ab") as f:
