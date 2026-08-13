@@ -436,6 +436,41 @@ class TestRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.read_mutate_execute(_reg_file(text), "claude_google_ads")
 
+    def test_duplicate_allow_header_refused(self):
+        """A repeated allow: header must not accumulate — that would silently admit a
+        second mutator into the list that decides what may touch a live account."""
+        text = REG.replace("        - mutate_campaign_negative\n",
+                           "        - mutate_campaign_negative\n      allow:\n        - apply_negatives\n")
+        with self.assertRaises(ValueError) as ctx:
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+        self.assertIn("duplicate", str(ctx.exception))
+
+    def test_duplicate_caps_header_refused(self):
+        text = REG.replace("      caps:\n", "      caps:\n        actions_per_changeset: 999\n      caps:\n")
+        with self.assertRaises(ValueError):
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+
+    def test_duplicate_scalar_key_refused(self):
+        """A repeated runner: would otherwise silently swap the interpreter."""
+        text = REG.replace("      script_dir: code\n", "      script_dir: code\n      runner: /bin/sh\n")
+        with self.assertRaises(ValueError):
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+
+    def test_duplicate_block_refused(self):
+        text = REG + """    mutate_execute:
+      runner: /bin/sh
+      script_dir: code
+      allow:
+        - evil
+      caps:
+        actions_per_changeset: 1
+        actions_per_client_day: 1
+        applies_per_client_day: 1
+        approval_ttl_hours: 1
+"""
+        with self.assertRaises(ValueError):
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+
     def test_read_workdir(self):
         self.assertEqual(C.read_workdir(self.p, "claude_google_ads"), "/projects/claude_google_ads")
         self.assertEqual(C.read_workdir(self.p, "claude_code"), "/projects/claude_code")
@@ -471,7 +506,8 @@ class TestDisjointness(unittest.TestCase):
         here = os.path.dirname(os.path.abspath(__file__))
         real = os.path.join(here, "..", "registry", "projects.yaml")
         mut = C.read_mutate_execute(real, "claude_google_ads")
-        read_allow = ["test_connection", "account_overview", "audit_search_terms", "audit_analyze"]
+        read_allow = C.read_allow_list(real, "claude_google_ads", "read_execute")
+        self.assertTrue(read_allow, "read_execute allow-list should not be empty")
         C.assert_allow_lists_disjoint(read_allow, mut["allow"])
 ```
 
@@ -558,18 +594,32 @@ def read_block(path, project, block):
     shallower line closes the block, so a later key cannot bleed into `allow`.
     Returns empty structures when the block is absent — callers decide whether that
     is a refusal (read_mutate_execute) or simply nothing to check (read_allow_list).
+
+    DUPLICATE KEYS REFUSE. A repeated `allow:` header would otherwise ACCUMULATE,
+    silently admitting a second mutator; a repeated scalar would silently take the
+    last value, quietly swapping the interpreter. In a file that decides what may
+    mutate a live account, a duplicate key is a mistake — a merge artifact or a bad
+    hand-edit — not an intent, so it is loud rather than resolved.
     """
     inside = False
     sub = None
+    seen = set()
     got = {"allow": [], "caps": {}}
     for indent, stripped in _iter_project_lines(path, project):
         if indent == 4 and stripped == f"{block}:":
+            if inside or seen:
+                raise ValueError(f"duplicate {block!r} block for project {project!r} — refusing")
             inside = True; sub = None
         elif indent <= 4:                                        # sibling/shallower closes scope
             inside = False; sub = None
         elif indent == 6 and inside:
+            key = stripped[:-1] if stripped in ("allow:", "caps:") else stripped.partition(":")[0].strip()
+            if key in seen:
+                raise ValueError(f"duplicate {key!r} key in {block} for project {project!r} — "
+                                 "refusing rather than merging or taking the last value")
+            seen.add(key)
             if stripped in ("allow:", "caps:"):
-                sub = stripped[:-1]
+                sub = key
             else:
                 sub = None
                 k, _, v = stripped.partition(":")
