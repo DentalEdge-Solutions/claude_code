@@ -2119,10 +2119,14 @@ mutation landed; the audit log holds what did, and --undo can reverse it.
 
 See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 """
-import argparse, datetime, json, os, shutil, subprocess, sys, tempfile
+import argparse, datetime, json, os, re, shutil, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
 import vault_lib
+
+# Must match the mutator's own RESOURCE_RE — this side validates what comes BACK,
+# before it is persisted as the reversibility record.
+RESOURCE_RE = re.compile(r"^customers/[0-9]{1,15}/campaignCriteria/[0-9]{1,20}~[0-9]{1,20}$")
 
 CRED_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
              "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN",
@@ -2170,16 +2174,18 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
     if not C.CHANGESET_ID_RE.fullmatch(target or ""):
         _refuse(f"invalid change-set id: {target!r}")
 
-    # 2. client resolves and is active  (undo skips the kill switch, guard 1, see below)
-    try:
-        rec = vault_lib.resolve(client, registry)
-    except (ValueError, KeyError, OSError) as e:
-        _refuse(str(e))
-    vault = rec["vault_path"]
-
-    # 1. kill switch — CREATING change only; undo must stay available.
+    # 1. kill switch FIRST, before any per-client parsing — the mandated order is
+    #    literal, not approximate. CREATING change only; undo must stay available so
+    #    cleanup is never blocked by the switch that stopped the damage.
     if not undo and not C.kill_switch_ok(vault_lib.vault_root()):
         _refuse("mutation is disabled (kill switch absent or unreadable) — this is the safe default")
+
+    # 2. client resolves and is active
+    try:
+        rec = vault_lib.resolve(client, registry)
+    except (ValueError, KeyError, OSError, TypeError) as e:
+        _refuse(str(e))
+    vault = rec["vault_path"]
     if rec.get("status") != "active":
         _refuse(f"client status is {rec.get('status')!r}, not 'active'")
 
@@ -2210,9 +2216,6 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
         if cs["client"] != rec["slug"] or cs["customer_id"] != rec["customer_id"] \
                 or cs["project"] != rec["project"]:
             _refuse("change-set identity does not match the resolved client")
-        if cs["customer_id"] != "".join(c for c in os.environ.get("GOOGLE_ADS_CUSTOMER_ID", "")
-                                        if c.isdigit()):
-            _refuse("injected GOOGLE_ADS_CUSTOMER_ID does not match the change-set's customer_id")
         # 5. approval
         try:
             approval = C.verify_approval(vault, changeset_id, C.file_digest(path), now)
@@ -2231,6 +2234,15 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
             _refuse(f"daily actions cap would be exceeded ({counts['actions']}+{len(cs['actions'])}"
                     f" > {cfg['caps']['actions_per_client_day']})")
         actions = cs["actions"]
+
+    # 6b. The injected credential must belong to THIS client — on BOTH paths.
+    #     Without this on the undo path, an undo for client A could run against
+    #     client B's injected credential, and the only thing refusing it would be the
+    #     mutator in a DIFFERENT repository. A pre-flight guarantee must not depend on
+    #     code Hermes does not own.
+    injected = "".join(c for c in os.environ.get("GOOGLE_ADS_CUSTOMER_ID", "") if c.isdigit())
+    if rec["customer_id"] != injected:
+        _refuse("injected GOOGLE_ADS_CUSTOMER_ID does not match this client's customer_id")
 
     # 7. allow-list resolution + disjointness
     if len(cfg["allow"]) != 1:
@@ -2318,9 +2330,13 @@ def apply(plan, now):
                 raise PostMutationError(f"action {i} returned unparseable output — the mutation may "
                                         f"have landed; inspect the account:\n{out}")
             resource = payload.get("removed") if plan["undo"] else payload.get("resource_name")
-            if not resource:
-                raise PostMutationError(f"action {i} returned no resource name — the mutation may "
-                                        f"have landed; inspect the account:\n{out}")
+            # Shape-validate before it becomes the durable reversibility record. This is
+            # the one piece of subprocess output persisted verbatim, so a malfunctioning
+            # mutator must not be able to write arbitrary text into the audit log.
+            if not RESOURCE_RE.fullmatch(resource or ""):
+                raise PostMutationError(f"action {i} returned a malformed resource name "
+                                        f"{resource!r} — the mutation may have landed; "
+                                        f"inspect the account")
             rec = {"ts": now.strftime(C.ISO), "changeset_id": plan["changeset_id"],
                    "action_index": i, "type": a.get("type", "add_campaign_negative"),
                    "resource_name": resource,
