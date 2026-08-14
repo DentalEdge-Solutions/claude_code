@@ -477,6 +477,107 @@ python3 infra/hermes-agent/bin/vault-write.test.py
 python3 infra/hermes-agent/bin/vault-purge.test.py
 ```
 
+## Mutation tier — applying approved changes (Task 2)
+
+The first Hermes path that can **change** a client's Google Ads account. Everything
+else in this README is read-only, and that guarantee has always rested on a
+**read-only credential**: Google refuses every mutate call server-side, whatever the
+code does. This tier deliberately removes that backstop for one narrow action, so
+**the guardrails are the safety model** — there is no platform-level layer beneath them.
+
+Scope is one typed action: **add a campaign-level negative keyword**. Never budgets,
+bids, or campaign status. Undo removes exactly the criteria this rail created, by
+resource name.
+
+**Three commands, deliberately not chainable, with sharply different privilege:**
+
+```bash
+cd infra/hermes-agent
+python3 bin/propose-changeset.py --client <slug> --from actions.json      # no credential
+python3 bin/approve-changeset.py --client <slug> --changeset <id> --operator <name>
+./run-ads-mutate.sh --client <slug> --changeset <id>                      # write credential
+./run-ads-mutate.sh --client <slug> --undo <id>
+```
+
+`propose` and `approve` hold **no credential and perform no network I/O** — they are
+structurally incapable of touching the account. Only `apply` can reach Google.
+
+The operator's `actions.json` contains **only** an `actions` array; `propose` fills in
+client, project, customer id, change-set id, and timestamp from the client resolver.
+An operator therefore cannot typo a customer id into a change-set, and the apply-time
+identity check becomes a genuine tamper check.
+
+**Approval binds bytes.** `approve` records the sha256 of the exact change-set file the
+operator reviewed, plus an expiry. Editing that file afterwards — even by one
+whitespace byte — invalidates the approval, because `apply` recomputes and compares.
+
+**Guard order at apply** (fail-closed; the credential is touched last, so every refusal
+happens before Google is reachable):
+
+1. kill switch present and readable
+2. client slug resolves and is `active`
+3. change-set loads, schema-validates, within the per-change-set action cap
+4. change-set identity matches the resolved client
+5. approval hash matches and has not expired
+6. daily caps satisfied, counted from the audit log
+7. the injected credential belongs to **this** client
+8. mutator resolves in `mutate_execute.allow`; the read and mutate allow-lists are disjoint
+9. full credential set present and `GOOGLE_ADS_CREDENTIAL_ROLE=write`
+10. **`validate_only` dry run over every action, all-or-nothing** — any failure aborts
+    the whole change-set with nothing applied
+11. live apply, one action at a time, each logged and fsynced **before the next begins**
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | usage error |
+| 2 | pre-flight refusal — **guaranteed nothing was mutated** |
+| 3 | failure *after* at least one live mutation landed; the audit log holds what applied, and `--undo` reverses it |
+
+Exit 2 is a promise about the account, not merely about the process. The test suite
+asserts the stronger property directly: for every refusal, the mutator subprocess is
+never spawned at all.
+
+**Caps** live in `registry/projects.yaml` under `mutate_execute.caps`, so tuning them is
+a config edit rather than a code change. Missing or malformed caps **refuse** — an
+unreadable limit must never become an unlimited one. Defaults: 25 actions per
+change-set, 100 actions and 5 applies per client per day, 24-hour approval expiry.
+
+**The kill switch** is a marker file on the Hermes volume at
+`data/vaults/_governance/mutation-enabled`. Absent, unreadable, or a directory in its
+place all mean *disabled* — the safe state is the default state, and one `rm` disables
+all mutation across every client.
+
+**Undo bypasses only the kill switch and the daily caps.** Guards constrain *creating*
+change, never *reversing* it: a tripped kill switch that also blocked cleanup would be a
+guardrail that makes a bad situation worse. Every other guard still applies, including
+the injected-credential check, so an undo can never reach another client's account.
+
+**Credential separation.** The write credential lives **only** in the gitignored
+`.env.gaw` (copy `.env.gaw.example`), is parsed as data rather than sourced, and is
+injected per-invocation via `docker compose exec -e`. It is never in `.env`, never in
+`.env.ga`, and never in the gateway environment. `.env.ga` stays read-only so every
+other path keeps its backstop — **never copy a token between the two files**. The
+mutator in the ads project reads credentials strictly from the injected environment and
+never loads a local `.env`, which would otherwise pick up that project's full-access
+token.
+
+**Vault artifacts** (gitignored, per client, under `data/vaults/<slug>/changes/`):
+the change-set, its approval record, a per-run result file, and `log.jsonl` — the
+append-only reversibility record that also feeds the daily caps. Each apply appends a
+line to `timeline.md`, so the next trend audit sees that a change was made.
+
+**Tests** (run directly — not auto-discovered by `run-all-tests.js`):
+
+```bash
+python3 infra/hermes-agent/bin/changeset_lib.test.py
+python3 infra/hermes-agent/bin/propose-changeset.test.py
+python3 infra/hermes-agent/bin/approve-changeset.test.py
+python3 infra/hermes-agent/bin/apply-changeset.test.py
+```
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
