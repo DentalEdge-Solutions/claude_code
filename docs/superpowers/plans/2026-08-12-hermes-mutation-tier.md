@@ -2749,7 +2749,21 @@ Expected with a real campaign: exit 2 and an **authorization** error
 - **If it succeeds, stop — `.env.ga` is not read-only and Inc-3's backstop has silently
   lapsed**, which invalidates the safety story of every read-only path shipped so far.
 
-- [ ] **Step 4: Prove the two refresh tokens differ**
+- [ ] **Step 4: Prove the two credentials are DIFFERENT GOOGLE USERS — not merely different tokens**
+
+**Comparing token strings is not sufficient.** Minting twice while signed in as the same Google
+account yields two different refresh tokens for the same user, which would pass a string comparison
+while giving both credentials identical permissions — defeating the entire read/write separation.
+The hash check below is necessary but proves only that a re-mint happened.
+
+The identity itself cannot be read from the token: the `adwords` scope does not expose `email` or
+`sub` via tokeninfo. Confirm it out of band instead — in the MCC under **Admin → Access and
+security → Users**, check that the account backing `.env.ga` and the account backing `.env.gaw` are
+two distinct emails, and that the `.env.ga` account's role is **Read only**.
+
+Note that the manager account's link level to a client (Admin/Standard/Read-only) is a SEPARATE
+setting from a user's role on the MCC. An Admin manager link plus a Standard/Admin user role means
+that user inherits write on the client, however "read-only" the credential is named.
 
 ```bash
 cd infra/hermes-agent
