@@ -307,5 +307,73 @@ class TestPostMutationFailure(Base):
         self.assertEqual(len(recs), 1)                     # the one that landed is recorded
         self.assertEqual(recs[0]["status"], "applied")
 
+class TestUndo(Base):
+    def _applied(self, n=1):
+        cs = self._approved(n)
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        os.remove(self.calls)
+        return cs
+
+    def test_undo_removes_each_applied_resource(self):
+        cs = self._applied(2)
+        self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
+        calls = self._calls()
+        self.assertEqual(len(calls), 4)                        # 2 validate + 2 live
+        self.assertTrue(all("--undo" in c for c in calls))
+
+    def test_undo_appends_undone_lines(self):
+        cs = self._applied(2)
+        self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        with open(C.log_path(self.vault)) as f:
+            recs = [json.loads(x) for x in f if x.strip()]
+        self.assertEqual(len([r for r in recs if r["status"] == "applied"]), 2)
+        self.assertEqual(len([r for r in recs if r["status"] == "undone"]), 2)
+
+    def test_undo_works_with_kill_switch_absent(self):
+        """Guards constrain creating change, never reversing it."""
+        cs = self._applied(1)
+        os.remove(os.path.join(self.tmp, C.GOVERNANCE_DIR, C.KILL_SWITCH))
+        self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
+
+    def test_undo_works_with_daily_caps_exhausted(self):
+        with open(self.projects, "w") as f:
+            f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
+                                              "actions_per_client_day": 1,
+                                              "applies_per_client_day": 1,
+                                              "approval_ttl_hours": 24}))
+        cs = self._applied(1)
+        self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
+
+    def test_second_undo_is_a_noop_refusal(self):
+        cs = self._applied(1)
+        self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        os.remove(self.calls)
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
+    def test_undo_of_unknown_changeset_refused(self):
+        self._applied(1)
+        with self.assertRaises(SystemExit) as ctx:
+            self._run("20260812-999999-deadbeef", undo="20260812-999999-deadbeef")
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
+    def test_undo_still_requires_credentials(self):
+        cs = self._applied(1)
+        del os.environ["GOOGLE_ADS_CLIENT_SECRET"]
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_undo_still_requires_write_role(self):
+        cs = self._applied(1)
+        os.environ["GOOGLE_ADS_CREDENTIAL_ROLE"] = "read"
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
