@@ -1563,6 +1563,20 @@ class TestCredentials(unittest.TestCase):
         with self.assertRaises(ValueError):
             M.require_credentials(dict(FULL_ENV, GOOGLE_ADS_REFRESH_TOKEN=""))
 
+class TestCustomerId(unittest.TestCase):
+    def test_plain_and_display_forms_accepted(self):
+        self.assertEqual(M.customer_id("1234567890", "X"), "1234567890")
+        self.assertEqual(M.customer_id("123-456-7890", "X"), "1234567890")
+        self.assertEqual(M.customer_id("123 456 7890", "X"), "1234567890")
+
+    def test_arbitrary_junk_refused_not_stripped(self):
+        """The old digits() coerced "acct-1234567890" into a plausible id."""
+        for bad in ["acct-1234567890", "1234567890x", "", "-1234567890",
+                    "12345678901234567890", "1234567890\n", None, 1234567890]:
+            with self.assertRaises(ValueError):
+                M.customer_id(bad, "X")
+
+
 class TestResourceName(unittest.TestCase):
     def test_valid_resource_name(self):
         self.assertTrue(M.RESOURCE_RE.fullmatch("customers/1234567890/campaignCriteria/111~222"))
@@ -1628,6 +1642,11 @@ ACTION_TYPES = ("add_campaign_negative",)
 MATCH_TYPES = ("EXACT", "PHRASE", "BROAD")
 KEYWORD_MAX = 80
 ID_RE = re.compile(r"^[0-9]{1,15}$")
+# Google's UI displays customer ids dashed (123-456-7890), so those separators are
+# accepted and stripped. ANYTHING else refuses: silently stripping arbitrary
+# characters would let "acct-1234567890" coerce into a different, plausible id and
+# drive the real mutation target.
+CID_INPUT_RE = re.compile(r"^[0-9][0-9 -]{0,24}$")
 RESOURCE_RE = re.compile(r"^customers/[0-9]{1,15}/campaignCriteria/[0-9]{1,20}~[0-9]{1,20}$")
 
 REQUIRED = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
@@ -1635,8 +1654,15 @@ REQUIRED = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
             "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
 
 
-def digits(v):
-    return "".join(c for c in str(v) if c.isdigit())
+def customer_id(v, field):
+    """Normalize a customer id, refusing anything that is not digits plus the
+    display separators. Refuse-then-strip, never strip-then-hope."""
+    if not isinstance(v, str) or not CID_INPUT_RE.fullmatch(v):
+        raise ValueError(f"invalid {field}: expected digits (dashes/spaces allowed), got {v!r}")
+    d = v.replace("-", "").replace(" ", "")
+    if not ID_RE.fullmatch(d):
+        raise ValueError(f"invalid {field}: {v!r} does not reduce to a 1-15 digit id")
+    return d
 
 
 def parse_action(s):
@@ -1672,7 +1698,8 @@ def require_credentials(env):
             "client_id": env["GOOGLE_ADS_CLIENT_ID"],
             "client_secret": env["GOOGLE_ADS_CLIENT_SECRET"],
             "refresh_token": env["GOOGLE_ADS_REFRESH_TOKEN"],
-            "login_customer_id": digits(env["GOOGLE_ADS_LOGIN_CUSTOMER_ID"]),
+            "login_customer_id": customer_id(env["GOOGLE_ADS_LOGIN_CUSTOMER_ID"],
+                                             "GOOGLE_ADS_LOGIN_CUSTOMER_ID"),
             "use_proto_plus": True}
 
 
@@ -1689,7 +1716,7 @@ def do_add(client, cid, action, validate_only):
     op = client.get_type("CampaignCriterionOperation")
     crit = op.create
     crit.campaign = client.get_service("CampaignService").campaign_path(
-        cid, digits(action["campaign_id"]))
+        cid, action["campaign_id"])          # already ID_RE-validated by parse_action
     crit.negative = True
     crit.keyword.text = action["keyword"]
     crit.keyword.match_type = client.enums.KeywordMatchTypeEnum[action["match_type"]]
@@ -1721,9 +1748,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         cfg = require_credentials(os.environ)
-        cid = digits(os.environ["GOOGLE_ADS_CUSTOMER_ID"])
-        if not cid:
-            raise ValueError("GOOGLE_ADS_CUSTOMER_ID has no digits")
+        cid = customer_id(os.environ["GOOGLE_ADS_CUSTOMER_ID"], "GOOGLE_ADS_CUSTOMER_ID")
         client = GoogleAdsClient.load_from_dict(cfg)
         if args.action:
             out = do_add(client, cid, parse_action(args.action), args.validate_only)
