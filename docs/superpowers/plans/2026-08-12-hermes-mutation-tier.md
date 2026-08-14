@@ -2678,11 +2678,18 @@ git add infra/hermes-agent/run-ads-mutate.sh infra/hermes-agent/.env.gaw.example
 git commit -m "feat(hermes): run-ads-mutate host wrapper, write-credential template, docs"
 ```
 
-Then push the separate repo (per the brainstorming decision — the 2 pre-existing commits ride along):
+**The ads-repo push moves to AFTER Task 10** (operator ruling, sequencing corrected
+mid-execution). The mutator has never run against a real account until the gate proves
+it, and pushing first would publish unproven mutation code to a client-adjacent repo —
+if the gate surfaces a defect, which is exactly where one would surface, it should be
+fixed before anything reaches origin. The gate does not need the push: the container
+reads the host working tree.
+
+Push after Task 10 passes:
 
 ```bash
 cd /Users/ericksicard/projects/claude-google-ads
-git log --oneline origin/main..HEAD    # expect exactly 3: audit_data untrack, zero-spend guard, mutator
+git log --oneline origin/main..HEAD    # expect 4: audit_data untrack, zero-spend guard, mutator, cid fix
 git push origin HEAD
 ```
 
