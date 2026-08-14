@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Apply an approved change-set to a client's external Google Ads account.
+
+THE ONLY CREDENTIALED ENTRY POINT in the mutation tier. Runs in-container, invoked by
+run-ads-mutate.sh, which injects a SEPARATE Standard-access write credential
+per-invocation via `docker compose exec -e`. Stdlib-only; the SDK lives in the
+project's pinned venv, reached through the allow-listed mutator subprocess.
+
+Guard order is load-bearing (spec §7): every refusal happens BEFORE the credential is
+used, so exit 2 is a promise that nothing was mutated. Exit 3 means at least one live
+mutation landed; the audit log holds what did, and --undo can reverse it.
+
+See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
+"""
+import argparse, datetime, json, os, shutil, subprocess, sys, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import changeset_lib as C
+import vault_lib
+
+CRED_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
+             "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN",
+             "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
+SECRET_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
+               "GOOGLE_ADS_CLIENT_SECRET", "GOOGLE_ADS_REFRESH_TOKEN")
+ROLE_VAR = "GOOGLE_ADS_CREDENTIAL_ROLE"
+WRITE_ROLE = "write"
+
+# Mirrors run-ads-report.py: the mutator gets the credentials plus a minimal benign
+# runtime whitelist, and nothing else — never ANTHROPIC_API_KEY or the OpenRouter key.
+_RUNTIME_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
+                     "SSL_CERT_FILE", "SSL_CERT_DIR", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
+                     "REQUESTS_CA_BUNDLE")
+
+
+class PostMutationError(Exception):
+    """Raised for any failure AFTER at least one live mutation landed. Exits 3, never 2 —
+    exit 2 must remain a guarantee that the account was not touched."""
+
+
+def _refuse(msg):
+    print(f"apply-changeset: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _scrub(text):
+    for v in SECRET_VARS:
+        s = os.environ.get(v)
+        if s:
+            text = text.replace(s, "***")
+    return text
+
+
+def _child_env():
+    env = {k: os.environ[k] for k in _RUNTIME_ENV_KEYS if k in os.environ}
+    for v in CRED_VARS:
+        env[v] = os.environ[v]
+    return env
+
+
+def build_plan(client, changeset_id, now, registry=None, projects=None, undo=None):
+    """Guards 1-8. Returns everything apply() needs; raises SystemExit(2) on any refusal."""
+    target = undo or changeset_id
+    if not C.CHANGESET_ID_RE.fullmatch(target or ""):
+        _refuse(f"invalid change-set id: {target!r}")
+
+    # 2. client resolves and is active  (undo skips the kill switch, guard 1, see below)
+    try:
+        rec = vault_lib.resolve(client, registry)
+    except (ValueError, KeyError, OSError) as e:
+        _refuse(str(e))
+    vault = rec["vault_path"]
+
+    # 1. kill switch — CREATING change only; undo must stay available.
+    if not undo and not C.kill_switch_ok(vault_lib.vault_root()):
+        _refuse("mutation is disabled (kill switch absent or unreadable) — this is the safe default")
+    if rec.get("status") != "active":
+        _refuse(f"client status is {rec.get('status')!r}, not 'active'")
+
+    projects_path = projects or C.registry_projects_path()
+    try:
+        cfg = C.read_mutate_execute(projects_path, rec["project"])
+    except (ValueError, OSError) as e:
+        _refuse(str(e))
+
+    cs, approval, actions = None, None, []
+    if undo:
+        actions = _undo_targets(vault, undo)
+        if not actions:
+            _refuse(f"no applied, un-undone actions recorded for change-set {undo!r}")
+        operator = actions[0].get("operator", "unknown")
+    else:
+        # 3. change-set loads and validates
+        path = C.changeset_path(vault, changeset_id)
+        if not os.path.isfile(path):
+            _refuse(f"no change-set {changeset_id!r} for this client")
+        try:
+            with open(path, encoding="utf-8") as f:
+                cs = json.load(f)
+            C.validate_changeset(cs, cfg["caps"]["actions_per_changeset"])
+        except (ValueError, json.JSONDecodeError) as e:
+            _refuse(str(e))
+        # 4. identity match — a tamper check, since propose supplies these fields
+        if cs["client"] != rec["slug"] or cs["customer_id"] != rec["customer_id"] \
+                or cs["project"] != rec["project"]:
+            _refuse("change-set identity does not match the resolved client")
+        if cs["customer_id"] != "".join(c for c in os.environ.get("GOOGLE_ADS_CUSTOMER_ID", "")
+                                        if c.isdigit()):
+            _refuse("injected GOOGLE_ADS_CUSTOMER_ID does not match the change-set's customer_id")
+        # 5. approval
+        try:
+            approval = C.verify_approval(vault, changeset_id, C.file_digest(path), now)
+        except (ValueError, OSError, json.JSONDecodeError) as e:
+            _refuse(str(e))
+        operator = approval["operator"]
+        # 6. daily caps
+        try:
+            counts = C.day_counts(vault, now.strftime("%Y-%m-%d"))
+        except ValueError as e:
+            _refuse(str(e))
+        if counts["applies"] + 1 > cfg["caps"]["applies_per_client_day"]:
+            _refuse(f"daily applies cap reached ({counts['applies']}/"
+                    f"{cfg['caps']['applies_per_client_day']})")
+        if counts["actions"] + len(cs["actions"]) > cfg["caps"]["actions_per_client_day"]:
+            _refuse(f"daily actions cap would be exceeded ({counts['actions']}+{len(cs['actions'])}"
+                    f" > {cfg['caps']['actions_per_client_day']})")
+        actions = cs["actions"]
+
+    # 7. allow-list resolution + disjointness
+    if len(cfg["allow"]) != 1:
+        _refuse(f"mutate_execute.allow must hold exactly one entry, got {cfg['allow']}")
+    name = cfg["allow"][0]
+    if os.path.basename(name) != name:
+        _refuse(f"mutator name must be a bare basename, got {name!r}")
+    try:
+        C.assert_allow_lists_disjoint(
+            C.read_allow_list(projects_path, rec["project"], "read_execute"), cfg["allow"])
+        workdir = C.read_workdir(projects_path, rec["project"])
+    except (ValueError, OSError) as e:
+        _refuse(str(e))
+    script = os.path.join(workdir, cfg["script_dir"], name + ".py")
+    if not os.path.isfile(cfg["runner"]):
+        _refuse(f"runner interpreter not found: {cfg['runner']}")
+    if not os.path.isfile(script):
+        _refuse(f"mutator not found: {script}")
+
+    # 8. credentials
+    missing = [v for v in CRED_VARS if not os.environ.get(v)]
+    if missing:
+        _refuse(f"missing injected credential vars: {', '.join(missing)} "
+                "(operator-invoked via run-ads-mutate.sh only)")
+    if os.environ.get(ROLE_VAR) != WRITE_ROLE:
+        _refuse(f"{ROLE_VAR} is {os.environ.get(ROLE_VAR)!r}, expected {WRITE_ROLE!r} — "
+                "the mutation tier refuses the read-only credential")
+
+    return {"vault": vault, "changeset_id": target, "runner": cfg["runner"], "script": script,
+            "actions": actions, "undo": bool(undo), "operator": operator,
+            "customer_id": rec["customer_id"]}
+
+
+def _undo_targets(vault, changeset_id):
+    """Applied actions for this change-set that have not already been undone."""
+    p = C.log_path(vault)
+    if not os.path.exists(p):
+        return []
+    applied, undone = [], set()
+    with open(p, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError as e:
+                _refuse(f"corrupt audit log at {p}:{n} ({e})")
+            if r.get("changeset_id") != changeset_id:
+                continue
+            if r.get("status") == "applied":
+                applied.append(r)
+            elif r.get("status") == "undone":
+                undone.add(r.get("resource_name"))
+    return [r for r in reversed(applied) if r.get("resource_name") not in undone]
+
+
+def _invoke(plan, args, scratch):
+    """Returns RAW (unscrubbed) stdout/stderr — the live-loop JSON payload must be
+    parsed byte-exact. Scrubbing happens only where text is embedded into a
+    human-facing message (_refuse / PostMutationError strings), never on the parse
+    path: run-ads-report.py's whole-string _scrub() replaces every occurrence of a
+    secret value anywhere in the text, and the mutator's success JSON legitimately
+    contains ordinary substrings ("resource_name", "true", ...) that can coincide
+    with a short placeholder credential — scrubbing the parse input would corrupt it."""
+    proc = subprocess.run([plan["runner"], plan["script"]] + args,
+                          cwd=scratch, env=_child_env(), capture_output=True, text=True)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def apply(plan, now):
+    scratch = tempfile.mkdtemp(prefix="ads-mutate-")   # defense in depth: no in-tree .env nearby
+    try:
+        # 9. validate_only over EVERY action, all-or-nothing
+        for i, a in enumerate(plan["actions"]):
+            args = (["--undo", a["resource_name"]] if plan["undo"]
+                    else ["--action", json.dumps(a, sort_keys=True)]) + ["--validate-only"]
+            rc, out, err = _invoke(plan, args, scratch)
+            if rc != 0:
+                _refuse(f"validate_only failed for action {i} — nothing applied:\n{_scrub(err)}")
+
+        # 10. live, one action at a time, each logged before the next begins.
+        # PostMutationError is caught HERE, at the boundary of apply() itself, and
+        # converted to SystemExit(3) — not left to propagate as a bare exception and
+        # not deferred to main(). apply() is called directly (not just via the CLI, see
+        # apply-changeset.test.py), so the 0/2/3 exit-code contract has to hold at the
+        # function boundary, the same way build_plan's refusals hold SystemExit(2) at
+        # its own boundary rather than leaking a plain ValueError to callers.
+        try:
+            results = []
+            for i, a in enumerate(plan["actions"]):
+                args = (["--undo", a["resource_name"]] if plan["undo"]
+                        else ["--action", json.dumps(a, sort_keys=True)])
+                rc, out, err = _invoke(plan, args, scratch)
+                if rc != 0:
+                    raise PostMutationError(f"action {i} failed after {len(results)} already applied:\n{_scrub(err)}")
+                try:
+                    payload = json.loads(out)
+                except json.JSONDecodeError:
+                    raise PostMutationError(f"action {i} returned unparseable output — the mutation may "
+                                            f"have landed; inspect the account:\n{_scrub(out)}")
+                resource = payload.get("removed") if plan["undo"] else payload.get("resource_name")
+                if not resource:
+                    raise PostMutationError(f"action {i} returned no resource name — the mutation may "
+                                            f"have landed; inspect the account:\n{_scrub(out)}")
+                rec = {"ts": now.strftime(C.ISO), "changeset_id": plan["changeset_id"],
+                       "action_index": i, "type": a.get("type", "add_campaign_negative"),
+                       "resource_name": resource,
+                       "status": "undone" if plan["undo"] else "applied",
+                       "operator": plan["operator"]}
+                C.append_log(plan["vault"], rec)      # fsync'd before the next action starts
+                results.append(rec)
+
+            # 11. result.json + timeline.md
+            C._atomic_write_json(C.result_path(plan["vault"], plan["changeset_id"]),
+                                 {"changeset_id": plan["changeset_id"],
+                                  "undo": plan["undo"], "completed_at": now.strftime(C.ISO),
+                                  "operator": plan["operator"], "actions": results})
+            verb = "undo" if plan["undo"] else "change"
+            with open(os.path.join(plan["vault"], "timeline.md"), "a", encoding="utf-8") as f:
+                f.write(f"- {now.strftime(C.ISO)} · {verb} · {len(results)} action(s) · "
+                        f"changeset {plan['changeset_id']} · by {plan['operator']}\n")
+            print(json.dumps({"ok": True, "changeset_id": plan["changeset_id"],
+                              "undo": plan["undo"], "applied": len(results)}))
+            return 0
+        except PostMutationError as e:
+            print(f"apply-changeset: {e}", file=sys.stderr)
+            print("apply-changeset: EXIT 3 — at least one mutation LANDED. The audit log records "
+                  "what applied; reverse it with --undo.", file=sys.stderr)
+            raise SystemExit(3)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--client", required=True)
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--changeset")
+    g.add_argument("--undo")
+    ap.add_argument("--registry")
+    ap.add_argument("--projects")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    plan = build_plan(args.client, args.changeset, now, args.registry, args.projects, args.undo)
+    if args.dry_run:
+        print(f"vault:   {plan['vault']}")
+        print(f"runner:  {plan['runner']}")
+        print(f"script:  {plan['script']}")
+        print(f"mode:    {'undo' if plan['undo'] else 'apply'}")
+        print(f"actions: {len(plan['actions'])}")
+        return 0
+    # apply() itself raises SystemExit(2)/(3) on refusal or post-mutation failure — its
+    # return value is only ever 0. No try/except needed here.
+    return apply(plan, now)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
