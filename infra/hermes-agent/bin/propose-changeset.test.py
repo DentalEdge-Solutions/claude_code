@@ -109,6 +109,17 @@ class T(unittest.TestCase):
             capture_output=True, text=True, env={**os.environ})
         self.assertEqual(out.returncode, 2)
 
+    def test_cli_from_directory_exit2(self):
+        d = os.path.join(self.tmp, "adir")
+        os.makedirs(d)
+        out = subprocess.run(
+            [sys.executable, os.path.join(HERE, "propose-changeset.py"),
+             "--client", "acme-dental", "--from", d,
+             "--registry", self.clients, "--projects", self.projects],
+            capture_output=True, text=True, env={**os.environ})
+        self.assertEqual(out.returncode, 2)
+        self.assertEqual(out.stderr.count("Traceback"), 0)
+
     def test_cli_success_prints_path_exit0(self):
         out = subprocess.run(
             [sys.executable, os.path.join(HERE, "propose-changeset.py"),
