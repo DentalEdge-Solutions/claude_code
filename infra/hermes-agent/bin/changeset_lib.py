@@ -290,6 +290,15 @@ def _atomic_write_json(path, obj):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    # fsync the directory so the rename itself is durable — same reasoning as
+    # append_log and propose. All three writers of a newly-named file in this tier
+    # must be consistent about durability; one quietly weaker writer is how an
+    # approval survives review but not a crash.
+    dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def _parse_utc_field(rec, field):
