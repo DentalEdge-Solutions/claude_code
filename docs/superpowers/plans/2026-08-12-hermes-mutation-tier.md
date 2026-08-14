@@ -2438,20 +2438,30 @@ class TestUndo(Base):
         os.remove(self.calls)
         return cs
 
+    def _log_records(self):
+        with open(C.log_path(self.vault)) as f:
+            return [json.loads(x) for x in f if x.strip()]
+
     def test_undo_removes_each_applied_resource(self):
+        """Asserts resource IDENTITY, not just counts. Counting alone would pass even if
+        _undo_targets returned the same record twice instead of both distinct ones."""
         cs = self._applied(2)
-        self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"]), 0)
+        applied = [r["resource_name"] for r in self._log_records() if r["status"] == "applied"]
+        self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
         calls = self._calls()
         self.assertEqual(len(calls), 4)                        # 2 validate + 2 live
-        self.assertTrue(all("--undo" in c for c in calls))
+        undone_args = [c[c.index("--undo") + 1] for c in calls if "--undo" in c]
+        self.assertEqual(len(set(undone_args)), 2)             # distinct, not one twice
+        self.assertEqual(set(undone_args), set(applied))       # exactly what was applied
 
     def test_undo_appends_undone_lines(self):
         cs = self._applied(2)
         self._run(cs["changeset_id"], undo=cs["changeset_id"])
-        with open(C.log_path(self.vault)) as f:
-            recs = [json.loads(x) for x in f if x.strip()]
-        self.assertEqual(len([r for r in recs if r["status"] == "applied"]), 2)
-        self.assertEqual(len([r for r in recs if r["status"] == "undone"]), 2)
+        recs = self._log_records()
+        applied = {r["resource_name"] for r in recs if r["status"] == "applied"}
+        undone = {r["resource_name"] for r in recs if r["status"] == "undone"}
+        self.assertEqual(len(applied), 2)
+        self.assertEqual(undone, applied)                      # every applied resource undone
 
     def test_undo_works_with_kill_switch_absent(self):
         """Guards constrain creating change, never reversing it."""
