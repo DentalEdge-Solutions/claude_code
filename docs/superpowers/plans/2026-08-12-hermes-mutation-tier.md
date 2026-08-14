@@ -1606,10 +1606,14 @@ Invoked ONLY by Hermes's apply-changeset.py, which owns the safety rail (approva
 caps, kill switch, audit log). This script is deliberately dumb: it performs exactly
 one validated operation and reports the result as JSON.
 
-CREDENTIALS COME STRICTLY FROM THE ENVIRONMENT. This script never calls load_dotenv()
-— every other mutator in this repo does, and would silently pick up the in-tree
-FULL-ACCESS token. Hermes injects a separate Standard-access write credential
-per-invocation; an incomplete set is a refusal, never a fallback.
+CREDENTIALS COME STRICTLY FROM THE ENVIRONMENT. This script never reads a local
+.env file the way every other mutator in this repo does — that path would silently
+pick up the in-tree FULL-ACCESS token. Hermes injects a separate Standard-access
+write credential per-invocation; an incomplete set is a refusal, never a fallback.
+
+(Wording note: this docstring deliberately avoids naming the loader function,
+because the test below asserts that string appears nowhere in the file. Do not
+reintroduce it here — the guard is the point, not the prose.)
 
 Usage (both modes support --validate-only for a server-side dry run):
   mutate_campaign_negative.py --action '<json>' [--validate-only]
