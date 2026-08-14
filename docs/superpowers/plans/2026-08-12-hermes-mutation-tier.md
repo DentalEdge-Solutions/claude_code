@@ -2731,7 +2731,23 @@ docker compose exec \
   --validate-only
 ```
 
-with the **read-only** values exported from `.env.ga`. Expected: exit 2, `ACTION_NOT_PERMITTED`. Record the exact message. **If this succeeds, stop — `.env.ga` is not read-only and Inc-3's backstop has silently lapsed.**
+with the **read-only** values exported from `.env.ga`, and **`<CAMPAIGN>` must be a REAL
+campaign id taken from Step 2's report** — not a synthetic placeholder.
+
+**This is not optional pedantry: a fake campaign id makes this step prove nothing.**
+Verified during pre-gate work: with a synthetic id the API returns
+`mutate_error: RESOURCE_NOT_FOUND` because resource resolution fails *before* the
+authorization check is evaluated. That reads as "refused" to a careless eye while
+saying nothing at all about whether the credential can mutate. Only a real, resolvable
+campaign forces the authorization layer to answer.
+
+Expected with a real campaign: exit 2 and an **authorization** error
+(`ACTION_NOT_PERMITTED` / `USER_PERMISSION_DENIED`). Record the exact message.
+
+- If you get `RESOURCE_NOT_FOUND`, the campaign id is wrong — fix it and re-run; do
+  NOT record this as a pass.
+- **If it succeeds, stop — `.env.ga` is not read-only and Inc-3's backstop has silently
+  lapsed**, which invalidates the safety story of every read-only path shipped so far.
 
 - [ ] **Step 4: Prove the two refresh tokens differ**
 
