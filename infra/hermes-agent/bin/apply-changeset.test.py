@@ -214,6 +214,22 @@ class TestPreflightRefusals(Base):
                 "status": "active"}}}, f)
         self._assert_refused(cs["changeset_id"])
 
+    def test_injected_credential_for_another_client_refused(self):
+        """The registry and change-set agree; only the injected credential differs."""
+        cs = self._approved(1)
+        os.environ["GOOGLE_ADS_CUSTOMER_ID"] = "9999999999"
+        self._assert_refused(cs["changeset_id"])
+
+    def test_undo_with_another_clients_credential_refused(self):
+        cs = self._approved(1)
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        os.remove(self.calls)
+        os.environ["GOOGLE_ADS_CUSTOMER_ID"] = "9999999999"
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
     def test_daily_applies_cap(self):
         with open(self.projects, "w") as f:
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
