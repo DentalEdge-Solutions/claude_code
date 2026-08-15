@@ -2742,16 +2742,23 @@ docker compose exec \
 with the **read-only** values exported from `.env.ga`, and **`<CAMPAIGN>` must be a REAL
 campaign id taken from Step 2's report** — not a synthetic placeholder.
 
-**`validate_only` CANNOT be used for this step.** Established empirically 2026-08-15: a READ_ONLY
-user's `validate_only` mutate is ACCEPTED (exit 0). `validate_only` checks request shape, not write
-permission, so a positive control built on it proves nothing about the backstop — it would pass
-identically whether or not the credential can mutate. Increment 3's recorded `ACTION_NOT_PERMITTED`
-must therefore have come from a different permission state than the one it was believed to prove.
+**Run `validate_only` FIRST, then escalate only if it passes.** Both forms were measured against a
+genuinely read-only credential on 2026-08-15 and both refuse with `authorization_error:
+ACTION_NOT_PERMITTED`, so `validate_only` does enforce write permission and Increment 3's method was
+sound.
 
-**Use a REAL mutate instead** (omit `--validate-only`). Expected: refusal with an authorization
-error. The risk is bounded and acceptable: the target is a PAUSED campaign, the keyword is
-synthetic, and if the mutate unexpectedly SUCCEEDS that is itself the finding — the criterion is
-then removed immediately with `--undo`, which this increment already built and tested.
+- **Primary check — `--validate-only`.** Cheap, and cannot mutate under any outcome. A refusal here
+  is sufficient: the step passes.
+- **Escalation — a REAL mutate** (omit `--validate-only`), ONLY if the validate_only call
+  unexpectedly succeeds. That outcome means the credential is not read-only in fact, and a real
+  mutate is what distinguishes "not read-only" from "validate_only being lenient". Bounded: PAUSED
+  campaign, synthetic keyword, and `--undo` removes the criterion immediately.
+
+**A caution recorded from getting this wrong once:** a credential accepting `validate_only` is
+evidence the CREDENTIAL has write access — not evidence that `validate_only` is lenient. During the
+first gate attempt the controller inferred the latter, rewrote this step on that basis, and was
+wrong; the credential in use simply had write access. Do not conclude anything about the API's
+behaviour from a credential whose identity has not been established by construction.
 
 **A fake campaign id also makes this step prove nothing.**
 Verified during pre-gate work: with a synthetic id the API returns
