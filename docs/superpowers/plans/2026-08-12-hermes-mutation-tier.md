@@ -2717,7 +2717,15 @@ Expected: `/opt/data/vaults` exists; the touch fails with a read-only filesystem
 ./run-ads-report.sh --project claude_google_ads --report account_overview --customer <CID>
 ```
 
-Read the produced report. **Every campaign must be PAUSED.** If any is enabled, stop and consult the operator — the gate's zero-impact premise no longer holds.
+**Check the TARGET campaign specifically — not "every campaign".** Verified during the first gate
+attempt: the authorised account holds one ENABLED `LOCAL_SERVICES` campaign alongside its paused
+SEARCH campaigns, so a blanket "every campaign must be PAUSED" assertion aborts on a campaign that
+is irrelevant — Local Services campaigns cannot accept campaign-level negatives at all (both
+credentials get `OPERATION_NOT_PERMITTED_FOR_CONTEXT`).
+
+The binding condition is therefore: **the campaign named in the change-set must be a SEARCH campaign
+with status PAUSED.** Confirm both, and confirm 30-day spend on the account is 0.00 as a second
+signal. If the target campaign is enabled or serving, stop and consult the operator.
 
 - [ ] **Step 3: Prove the read-only credential still refuses a mutate (positive control)**
 
@@ -2734,7 +2742,18 @@ docker compose exec \
 with the **read-only** values exported from `.env.ga`, and **`<CAMPAIGN>` must be a REAL
 campaign id taken from Step 2's report** — not a synthetic placeholder.
 
-**This is not optional pedantry: a fake campaign id makes this step prove nothing.**
+**`validate_only` CANNOT be used for this step.** Established empirically 2026-08-15: a READ_ONLY
+user's `validate_only` mutate is ACCEPTED (exit 0). `validate_only` checks request shape, not write
+permission, so a positive control built on it proves nothing about the backstop — it would pass
+identically whether or not the credential can mutate. Increment 3's recorded `ACTION_NOT_PERMITTED`
+must therefore have come from a different permission state than the one it was believed to prove.
+
+**Use a REAL mutate instead** (omit `--validate-only`). Expected: refusal with an authorization
+error. The risk is bounded and acceptable: the target is a PAUSED campaign, the keyword is
+synthetic, and if the mutate unexpectedly SUCCEEDS that is itself the finding — the criterion is
+then removed immediately with `--undo`, which this increment already built and tested.
+
+**A fake campaign id also makes this step prove nothing.**
 Verified during pre-gate work: with a synthetic id the API returns
 `mutate_error: RESOURCE_NOT_FOUND` because resource resolution fails *before* the
 authorization check is evaluated. That reads as "refused" to a careless eye while
@@ -2756,7 +2775,12 @@ account yields two different refresh tokens for the same user, which would pass 
 while giving both credentials identical permissions — defeating the entire read/write separation.
 The hash check below is necessary but proves only that a re-mint happened.
 
-The identity itself cannot be read from the token: the `adwords` scope does not expose `email` or
+**Establish identity BY CONSTRUCTION, not by inference.** Mint `.env.ga` yourself while signed in
+as the dedicated read-only service user, so the identity is known because you created it — never
+inferred from behaviour. Two days of this increment were spent trying to infer which of several
+identities a token mapped to; that is not a solvable problem from the API side.
+
+The identity cannot be read from the token: the `adwords` scope does not expose `email` or
 `sub` via tokeninfo. Confirm it out of band instead — in the MCC under **Admin → Access and
 security → Users**, check that the account backing `.env.ga` and the account backing `.env.gaw` are
 two distinct emails, and that the `.env.ga` account's role is **Read only**.
