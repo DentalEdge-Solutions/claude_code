@@ -6,6 +6,7 @@ A self-contained pipeline for sourcing, vetting, adapting, measuring, and auto-i
 
 - **Stack**: Node.js ≥ 18 (scripts only — no runtime framework)
 - **Test (all suites)**: `node scripts/run-all-tests.js` — run after any change under `skills/*/scripts/`, `scripts/codex/`, `scripts/telemetry/`, or the calibration scripts
+- **Test (Hermes `bin/`)**: `infra/hermes-agent/bin/run-bin-tests.sh` — the stdlib-only Python suites, which `run-all-tests.js` does not discover (it is node-only by design). Run after any change under `infra/hermes-agent/bin/`. Discovers suites dynamically; exits non-zero if any fail.
 - **Grader calibration**: `node scripts/run-grader-calibration.js generate|check` — blind re-judging of the golden transcript; run after any grading-rubric or judge-methodology change
 - **Test**: `node skills/skill-eval/scripts/generate-seed-evals.js skills/<name>/SKILL.md --context evals/project-context.json`
 - **Lint**: `node --check skills/skill-eval/scripts/extract-project-context.js` (syntax check)

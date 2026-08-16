@@ -233,6 +233,36 @@ class TestRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.read_mutate_execute(_reg_file(text), "claude_google_ads")
 
+    def test_duplicate_cap_key_refused(self):
+        """The duplicate check must reach INSIDE caps:, not just the keys above it.
+
+        This is the worst depth to allow a silent winner: applies_per_client_day is the
+        load-bearing cap against a malfunction repeating, so a merge artifact raising it
+        would leave every visible guard reading as correct while the limit was gone.
+        """
+        text = REG.replace("        applies_per_client_day: 5\n",
+                           "        applies_per_client_day: 5\n        applies_per_client_day: 9999\n")
+        self.assertIn("applies_per_client_day: 9999", text)     # the edit actually landed
+        with self.assertRaises(ValueError) as ctx:
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+        self.assertIn("duplicate", str(ctx.exception))
+
+    def test_duplicate_allow_entry_refused(self):
+        text = REG.replace("        - mutate_campaign_negative\n",
+                           "        - mutate_campaign_negative\n        - mutate_campaign_negative\n")
+        with self.assertRaises(ValueError) as ctx:
+            C.read_mutate_execute(_reg_file(text), "claude_google_ads")
+        self.assertIn("duplicate", str(ctx.exception))
+
+    def test_duplicate_workdir_refused(self):
+        """workdir is half the path Hermes executes; a silent winner picks the tree."""
+        text = REG.replace("    workdir: /projects/claude_google_ads\n",
+                           "    workdir: /projects/claude_google_ads\n    workdir: /tmp/evil\n")
+        self.assertIn("/tmp/evil", text)                        # the edit actually landed
+        with self.assertRaises(ValueError) as ctx:
+            C.read_workdir(_reg_file(text), "claude_google_ads")
+        self.assertIn("duplicate", str(ctx.exception))
+
     def test_duplicate_block_refused(self):
         text = REG + """    mutate_execute:
       runner: /bin/sh

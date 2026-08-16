@@ -41,6 +41,10 @@ class PostMutationError(Exception):
     exit 2 must remain a guarantee that the account was not touched."""
 
 
+def _utcnow():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+
+
 def _refuse(msg):
     print(f"apply-changeset: {msg}", file=sys.stderr)
     raise SystemExit(2)
@@ -90,7 +94,10 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
 
     cs, approval, actions = None, None, []
     if undo:
-        actions = _undo_targets(vault, undo)
+        # Spec §7.1: resource_name is shape- and prefix-validated against the RESOLVED
+        # customer_id inside _undo_targets, so no record can reach argv unvalidated.
+        # Uses no credential, so it belongs here with the other cheap checks.
+        actions = _undo_targets(vault, undo, rec["customer_id"])
         if not actions:
             _refuse(f"no applied, un-undone actions recorded for change-set {undo!r}")
         operator = actions[0].get("operator", "unknown")
@@ -169,27 +176,39 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
             "customer_id": rec["customer_id"]}
 
 
-def _undo_targets(vault, changeset_id):
-    """Applied actions for this change-set that have not already been undone."""
-    p = C.log_path(vault)
-    if not os.path.exists(p):
-        return []
-    applied, undone = [], set()
-    with open(p, encoding="utf-8") as f:
-        for n, line in enumerate(f, 1):
-            if not line.strip():
-                continue
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError as e:
-                _refuse(f"corrupt audit log at {p}:{n} ({e})")
-            if r.get("changeset_id") != changeset_id:
-                continue
-            if r.get("status") == "applied":
-                applied.append(r)
-            elif r.get("status") == "undone":
-                undone.add(r.get("resource_name"))
-    return [r for r in reversed(applied) if r.get("resource_name") not in undone]
+def _undo_targets(vault, changeset_id, customer_id):
+    """Applied, un-undone actions for this change-set BELONGING TO THIS CUSTOMER.
+
+    The customer_id argument is the spec §7.1 guard, and its placement here is
+    deliberate. That guard also exists inside the ads-repo mutator's do_undo, but a
+    pre-flight guarantee must not depend on code Hermes neither owns nor
+    version-pins — the same reasoning the guard-6b comment above applies to the
+    injected credential. Validating INSIDE this function, rather than in build_plan
+    after it returns, means an unvalidated record cannot escape into argv at all.
+
+    Records are read through C.iter_log_records so the undo path and the caps path
+    share one parser with one standard of rigour.
+    """
+    try:
+        records = list(C.iter_log_records(vault))
+    except ValueError as e:
+        _refuse(str(e))
+    targets, undone = [], set()
+    for n, r in records:
+        if r["changeset_id"] != changeset_id:
+            continue
+        rn = r.get("resource_name")
+        if not isinstance(rn, str) or not RESOURCE_RE.fullmatch(rn):
+            _refuse(f"audit log at {C.log_path(vault)}:{n} has a malformed resource_name "
+                    "— refusing to hand it to the mutator")
+        if not rn.startswith(f"customers/{customer_id}/"):
+            _refuse("refusing to undo a criterion that belongs to another customer "
+                    "(spec §7.1: an undo can never reach another account)")
+        if r["status"] == "applied":
+            targets.append(r)
+        elif r["status"] == "undone":
+            undone.add(rn)
+    return [r for r in reversed(targets) if r["resource_name"] not in undone]
 
 
 def _invoke(plan, args, scratch):
@@ -208,13 +227,24 @@ def _invoke(plan, args, scratch):
 def apply(plan, now):
     scratch = tempfile.mkdtemp(prefix="ads-mutate-")   # defense in depth: no in-tree .env nearby
     try:
-        # 9. validate_only over EVERY action, all-or-nothing
-        for i, a in enumerate(plan["actions"]):
-            args = (["--undo", a["resource_name"]] if plan["undo"]
-                    else ["--action", json.dumps(a, sort_keys=True)]) + ["--validate-only"]
-            rc, out, err = _invoke(plan, args, scratch)
-            if rc != 0:
-                _refuse(f"validate_only failed for action {i} — nothing applied:\n{_scrub(err)}")
+        # 9. validate_only over EVERY action, all-or-nothing.
+        #    Any exception here is a REFUSAL (exit 2), not a usage error (exit 1): a
+        #    validate_only call cannot mutate, so "nothing was touched" still holds even
+        #    when the failure is an OSError spawning the runner rather than a rejection
+        #    from Google. build_plan pre-checks that the runner exists, but it cannot
+        #    pre-check permissions, exhaustion, or a mid-run OSError.
+        try:
+            for i, a in enumerate(plan["actions"]):
+                args = (["--undo", a["resource_name"]] if plan["undo"]
+                        else ["--action", json.dumps(a, sort_keys=True)]) + ["--validate-only"]
+                rc, out, err = _invoke(plan, args, scratch)
+                if rc != 0:
+                    _refuse(f"validate_only failed for action {i} — nothing applied:\n{_scrub(err)}")
+        except SystemExit:
+            raise                      # the _refuse above already chose exit 2
+        except Exception as e:
+            _refuse(f"validate_only could not run for action {i} — nothing applied "
+                    f"({type(e).__name__}: {_scrub(str(e))})")
 
         # 10. live, one action at a time, each logged before the next begins.
         # PostMutationError is caught HERE, at the boundary of apply() itself, and
@@ -223,12 +253,16 @@ def apply(plan, now):
         # apply-changeset.test.py), so the 0/2/3 exit-code contract has to hold at the
         # function boundary, the same way build_plan's refusals hold SystemExit(2) at
         # its own boundary rather than leaking a plain ValueError to callers.
+        landed = False   # True once the mutator has RUN — the account may differ from here on
         try:
             results = []
             for i, a in enumerate(plan["actions"]):
                 args = (["--undo", a["resource_name"]] if plan["undo"]
                         else ["--action", json.dumps(a, sort_keys=True)])
                 rc, out, err = _invoke(plan, args, scratch)
+                # Set BEFORE inspecting rc: a non-zero return means the mutator ran and
+                # failed, which is not evidence that nothing changed. Conservative by design.
+                landed = True
                 if rc != 0:
                     raise PostMutationError(f"action {i} failed after {len(results)} already applied:\n{_scrub(err)}")
                 try:
@@ -242,14 +276,30 @@ def apply(plan, now):
                 # mutator must not be able to write arbitrary text into the audit log.
                 if not RESOURCE_RE.fullmatch(resource or ""):
                     raise PostMutationError(f"action {i} returned a malformed resource name "
-                                            f"{resource!r} — the mutation may have landed; "
-                                            f"inspect the account")
+                                            f"{_scrub(repr(resource))} — the mutation may have "
+                                            f"landed; inspect the account")
+                # ts comes from the run's `now`, deliberately, so every action in one apply
+                # shares it. A whole-branch review suggested a fresh per-action timestamp for
+                # audit precision; that was tried and reverted, because day_counts matches
+                # this exact field to enforce the DAILY CAPS. A write-time clock decouples the
+                # log from the cap accounting that reads it — deterministically under an
+                # injected `now`, and across a UTC midnight in production, where actions
+                # logged after 00:00 would stop counting toward the day the run was admitted
+                # under. Sequence is already recoverable from action_index.
                 rec = {"ts": now.strftime(C.ISO), "changeset_id": plan["changeset_id"],
                        "action_index": i, "type": a.get("type", "add_campaign_negative"),
                        "resource_name": resource,
                        "status": "undone" if plan["undo"] else "applied",
                        "operator": plan["operator"]}
-                C.append_log(plan["vault"], rec)      # fsync'd before the next action starts
+                try:
+                    C.append_log(plan["vault"], rec)  # fsync'd before the next action starts
+                except Exception as e:
+                    # The one place an irreversible side effect can outrun its record. Print
+                    # the resource name FIRST: it is the only way back from here, and it is
+                    # about to exist nowhere else.
+                    print(f"apply-changeset: action {i} LANDED but its audit-log write failed. "
+                          f"RECORD THIS NOW — it is in no log: {resource}", file=sys.stderr)
+                    raise PostMutationError(f"audit-log write failed after action {i} landed: {_scrub(str(e))}")
                 results.append(rec)
 
             # 11. result.json + timeline.md
@@ -269,6 +319,28 @@ def apply(plan, now):
             print("apply-changeset: EXIT 3 — at least one mutation LANDED. The audit log records "
                   "what applied; reverse it with --undo.", file=sys.stderr)
             raise SystemExit(3)
+        except SystemExit:
+            # Belt-and-braces. SystemExit derives from BaseException, so the `except
+            # Exception` below would not catch a _refuse() anyway — this clause exists so a
+            # future widening to `except BaseException` cannot silently swallow a refusal
+            # and relabel it as a post-mutation failure.
+            raise
+        except Exception as e:
+            # Anything unexpected raised after the live loop began — an OSError writing
+            # result.json, a full disk, a directory where timeline.md should be. Without
+            # this, such a failure escaped apply() as a traceback and exit 1, which reads
+            # as "usage error, nothing happened" for a run that DID change the account.
+            # The exit code is chosen by what actually happened, never by the exception type.
+            if landed:
+                print(f"apply-changeset: {type(e).__name__} after a live mutation: {_scrub(str(e))}",
+                      file=sys.stderr)
+                print("apply-changeset: EXIT 3 — at least one mutation LANDED. The audit log records "
+                      "what applied; reverse it with --undo.", file=sys.stderr)
+                raise SystemExit(3)
+            # Nothing was sent: subprocess.run raises before the child starts, so exit 2's
+            # promise still holds.
+            _refuse(f"failed before any mutation was attempted "
+                    f"({type(e).__name__}: {_scrub(str(e))})")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -283,7 +355,7 @@ def main(argv=None):
     ap.add_argument("--projects")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
-    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    now = _utcnow()
     plan = build_plan(args.client, args.changeset, now, args.registry, args.projects, args.undo)
     if args.dry_run:
         print(f"vault:   {plan['vault']}")

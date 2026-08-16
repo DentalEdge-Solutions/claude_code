@@ -581,10 +581,17 @@ def _iter_project_lines(path, project):
 
 
 def read_workdir(path, project):
+    """A duplicate refuses: workdir is half the path Hermes executes, so a silent
+    winner silently chooses which tree runs."""
+    found = None
     for indent, stripped in _iter_project_lines(path, project):
         if indent == 4 and stripped.startswith("workdir:"):
-            return stripped.split(":", 1)[1].strip()
-    raise ValueError(f"no workdir for project {project!r}")
+            if found is not None:
+                raise ValueError(f"duplicate 'workdir' key for project {project!r} — refusing")
+            found = stripped.split(":", 1)[1].strip()
+    if found is None:
+        raise ValueError(f"no workdir for project {project!r}")
+    return found
 
 
 def read_block(path, project, block):
@@ -595,15 +602,17 @@ def read_block(path, project, block):
     Returns empty structures when the block is absent — callers decide whether that
     is a refusal (read_mutate_execute) or simply nothing to check (read_allow_list).
 
-    DUPLICATE KEYS REFUSE. A repeated `allow:` header would otherwise ACCUMULATE,
-    silently admitting a second mutator; a repeated scalar would silently take the
-    last value, quietly swapping the interpreter. In a file that decides what may
-    mutate a live account, a duplicate key is a mistake — a merge artifact or a bad
-    hand-edit — not an intent, so it is loud rather than resolved.
+    DUPLICATE KEYS REFUSE, AT EVERY DEPTH. A repeated `allow:` header would otherwise
+    ACCUMULATE, silently admitting a second mutator; a repeated scalar would silently
+    take the last value, quietly swapping the interpreter; a repeated CAP would silently
+    raise the limit that bounds a malfunction. In a file that decides what may mutate a
+    live account, a duplicate key is a mistake — a merge artifact or a bad hand-edit —
+    not an intent, so it is loud rather than resolved.
     """
     inside = False
     sub = None
     seen = set()
+    seen_deep = set()          # keys inside the current indent-6 sub-block
     got = {"allow": [], "caps": {}}
     for indent, stripped in _iter_project_lines(path, project):
         if indent == 4 and stripped == f"{block}:":
@@ -618,6 +627,7 @@ def read_block(path, project, block):
                 raise ValueError(f"duplicate {key!r} key in {block} for project {project!r} — "
                                  "refusing rather than merging or taking the last value")
             seen.add(key)
+            seen_deep = set()                               # entering a new sub-block
             if stripped in ("allow:", "caps:"):
                 sub = key
             else:
@@ -625,11 +635,25 @@ def read_block(path, project, block):
                 k, _, v = stripped.partition(":")
                 got[k.strip()] = v.strip()
         elif indent == 8 and inside:
+            # Duplicate detection must reach THIS depth too. Covering only indent 6 left
+            # a repeated CAP taking a silent winner — the worst place to allow one, since
+            # applies_per_client_day is the load-bearing cap against a malfunction
+            # repeating. `seen_deep` is reset whenever a new indent-6 sub-block opens.
             if sub == "allow" and stripped.startswith("- "):
-                got["allow"].append(stripped[2:].strip())
+                item = stripped[2:].strip()
+                if item in seen_deep:
+                    raise ValueError(f"duplicate allow entry {item!r} in {block} for project "
+                                     f"{project!r} — refusing")
+                seen_deep.add(item)
+                got["allow"].append(item)
             elif sub == "caps":
                 k, _, v = stripped.partition(":")
-                got["caps"][k.strip()] = v.strip()
+                k = k.strip()
+                if k in seen_deep:
+                    raise ValueError(f"duplicate cap {k!r} in {block} for project {project!r} — "
+                                     "refusing rather than taking the last value")
+                seen_deep.add(k)
+                got["caps"][k] = v.strip()
     return got
 
 
@@ -952,25 +976,51 @@ def append_log(vault, rec):
         os.close(dfd)
 
 
-def day_counts(vault, day):
-    """Count applied actions and distinct applied change-sets for a UTC day (YYYY-MM-DD).
-    A corrupt line is a refusal, not a skip: an unreadable counter must never read as
-    'under the cap'."""
+def iter_log_records(vault):
+    """Yield (lineno, record) for every audit-log line, validating the fields all
+    readers depend on.
+
+    THE audit log has exactly ONE parser. It feeds two consumers with different
+    filters — day_counts (caps) and apply-changeset's _undo_targets (undo) — and
+    two readers with two standards of rigour is precisely how a log-borne defect
+    reaches only one of them. Every failure mode is a refusal, never a skip: an
+    unreadable counter must not read as 'under the cap', and an unreadable undo
+    list must not read as 'nothing to undo'.
+    """
     p = log_path(vault)
     if not os.path.exists(p):
-        return {"applies": 0, "actions": 0}
-    applies, actions = set(), 0
-    with open(p, encoding="utf-8") as f:
+        return
+    try:
+        f = open(p, encoding="utf-8")
+    except OSError as e:
+        raise ValueError(f"unreadable audit log at {p} ({e}) — fail-closed") from e
+    with f:
         for n, line in enumerate(f, 1):
             if not line.strip():
                 continue
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError as e:
-                raise ValueError(f"corrupt audit log at {p}:{n} ({e}) — caps are fail-closed")
-            if rec.get("status") == "applied" and str(rec.get("ts", "")).startswith(day):
-                applies.add(rec.get("changeset_id"))
-                actions += 1
+                raise ValueError(f"corrupt audit log at {p}:{n} ({e}) — fail-closed") from e
+            if not isinstance(rec, dict):
+                raise ValueError(f"corrupt audit log at {p}:{n} (record must be an object) — fail-closed")
+            _require_str(rec.get("status"), "status")
+            _require_str(rec.get("ts"), "ts")
+            _require_str(rec.get("changeset_id"), "changeset_id")
+            yield n, rec
+
+
+def day_counts(vault, day):
+    """Count applied actions and distinct applied change-sets for a UTC day (YYYY-MM-DD).
+    A corrupt line is a refusal, not a skip: an unreadable counter must never read as
+    'under the cap'."""
+    if not DAY_RE.fullmatch(_require_str(day, "day")):
+        raise ValueError(f"invalid day: {day!r}")
+    applies, actions = set(), 0
+    for _n, rec in iter_log_records(vault):
+        if rec["status"] == "applied" and rec["ts"].startswith(day):
+            applies.add(rec["changeset_id"])
+            actions += 1
     return {"applies": len(applies), "actions": actions}
 ```
 
@@ -2197,7 +2247,9 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
 
     cs, approval, actions = None, None, []
     if undo:
-        actions = _undo_targets(vault, undo)
+        # Spec §7.1: the resource_name prefix check against the RESOLVED customer_id
+        # happens inside _undo_targets, before any record can reach argv.
+        actions = _undo_targets(vault, undo, rec["customer_id"])
         if not actions:
             _refuse(f"no applied, un-undone actions recorded for change-set {undo!r}")
         operator = actions[0].get("operator", "unknown")
@@ -2276,27 +2328,33 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
             "customer_id": rec["customer_id"]}
 
 
-def _undo_targets(vault, changeset_id):
-    """Applied actions for this change-set that have not already been undone."""
-    p = C.log_path(vault)
-    if not os.path.exists(p):
-        return []
-    applied, undone = [], set()
-    with open(p, encoding="utf-8") as f:
-        for n, line in enumerate(f, 1):
-            if not line.strip():
-                continue
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError as e:
-                _refuse(f"corrupt audit log at {p}:{n} ({e})")
-            if r.get("changeset_id") != changeset_id:
-                continue
-            if r.get("status") == "applied":
-                applied.append(r)
-            elif r.get("status") == "undone":
-                undone.add(r.get("resource_name"))
-    return [r for r in reversed(applied) if r.get("resource_name") not in undone]
+def _undo_targets(vault, changeset_id, customer_id):
+    """Applied, un-undone actions for this change-set **belonging to this customer**.
+
+    The customer_id argument is not decoration. Spec §7.1 requires `resource_name`
+    to be prefix-validated against the RESOLVED customer_id so an undo can never
+    reach another account, and that guard belongs HERE, in Hermes. An earlier
+    revision of this plan placed it only inside the ads-repo mutator's do_undo,
+    which made a pre-flight guarantee depend on code Hermes neither owns nor
+    version-pins — exactly what the guard-6b comment in this same file forbids.
+    Validating inside this function (rather than in build_plan afterwards) means
+    an unvalidated record cannot escape it.
+    """
+    targets, undone = [], set()
+    for n, r in C.iter_log_records(vault):
+        if r.get("changeset_id") != changeset_id:
+            continue
+        status = r["status"]                      # iter_log_records type-checked it
+        rn = r.get("resource_name")
+        if not isinstance(rn, str) or not RESOURCE_RE.fullmatch(rn):
+            _refuse(f"audit log at {C.log_path(vault)}:{n} has a malformed resource_name")
+        if not rn.startswith(f"customers/{customer_id}/"):
+            _refuse("refusing to undo a criterion belonging to another customer")
+        if status == "applied":
+            targets.append(r)
+        elif status == "undone":
+            undone.add(rn)
+    return [r for r in reversed(targets) if r["resource_name"] not in undone]
 
 
 def _invoke(plan, args, scratch):
@@ -2305,17 +2363,38 @@ def _invoke(plan, args, scratch):
     return proc.returncode, _scrub(proc.stdout), _scrub(proc.stderr)
 
 
+# CORRECTIONS APPLIED TO THE SHIPPED CODE AFTER THIS BLOCK WAS WRITTEN. The reference
+# below is the ORIGINAL Task-7 draft and is retained for history; where it disagrees with
+# infra/hermes-agent/bin/apply-changeset.py, the shipped file is correct. The deltas:
+#
+#   1. PostMutationError is caught INSIDE apply(), not only in main(). The tests call
+#      apply() directly, so the 0/2/3 contract has to hold at that boundary too.
+#   2. _invoke returns RAW stdout/stderr; _scrub is applied only where text is embedded
+#      into a human-facing message. Scrubbing the PARSE input can corrupt valid JSON.
+#   3. The exit code is chosen by WHAT HAPPENED, not by exception type. A `landed` flag is
+#      set the moment the mutator has run; a catch-all maps any later failure to exit 3,
+#      and any failure before the first spawn to exit 2. Previously an OSError writing
+#      result.json or timeline.md escaped as a traceback and exit 1 — which an operator's
+#      tooling reads as "usage error, nothing happened" for a run that CHANGED the account.
+#   4. The validate_only loop has the same catch-all, mapping to exit 2: a validate_only
+#      call cannot mutate, so "nothing was touched" still holds even when the failure is
+#      an OSError spawning the runner rather than a rejection from Google.
+#   5. append_log is wrapped so a failed audit-log write PRINTS THE RESOURCE NAME first.
+#      That is the one point where an irreversible side effect can outrun its record, and
+#      the resource name is about to exist nowhere else.
+#
 def apply(plan, now):
     scratch = tempfile.mkdtemp(prefix="ads-mutate-")   # defense in depth: no in-tree .env nearby
     results = []
     try:
-        # 9. validate_only over EVERY action, all-or-nothing
+        # 9. validate_only over EVERY action, all-or-nothing. Any exception here is a
+        #    REFUSAL (exit 2), not a usage error — see delta 4 above.
         for i, a in enumerate(plan["actions"]):
             args = (["--undo", a["resource_name"]] if plan["undo"]
                     else ["--action", json.dumps(a, sort_keys=True)]) + ["--validate-only"]
             rc, out, err = _invoke(plan, args, scratch)
             if rc != 0:
-                _refuse(f"validate_only failed for action {i} — nothing applied:\n{err}")
+                _refuse(f"validate_only failed for action {i} — nothing applied:\n{_scrub(err)}")
 
         # 10. live, one action at a time, each logged before the next begins
         for i, a in enumerate(plan["actions"]):
@@ -2335,14 +2414,23 @@ def apply(plan, now):
             # mutator must not be able to write arbitrary text into the audit log.
             if not RESOURCE_RE.fullmatch(resource or ""):
                 raise PostMutationError(f"action {i} returned a malformed resource name "
-                                        f"{resource!r} — the mutation may have landed; "
-                                        f"inspect the account")
+                                        f"{_scrub(repr(resource))} — the mutation may have "
+                                        f"landed; inspect the account")
+            # ts comes from the run's `now` deliberately: day_counts matches this exact
+            # field to enforce the daily caps, so a write-time clock would decouple the log
+            # from the accounting that reads it (and straddle UTC midnight). A review
+            # suggested per-action timestamps for audit precision; tried and reverted.
             rec = {"ts": now.strftime(C.ISO), "changeset_id": plan["changeset_id"],
                    "action_index": i, "type": a.get("type", "add_campaign_negative"),
                    "resource_name": resource,
                    "status": "undone" if plan["undo"] else "applied",
                    "operator": plan["operator"]}
-            C.append_log(plan["vault"], rec)      # fsync'd before the next action starts
+            try:
+                C.append_log(plan["vault"], rec)  # fsync'd before the next action starts
+            except Exception as e:
+                print(f"apply-changeset: action {i} LANDED but its audit-log write failed. "
+                      f"RECORD THIS NOW — it is in no log: {resource}", file=sys.stderr)
+                raise PostMutationError(f"audit-log write failed after action {i} landed: {_scrub(str(e))}")
             results.append(rec)
 
         C._atomic_write_json(C.result_path(plan["vault"], plan["changeset_id"]),

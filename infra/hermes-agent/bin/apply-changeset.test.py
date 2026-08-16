@@ -33,6 +33,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CALLS = os.path.join(HERE, "calls.jsonl")
 with open(CALLS, "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
+# How many audit-log records existed at the MOMENT this process was spawned. Lets a
+# test prove the per-action log write completed BEFORE the next action started,
+# rather than only that the right number of records exist once the run has finished.
+_log = os.path.join(HERE, "..", "acme-dental", "changes", "log.jsonl")
+_n = sum(1 for line in open(_log) if line.strip()) if os.path.exists(_log) else 0
+with open(os.path.join(HERE, "logcounts.jsonl"), "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "log_records_at_spawn": _n}) + "\\n")
 mode_file = os.path.join(HERE, "mode.txt")
 mode = open(mode_file).read().strip() if os.path.exists(mode_file) else "ok"
 if mode == "fail_validate" and "--validate-only" in sys.argv:
@@ -307,6 +314,54 @@ class TestPostMutationFailure(Base):
         self.assertEqual(len(recs), 1)                     # the one that landed is recorded
         self.assertEqual(recs[0]["status"], "applied")
 
+    def test_each_log_write_completes_before_the_next_action_spawns(self):
+        """The durability property stated in spec §5, asserted directly.
+
+        Previously this was only covered indirectly, by counting records after a failed
+        second action — which proves the log holds one entry at the END, not that the
+        write completed before the next mutator started. The stub now records how many
+        records existed when it was spawned, so the ordering itself is observable: live
+        action k must see exactly k records already durable.
+        """
+        cs = self._approved(3)
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        p = os.path.join(self.tmp, "code", "logcounts.jsonl")
+        entries = [json.loads(x) for x in open(p) if x.strip()]
+        live = [e for e in entries if "--validate-only" not in e["argv"]]
+        self.assertEqual(len(live), 3)
+        self.assertEqual([e["log_records_at_spawn"] for e in live], [0, 1, 2])
+        # And every validate_only call ran before any of them wrote anything.
+        dry = [e for e in entries if "--validate-only" in e["argv"]]
+        self.assertEqual([e["log_records_at_spawn"] for e in dry], [0, 0, 0])
+
+    def test_io_failure_after_a_live_mutation_exits_3_not_1(self):
+        """The 0/1/2/3 contract must be decided by WHAT HAPPENED, not by exception type.
+
+        A post-mutation OSError previously escaped apply() as a traceback and exit 1,
+        which an operator's tooling reads as 'usage error, nothing happened' — for a run
+        that changed the account. A directory where timeline.md belongs reproduces it.
+        """
+        cs = self._approved(1)
+        os.mkdir(os.path.join(self.vault, "timeline.md"))   # open(..., "a") will raise
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 3)
+        recs = [json.loads(x) for x in open(C.log_path(self.vault)) if x.strip()]
+        self.assertEqual(len(recs), 1)                      # the mutation is still recorded
+        self.assertEqual(recs[0]["status"], "applied")
+
+    def test_failure_before_any_mutation_still_exits_2(self):
+        """The other half of the same contract: a broken runner sends nothing, so exit 2's
+        promise ('guaranteed nothing was mutated') must survive the new catch-all."""
+        cs = self._approved(1)
+        plan = X.build_plan("acme-dental", cs["changeset_id"], NOW,
+                            registry=self.clients, projects=self.projects)
+        plan["runner"] = os.path.join(self.tmp, "no-such-interpreter")
+        with self.assertRaises(SystemExit) as ctx:
+            X.apply(plan, NOW)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
 class TestUndo(Base):
     def _applied(self, n=1):
         cs = self._approved(n)
@@ -376,6 +431,7 @@ class TestUndo(Base):
         with self.assertRaises(SystemExit) as ctx:
             self._run(cs["changeset_id"], undo=cs["changeset_id"])
         self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])        # refused BEFORE the mutator ran
 
     def test_undo_still_requires_write_role(self):
         cs = self._applied(1)
@@ -383,6 +439,59 @@ class TestUndo(Base):
         with self.assertRaises(SystemExit) as ctx:
             self._run(cs["changeset_id"], undo=cs["changeset_id"])
         self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])        # refused BEFORE the mutator ran
+
+    # --- spec §7.1 / §9: an undo can never reach another account -------------------
+    #
+    # These exercise the HERMES-side guard specifically. The ads-repo mutator carries an
+    # equivalent check, so a live gate cannot distinguish "Hermes refused" from "the
+    # mutator refused" — which is exactly how the Hermes-side guard went missing and
+    # stayed missing. The stub here has NO such check, so a passing test means Hermes
+    # refused on its own. Asserting _calls() == [] is the load-bearing half.
+
+    def _rewrite_log(self, fn):
+        p = C.log_path(self.vault)
+        recs = [json.loads(x) for x in open(p) if x.strip()]
+        with open(p, "w") as f:
+            for r in recs:
+                fn(r)
+                f.write(json.dumps(r, sort_keys=True) + "\n")
+
+    def test_undo_refuses_resource_name_of_another_customer(self):
+        cs = self._applied(1)
+        self._rewrite_log(lambda r: r.__setitem__(
+            "resource_name", r["resource_name"].replace("customers/1234567890/",
+                                                        "customers/9999999999/")))
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
+    def test_undo_refuses_malformed_resource_name(self):
+        cs = self._applied(1)
+        self._rewrite_log(lambda r: r.__setitem__("resource_name", "; rm -rf /  $(whoami)"))
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
+    def test_undo_refuses_record_missing_resource_name(self):
+        """Previously surfaced as an uncaught KeyError and exit 1, not a refusal."""
+        cs = self._applied(1)
+        self._rewrite_log(lambda r: r.pop("resource_name", None))
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
+    def test_undo_refuses_record_with_non_string_status(self):
+        """iter_log_records type-checks the fields both readers depend on."""
+        cs = self._applied(1)
+        self._rewrite_log(lambda r: r.__setitem__("status", 1))
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
 
 
 if __name__ == "__main__":

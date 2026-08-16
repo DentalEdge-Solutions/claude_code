@@ -131,10 +131,19 @@ def _iter_project_lines(path, project):
 
 
 def read_workdir(path, project):
+    """The project's workdir. A duplicate refuses, for the same reason read_block's
+    duplicates do: workdir is half of the path Hermes executes, so a repeated key
+    silently choosing a winner would silently choose which tree runs."""
+    found = None
     for indent, stripped in _iter_project_lines(path, project):
         if indent == 4 and stripped.startswith("workdir:"):
-            return stripped.split(":", 1)[1].strip()
-    raise ValueError(f"no workdir for project {project!r}")
+            if found is not None:
+                raise ValueError(f"duplicate 'workdir' key for project {project!r} — refusing "
+                                 "rather than taking the first or last value")
+            found = stripped.split(":", 1)[1].strip()
+    if found is None:
+        raise ValueError(f"no workdir for project {project!r}")
+    return found
 
 
 def read_block(path, project, block):
@@ -145,15 +154,22 @@ def read_block(path, project, block):
     Returns empty structures when the block is absent — callers decide whether that
     is a refusal (read_mutate_execute) or simply nothing to check (read_allow_list).
 
-    DUPLICATE KEYS REFUSE. A repeated `allow:` header would otherwise ACCUMULATE,
-    silently admitting a second mutator; a repeated scalar would silently take the
-    last value, quietly swapping the interpreter. In a file that decides what may
-    mutate a live account, a duplicate key is a mistake — a merge artifact or a bad
+    DUPLICATE KEYS REFUSE, at EVERY depth. A repeated `allow:` header would otherwise
+    ACCUMULATE, silently admitting a second mutator; a repeated scalar would silently
+    take the last value, quietly swapping the interpreter. In a file that decides what
+    may mutate a live account, a duplicate key is a mistake — a merge artifact or a bad
     hand-edit — not an intent, so it is loud rather than resolved.
+
+    The depth part is not incidental. Duplicate detection originally covered only the
+    indent-6 keys, so a repeated CAP — one level deeper — still took a silent winner.
+    That is the worst place to allow it: `applies_per_client_day` is the load-bearing
+    cap against a malfunction repeating, and a merge artifact could raise it unnoticed
+    while every visible guard still read as correct.
     """
     inside = False
     sub = None
     seen = set()
+    seen_deep = set()          # keys inside the current indent-6 sub-block
     got = {"allow": [], "caps": {}}
     for indent, stripped in _iter_project_lines(path, project):
         if indent == 4 and stripped == f"{block}:":
@@ -168,6 +184,7 @@ def read_block(path, project, block):
                 raise ValueError(f"duplicate {key!r} key in {block} for project {project!r} — "
                                  "refusing rather than merging or taking the last value")
             seen.add(key)
+            seen_deep = set()                               # entering a new sub-block
             if stripped in ("allow:", "caps:"):
                 sub = key
             else:
@@ -176,10 +193,20 @@ def read_block(path, project, block):
                 got[k.strip()] = v.strip()
         elif indent == 8 and inside:
             if sub == "allow" and stripped.startswith("- "):
-                got["allow"].append(stripped[2:].strip())
+                item = stripped[2:].strip()
+                if item in seen_deep:
+                    raise ValueError(f"duplicate allow entry {item!r} in {block} for project "
+                                     f"{project!r} — refusing")
+                seen_deep.add(item)
+                got["allow"].append(item)
             elif sub == "caps":
                 k, _, v = stripped.partition(":")
-                got["caps"][k.strip()] = v.strip()
+                k = k.strip()
+                if k in seen_deep:
+                    raise ValueError(f"duplicate cap {k!r} in {block} for project {project!r} — "
+                                     "refusing rather than taking the last value")
+                seen_deep.add(k)
+                got["caps"][k] = v.strip()
     return got
 
 
@@ -381,6 +408,45 @@ def append_log(vault, rec):
         os.close(dfd)
 
 
+def iter_log_records(vault):
+    """Yield (lineno, record) for every audit-log line, validating the fields all
+    readers depend on.
+
+    THE audit log has exactly ONE parser. It feeds two consumers with different
+    filters — day_counts (daily caps) and apply-changeset's _undo_targets (the undo
+    path) — and two readers with two standards of rigour is precisely how a
+    log-borne defect reaches only one of them. (It did: the undo reader originally
+    used bare .get() throughout and had no OSError guard, so an unreadable log or a
+    record missing a field surfaced as an uncaught exception and exit 1 rather than
+    a refusal.)
+
+    Every failure mode is a refusal, never a skip: an unreadable counter must not
+    read as 'under the cap', and an unreadable undo list must not read as 'nothing
+    to undo'.
+    """
+    p = log_path(vault)
+    if not os.path.exists(p):
+        return
+    try:
+        f = open(p, encoding="utf-8")
+    except OSError as e:
+        raise ValueError(f"unreadable audit log at {p} ({e}) — fail-closed") from e
+    with f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"corrupt audit log at {p}:{n} ({e}) — fail-closed") from e
+            if not isinstance(rec, dict):
+                raise ValueError(f"corrupt audit log at {p}:{n} (record must be an object) — fail-closed")
+            _require_str(rec.get("status"), "status")
+            _require_str(rec.get("ts"), "ts")
+            _require_str(rec.get("changeset_id"), "changeset_id")
+            yield n, rec
+
+
 def day_counts(vault, day):
     """Count applied actions and distinct applied change-sets for a UTC day.
 
@@ -389,27 +455,9 @@ def day_counts(vault, day):
     """
     if not DAY_RE.fullmatch(_require_str(day, "day")):
         raise ValueError(f"invalid day: {day!r}")
-    p = log_path(vault)
-    if not os.path.exists(p):
-        return {"applies": 0, "actions": 0}
     applies, actions = set(), 0
-    try:
-        f = open(p, encoding="utf-8")
-    except OSError as e:
-        raise ValueError(f"unreadable audit log at {p} ({e}) — caps are fail-closed") from e
-    with f:
-        for n, line in enumerate(f, 1):
-            if not line.strip():
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"corrupt audit log at {p}:{n} ({e}) — caps are fail-closed") from e
-            if not isinstance(rec, dict):
-                raise ValueError(f"corrupt audit log at {p}:{n} (record must be object) — caps are fail-closed")
-            status = _require_str(rec.get("status"), "status")
-            ts = _require_str(rec.get("ts"), "ts")
-            if status == "applied" and ts.startswith(day):
-                applies.add(_require_str(rec.get("changeset_id"), "changeset_id"))
-                actions += 1
+    for _n, rec in iter_log_records(vault):
+        if rec["status"] == "applied" and rec["ts"].startswith(day):
+            applies.add(rec["changeset_id"])
+            actions += 1
     return {"applies": len(applies), "actions": actions}

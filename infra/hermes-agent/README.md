@@ -552,8 +552,29 @@ all mutation across every client.
 
 **Undo bypasses only the kill switch and the daily caps.** Guards constrain *creating*
 change, never *reversing* it: a tripped kill switch that also blocked cleanup would be a
-guardrail that makes a bad situation worse. Every other guard still applies, including
-the injected-credential check, so an undo can never reach another client's account.
+guardrail that makes a bad situation worse. Every other guard still applies.
+
+An undo cannot reach another client's account, and *two independent checks* enforce that:
+the injected credential must belong to the resolved client (guard 7), and every
+`resource_name` read out of the audit log is shape-validated and prefix-checked against
+that client's customer id before it can become a command-line argument. The second check
+lives in `apply-changeset.py` deliberately. The mutator carries an equivalent one, but a
+pre-flight guarantee that exists only in a separate repository is one Hermes neither owns
+nor version-pins — and for a while that was the only copy, which a whole-branch review
+caught.
+
+**`--dry-run` runs the guards, not the account.** `./run-ads-mutate.sh --client <slug>
+--changeset <id> --dry-run` runs every pre-flight guard and prints the resolved runner,
+script, mode, and action count — then stops. It does **not** perform the `validate_only`
+pass, and it never spawns the mutator, so it proves the change-set would be *admitted*,
+not that Google would accept it. The `validate_only` dry run happens inside a real apply.
+
+**One client per credential file.** Guard 7 requires the injected
+`GOOGLE_ADS_CUSTOMER_ID` to equal the resolved client's customer id, and `.env.gaw` pins
+exactly one. Operating a second client means pointing that file at that client — by
+construction, not by convention. This is a deliberate safety property, but it surfaces as
+a refusal rather than a prompt, so it is worth knowing before the second client rather
+than during it.
 
 **Credential separation.** The write credential lives **only** in the gitignored
 `.env.gaw` (copy `.env.gaw.example`), is parsed as data rather than sourced, and is
@@ -569,14 +590,17 @@ the change-set, its approval record, a per-run result file, and `log.jsonl` — 
 append-only reversibility record that also feeds the daily caps. Each apply appends a
 line to `timeline.md`, so the next trend audit sees that a change was made.
 
-**Tests** (run directly — not auto-discovered by `run-all-tests.js`):
+**Tests.** These suites are stdlib-only and are not discoverable by
+`scripts/run-all-tests.js`, which is node-only by design. Run all of them with:
 
 ```bash
-python3 infra/hermes-agent/bin/changeset_lib.test.py
-python3 infra/hermes-agent/bin/propose-changeset.test.py
-python3 infra/hermes-agent/bin/approve-changeset.test.py
-python3 infra/hermes-agent/bin/apply-changeset.test.py
+infra/hermes-agent/bin/run-bin-tests.sh
 ```
+
+It discovers every `*.test.py` in that directory rather than listing them, runs all of
+them even after one fails, and exits non-zero if any did. Individual suites still run
+directly (`python3 infra/hermes-agent/bin/apply-changeset.test.py`) — note `python3`,
+never `python`.
 
 ## Security
 

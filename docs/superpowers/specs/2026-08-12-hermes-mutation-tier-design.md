@@ -183,11 +183,15 @@ every refusal happens before Google is reachable:
    (cross-client bleed guard, mirroring two-tier §7)
 5. Approval exists, hash matches, not expired
 6. Daily caps satisfied, counted from `log.jsonl` for the current UTC day (§7.2)
-7. Mutator resolves in `mutate_execute.allow`; allow-lists disjoint
-8. All write-credential vars present — else refuse, so nothing falls through to the in-tree `.env`
-9. **`validate_only` pass over every action.** Any failure aborts the entire change-set, nothing applied
-10. Live apply, action by action, each logged immediately
-11. Write `result.json`, append `timeline.md`
+7. **The injected `GOOGLE_ADS_CUSTOMER_ID` equals the resolved client's customer id** — on BOTH
+   the apply and undo paths. Without this, an operation for client A could run under client B's
+   injected credential, and the only thing refusing it would be the mutator in a different
+   repository. A pre-flight guarantee must not depend on code Hermes does not own.
+8. Mutator resolves in `mutate_execute.allow`; allow-lists disjoint
+9. All write-credential vars present — else refuse, so nothing falls through to the in-tree `.env`
+10. **`validate_only` pass over every action.** Any failure aborts the entire change-set, nothing applied
+11. Live apply, action by action, each logged immediately
+12. Write `result.json`, append `timeline.md`
 
 Step 9 is all-or-nothing: a change-set is validated as a unit before any part of it executes.
 
@@ -210,9 +214,17 @@ criterion by identity. Keeping it in the one script means the allow-list stays a
 and undo cannot exist without the add path it reverses.
 
 Guards that **do** apply to undo: slug validation and resolution; a matching `log.jsonl` entry with
-status `applied`; **`resource_name` prefix-validated against the resolved `customer_id`** (so an undo
-can never reach another account); allow-list resolution; the full credential set; and `validate_only`
-before the live removal. Each undo appends its own `log.jsonl` line with status `undone`.
+status `applied`; **`resource_name` shape- and prefix-validated against the resolved `customer_id`,
+in `apply-changeset.py` itself** (so an undo can never reach another account); the injected-credential
+check (§7 step 7); allow-list resolution; the full credential set; and `validate_only` before the live
+removal. Each undo appends its own `log.jsonl` line with status `undone`.
+
+**The prefix guard is Hermes-side, and that placement is load-bearing.** The mutator carries its own
+equivalent check, but a guarantee that lives only in a separate repository is one Hermes neither owns
+nor version-pins. Both exist deliberately; the Hermes one is the one this spec requires. (Recorded
+because the first implementation pass dropped the Hermes-side check and kept only the mutator's — a
+whole-branch review caught it, and a foreign-account `resource_name` in the audit log was live-executed
+in a harness probe before the fix.)
 
 Guards that **do not** apply: the kill switch and the daily caps. They constrain *creating* change,
 never *reversing* it — a tripped kill switch that also blocked cleanup would be a guardrail that makes
