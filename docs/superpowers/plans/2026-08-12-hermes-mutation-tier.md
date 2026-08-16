@@ -2863,17 +2863,46 @@ Expected: `exit=0` and a JSON summary. Internally this ran `validate_only` first
 
 - [ ] **Step 11: Verify the criterion is present in the account**
 
+**Do NOT use `audit_analyze` for this.** It is PURE LOCAL computation over `audit_data/` and makes
+no API call, so `--customer` has no effect on it and it will happily report stale, possibly
+cross-client state. It would return exit 0 and look like a pass while proving nothing about the
+account. (Corrected after the first gate run, where this step as originally written would have
+been a false positive.)
+
+The account-side read-back goes through `collect-audit-data.sh`, which runs SELECT-only collectors
+on the host under the **read-only** credential — so the confirmation is independent of the
+credential that made the change:
+
 ```bash
-./run-ads-report.sh --project claude_google_ads --report audit_analyze --customer <CID>
+AD=<ads-project-dir>/audit_data
+# 1. NEGATIVE CONTROL first — the keyword must be absent before the collect, or a later
+#    hit proves nothing about whether the account actually holds it.
+grep -rlF "zzz hermes gate probe" "$AD" | wc -l          # expect 0
+date -u +%Y-%m-%dT%H:%M:%SZ                              # freshness marker
+
+# 2. Scoped, read-only collect against the authorised account.
+cd infra/hermes-agent
+ADS_CUSTOMER_ID_OVERRIDE=<CID> ./collect-audit-data.sh
+
+# 3. FRESHNESS PROOF — the files you are about to read must have been rewritten by THIS
+#    collect (mtime after the marker) and be non-empty. audit_data/ retains stale files.
+ls -l "$AD"/campaign_criteria.json "$AD"/campaign_negatives.json
+grep -rlF "zzz hermes gate probe" "$AD"                  # expect both files
 ```
 
-Confirm the synthetic negative appears. Also confirm the audit log:
+Expected in the collected record: `"negative": true`, `matchType` `PHRASE`, `status` `ENABLED`,
+on the target campaign, under the authorised customer id. `negatives_audit.py`'s summary line
+`campaign-level negative keywords:` should read one higher than before the apply.
+
+Then confirm the audit log, and tie the two together:
 
 ```bash
 cat data/vaults/<slug>/changes/log.jsonl
 ```
 
-Expected: one `applied` line carrying the real `resource_name`.
+Expected: one `applied` line carrying the real `resource_name`. **Assert set equality** between
+the `resource_name`s logged as `applied` and the `resourceName`s the account returns for the probe
+keyword — a count match alone would not catch a duplicated or mismatched record.
 
 - [ ] **Step 12: UNDO and verify absence (binding condition 3)**
 
