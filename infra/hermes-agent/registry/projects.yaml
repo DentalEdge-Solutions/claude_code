@@ -52,6 +52,36 @@ projects:
         - account_overview
         - audit_search_terms
         - audit_analyze
+        # --- opened 2026-08-17: analysis readers, verified non-mutating and
+        # verified runnable in-container. A read-only credential already bounds
+        # the worst case to "produces a bad report", so withholding these bought
+        # no safety. Each was probed live before being listed here.
+        - find_negatives           # pure local compute over audit_data/ (no credential)
+        - simulate_negatives       # pure local compute over audit_data/ (no credential)
+        - rsa_rubric_check         # pure local compute over audit_data/ (no credential)
+        - discover_accounts        # API reader, no file writes
+        #
+        # DELIBERATELY NOT LISTED — each verified, each for a different reason:
+        #
+        #   audit_assets_rsa / assess_supplemental / build_dashboard_data
+        #     Non-mutating, but they WRITE into the project tree
+        #     (<workdir>/audit_data/, <workdir>/landing/data/). Hermes mounts
+        #     projects :ro, so in-container they die with
+        #     `OSError: [Errno 30] Read-only file system` at the first write —
+        #     AFTER spending real API calls. These belong host-side, alongside
+        #     collect-audit-data.sh, which exists precisely because refreshing
+        #     audit_data/ requires writing the project tree.
+        #
+        #   negatives_coverage
+        #     Non-mutating and writes nothing, but currently BROKEN against the
+        #     repo's own data: it splits universal-negative-keywords.md on
+        #     "## A. Universal negatives" / "## B. Industry-specific", and that
+        #     file was restructured to "## A. Tier 1 …" / "## B. Tier 2 …".
+        #     Fails with IndexError. Fix it in the ads repo, then list it.
+        #
+        #   add_campaign_negative / add_competitor_negatives / apply_negatives /
+        #   attach_audience — mutators. NEVER allow-listed, in this project or
+        #   any future one. Guarded at the script via code/injected_credentials.py.
     # MUTATION TIER (Task 2 increment). Separate from read_execute by design: the
     # read allow-list's invariant is "readers only; mutators are never allow-listed",
     # and apply-changeset.py refuses if any name appears in BOTH lists.
