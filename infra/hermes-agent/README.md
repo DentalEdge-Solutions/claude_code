@@ -602,6 +602,62 @@ them even after one fails, and exits non-zero if any did. Individual suites stil
 directly (`python3 infra/hermes-agent/bin/apply-changeset.test.py`) — note `python3`,
 never `python`.
 
+## Credential access levels — measure, never assert
+
+Every access-level guarantee here used to be a sentence in prose: "`.env.ga` is
+read-only", "`.env.gaw` is Standard-access". Twice those sentences were wrong, and
+both times the discrepancy surfaced by luck rather than by design. Prose cannot be
+checked, so the guarantee is now measurable:
+
+```bash
+cd infra/hermes-agent
+./audit-credential-access.sh --cred .env.ga  --customer <digits>
+./audit-credential-access.sh --cred .env.gaw --customer <digits>
+./audit-credential-access.sh --all
+```
+
+It is **credential-scoped, not project-scoped** — it asks Google what a given
+credential can do, so it works unchanged for whatever project replaces
+`claude-google-ads` and for every project registered after it.
+
+**Structurally non-mutating.** The mutate probe hardcodes `validate_only=True`
+with no flag to disable it; every other probe is a `SELECT`. It cannot change an
+account.
+
+| Probe | Answers |
+|---|---|
+| `read` | Can it read the target account? Positive control for the rest — without a successful read, a refusal below proves nothing about access level |
+| `scope` | How many accounts are reachable under the login customer — the blast radius, and the number that matters once Hermes holds credentials for several projects |
+| `mutate` | `validate_only` against a **SEARCH** campaign. Three-valued: PERMITTED / DENIED / INCONCLUSIVE |
+| `roles` | The `customer_user_access` role table for the manager and the target account — Google's own record of who holds what |
+
+**Verdicts:** `UNUSABLE` · `READ_ONLY` · `MUTATE_CAPABLE` · `INCONCLUSIVE`.
+Exit `0` agree · `2` unusable · `3` **mismatch** · `4` inconclusive.
+
+Two rules this encodes, both learned from getting them wrong:
+
+- **A context refusal is not an authorization refusal.** Campaign-level negative
+  keywords are invalid on some channel types; that refusal says nothing about
+  access level. Conflating the two reports a mutate-capable credential as
+  read-only. Hence the SEARCH-campaign requirement and the three-valued result.
+- **"Could not tell" must never round to "safely read-only."** An inconclusive
+  probe stays `INCONCLUSIVE` and exits 4.
+
+**What it deliberately does not claim:** whether a credential is ADMIN. There is
+no sound non-mutating probe — `MutateCustomerUserAccessRequest` has no
+`validate_only` field (verified against SDK v24), so the only test would be a real
+user-access mutation. Reading `customer_user_access` is **not** an admin
+discriminator: a READ_ONLY credential reads it successfully. An earlier version of
+this tool misread that as proof of ADMIN while the same run showed the mutate
+refused — a confident wrong answer, which is the worst possible failure for a tool
+whose purpose is replacing assertion with evidence. The roles table is reported so
+a human can match it against the account a credential was minted from; the tool
+does not guess.
+
+**Tests:** `bin/audit-credential-access.test.py` covers the classification logic
+(the part where both historical bugs lived). The probes need a live account and
+belong to operator-run verification.
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
