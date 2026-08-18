@@ -643,16 +643,27 @@ Two rules this encodes, both learned from getting them wrong:
 - **"Could not tell" must never round to "safely read-only."** An inconclusive
   probe stays `INCONCLUSIVE` and exits 4.
 
-**What it deliberately does not claim:** whether a credential is ADMIN. There is
-no sound non-mutating probe — `MutateCustomerUserAccessRequest` has no
-`validate_only` field (verified against SDK v24), so the only test would be a real
-user-access mutation. Reading `customer_user_access` is **not** an admin
-discriminator: a READ_ONLY credential reads it successfully. An earlier version of
-this tool misread that as proof of ADMIN while the same run showed the mutate
-refused — a confident wrong answer, which is the worst possible failure for a tool
-whose purpose is replacing assertion with evidence. The roles table is reported so
-a human can match it against the account a credential was minted from; the tool
-does not guess.
+| `manager_admin` | Is it ADMIN at the **manager** level? `validate_only` update of the manager account's own name, set to the value it already holds. Touches no client ad account |
+
+**How the admin probe was arrived at, because two earlier attempts were wrong and
+both failed confidently.** First, reading `customer_user_access` was treated as
+proof of ADMIN — it is not a discriminator at all, since a READ_ONLY credential
+reads it fine, and the tool reported ADMIN for a credential whose mutate was
+refused in the *same run*. Then this doc claimed admin was simply not measurable,
+reasoning that `MutateCustomerUserAccessRequest` has no `validate_only`. True, but
+the wrong service: `MutateCustomerRequest` **has** `validate_only`, and updating the
+manager account is admin-gated.
+
+The current probe is verified **discriminating** against a known-READ_ONLY control
+(`hermes@` is refused with `ACTION_NOT_PERMITTED`; a manager ADMIN is accepted).
+That control is the check both earlier versions lacked — a probe never shown to
+refuse something it *should* refuse proves nothing when it accepts.
+
+This is also how a credential's identity gets pinned down without a `whoami`
+endpoint, which Google Ads does not offer: combine the measured manager-level
+result with the `customer_user_access` role table. A credential that is refused at
+manager level cannot belong to any manager ADMIN, which is often the exclusion you
+actually need.
 
 **Tests:** `bin/audit-credential-access.test.py` covers the classification logic
 (the part where both historical bugs lived). The probes need a live account and

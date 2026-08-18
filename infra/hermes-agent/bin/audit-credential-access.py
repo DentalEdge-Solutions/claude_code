@@ -31,15 +31,25 @@ WHAT IT MEASURES
               the target account. This is Google's own ground truth about who holds
               what, and it is the only non-behavioural evidence available here.
 
-WHAT IT DELIBERATELY DOES NOT CLAIM
-    Whether THIS credential is ADMIN. There is no sound non-mutating probe for it:
-    MutateCustomerUserAccessRequest has no validate_only field (verified against
-    SDK v24), so the only test would be an actual user-access mutation. Reading
-    customer_user_access is NOT an admin discriminator — a READ_ONLY credential
-    reads it successfully, which an earlier version of this file misread as proof
-    of ADMIN while the same run showed its mutate refused. The roles table is
-    reported for a human to match against the account the credential was minted
-    from; the tool does not guess.
+    manager_admin — is the credential ADMIN at the MANAGER level? validate_only
+              update of the manager account's own descriptive_name, set to the value
+              it already holds. Touches no client ad account.
+
+A NOTE ON HOW THIS PROBE WAS ARRIVED AT
+    Two earlier attempts were wrong, and both failed in the confident direction:
+
+      1. Reading customer_user_access was treated as proof of ADMIN. It is not a
+         discriminator at all — a READ_ONLY credential reads it successfully. The
+         tool reported ADMIN for a credential whose mutate was refused in the SAME
+         run, an internal contradiction it should have caught itself.
+      2. This file then claimed admin was not measurable, reasoning that
+         MutateCustomerUserAccessRequest has no validate_only. True, but the wrong
+         service: MutateCustomerRequest HAS validate_only, and updating the manager
+         account is admin-gated.
+
+    The current probe is verified DISCRIMINATING against a known-READ_ONLY control,
+    which is the check both earlier versions lacked. A probe that has not been shown
+    to refuse a credential that should be refused proves nothing when it accepts one.
 
 VERDICT LADDER
     UNUSABLE      — cannot even read
@@ -149,6 +159,49 @@ def probe_scope(client, login_cid):
         return {"ok": False, "detail": _err(e)}
 
 
+def probe_manager_admin(client, mcc):
+    """Is this credential ADMIN at the manager level? Non-mutating.
+
+    validate_only update of the MANAGER account's own descriptive_name, set to the
+    value it already holds. Touches no client ad account, and validate_only means
+    nothing is written even when accepted.
+
+    This supersedes an earlier claim in this file that admin was not measurable. That
+    claim was based on MutateCustomerUserAccessRequest lacking validate_only — true,
+    but the wrong service to reach for. MutateCustomerRequest HAS validate_only, and
+    updating the manager account is admin-gated, which makes it a sound probe.
+
+    Verified discriminating: a credential known READ_ONLY on the manager is refused
+    with ACTION_NOT_PERMITTED, while a manager ADMIN is accepted.
+    """
+    try:
+        rows = _search(client, mcc, "SELECT customer.descriptive_name FROM customer LIMIT 1")
+        if not rows:
+            return {"admin": None, "reason": "could not read the manager account"}
+        name = rows[0].customer.descriptive_name
+    except GoogleAdsException as e:
+        return {"admin": None, "reason": "manager read refused", "detail": _err(e)}
+
+    from google.api_core import protobuf_helpers
+    svc = client.get_service("CustomerService")
+    op = client.get_type("CustomerOperation")
+    op.update.resource_name = svc.customer_path(mcc)
+    op.update.descriptive_name = name                 # unchanged value
+    client.copy_from(op.update_mask, protobuf_helpers.field_mask(None, op.update._pb))
+    req = client.get_type("MutateCustomerRequest")
+    req.customer_id = mcc
+    req.operation = op
+    req.validate_only = True                          # HARDCODED — no flag
+    try:
+        svc.mutate_customer(request=req)
+        return {"admin": True, "reason": "manager-level update accepted"}
+    except GoogleAdsException as e:
+        sig = _err(e)
+        if classify_mutate_error(sig) is False:
+            return {"admin": False, "reason": "authorization refusal"}
+        return {"admin": None, "reason": "non-authorization refusal", "detail": sig}
+
+
 def probe_roles(client, cid, label):
     """Google's own record of who holds what. Emails are hashed; only a 3-char hint
     is kept so a human can match a row to an account without the file carrying an
@@ -252,6 +305,8 @@ def main():
                                                            "reason": "skipped — read failed"}
     roles = [probe_roles(client, login, "manager (login_customer_id)"),
              probe_roles(client, cid, "target account")] if read["ok"] else []
+    mgr_admin = probe_manager_admin(client, login) if read["ok"] else {"admin": None,
+                                                                      "reason": "skipped"}
 
     v = verdict(read, mutate)
     mismatch = read["ok"] and v != "INCONCLUSIVE" and v != expected
@@ -268,11 +323,9 @@ def main():
         "expected_verdict": expected,
         "measured_verdict": v,
         "mismatch": mismatch,
-        "admin_capability": "NOT MEASURED — no non-mutating probe exists "
-                            "(MutateCustomerUserAccessRequest has no validate_only). "
-                            "Match the roles table below against the account this "
-                            "credential was minted from.",
-        "probes": {"read": read, "scope": scope, "mutate": mutate, "roles": roles},
+        "manager_level_admin": mgr_admin,
+        "probes": {"read": read, "scope": scope, "mutate": mutate,
+                   "manager_admin": mgr_admin, "roles": roles},
     }, indent=2))
 
     if v == "UNUSABLE":
