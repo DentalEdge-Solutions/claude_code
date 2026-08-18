@@ -5,7 +5,7 @@ Aggregates campaign_perf_30d.json (current-30d per-campaign metrics) into
 account-level KPIs. Ratios are RECOMPUTED from summed totals (never averaged
 across campaigns); impression_share is impression-weighted. Emits JSON.
 """
-import argparse, json, os, sys
+import argparse, hashlib, json, os, sys
 from datetime import datetime, timezone
 
 def _load(d, name):
@@ -16,7 +16,51 @@ def _num(x):
     try: return float(x)
     except (TypeError, ValueError): return 0.0
 
+def _digits(x):
+    return "".join(c for c in str(x) if c.isdigit())
+
+class ProvenanceMismatch(Exception):
+    """audit_data/ belongs to a different account than the one being labelled."""
+
+def audit_data_customer_id(audit_data_dir):
+    """Which account audit_data/ was actually collected for, per account.json."""
+    rows = _load(audit_data_dir, "account.json")
+    if isinstance(rows, dict):
+        rows = [rows]
+    for r in rows:
+        cid = (r.get("customer") or {}).get("id")
+        if cid:
+            return _digits(cid)
+    raise KeyError("account.json contains no customer.id — cannot verify provenance")
+
+def assert_provenance(audit_data_dir, customer_id):
+    """Refuse to label audit_data/ with an account it does not belong to.
+
+    audit_data/ is ONE flat directory shared by every client: collecting for client B
+    overwrites client A's files, and any dataset whose query failed keeps A's data
+    while its neighbours refresh. Nothing downstream re-checks. Without this guard a
+    snapshot taken after a failed or skipped collection is written into client B's
+    vault carrying B's customer_id and A's numbers — not merely stale, but
+    mislabelled cross-client data inside a per-client vault, which is exactly what
+    the two-tier memory split exists to prevent.
+
+    run-trend-audit.sh already clears stale REPORTS for this same reason; audit_data/
+    had no equivalent. Comparison is by id, and only hashes are ever printed.
+    """
+    want = _digits(customer_id)
+    got = audit_data_customer_id(audit_data_dir)
+    if got != want:
+        raise ProvenanceMismatch(
+            "audit_data/ was collected for a DIFFERENT account than --customer.\n"
+            f"  audit_data/account.json : sha12 {hashlib.sha1(got.encode()).hexdigest()[:12]}\n"
+            f"  --customer              : sha12 {hashlib.sha1(want.encode()).hexdigest()[:12]}\n"
+            "  Re-run collect-audit-data.sh for this client before snapshotting. "
+            "Refusing rather than writing another client's numbers into this vault."
+        )
+    return got
+
 def snapshot(audit_data_dir, customer_id, collected_at=None):
+    assert_provenance(audit_data_dir, customer_id)   # fail closed BEFORE any labelling
     # campaign_perf_30d.json is the file the collector (audit_discovery.py) actually
     # refreshes and that audit_analyze reads for its 30-day numbers — so the snapshot
     # stays in lockstep with a fresh collection. (campaign_perf_cur30.json is written by
@@ -61,6 +105,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         snap = snapshot(args.audit_data, args.customer, args.collected_at)
+    except ProvenanceMismatch as e:
+        print(f"ads-metrics-snapshot: PROVENANCE REFUSED\n{e}", file=sys.stderr); return 2
     except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
         print(f"ads-metrics-snapshot: {e}", file=sys.stderr); return 2
     print(json.dumps(snap, indent=2)); return 0
