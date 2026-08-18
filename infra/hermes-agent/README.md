@@ -658,6 +658,62 @@ does not guess.
 (the part where both historical bugs lived). The probes need a live account and
 belong to operator-run verification.
 
+## Provisioning a credential for a new project or role
+
+The model, stated once so the next project does not have to rediscover it:
+
+**One OAuth client per credential-holding component, and one Google *account* per
+role.** These are different axes and conflating them is what made an earlier
+revocation collateral rather than surgical — revocation is per *(user, client)*
+pair, so a shared client means killing one grant kills them all.
+
+| Role | Account | Access level | Credential file | Why |
+|---|---|---|---|---|
+| read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga` | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
+| write | `hermes-write@…` | **STANDARD** on the manager | `.env.gaw` | Mutate-capable but not ADMIN — no user or billing management. A machine identity, distinct from any human operator login. |
+
+Never point both files at the same account, and never copy a token between them.
+The read guarantee is only real while the read account genuinely cannot mutate.
+
+**Steps.** Console work is the operator's; verification is mechanical.
+
+1. Google Ads → the manager account → Admin → Access and security → invite the new
+   user at the minimum role for its job (`STANDARD` for write; `READ_ONLY` for read).
+   Accept the invitation from that account.
+2. Cloud Console → Credentials → Create OAuth client ID → **Desktop app**, named for
+   the component. One client per component; do not reuse another component's.
+3. Mint the refresh token **signed in as the matching account**, in a terminal that is
+   not an assistant session — the token must never reach a transcript. Set the new
+   client id/secret first: the ads project's `get_refresh_token.py` calls
+   `load_dotenv()`, and `load_dotenv` does not override already-set variables, so a
+   bare run mints against whatever client that project's `.env` names. The failure
+   then looks like a bad token rather than a wrong client.
+4. Write the value into the gitignored `.env.<x>` (mode 600). Never into a tracked
+   `*.example`, never into git, never into a report or the brain.
+5. **Verify rather than assert:**
+
+```bash
+./audit-credential-access.sh --cred .env.gaw --customer <digits>
+# expect: measured_verdict MUTATE_CAPABLE, mismatch false, exit 0
+./audit-credential-access.sh --cred .env.ga  --customer <digits>
+# expect: measured_verdict READ_ONLY,      mismatch false, exit 0
+```
+
+   Check `probes.scope.reachable_accounts` — that is the blast radius. An MCC-level
+   grant reaches every account under the manager; if a credential should only touch
+   one client, grant it on that client account rather than on the manager.
+
+   Then match `probes.roles` against the account you just minted from. The tool
+   reports the role table but deliberately does not guess which row is *this*
+   credential — see the note above on why ADMIN is not measurable non-destructively.
+
+**Drift detection.** Access levels have silently changed before. Re-run the audit
+after any access change, and periodically:
+
+```bash
+./audit-credential-access.sh --all --customer <digits>   # exit 3 = a credential is not what it claims
+```
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the
