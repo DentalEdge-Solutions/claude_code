@@ -60,6 +60,7 @@ projects:
         - simulate_negatives       # pure local compute over audit_data/ (no credential)
         - rsa_rubric_check         # pure local compute over audit_data/ (no credential)
         - discover_accounts        # API reader, no file writes
+        - negatives_coverage       # pure local compute; spec-parser fixed 2026-08-18
         #
         # DELIBERATELY NOT LISTED — each verified, each for a different reason:
         #
@@ -71,13 +72,6 @@ projects:
         #     AFTER spending real API calls. These belong host-side, alongside
         #     collect-audit-data.sh, which exists precisely because refreshing
         #     audit_data/ requires writing the project tree.
-        #
-        #   negatives_coverage
-        #     Non-mutating and writes nothing, but currently BROKEN against the
-        #     repo's own data: it splits universal-negative-keywords.md on
-        #     "## A. Universal negatives" / "## B. Industry-specific", and that
-        #     file was restructured to "## A. Tier 1 …" / "## B. Tier 2 …".
-        #     Fails with IndexError. Fix it in the ads repo, then list it.
         #
         #   add_campaign_negative / add_competitor_negatives / apply_negatives /
         #   attach_audience — mutators. NEVER allow-listed, in this project or
