@@ -73,12 +73,10 @@ import sys
 try:                                    # the SDK lives in the pinned /opt/ads-venv.
     from google.ads.googleads.client import GoogleAdsClient
     from google.ads.googleads.errors import GoogleAdsException
-    SDK = True
 except ImportError:                     # host-side: the pure classification logic
     GoogleAdsClient = None              # is still importable and unit-testable.
     class GoogleAdsException(Exception):
         pass
-    SDK = False
 
 API_VERSION = "v24"
 REQUIRED = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
@@ -295,9 +293,18 @@ def main():
     declared = role_declared or "read (no role declared)"
     expected = "MUTATE_CAPABLE" if role_declared == "write" else "READ_ONLY"
 
-    client = build_client(env)
-    cid = digits(env["GOOGLE_ADS_CUSTOMER_ID"], "GOOGLE_ADS_CUSTOMER_ID")
-    login = digits(env["GOOGLE_ADS_LOGIN_CUSTOMER_ID"], "GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+    try:
+        client = build_client(env)
+        cid = digits(env["GOOGLE_ADS_CUSTOMER_ID"], "GOOGLE_ADS_CUSTOMER_ID")
+        login = digits(env["GOOGLE_ADS_LOGIN_CUSTOMER_ID"], "GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+    except (ValueError, KeyError) as e:
+        # Forgetting --customer is the likeliest operator error, now that .env.ga
+        # deliberately pins no default account. Report it as a usage problem rather
+        # than an unhandled traceback.
+        print(f"audit-credential-access: {e}", file=sys.stderr)
+        print("  Pass --customer <digits>; credential files pin no default account.",
+              file=sys.stderr)
+        return 1
 
     read = probe_read(client, cid)
     scope = probe_scope(client, login) if read["ok"] else {"ok": False, "detail": "skipped"}

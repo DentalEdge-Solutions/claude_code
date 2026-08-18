@@ -28,8 +28,23 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Every GOOGLE_ADS_* var this tool injects. Cleared before each credential is parsed.
+CRED_VARS="GOOGLE_ADS_DEVELOPER_TOKEN GOOGLE_ADS_CLIENT_ID GOOGLE_ADS_CLIENT_SECRET
+GOOGLE_ADS_REFRESH_TOKEN GOOGLE_ADS_LOGIN_CUSTOMER_ID GOOGLE_ADS_CUSTOMER_ID
+GOOGLE_ADS_CREDENTIAL_ROLE"
+
 audit_one() {
   _cred="$1"
+
+  # Clear ALL of them first. export persists across calls in the same shell, so in
+  # --all mode a key present in one credential file and absent from the next would be
+  # silently inherited — and the tool would confidently report on a credential that
+  # does not exist. That is live, not theoretical: .env.ga no longer pins
+  # GOOGLE_ADS_CUSTOMER_ID while .env.gaw does, so a different loop order would have
+  # audited the read credential against the write credential's target account.
+  for _v in $CRED_VARS; do
+    unset "$_v" 2>/dev/null || true
+  done
   if [ ! -f "$here/$_cred" ]; then
     echo "audit-credential-access: $here/$_cred not found" >&2
     return 1
@@ -54,11 +69,6 @@ audit_one() {
     esac
     export "$_key=$_val"
   done < "$here/$_cred"
-
-  # A file with no role key must not inherit the previous file's role in --all.
-  if ! grep -q '^GOOGLE_ADS_CREDENTIAL_ROLE=' "$here/$_cred"; then
-    unset GOOGLE_ADS_CREDENTIAL_ROLE 2>/dev/null || true
-  fi
 
   if [ -n "$CUSTOMER" ]; then
     case "$CUSTOMER" in
