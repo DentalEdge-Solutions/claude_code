@@ -602,6 +602,160 @@ them even after one fails, and exits non-zero if any did. Individual suites stil
 directly (`python3 infra/hermes-agent/bin/apply-changeset.test.py`) — note `python3`,
 never `python`.
 
+## Credential access levels — measure, never assert
+
+Every access-level guarantee here used to be a sentence in prose: "`.env.ga` is
+read-only", "`.env.gaw` is Standard-access". Twice those sentences were wrong, and
+both times the discrepancy surfaced by luck rather than by design. Prose cannot be
+checked, so the guarantee is now measurable:
+
+```bash
+cd infra/hermes-agent
+./audit-credential-access.sh --cred .env.ga  --customer <digits>
+./audit-credential-access.sh --cred .env.gaw --customer <digits>
+./audit-credential-access.sh --all
+```
+
+It is **credential-scoped, not project-scoped** — it asks Google what a given
+credential can do, so it works unchanged for whatever project replaces
+`claude-google-ads` and for every project registered after it.
+
+**Structurally non-mutating.** The mutate probe hardcodes `validate_only=True`
+with no flag to disable it; every other probe is a `SELECT`. It cannot change an
+account.
+
+| Probe | Answers |
+|---|---|
+| `read` | Can it read the target account? Positive control for the rest — without a successful read, a refusal below proves nothing about access level |
+| `scope` | How many accounts are reachable under the login customer — the blast radius, and the number that matters once Hermes holds credentials for several projects |
+| `mutate` | `validate_only` against a **SEARCH** campaign. Three-valued: PERMITTED / DENIED / INCONCLUSIVE |
+| `roles` | The `customer_user_access` role table for the manager and the target account — Google's own record of who holds what |
+
+**Verdicts:** `UNUSABLE` · `READ_ONLY` · `MUTATE_CAPABLE` · `INCONCLUSIVE`.
+Exit `0` agree · `2` unusable · `3` **mismatch** · `4` inconclusive.
+
+Two rules this encodes, both learned from getting them wrong:
+
+- **A context refusal is not an authorization refusal.** Campaign-level negative
+  keywords are invalid on some channel types; that refusal says nothing about
+  access level. Conflating the two reports a mutate-capable credential as
+  read-only. Hence the SEARCH-campaign requirement and the three-valued result.
+- **"Could not tell" must never round to "safely read-only."** An inconclusive
+  probe stays `INCONCLUSIVE` and exits 4.
+
+| `manager_admin` | Is it ADMIN at the **manager** level? `validate_only` update of the manager account's own name, set to the value it already holds. Touches no client ad account |
+
+**How the admin probe was arrived at, because two earlier attempts were wrong and
+both failed confidently.** First, reading `customer_user_access` was treated as
+proof of ADMIN — it is not a discriminator at all, since a READ_ONLY credential
+reads it fine, and the tool reported ADMIN for a credential whose mutate was
+refused in the *same run*. Then this doc claimed admin was simply not measurable,
+reasoning that `MutateCustomerUserAccessRequest` has no `validate_only`. True, but
+the wrong service: `MutateCustomerRequest` **has** `validate_only`, and updating the
+manager account is admin-gated.
+
+The current probe is verified **discriminating** against a known-READ_ONLY control
+(`hermes@` is refused with `ACTION_NOT_PERMITTED`; a manager ADMIN is accepted).
+That control is the check both earlier versions lacked — a probe never shown to
+refuse something it *should* refuse proves nothing when it accepts.
+
+This is also how a credential's identity gets pinned down without a `whoami`
+endpoint, which Google Ads does not offer: combine the measured manager-level
+result with the `customer_user_access` role table. A credential that is refused at
+manager level cannot belong to any manager ADMIN, which is often the exclusion you
+actually need.
+
+**Tests:** `bin/audit-credential-access.test.py` covers the classification logic
+(the part where both historical bugs lived). The probes need a live account and
+belong to operator-run verification.
+
+## Provisioning a credential for a new project or role
+
+The model, stated once so the next project does not have to rediscover it:
+
+**One OAuth client per credential-holding component, and one Google *account* per
+role.** These are different axes and conflating them is what made an earlier
+revocation collateral rather than surgical — revocation is per *(user, client)*
+pair, so a shared client means killing one grant kills them all.
+
+| Role | Account | Access level | Credential file | Why |
+|---|---|---|---|---|
+| read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga` | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
+| write | the operator's own Google account | **ADMIN** on the manager | `.env.gaw` | Operator decision, 2026-08-18: reuse the existing account rather than provision a dedicated `hermes-write@`. |
+
+**The write row is a deliberate, recorded tradeoff, not the ideal shape.** A
+purpose-made `hermes-write@` at STANDARD would be better on three counts, and it is
+worth knowing which ones were traded away:
+
+- **Privilege.** The operator account is ADMIN at the manager level, so the write
+  credential carries user management, billing and account linking — far more than
+  the one typed action (`add_campaign_negative`) the mutation tier actually uses.
+  A STANDARD service account would be mutate-capable and nothing more.
+- **Attribution.** Google's change history will record Hermes's mutations under a
+  human's identity. Nothing on the platform side distinguishes "the operator did
+  this" from "Hermes did this while the operator was asleep". The vault audit log
+  (`data/vaults/<slug>/changes/log.jsonl`) is the only place that distinction
+  exists, so it carries more weight than it otherwise would.
+- **Assurance.** With a purpose-made account the access level is known by
+  construction. With a human account it is inherited from whatever that person
+  needs for their own work, and it can change without anyone touching Hermes —
+  which is exactly the drift pattern this capsule has been bitten by twice.
+  Compensate by running the access audit after any change to the operator's own
+  Google Ads permissions, not just after Hermes changes.
+
+**What is NOT lost:** revocation stays surgical. OAuth revocation is per
+*(user, client)* pair, and Hermes has its own OAuth client as of 2026-08-17, so
+revoking the Hermes write grant does not disturb the operator's other grants for
+the same account. That property came from separating the client, not the account —
+which is why the two axes are worth keeping distinct even when one is reused.
+
+Never point both files at the same account, and never copy a token between them.
+The read guarantee is only real while the read account genuinely cannot mutate.
+
+**Steps.** Console work is the operator's; verification is mechanical.
+
+1. Google Ads → the manager account → Admin → Access and security → invite the new
+   user at the minimum role for its job (`STANDARD` for write; `READ_ONLY` for read).
+   Accept the invitation from that account.
+
+   *Skip this step when reusing an existing account* — which is the current shape of
+   the write role. Reuse changes nothing below: step 2 still creates a **separate
+   OAuth client**, and that is what keeps revocation surgical. Never reuse another
+   component's client just because you are reusing its account.
+2. Cloud Console → Credentials → Create OAuth client ID → **Desktop app**, named for
+   the component. One client per component; do not reuse another component's.
+3. Mint the refresh token **signed in as the matching account**, in a terminal that is
+   not an assistant session — the token must never reach a transcript. Set the new
+   client id/secret first: the ads project's `get_refresh_token.py` calls
+   `load_dotenv()`, and `load_dotenv` does not override already-set variables, so a
+   bare run mints against whatever client that project's `.env` names. The failure
+   then looks like a bad token rather than a wrong client.
+4. Write the value into the gitignored `.env.<x>` (mode 600). Never into a tracked
+   `*.example`, never into git, never into a report or the brain.
+5. **Verify rather than assert:**
+
+```bash
+./audit-credential-access.sh --cred .env.gaw --customer <digits>
+# expect: measured_verdict MUTATE_CAPABLE, mismatch false, exit 0
+./audit-credential-access.sh --cred .env.ga  --customer <digits>
+# expect: measured_verdict READ_ONLY,      mismatch false, exit 0
+```
+
+   Check `probes.scope.reachable_accounts` — that is the blast radius. An MCC-level
+   grant reaches every account under the manager; if a credential should only touch
+   one client, grant it on that client account rather than on the manager.
+
+   Then match `probes.roles` against the account you just minted from. The tool
+   reports the role table but deliberately does not guess which row is *this*
+   credential — see the note above on why ADMIN is not measurable non-destructively.
+
+**Drift detection.** Access levels have silently changed before. Re-run the audit
+after any access change, and periodically:
+
+```bash
+./audit-credential-access.sh --all --customer <digits>   # exit 3 = a credential is not what it claims
+```
+
 ## Security
 
 - Keys live in `.env` (gitignored); the executor's key is projected into the

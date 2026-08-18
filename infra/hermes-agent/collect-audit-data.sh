@@ -44,6 +44,17 @@ if [ "${ADS_CUSTOMER_ID_OVERRIDE+x}" = "x" ]; then
   export GOOGLE_ADS_CUSTOMER_ID="$ADS_CUSTOMER_ID_OVERRIDE"
 fi
 
+# Fail closed on a missing target. .env.ga no longer pins GOOGLE_ADS_CUSTOMER_ID —
+# there is deliberately no implicit default account — so an unset override used to
+# fall through and run every collector against an empty customer id. Refuse instead:
+# an unresolved target must never become "whichever account the file happened to name".
+if [ -z "${GOOGLE_ADS_CUSTOMER_ID:-}" ]; then
+  echo "collect-audit-data: no target account. .env.ga does not pin GOOGLE_ADS_CUSTOMER_ID" >&2
+  echo "  by design; set ADS_CUSTOMER_ID_OVERRIDE=<digits> (run-trend-audit.sh does this" >&2
+  echo "  from the client vault, which is the resolved-not-hardcoded path)." >&2
+  exit 1
+fi
+
 if [ "${1:-}" = "--dry-run" ]; then
   echo "effective GOOGLE_ADS_CUSTOMER_ID: $GOOGLE_ADS_CUSTOMER_ID"
   for c in $COLLECTORS; do echo "would run (read-only cred): (cd $project_dir && .venv/bin/python code/$c)"; done
