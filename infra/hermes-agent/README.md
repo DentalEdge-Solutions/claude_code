@@ -670,7 +670,33 @@ pair, so a shared client means killing one grant kills them all.
 | Role | Account | Access level | Credential file | Why |
 |---|---|---|---|---|
 | read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga` | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
-| write | `hermes-write@…` | **STANDARD** on the manager | `.env.gaw` | Mutate-capable but not ADMIN — no user or billing management. A machine identity, distinct from any human operator login. |
+| write | the operator's own Google account | **ADMIN** on the manager | `.env.gaw` | Operator decision, 2026-08-18: reuse the existing account rather than provision a dedicated `hermes-write@`. |
+
+**The write row is a deliberate, recorded tradeoff, not the ideal shape.** A
+purpose-made `hermes-write@` at STANDARD would be better on three counts, and it is
+worth knowing which ones were traded away:
+
+- **Privilege.** The operator account is ADMIN at the manager level, so the write
+  credential carries user management, billing and account linking — far more than
+  the one typed action (`add_campaign_negative`) the mutation tier actually uses.
+  A STANDARD service account would be mutate-capable and nothing more.
+- **Attribution.** Google's change history will record Hermes's mutations under a
+  human's identity. Nothing on the platform side distinguishes "the operator did
+  this" from "Hermes did this while the operator was asleep". The vault audit log
+  (`data/vaults/<slug>/changes/log.jsonl`) is the only place that distinction
+  exists, so it carries more weight than it otherwise would.
+- **Assurance.** With a purpose-made account the access level is known by
+  construction. With a human account it is inherited from whatever that person
+  needs for their own work, and it can change without anyone touching Hermes —
+  which is exactly the drift pattern this capsule has been bitten by twice.
+  Compensate by running the access audit after any change to the operator's own
+  Google Ads permissions, not just after Hermes changes.
+
+**What is NOT lost:** revocation stays surgical. OAuth revocation is per
+*(user, client)* pair, and Hermes has its own OAuth client as of 2026-08-17, so
+revoking the Hermes write grant does not disturb the operator's other grants for
+the same account. That property came from separating the client, not the account —
+which is why the two axes are worth keeping distinct even when one is reused.
 
 Never point both files at the same account, and never copy a token between them.
 The read guarantee is only real while the read account genuinely cannot mutate.
@@ -680,6 +706,11 @@ The read guarantee is only real while the read account genuinely cannot mutate.
 1. Google Ads → the manager account → Admin → Access and security → invite the new
    user at the minimum role for its job (`STANDARD` for write; `READ_ONLY` for read).
    Accept the invitation from that account.
+
+   *Skip this step when reusing an existing account* — which is the current shape of
+   the write role. Reuse changes nothing below: step 2 still creates a **separate
+   OAuth client**, and that is what keeps revocation surgical. Never reuse another
+   component's client just because you are reusing its account.
 2. Cloud Console → Credentials → Create OAuth client ID → **Desktop app**, named for
    the component. One client per component; do not reuse another component's.
 3. Mint the refresh token **signed in as the matching account**, in a terminal that is
