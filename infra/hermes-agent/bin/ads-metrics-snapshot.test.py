@@ -15,6 +15,11 @@ class T(unittest.TestCase):
         ]
         with open(os.path.join(self.d,"campaign_perf_30d.json"),"w") as f:
             json.dump(perf, f)
+        # account.json records which account audit_data/ belongs to. snapshot() now
+        # refuses without it — "cannot verify provenance" must not round to "fine" —
+        # so every fixture has to declare the account it is pretending to be.
+        with open(os.path.join(self.d,"account.json"),"w") as f:
+            json.dump([{"customer":{"id":"1234567890"}}], f)
         with open(os.path.join(self.d,"campaigns.json"),"w") as f:
             json.dump([{"campaign":{"id":"1"}},{"campaign":{"id":"2"}}], f)
     def test_aggregation(self):
@@ -34,7 +39,9 @@ class T(unittest.TestCase):
         with open(os.path.join(self.d,"campaign_perf_30d.json"),"w") as f:
             json.dump([{"campaign":{"id":"1"},"metrics":{"costMicros":"0","conversions":0.0,
                 "impressions":"0","clicks":"0"}}], f)
-        s = M.snapshot(self.d, "1")
+        # customer id must match the fixture's account.json — this test is about
+        # division guards, not provenance, so it uses the dir's declared account.
+        s = M.snapshot(self.d, "1234567890")
         self.assertEqual(s["cost_per_conv"], 0.0); self.assertEqual(s["ctr"], 0.0)
         self.assertEqual(s["conv_rate"], 0.0); self.assertEqual(s["impression_share"], 0.0)
     def test_missing_file_exit2(self):
@@ -43,4 +50,57 @@ class T(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
 
-if __name__ == "__main__": unittest.main()
+
+
+class TestProvenanceGuard(unittest.TestCase):
+    """audit_data/ is one flat dir shared by every client, so a snapshot taken after a
+    failed or skipped collection would otherwise label client A's numbers with client
+    B's id and write them into B's vault."""
+
+    def _dir(self, account_id):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "campaign_perf_30d.json"), "w") as f:
+            json.dump([{"campaign": {"id": "1"}, "metrics": {"costMicros": "1000000"}}], f)
+        if account_id is not None:
+            with open(os.path.join(d, "account.json"), "w") as f:
+                json.dump([{"customer": {"id": account_id}}], f)
+        return d
+
+    def test_matching_account_is_accepted(self):
+        d = self._dir("1234567890")
+        self.assertEqual(M.snapshot(d, "1234567890")["customer_id"], "1234567890")
+
+    def test_dashed_customer_id_still_matches(self):
+        d = self._dir("1234567890")
+        self.assertEqual(M.assert_provenance(d, "123-456-7890"), "1234567890")
+
+    def test_mismatched_account_is_refused(self):
+        d = self._dir("1234567890")
+        with self.assertRaises(M.ProvenanceMismatch):
+            M.snapshot(d, "9999999999")
+
+    def test_refusal_message_never_leaks_a_raw_id(self):
+        d = self._dir("1234567890")
+        try:
+            M.snapshot(d, "9999999999")
+            self.fail("expected ProvenanceMismatch")
+        except M.ProvenanceMismatch as e:
+            self.assertNotIn("1234567890", str(e))
+            self.assertNotIn("9999999999", str(e))
+
+    def test_missing_account_json_is_refused_not_assumed_ok(self):
+        # "cannot verify" must never round to "verified".
+        d = self._dir(None)
+        with self.assertRaises((FileNotFoundError, KeyError)):
+            M.snapshot(d, "1234567890")
+
+    def test_account_json_without_customer_id_is_refused(self):
+        d = self._dir(None)
+        with open(os.path.join(d, "account.json"), "w") as f:
+            json.dump([{"customer": {"descriptiveName": "x"}}], f)
+        with self.assertRaises(KeyError):
+            M.snapshot(d, "1234567890")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
