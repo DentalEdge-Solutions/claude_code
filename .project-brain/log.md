@@ -9,3 +9,4 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-08-05 promoted decisions/candidates/2026-07-17-hermes-local-first-deploy.md → canon/2026-07-17-hermes-local-first-deploy.md
 - 2026-08-05 promoted decisions/candidates/2026-08-05-p6-ads-audit-pilot-validated.md → canon/2026-08-05-p6-ads-audit-pilot-validated.md
 - 2026-08-17 promoted decisions/candidates/2026-08-17-credential-governance-lessons.md → canon/2026-08-17-credential-governance-lessons.md
+- 2026-08-19 promoted decisions/candidates/2026-08-17-credential-governance-lessons.md → canon/2026-08-17-credential-governance-lessons.md
