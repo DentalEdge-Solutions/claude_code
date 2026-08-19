@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, shutil, subprocess, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vault_lib as V
 
@@ -54,5 +54,44 @@ class T(unittest.TestCase):
         out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "vault_lib.py"),
                               "--client", "acme-dental", "--registry", self.tmp], capture_output=True, text=True)
         self.assertEqual(out.returncode, 2)
+
+class TestRegistryLivesInGovernanceStore(unittest.TestCase):
+    def setUp(self):
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.vault = tempfile.mkdtemp(prefix="vault-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        self.addCleanup(shutil.rmtree, self.vault, True)
+        os.makedirs(os.path.join(self.gov, "registry"))
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        os.environ["VAULT_ROOT"] = self.vault
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        self.addCleanup(os.environ.pop, "VAULT_ROOT", None)
+        with open(os.path.join(self.gov, "registry", "clients.json"), "w") as f:
+            json.dump({"clients": {"acme-dental": {
+                "customer_id": "1234567890", "project": "claude_google_ads",
+                "status": "active"}}}, f)
+
+    def test_registry_path_points_at_the_governance_store(self):
+        self.assertEqual(V.registry_path(),
+                         os.path.join(self.gov, "registry", "clients.json"))
+
+    def test_resolve_reads_it(self):
+        rec = V.resolve("acme-dental")
+        self.assertEqual(rec["customer_id"], "1234567890")
+
+    def test_vault_path_still_points_at_the_vault(self):
+        """The vault is NOT being emptied — results and reports stay readable by Hermes."""
+        rec = V.resolve("acme-dental")
+        self.assertEqual(rec["vault_path"], os.path.join(self.vault, "acme-dental"))
+
+    def test_a_registry_at_the_old_vault_location_is_not_read(self):
+        """Control: writing the old path must NOT satisfy resolve."""
+        os.makedirs(os.path.join(self.vault, "_registry"))
+        with open(os.path.join(self.vault, "_registry", "clients.json"), "w") as f:
+            json.dump({"clients": {"other-clinic": {
+                "customer_id": "9999999999", "project": "claude_google_ads",
+                "status": "active"}}}, f)
+        with self.assertRaises(KeyError):
+            V.resolve("other-clinic")
 
 if __name__ == "__main__": unittest.main()
