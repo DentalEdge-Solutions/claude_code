@@ -37,7 +37,9 @@ with open(CALLS, "a") as f:
 # How many audit-log records existed at the MOMENT this process was spawned. Lets a
 # test prove the per-action log write completed BEFORE the next action started,
 # rather than only that the right number of records exist once the run has finished.
-_log = os.path.join(HERE, "..", "acme-dental", "changes", "log.jsonl")
+# The log now lives in the governance store (HERMES_GOVERNANCE_ROOT == VAULT_ROOT ==
+# self.tmp in this fixture), not under the client vault — see log/<slug>.jsonl.
+_log = os.path.join(HERE, "..", "log", "acme-dental.jsonl")
 _n = sum(1 for line in open(_log) if line.strip()) if os.path.exists(_log) else 0
 with open(os.path.join(HERE, "logcounts.jsonl"), "a") as f:
     f.write(json.dumps({"argv": sys.argv[1:], "log_records_at_spawn": _n}) + "\\n")
@@ -166,7 +168,7 @@ class TestHappyPath(Base):
     def test_log_records_resource_names(self):
         cs = self._approved(2)
         self._run(cs["changeset_id"])
-        with open(C.log_path(self.vault)) as f:
+        with open(C.log_path("acme-dental")) as f:
             recs = [json.loads(x) for x in f if x.strip()]
         self.assertEqual(len(recs), 2)
         self.assertTrue(all(r["status"] == "applied" for r in recs))
@@ -338,7 +340,7 @@ class TestValidateOnlyGate(Base):
         self.assertEqual(ctx.exception.code, 2)
         calls = self._calls()
         self.assertTrue(all("--validate-only" in c for c in calls))   # zero live calls
-        self.assertFalse(os.path.exists(C.log_path(self.vault)))
+        self.assertFalse(os.path.exists(C.log_path("acme-dental")))
 
     def test_stderr_secrets_are_scrubbed_in_failure_message(self):
         """A mutator failure must not surface credential values in the message."""
@@ -359,7 +361,7 @@ class TestPostMutationFailure(Base):
         with self.assertRaises(SystemExit) as ctx:
             self._run(cs["changeset_id"])
         self.assertEqual(ctx.exception.code, 3)
-        with open(C.log_path(self.vault)) as f:
+        with open(C.log_path("acme-dental")) as f:
             recs = [json.loads(x) for x in f if x.strip()]
         self.assertEqual(len(recs), 1)                     # the one that landed is recorded
         self.assertEqual(recs[0]["status"], "applied")
@@ -396,7 +398,7 @@ class TestPostMutationFailure(Base):
         with self.assertRaises(SystemExit) as ctx:
             self._run(cs["changeset_id"])
         self.assertEqual(ctx.exception.code, 3)
-        recs = [json.loads(x) for x in open(C.log_path(self.vault)) if x.strip()]
+        recs = [json.loads(x) for x in open(C.log_path("acme-dental")) if x.strip()]
         self.assertEqual(len(recs), 1)                      # the mutation is still recorded
         self.assertEqual(recs[0]["status"], "applied")
 
@@ -420,7 +422,7 @@ class TestUndo(Base):
         return cs
 
     def _log_records(self):
-        with open(C.log_path(self.vault)) as f:
+        with open(C.log_path("acme-dental")) as f:
             return [json.loads(x) for x in f if x.strip()]
 
     def test_undo_removes_each_applied_resource(self):
@@ -500,7 +502,7 @@ class TestUndo(Base):
     # refused on its own. Asserting _calls() == [] is the load-bearing half.
 
     def _rewrite_log(self, fn):
-        p = C.log_path(self.vault)
+        p = C.log_path("acme-dental")
         recs = [json.loads(x) for x in open(p) if x.strip()]
         with open(p, "w") as f:
             for r in recs:

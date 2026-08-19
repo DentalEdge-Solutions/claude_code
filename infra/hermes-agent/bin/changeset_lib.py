@@ -314,8 +314,8 @@ def result_path(vault, cid):
     return os.path.join(changes_dir(vault), f"{cid}.result.json")
 
 
-def log_path(vault):
-    return os.path.join(changes_dir(vault), "log.jsonl")
+def log_path(slug):
+    return governance_lib.log_path(slug)
 
 
 DEFAULT_PROJECTS_REGISTRY = "/opt/registry/projects.yaml"
@@ -431,11 +431,11 @@ def verify_approval(slug, cid, digest, now):
     return rec
 
 
-def append_log(vault, rec):
+def append_log(slug, rec):
     """Append one audit-log record and fsync before returning."""
-    d = changes_dir(vault)
-    os.makedirs(d, exist_ok=True)
-    with open(log_path(vault), "a", encoding="utf-8") as f:
+    p = log_path(slug)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, sort_keys=True) + "\n")
         f.flush()
         os.fsync(f.fileno())
@@ -443,14 +443,14 @@ def append_log(vault, rec):
     # fsyncing its contents does not persist the directory entry that names it. Losing
     # that entry loses the whole reversibility record, which day_counts would then read
     # as a legitimate zero.
-    dfd = os.open(d, os.O_RDONLY)
+    dfd = os.open(os.path.dirname(p), os.O_RDONLY)
     try:
         os.fsync(dfd)
     finally:
         os.close(dfd)
 
 
-def iter_log_records(vault):
+def iter_log_records(slug):
     """Yield (lineno, record) for every audit-log line, validating the fields all
     readers depend on.
 
@@ -466,7 +466,7 @@ def iter_log_records(vault):
     read as 'under the cap', and an unreadable undo list must not read as 'nothing
     to undo'.
     """
-    p = log_path(vault)
+    p = log_path(slug)
     if not os.path.exists(p):
         return
     try:
@@ -489,7 +489,7 @@ def iter_log_records(vault):
             yield n, rec
 
 
-def day_counts(vault, day):
+def day_counts(slug, day):
     """Count applied actions and distinct applied change-sets for a UTC day.
 
     Corrupt log lines refuse rather than being skipped because the log feeds
@@ -498,7 +498,7 @@ def day_counts(vault, day):
     if not DAY_RE.fullmatch(_require_str(day, "day")):
         raise ValueError(f"invalid day: {day!r}")
     applies, actions = set(), 0
-    for _n, rec in iter_log_records(vault):
+    for _n, rec in iter_log_records(slug):
         if rec["status"] == "applied" and rec["ts"].startswith(day):
             applies.add(rec["changeset_id"])
             actions += 1

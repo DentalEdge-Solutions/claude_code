@@ -97,7 +97,7 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
         # Spec §7.1: resource_name is shape- and prefix-validated against the RESOLVED
         # customer_id inside _undo_targets, so no record can reach argv unvalidated.
         # Uses no credential, so it belongs here with the other cheap checks.
-        actions = _undo_targets(vault, undo, rec["customer_id"])
+        actions = _undo_targets(rec["slug"], undo, rec["customer_id"])
         if not actions:
             _refuse(f"no applied, un-undone actions recorded for change-set {undo!r}")
         operator = actions[0].get("operator", "unknown")
@@ -125,7 +125,7 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
         operator = approval["operator"]
         # 6. daily caps
         try:
-            counts = C.day_counts(vault, now.strftime("%Y-%m-%d"))
+            counts = C.day_counts(rec["slug"], now.strftime("%Y-%m-%d"))
         except ValueError as e:
             _refuse(str(e))
         if counts["applies"] + 1 > cfg["caps"]["applies_per_client_day"]:
@@ -172,12 +172,12 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
         _refuse(f"{ROLE_VAR} is {os.environ.get(ROLE_VAR)!r}, expected {WRITE_ROLE!r} — "
                 "the mutation tier refuses the read-only credential")
 
-    return {"vault": vault, "changeset_id": target, "runner": cfg["runner"], "script": script,
-            "actions": actions, "undo": bool(undo), "operator": operator,
+    return {"vault": vault, "slug": rec["slug"], "changeset_id": target, "runner": cfg["runner"],
+            "script": script, "actions": actions, "undo": bool(undo), "operator": operator,
             "customer_id": rec["customer_id"]}
 
 
-def _undo_targets(vault, changeset_id, customer_id):
+def _undo_targets(slug, changeset_id, customer_id):
     """Applied, un-undone actions for this change-set BELONGING TO THIS CUSTOMER.
 
     The customer_id argument is the spec §7.1 guard, and its placement here is
@@ -188,10 +188,11 @@ def _undo_targets(vault, changeset_id, customer_id):
     after it returns, means an unvalidated record cannot escape into argv at all.
 
     Records are read through C.iter_log_records so the undo path and the caps path
-    share one parser with one standard of rigour.
+    share one parser with one standard of rigour, from the same governance-store
+    log an operator's --undo targets — never a copy Hermes itself could steer.
     """
     try:
-        records = list(C.iter_log_records(vault))
+        records = list(C.iter_log_records(slug))
     except ValueError as e:
         _refuse(str(e))
     targets, undone = [], set()
@@ -200,7 +201,7 @@ def _undo_targets(vault, changeset_id, customer_id):
             continue
         rn = r.get("resource_name")
         if not isinstance(rn, str) or not RESOURCE_RE.fullmatch(rn):
-            _refuse(f"audit log at {C.log_path(vault)}:{n} has a malformed resource_name "
+            _refuse(f"audit log at {C.log_path(slug)}:{n} has a malformed resource_name "
                     "— refusing to hand it to the mutator")
         if not rn.startswith(f"customers/{customer_id}/"):
             _refuse("refusing to undo a criterion that belongs to another customer "
@@ -293,7 +294,7 @@ def apply(plan, now):
                        "status": "undone" if plan["undo"] else "applied",
                        "operator": plan["operator"]}
                 try:
-                    C.append_log(plan["vault"], rec)  # fsync'd before the next action starts
+                    C.append_log(plan["slug"], rec)  # fsync'd before the next action starts
                 except Exception as e:
                     # The one place an irreversible side effect can outrun its record. Print
                     # the resource name FIRST: it is the only way back from here, and it is

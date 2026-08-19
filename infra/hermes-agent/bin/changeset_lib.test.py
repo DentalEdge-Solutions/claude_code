@@ -444,7 +444,11 @@ class TestApproval(unittest.TestCase):
 
 class TestLog(unittest.TestCase):
     def setUp(self):
-        self.vault = tempfile.mkdtemp()
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        self.slug = "acme-dental"
 
     def _line(self, **kw):
         rec = {"ts": "2026-08-12T10:15:00Z", "changeset_id": "20260812-101500-abcd1234",
@@ -455,34 +459,34 @@ class TestLog(unittest.TestCase):
         return rec
 
     def test_empty_log_counts_zero(self):
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 0, "actions": 0})
 
     def test_counts_actions_and_distinct_applies(self):
-        C.append_log(self.vault, self._line(action_index=0))
-        C.append_log(self.vault, self._line(action_index=1))
-        C.append_log(self.vault, self._line(changeset_id="20260812-120000-beef0001"))
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 2, "actions": 3})
+        C.append_log(self.slug, self._line(action_index=0))
+        C.append_log(self.slug, self._line(action_index=1))
+        C.append_log(self.slug, self._line(changeset_id="20260812-120000-beef0001"))
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 2, "actions": 3})
 
     def test_other_days_not_counted(self):
-        C.append_log(self.vault, self._line(ts="2026-08-11T23:59:59Z"))
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+        C.append_log(self.slug, self._line(ts="2026-08-11T23:59:59Z"))
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 0, "actions": 0})
 
     def test_undone_lines_not_counted_as_applies(self):
-        C.append_log(self.vault, self._line(status="undone"))
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+        C.append_log(self.slug, self._line(status="undone"))
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 0, "actions": 0})
 
     def test_corrupt_log_refuses_rather_than_undercounting(self):
-        C.append_log(self.vault, self._line())
-        with open(C.log_path(self.vault), "a") as f:
+        C.append_log(self.slug, self._line())
+        with open(C.log_path(self.slug), "a") as f:
             f.write("{not json\n")
         with self.assertRaises(ValueError) as ctx:
-            C.day_counts(self.vault, "2026-08-12")
+            C.day_counts(self.slug, "2026-08-12")
         self.assertIn("corrupt", str(ctx.exception))
 
     def test_append_is_durable_and_one_line_per_record(self):
-        C.append_log(self.vault, self._line())
-        C.append_log(self.vault, self._line(action_index=1))
-        with open(C.log_path(self.vault)) as f:
+        C.append_log(self.slug, self._line())
+        C.append_log(self.slug, self._line(action_index=1))
+        with open(C.log_path(self.slug)) as f:
             self.assertEqual(len([x for x in f.read().splitlines() if x.strip()]), 2)
 
 
@@ -540,6 +544,70 @@ class TestApprovalSnapshot(unittest.TestCase):
         C.write_approval("acme-dental", self.CID, digest, "operator", now, 24)
         rec = C.verify_approval("acme-dental", self.CID, digest, now)
         self.assertEqual(rec["operator"], "operator")
+
+
+class TestAuditLogInGovernanceStore(unittest.TestCase):
+    def setUp(self):
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+
+    def _rec(self, **kw):
+        r = {"changeset_id": "20260812-101500-abcd1234", "action_index": 0,
+             "status": "applied", "operator": "operator",
+             "resource_name": "customers/1234567890/campaignCriteria/111~222",
+             # "ts" is the field day_counts/iter_log_records actually key off of
+             # (see TestLog._line above); "applied_at" is kept alongside it only
+             # because it happens to appear on real records too.
+             "ts": "2026-08-12T10:15:00Z", "applied_at": "2026-08-12T10:15:00Z"}
+        r.update(kw)
+        return r
+
+    def test_append_writes_under_the_governance_root(self):
+        C.append_log("acme-dental", self._rec())
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.gov, "log", "acme-dental.jsonl")))
+
+    def test_one_line_per_record(self):
+        C.append_log("acme-dental", self._rec())
+        C.append_log("acme-dental", self._rec(action_index=1))
+        with open(C.log_path("acme-dental")) as f:
+            self.assertEqual(len([x for x in f.read().splitlines() if x.strip()]), 2)
+
+    def test_clients_do_not_share_a_log(self):
+        C.append_log("acme-dental", self._rec())
+        self.assertFalse(os.path.exists(C.log_path("other-clinic")))
+
+    def test_day_counts_reads_the_new_location(self):
+        C.append_log("acme-dental", self._rec())
+        counts = C.day_counts("acme-dental", "2026-08-12")
+        self.assertEqual(counts["actions"], 1)
+
+    def test_a_vault_path_argument_is_rejected_not_silently_misread(self):
+        """Control, rewritten from the brief (see task-5-report.md, R8): the
+        brief's original version called C.day_counts("acme-dental", ...) — a bare
+        SLUG — while writing its decoy record under an unrelated tempdir. That
+        decoy is never on the path either signature actually reads for a bare
+        slug, so the assertion (0 actions) held under BOTH the old and the new
+        implementation and proved nothing.
+
+        Before this task, day_counts's first argument was the resolved vault path
+        (<VAULT_ROOT>/<slug> — see vault_lib.resolve: rec["vault_path"] =
+        os.path.join(vault_root(), slug)), never a bare slug; every real
+        pre-migration caller passed that path. This version writes a real record
+        at exactly that OLD location and calls day_counts with that same path —
+        the actual old calling convention — and asserts it is now REFUSED outright
+        rather than silently read (which would either double-count real
+        pre-migration data or return a zero indistinguishable from 'nothing to
+        migrate'). Task 6 migrates any such stray data deliberately."""
+        vault = tempfile.mkdtemp(prefix="vault-")
+        self.addCleanup(shutil.rmtree, vault, True)
+        os.makedirs(os.path.join(vault, "changes"))
+        with open(os.path.join(vault, "changes", "log.jsonl"), "w") as f:
+            f.write(json.dumps(self._rec()) + "\n")
+        with self.assertRaises(ValueError):
+            C.day_counts(vault, "2026-08-12")
 
 
 if __name__ == "__main__":
