@@ -297,6 +297,16 @@ def write_snapshot(slug, cid, src_path):
         out.flush()
         os.fsync(out.fileno())
     os.replace(tmp, dst)
+    # fsync the directory too — same reasoning as _atomic_write_json and append_log.
+    # write_snapshot is a fourth writer of a newly-named file in this tier; a caller
+    # that snapshots without immediately approving (a later increment does exactly
+    # this) must not be able to lose the rename on crash just because THIS writer was
+    # the one quietly weaker than the others.
+    dfd = os.open(os.path.dirname(dst) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
     return hashlib.sha256(data).hexdigest()
 
 
@@ -394,10 +404,15 @@ def verify_approval(slug, cid, digest, now):
         raise ValueError(f"unreadable approval record for {cid!r}: {e}")
     if not isinstance(rec, dict):
         raise ValueError(f"malformed approval record for {cid!r}: expected a JSON object")
-    if rec.get("reserved_at"):
+    if "reserved_at" in rec:
+        # Presence, not truthiness: "", null, or 0 must refuse exactly like a real
+        # timestamp does. Every other field here goes through _require_str — reserved_at
+        # is no exception, so a type-confused value refuses loudly instead of reading as
+        # unreserved.
+        reserved_at = _require_str(rec.get("reserved_at"), "reserved_at")
         raise ValueError(
             "approval for %r is already reserved (reserved_at=%s) — approvals are "
-            "single-use; approve again to authorise another apply" % (cid, rec["reserved_at"]))
+            "single-use; approve again to authorise another apply" % (cid, reserved_at))
     if _require_str(rec.get("changeset_id"), "changeset_id") != cid:
         raise ValueError(f"approval record changeset_id does not match {cid!r}")
     approved_digest = _require_str(rec.get("sha256"), "sha256")

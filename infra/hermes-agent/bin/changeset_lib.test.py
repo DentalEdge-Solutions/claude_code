@@ -494,14 +494,21 @@ class TestApprovalSnapshot(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.gov, True)
         os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
         self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        # Irregular spacing + a trailing newline: NOT a fixed point of
+        # json.dumps(json.loads(x)) under Python's default separators, so a
+        # parse-and-reserialise implementation of write_snapshot (rather than a true
+        # byte copy) would silently normalise this away and the test would go
+        # undetected. A pretty-printed '{"actions": []}' input would survive such a
+        # round trip unchanged and prove nothing.
         self.src = os.path.join(self.gov, "draft.json")
+        self.ORIGINAL = '{"actions"  :  []}\n'
         with open(self.src, "w") as f:
-            f.write('{"actions": []}')
+            f.write(self.ORIGINAL)
 
     def test_snapshot_is_byte_identical(self):
         digest = C.write_snapshot("acme-dental", self.CID, self.src)
         with open(G.snapshot_path("acme-dental", self.CID)) as f:
-            self.assertEqual(f.read(), '{"actions": []}')
+            self.assertEqual(f.read(), self.ORIGINAL)
         self.assertEqual(digest, C.file_digest(self.src))
 
     def test_editing_the_source_afterwards_does_not_change_the_snapshot(self):
@@ -510,7 +517,7 @@ class TestApprovalSnapshot(unittest.TestCase):
         with open(self.src, "w") as f:
             f.write('{"actions": [{"type": "add_campaign_negative"}]}')
         with open(G.snapshot_path("acme-dental", self.CID)) as f:
-            self.assertEqual(f.read(), '{"actions": []}')
+            self.assertEqual(f.read(), self.ORIGINAL)
 
     def test_verify_refuses_a_reserved_approval(self):
         now = datetime.datetime(2026, 8, 12, 10, 0, tzinfo=datetime.timezone.utc)

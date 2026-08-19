@@ -180,6 +180,39 @@ class TestHappyPath(Base):
         with open(os.path.join(self.vault, "timeline.md")) as f:
             self.assertIn("change", f.read())
 
+    def test_vault_swap_after_approval_executes_the_snapshot_not_the_swap(self):
+        """The critical failure mode this task exists to prevent: hashing the right
+        file at guard 5 proves nothing if guard 3 still LOADS a different one. A
+        whitespace tamper (see TestPreflightRefusals's vault-swap test) only proves
+        apply does not refuse; it cannot tell 'read the snapshot' apart from 'read
+        the vault, but the vault happens to still validate.' This swaps the vault
+        copy, after approval, for a semantically DIFFERENT but still identity-
+        matching change-set (a different campaign_id, so it would still pass every
+        guard if it were read) and asserts the mutator's argv carries the
+        SNAPSHOT's campaign_id — never the swapped-in one.
+
+        This is exactly the mutation a reviewer proved would otherwise survive:
+        verify the snapshot's digest at guard 5 while still loading `actions` from
+        C.changeset_path(vault, cid) at guard 3. That mutation leaves every other
+        apply test passing (the vault content used to always match the snapshot),
+        so only a test that inspects WHAT WAS EXECUTED, not just whether apply
+        refused, can catch it.
+        """
+        cs = self._approved(1)
+        original_campaign_id = cs["actions"][0]["campaign_id"]
+        swapped = dict(cs)
+        swapped["actions"] = [{"type": "add_campaign_negative", "campaign_id": "22233344499",
+                               "keyword": "swapped keyword", "match_type": "PHRASE"}]
+        with open(C.changeset_path(self.vault, cs["changeset_id"]), "wb") as f:
+            f.write(C.canonical_bytes(swapped))
+        rc, _ = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        live_calls = [c for c in self._calls() if "--validate-only" not in c]
+        self.assertTrue(live_calls)
+        argv_text = json.dumps(live_calls)
+        self.assertIn(original_campaign_id, argv_text)
+        self.assertNotIn("22233344499", argv_text)
+
 class TestPreflightRefusals(Base):
     """Every refusal must exit 2 AND never spawn the mutator."""
 
