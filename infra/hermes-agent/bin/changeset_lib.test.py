@@ -356,7 +356,7 @@ class TestKillSwitchInGovernanceStore(unittest.TestCase):
         self.addCleanup(shutil.rmtree, vault_root, True)
         os.makedirs(os.path.join(vault_root, "_governance"))
         open(os.path.join(vault_root, "_governance", "mutation-enabled"), "w").close()
-        self.assertFalse(C.kill_switch_ok(self.root))
+        self.assertFalse(C.kill_switch_ok(vault_root))
 
 class TestApproval(unittest.TestCase):
     def setUp(self):
