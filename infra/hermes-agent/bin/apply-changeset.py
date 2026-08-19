@@ -102,10 +102,11 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
             _refuse(f"no applied, un-undone actions recorded for change-set {undo!r}")
         operator = actions[0].get("operator", "unknown")
     else:
-        # 3. change-set loads and validates
-        path = C.changeset_path(vault, changeset_id)
+        # 3. change-set loads and validates — from the APPROVED SNAPSHOT in the
+        #    governance store, never the vault copy Hermes can write.
+        path = C.snapshot_path(rec["slug"], changeset_id)
         if not os.path.isfile(path):
-            _refuse(f"no change-set {changeset_id!r} for this client")
+            _refuse(f"no approved change-set {changeset_id!r} for this client")
         try:
             with open(path, encoding="utf-8") as f:
                 cs = json.load(f)
@@ -118,7 +119,7 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
             _refuse("change-set identity does not match the resolved client")
         # 5. approval
         try:
-            approval = C.verify_approval(vault, changeset_id, C.file_digest(path), now)
+            approval = C.verify_approval(rec["slug"], changeset_id, C.file_digest(path), now)
         except (ValueError, OSError, json.JSONDecodeError) as e:
             _refuse(str(e))
         operator = approval["operator"]

@@ -27,7 +27,8 @@ def approve(client, changeset_id, operator, now, registry=None, projects=None):
     C.validate_changeset(cs, caps["actions_per_changeset"])
     if cs["client"] != rec["slug"] or cs["customer_id"] != rec["customer_id"]:
         raise ValueError("change-set identity does not match the resolved client")
-    return C.write_approval(vault, changeset_id, C.file_digest(path), operator, now,
+    digest = C.write_snapshot(rec["slug"], changeset_id, path)
+    return C.write_approval(rec["slug"], changeset_id, digest, operator, now,
                             caps["approval_ttl_hours"])
 
 

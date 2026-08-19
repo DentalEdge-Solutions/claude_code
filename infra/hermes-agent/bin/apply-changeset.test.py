@@ -198,11 +198,25 @@ class TestPreflightRefusals(Base):
         cs = self._proposed()
         self._assert_refused(cs["changeset_id"])
 
-    def test_tampered_changeset_after_approval(self):
+    def test_tampered_snapshot_after_approval_refused(self):
+        """apply reads the governance-store SNAPSHOT, not the vault copy — so the
+        thing that must still be tamper-checked is the snapshot's bytes."""
+        cs = self._approved()
+        with open(C.snapshot_path("acme-dental", cs["changeset_id"]), "ab") as f:
+            f.write(b" ")
+        self._assert_refused(cs["changeset_id"])
+
+    def test_tampering_the_vault_copy_after_approval_does_not_block_apply(self):
+        """The race this task closes, asserted at the integration level: apply no
+        longer reads the vault copy at all, so editing it post-approval must have
+        NO effect on the outcome — the run must still succeed from the untouched
+        governance snapshot."""
         cs = self._approved()
         with open(C.changeset_path(self.vault, cs["changeset_id"]), "ab") as f:
             f.write(b" ")
-        self._assert_refused(cs["changeset_id"])
+        rc, _ = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._calls())
 
     def test_expired_approval(self):
         cs = self._approved()

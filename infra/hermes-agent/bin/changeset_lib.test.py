@@ -1,6 +1,7 @@
 import json, os, shutil, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
+import governance_lib as G
 
 def _action(**kw):
     a = {"type": "add_campaign_negative", "campaign_id": "22233344455",
@@ -360,80 +361,85 @@ class TestKillSwitchInGovernanceStore(unittest.TestCase):
 
 class TestApproval(unittest.TestCase):
     def setUp(self):
-        self.vault = tempfile.mkdtemp()
-        os.makedirs(C.changes_dir(self.vault))
-        self.cs = os.path.join(C.changes_dir(self.vault), "20260812-101500-abcd1234.json")
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        self.slug = "acme-dental"
+        self.srcdir = tempfile.mkdtemp()
+        self.cs = os.path.join(self.srcdir, "20260812-101500-abcd1234.json")
         with open(self.cs, "wb") as f:
             f.write(C.canonical_bytes(_cs()))
         self.digest = C.file_digest(self.cs)
 
     def test_write_then_verify_roundtrip(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
-        rec = C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        rec = C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
         self.assertEqual(rec["operator"], "erick")
 
     def test_missing_approval_refused(self):
         with self.assertRaises(ValueError):
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
 
     def test_directory_in_place_of_approval_refused(self):
-        os.makedirs(C.approval_path(self.vault, "20260812-101500-abcd1234"))
+        os.makedirs(C.approval_path(self.slug, "20260812-101500-abcd1234"))
         with self.assertRaises(ValueError):
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
 
     def test_unreadable_approval_refused(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
-        p = C.approval_path(self.vault, "20260812-101500-abcd1234")
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        p = C.approval_path(self.slug, "20260812-101500-abcd1234")
         os.chmod(p, 0)
         try:
             with self.assertRaises(ValueError):
-                C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+                C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
         finally:
             os.chmod(p, 0o600)      # restore so tempdir cleanup succeeds
 
     def test_non_object_approval_refused(self):
-        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), "w") as f:
+        os.makedirs(G.approvals_dir(self.slug), exist_ok=True)
+        with open(C.approval_path(self.slug, "20260812-101500-abcd1234"), "w") as f:
             f.write('["not", "an", "object"]')
         with self.assertRaises(ValueError):
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
 
     def test_hash_mismatch_refused(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
         with open(self.cs, "ab") as f:
             f.write(b" ")                     # a single whitespace byte
         new_digest = C.file_digest(self.cs)
         with self.assertRaises(ValueError) as ctx:
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", new_digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", new_digest, NOW)
         self.assertIn("modified after approval", str(ctx.exception))
 
     def test_expired_approval_refused(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
         later = NOW + datetime.timedelta(hours=24, seconds=1)
         with self.assertRaises(ValueError) as ctx:
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, later)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, later)
         self.assertIn("expired", str(ctx.exception))
 
     def test_within_ttl_accepted(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
         later = NOW + datetime.timedelta(hours=23, minutes=59)
         self.assertEqual(
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, later)["operator"],
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, later)["operator"],
             "erick")
 
     def test_bad_operator_rejected(self):
         for bad in ["", "a b", "rm -rf /", "x" * 65, "erick\n"]:
             with self.assertRaises(ValueError):
-                C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, bad, NOW, 24)
+                C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, bad, NOW, 24)
 
     def test_non_string_approval_datetime_refused_cleanly(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
-        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), encoding="utf-8") as f:
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        with open(C.approval_path(self.slug, "20260812-101500-abcd1234"), encoding="utf-8") as f:
             rec = json.load(f)
         rec["expires_at"] = 123
-        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), "w", encoding="utf-8") as f:
+        with open(C.approval_path(self.slug, "20260812-101500-abcd1234"), "w", encoding="utf-8") as f:
             json.dump(rec, f)
         with self.assertRaises(ValueError) as ctx:
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
         self.assertIn("expires_at must be a JSON string", str(ctx.exception))
 
 class TestLog(unittest.TestCase):
@@ -478,6 +484,56 @@ class TestLog(unittest.TestCase):
         C.append_log(self.vault, self._line(action_index=1))
         with open(C.log_path(self.vault)) as f:
             self.assertEqual(len([x for x in f.read().splitlines() if x.strip()]), 2)
+
+
+class TestApprovalSnapshot(unittest.TestCase):
+    CID = "20260812-101500-abcd1234"
+
+    def setUp(self):
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        self.src = os.path.join(self.gov, "draft.json")
+        with open(self.src, "w") as f:
+            f.write('{"actions": []}')
+
+    def test_snapshot_is_byte_identical(self):
+        digest = C.write_snapshot("acme-dental", self.CID, self.src)
+        with open(G.snapshot_path("acme-dental", self.CID)) as f:
+            self.assertEqual(f.read(), '{"actions": []}')
+        self.assertEqual(digest, C.file_digest(self.src))
+
+    def test_editing_the_source_afterwards_does_not_change_the_snapshot(self):
+        """This is the race the snapshot exists to close."""
+        C.write_snapshot("acme-dental", self.CID, self.src)
+        with open(self.src, "w") as f:
+            f.write('{"actions": [{"type": "add_campaign_negative"}]}')
+        with open(G.snapshot_path("acme-dental", self.CID)) as f:
+            self.assertEqual(f.read(), '{"actions": []}')
+
+    def test_verify_refuses_a_reserved_approval(self):
+        now = datetime.datetime(2026, 8, 12, 10, 0, tzinfo=datetime.timezone.utc)
+        digest = C.write_snapshot("acme-dental", self.CID, self.src)
+        C.write_approval("acme-dental", self.CID, digest, "operator", now, 24)
+        p = G.approval_path("acme-dental", self.CID)
+        with open(p) as f:
+            rec = json.load(f)
+        rec["reserved_at"] = "2026-08-12T10:30:00Z"
+        with open(p, "w") as f:
+            json.dump(rec, f)
+        with self.assertRaises(ValueError) as ctx:
+            C.verify_approval("acme-dental", self.CID, digest, now)
+        self.assertIn("reserved", str(ctx.exception))
+
+    def test_verify_accepts_an_unreserved_approval(self):
+        """The control: without this, the refusal above proves nothing."""
+        now = datetime.datetime(2026, 8, 12, 10, 0, tzinfo=datetime.timezone.utc)
+        digest = C.write_snapshot("acme-dental", self.CID, self.src)
+        C.write_approval("acme-dental", self.CID, digest, "operator", now, 24)
+        rec = C.verify_approval("acme-dental", self.CID, digest, now)
+        self.assertEqual(rec["operator"], "operator")
+
 
 if __name__ == "__main__":
     unittest.main()

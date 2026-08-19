@@ -35,6 +35,7 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["VAULT_ROOT"] = self.tmp
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
         d = os.path.join(self.tmp, "_registry"); os.makedirs(d)
         self.clients = os.path.join(d, "clients.json")
         with open(self.clients, "w") as f:
@@ -65,7 +66,7 @@ class T(unittest.TestCase):
                   registry=self.clients, projects=self.projects)
         digest = C.file_digest(C.changeset_path(self.vault, self.cs["changeset_id"]))
         self.assertEqual(
-            C.verify_approval(self.vault, self.cs["changeset_id"], digest, NOW)["operator"], "erick")
+            C.verify_approval("acme-dental", self.cs["changeset_id"], digest, NOW)["operator"], "erick")
 
     def test_tampered_changeset_refused_at_approve(self):
         p = C.changeset_path(self.vault, self.cs["changeset_id"])

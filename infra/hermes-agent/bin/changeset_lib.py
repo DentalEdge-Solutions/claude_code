@@ -271,8 +271,33 @@ def changeset_path(vault, cid):
     return os.path.join(changes_dir(vault), f"{cid}.json")
 
 
-def approval_path(vault, cid):
-    return os.path.join(changes_dir(vault), f"{cid}.approval.json")
+def approval_path(slug, cid):
+    return governance_lib.approval_path(slug, cid)
+
+
+def snapshot_path(slug, cid):
+    return governance_lib.snapshot_path(slug, cid)
+
+
+def write_snapshot(slug, cid, src_path):
+    """Copy the reviewed change-set BYTE-FOR-BYTE into the governance store and return
+    its sha256.
+
+    apply executes from THIS copy. Hashing the writable original would still leave the
+    draft -> review -> swap window open; copying it somewhere Hermes cannot write closes
+    it (spec section 7).
+    """
+    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
+    dst = governance_lib.snapshot_path(slug, cid)
+    with open(src_path, "rb") as src:
+        data = src.read()
+    tmp = dst + ".tmp"
+    with open(tmp, "wb") as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(tmp, dst)
+    return hashlib.sha256(data).hexdigest()
 
 
 def result_path(vault, cid):
@@ -334,7 +359,7 @@ def _parse_utc_field(rec, field):
         raise ValueError(f"invalid {field}: {raw!r}") from e
 
 
-def write_approval(vault, cid, digest, operator, now, ttl_hours):
+def write_approval(slug, cid, digest, operator, now, ttl_hours):
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
     operator = _require_str(operator, "operator")
@@ -351,15 +376,15 @@ def write_approval(vault, cid, digest, operator, now, ttl_hours):
     rec = {"changeset_id": cid, "sha256": digest, "operator": operator,
            "approved_at": now.strftime(ISO),
            "expires_at": (now + datetime.timedelta(hours=ttl_hours)).strftime(ISO)}
-    os.makedirs(changes_dir(vault), exist_ok=True)
-    _atomic_write_json(approval_path(vault, cid), rec)
+    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
+    _atomic_write_json(approval_path(slug, cid), rec)
     return rec
 
 
-def verify_approval(vault, cid, digest, now):
+def verify_approval(slug, cid, digest, now):
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
-    p = approval_path(vault, cid)
+    p = approval_path(slug, cid)
     if not os.path.isfile(p):
         raise ValueError(f"no approval record for change-set {cid!r} — run approve-changeset.py first")
     try:                       # unreadable / directory-in-place must REFUSE, not leak an OSError
@@ -369,6 +394,10 @@ def verify_approval(vault, cid, digest, now):
         raise ValueError(f"unreadable approval record for {cid!r}: {e}")
     if not isinstance(rec, dict):
         raise ValueError(f"malformed approval record for {cid!r}: expected a JSON object")
+    if rec.get("reserved_at"):
+        raise ValueError(
+            "approval for %r is already reserved (reserved_at=%s) — approvals are "
+            "single-use; approve again to authorise another apply" % (cid, rec["reserved_at"]))
     if _require_str(rec.get("changeset_id"), "changeset_id") != cid:
         raise ValueError(f"approval record changeset_id does not match {cid!r}")
     approved_digest = _require_str(rec.get("sha256"), "sha256")
