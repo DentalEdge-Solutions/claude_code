@@ -1,4 +1,4 @@
-import json, os, sys, unittest
+import json, os, shutil, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
 
@@ -321,22 +321,41 @@ import datetime
 
 NOW = datetime.datetime(2026, 8, 12, 10, 15, 0, tzinfo=datetime.timezone.utc)
 
-class TestKillSwitch(unittest.TestCase):
+class TestKillSwitchInGovernanceStore(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp()
+        self.root = tempfile.mkdtemp(prefix="gov-")
+        os.makedirs(os.path.join(self.root, "control"))
+        self.addCleanup(shutil.rmtree, self.root, True)
 
-    def test_absent_switch_is_not_ok(self):
+    def _switch(self):
+        return os.path.join(self.root, "control", "mutation-enabled")
+
+    def test_absent_means_disabled(self):
         self.assertFalse(C.kill_switch_ok(self.root))
 
-    def test_present_switch_is_ok(self):
-        d = os.path.join(self.root, C.GOVERNANCE_DIR)
-        os.makedirs(d)
-        with open(os.path.join(d, C.KILL_SWITCH), "w") as f:
-            f.write("enabled\n")
+    def test_present_and_readable_means_enabled(self):
+        open(self._switch(), "w").close()
         self.assertTrue(C.kill_switch_ok(self.root))
 
-    def test_directory_in_place_of_switch_is_not_ok(self):
-        os.makedirs(os.path.join(self.root, C.GOVERNANCE_DIR, C.KILL_SWITCH))
+    def test_directory_in_its_place_means_disabled(self):
+        os.makedirs(self._switch())
+        self.assertFalse(C.kill_switch_ok(self.root))
+
+    def test_unreadable_means_disabled(self):
+        open(self._switch(), "w").close()
+        os.chmod(self._switch(), 0o000)
+        try:
+            self.assertFalse(C.kill_switch_ok(self.root))
+        finally:
+            os.chmod(self._switch(), 0o600)
+
+    def test_it_no_longer_reads_the_vault_location(self):
+        """The control that proves the move actually happened: a switch at the OLD
+        vault path must NOT enable mutation."""
+        vault_root = tempfile.mkdtemp(prefix="vault-")
+        self.addCleanup(shutil.rmtree, vault_root, True)
+        os.makedirs(os.path.join(vault_root, "_governance"))
+        open(os.path.join(vault_root, "_governance", "mutation-enabled"), "w").close()
         self.assertFalse(C.kill_switch_ok(self.root))
 
 class TestApproval(unittest.TestCase):

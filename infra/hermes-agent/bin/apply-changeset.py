@@ -74,7 +74,7 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
     # 1. kill switch FIRST, before any per-client parsing — the mandated order is
     #    literal, not approximate. CREATING change only; undo must stay available so
     #    cleanup is never blocked by the switch that stopped the damage.
-    if not undo and not C.kill_switch_ok(vault_lib.vault_root()):
+    if not undo and not C.kill_switch_ok():
         _refuse("mutation is disabled (kill switch absent or unreadable) — this is the safe default")
 
     # 2. client resolves and is active

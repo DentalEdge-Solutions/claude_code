@@ -10,6 +10,7 @@ See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 """
 import datetime, hashlib, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import governance_lib
 import vault_lib
 
 ACTION_TYPES = ("add_campaign_negative",)
@@ -243,19 +244,16 @@ def assert_allow_lists_disjoint(read_allow, mutate_allow):
                          "a script must never be both reader and mutator")
 
 
-GOVERNANCE_DIR = "_governance"
-KILL_SWITCH = "mutation-enabled"
-
-
-def kill_switch_ok(vault_root=None):
+def kill_switch_ok(root=None):
     """Return whether mutation is deliberately enabled.
 
-    Safe state is disabled: absent, unreadable, or not a regular file all return
-    False. This function never raises because callers turn False into refusal.
+    Reads the HOST-OWNED governance store, which the gateway container does not
+    mount — so this can no longer be enabled from inside the container Hermes runs
+    in. Safe state is disabled: absent, unreadable, or not a regular file all return
+    False. Never raises; callers turn False into refusal.
     """
     try:
-        root = vault_root or vault_lib.vault_root()
-        p = os.path.join(root, GOVERNANCE_DIR, KILL_SWITCH)
+        p = governance_lib.kill_switch_path(root)
         if not os.path.isfile(p):
             return False
         with open(p, "rb") as f:

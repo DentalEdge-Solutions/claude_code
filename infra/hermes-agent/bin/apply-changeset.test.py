@@ -3,6 +3,7 @@ import contextlib, datetime, importlib.util, io, json, os, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import changeset_lib as C
+import governance_lib
 
 def _load(name, filename):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
@@ -89,6 +90,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["VAULT_ROOT"] = self.tmp
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
         for k, v in FULL_CRED.items():
             os.environ[k] = v
         code = os.path.join(self.tmp, "code"); os.makedirs(code)
@@ -107,8 +109,9 @@ class Base(unittest.TestCase):
         self.projects = os.path.join(self.tmp, "projects.yaml")
         with open(self.projects, "w") as f:
             f.write(_reg_text(self.tmp))
-        gov = os.path.join(self.tmp, C.GOVERNANCE_DIR); os.makedirs(gov)
-        with open(os.path.join(gov, C.KILL_SWITCH), "w") as f:
+        switch = governance_lib.kill_switch_path(self.tmp)
+        os.makedirs(os.path.dirname(switch))
+        with open(switch, "w") as f:
             f.write("enabled\n")
         self.vault = os.path.join(self.tmp, "acme-dental")
 
@@ -188,7 +191,7 @@ class TestPreflightRefusals(Base):
 
     def test_kill_switch_absent(self):
         cs = self._approved()
-        os.remove(os.path.join(self.tmp, C.GOVERNANCE_DIR, C.KILL_SWITCH))
+        os.remove(governance_lib.kill_switch_path(self.tmp))
         self._assert_refused(cs["changeset_id"])
 
     def test_no_approval(self):
@@ -397,7 +400,7 @@ class TestUndo(Base):
     def test_undo_works_with_kill_switch_absent(self):
         """Guards constrain creating change, never reversing it."""
         cs = self._applied(1)
-        os.remove(os.path.join(self.tmp, C.GOVERNANCE_DIR, C.KILL_SWITCH))
+        os.remove(governance_lib.kill_switch_path(self.tmp))
         self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
 
     def test_undo_works_with_daily_caps_exhausted(self):
