@@ -8,6 +8,34 @@
 # path keeps its platform-level backstop.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
+
+# R4 guard: if HERMES_GOVERNANCE_DIR is unset or empty, Docker Compose substitutes
+# an empty string for ${HERMES_GOVERNANCE_DIR} in docker-compose.yml, which would
+# bind-mount /approvals, /control, /registry and /log at the FILESYSTEM ROOT. Refuse
+# before anything else runs.
+if [ -z "${HERMES_GOVERNANCE_DIR:-}" ]; then
+  echo "run-ads-mutate: HERMES_GOVERNANCE_DIR is unset or empty — refusing (an empty value would make Docker Compose bind-mount the governance paths at the filesystem root)" >&2
+  exit 1
+fi
+
+# Parse --client out of "$@" so it can be handed to persist-run-record.py, which
+# needs it to resolve the client vault. Supports both `--client X` and `--client=X`.
+client=""
+_prev=""
+for _arg in "$@"; do
+  case "$_prev" in
+    --client) client="$_arg" ;;
+  esac
+  case "$_arg" in
+    --client=*) client="${_arg#--client=}" ;;
+  esac
+  _prev="$_arg"
+done
+if [ -z "$client" ]; then
+  echo "run-ads-mutate: --client is required" >&2
+  exit 1
+fi
+
 if [ ! -f "$here/.env.gaw" ]; then
   echo "run-ads-mutate: $here/.env.gaw not found — copy .env.gaw.example and fill in the WRITE credential" >&2
   exit 1
@@ -33,8 +61,21 @@ if [ "${GOOGLE_ADS_CREDENTIAL_ROLE:-}" != "write" ]; then
   echo "run-ads-mutate: .env.gaw must set GOOGLE_ADS_CREDENTIAL_ROLE=write (got '${GOOGLE_ADS_CREDENTIAL_ROLE:-}')" >&2
   exit 1
 fi
-exec docker compose -f "$here/docker-compose.yml" exec \
+# The executor runs in the one-shot ads-mutator container (not the gateway — see
+# docker-compose.yml). Its exit status must survive the persist step: `cmd | persist`
+# would take its status from persist, turning an exit-2 refusal into a false success.
+# Capture to a temp file instead of piping, so `rc` is the executor's real status.
+tmp_out="$(mktemp)"
+trap 'rm -f "$tmp_out"' EXIT INT TERM
+# `|| rc=$?` (not a bare command) so a non-zero exit here does not trip `set -e`
+# before rc is captured.
+rc=0
+docker compose -f "$here/docker-compose.yml" run --rm --no-deps \
   -e GOOGLE_ADS_DEVELOPER_TOKEN -e GOOGLE_ADS_CLIENT_ID -e GOOGLE_ADS_CLIENT_SECRET \
   -e GOOGLE_ADS_REFRESH_TOKEN -e GOOGLE_ADS_LOGIN_CUSTOMER_ID -e GOOGLE_ADS_CUSTOMER_ID \
   -e GOOGLE_ADS_CREDENTIAL_ROLE \
-  -T hermes-agent python3 /opt/cc-bin/apply-changeset.py "$@"
+  -T ads-mutator "$@" > "$tmp_out" 2>&1 || rc=$?
+cat "$tmp_out"
+VAULT_ROOT="$here/data/vaults" HERMES_GOVERNANCE_ROOT="${HERMES_GOVERNANCE_DIR}" \
+  python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null
+exit "$rc"
