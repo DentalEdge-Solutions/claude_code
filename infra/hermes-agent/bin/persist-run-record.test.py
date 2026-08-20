@@ -1,6 +1,7 @@
 import json, os, shutil, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import persist_run_record_shim as P
+import changeset_lib as C
 
 
 class TestParse(unittest.TestCase):
@@ -34,6 +35,20 @@ class TestPersist(unittest.TestCase):
             self.assertEqual(json.load(f)["applied"], 2)
         with open(os.path.join(self.vault, "timeline.md")) as f:
             self.assertIn("20260812-101500-abcd1234", f.read())
+
+    def test_persist_writes_to_the_canonical_result_path(self):
+        """R15: changeset_lib.result_path is the single definition of where a result
+        file lives (<vault>/changes/<cid>.result.json) — persist() must obtain the
+        destination from it rather than composing a second, divergent convention (a
+        prior version of this function wrote to <vault>/<cid>.result.json, the vault
+        ROOT, which this test would catch: that path is not equal to result_path()'s,
+        so the assertEqual below fails against it)."""
+        res = {"changeset_id": "20260812-101500-abcd1234", "applied": 2,
+               "status": "ok", "finished_at": "2026-08-12T10:20:00Z"}
+        path = P.persist(self.vault, res)
+        self.assertEqual(path, C.result_path(self.vault, res["changeset_id"]))
+        # And the canonical path is genuinely inside changes/, not the vault root.
+        self.assertEqual(os.path.dirname(path), os.path.join(self.vault, "changes"))
 
     def test_timeline_appends_rather_than_truncates(self):
         res = {"changeset_id": "20260812-101500-abcd1234", "applied": 1,
