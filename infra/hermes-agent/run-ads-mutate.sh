@@ -76,6 +76,13 @@ docker compose -f "$here/docker-compose.yml" run --rm --no-deps \
   -e GOOGLE_ADS_CREDENTIAL_ROLE \
   -T ads-mutator "$@" > "$tmp_out" 2>&1 || rc=$?
 cat "$tmp_out"
+# The executor's status ($rc) is what the operator relies on — an exit-2 refusal is a
+# promise the client's account was not touched. persist-run-record.py failing for an
+# unrelated reason (e.g. it cannot write the vault file) must not override that promise
+# and, under `set -e`, a bare non-zero exit here would abort the script with persist's
+# status instead. `|| true` keeps this compound command's own status zero so `set -e`
+# does not fire; persist's own stderr (it prints its own errors there) still reaches
+# the operator since only stdout is redirected.
 VAULT_ROOT="$here/data/vaults" HERMES_GOVERNANCE_ROOT="${HERMES_GOVERNANCE_DIR}" \
-  python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null
+  python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null || true
 exit "$rc"

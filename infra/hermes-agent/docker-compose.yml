@@ -59,7 +59,8 @@ services:
       - ${HERMES_GOVERNANCE_DIR}/approvals:/opt/governance/approvals:ro
       - ${HERMES_GOVERNANCE_DIR}/control:/opt/governance/control:ro
       - ${HERMES_GOVERNANCE_DIR}/registry:/opt/governance/registry:ro
-      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log      # the ONLY writable path
+      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log      # writable, like seen (below)
+      - ${HERMES_GOVERNANCE_DIR}/seen:/opt/governance/seen    # writable, like log (above) — replay-protection state
       - ../../../claude-google-ads:/projects/claude_google_ads:ro
       - ./registry:/opt/registry:ro
       - ./bin:/opt/cc-bin:ro
