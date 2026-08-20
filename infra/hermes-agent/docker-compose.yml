@@ -64,3 +64,15 @@ services:
       - ../../../claude-google-ads:/projects/claude_google_ads:ro
       - ./registry:/opt/registry:ro
       - ./bin:/opt/cc-bin:ro
+
+  # Credential access audit. Same isolation rationale as ads-mutator: this injects the
+  # WRITE credential, and must not do so into the container Hermes has a shell in.
+  ads-credential-audit:
+    build: .
+    image: hermes-agent-claude
+    profiles: ["tools"]
+    entrypoint: ["/opt/ads-venv/bin/python3", "/opt/cc-bin/audit-credential-access.py"]
+    volumes:
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro
+      - ./registry:/opt/registry:ro
+      - ./bin:/opt/cc-bin:ro
