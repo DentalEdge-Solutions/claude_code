@@ -304,17 +304,15 @@ def apply(plan, now):
                     raise PostMutationError(f"audit-log write failed after action {i} landed: {_scrub(str(e))}")
                 results.append(rec)
 
-            # 11. result.json + timeline.md
-            C._atomic_write_json(C.result_path(plan["vault"], plan["changeset_id"]),
-                                 {"changeset_id": plan["changeset_id"],
-                                  "undo": plan["undo"], "completed_at": now.strftime(C.ISO),
-                                  "operator": plan["operator"], "actions": results})
-            verb = "undo" if plan["undo"] else "change"
-            with open(os.path.join(plan["vault"], "timeline.md"), "a", encoding="utf-8") as f:
-                f.write(f"- {now.strftime(C.ISO)} · {verb} · {len(results)} action(s) · "
-                        f"changeset {plan['changeset_id']} · by {plan['operator']}\n")
-            print(json.dumps({"ok": True, "changeset_id": plan["changeset_id"],
-                              "undo": plan["undo"], "applied": len(results)}))
+            # 11. Emit the run record for the CALLER to persist. This container does
+            #     not mount the vault; the audit log above is the reversibility record.
+            #     result.json and timeline.md are convenience artifacts written by
+            #     persist-run-record.py from this line, never by the executor itself.
+            result = {"changeset_id": plan["changeset_id"], "undo": plan["undo"],
+                      "status": "ok", "finished_at": now.strftime(C.ISO),
+                      "operator": plan["operator"], "applied": len(results),
+                      "actions": results}
+            print("HERMES-RESULT-JSON " + json.dumps(result, sort_keys=True))
             return 0
         except PostMutationError as e:
             print(f"apply-changeset: {e}", file=sys.stderr)

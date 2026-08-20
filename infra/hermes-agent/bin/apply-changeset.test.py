@@ -14,6 +14,7 @@ def _load(name, filename):
 P = _load("propose_changeset", "propose-changeset.py")
 A = _load("approve_changeset", "approve-changeset.py")
 X = _load("apply_changeset", "apply-changeset.py")
+import persist_run_record_shim as PR
 
 NOW = datetime.datetime(2026, 8, 12, 10, 15, 0, tzinfo=datetime.timezone.utc)
 
@@ -62,6 +63,19 @@ a = json.loads(sys.argv[i + 1])
 print(json.dumps({"ok": True,
                   "resource_name": "customers/1234567890/campaignCriteria/%s~9" % a["campaign_id"]}))
 '''
+
+class _BrokenStdout:
+    """Stand-in for a broken stdout stream — e.g. a pipe closed by the caller, or a full
+    disk under a redirected fd. Used to force an OSError while emitting the step-11
+    HERMES-RESULT-JSON marker: now that step 11 is a stdout print rather than a vault
+    file write, this is the equivalent of the old 'directory where timeline.md belongs'
+    trick, relocated to the new site of the write."""
+    def write(self, s):
+        raise OSError("stdout is broken")
+
+    def flush(self):
+        pass
+
 
 def _reg_text(tmp, allow="mutate_campaign_negative", caps=None):
     caps = caps or {"actions_per_changeset": 25, "actions_per_client_day": 100,
@@ -175,12 +189,26 @@ class TestHappyPath(Base):
         self.assertTrue(all(r["resource_name"].startswith("customers/1234567890/") for r in recs))
         self.assertTrue(all(r["operator"] == "erick" for r in recs))
 
-    def test_result_and_timeline_written(self):
+    def test_result_marker_emitted_instead_of_vault_writes(self):
+        """apply() runs in a container that deliberately does not mount the vault (spec
+        §6.5), so step 11 must EMIT the run record for the caller to persist, not write
+        result.json/timeline.md itself. Was: asserted C.result_path(...) and timeline.md
+        existed after apply(). Now: asserts the HERMES-RESULT-JSON marker line was
+        printed with a payload persist_run_record_shim.parse_result() can read, AND that
+        apply() left the vault's result.json/timeline.md untouched — the vault dir
+        already exists at this point (propose/approve created it), so an absent
+        result.json/timeline.md here is a positive signal that apply() did not write
+        them, not just that nothing ran."""
         cs = self._approved(1)
-        self._run(cs["changeset_id"])
-        self.assertTrue(os.path.exists(C.result_path(self.vault, cs["changeset_id"])))
-        with open(os.path.join(self.vault, "timeline.md")) as f:
-            self.assertIn("change", f.read())
+        rc, out = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        result = PR.parse_result(out)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["changeset_id"], cs["changeset_id"])
+        self.assertEqual(result["applied"], 1)
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(os.path.exists(C.result_path(self.vault, cs["changeset_id"])))
+        self.assertFalse(os.path.exists(os.path.join(self.vault, "timeline.md")))
 
     def test_vault_swap_after_approval_executes_the_snapshot_not_the_swap(self):
         """The critical failure mode this task exists to prevent: hashing the right
@@ -391,12 +419,19 @@ class TestPostMutationFailure(Base):
 
         A post-mutation OSError previously escaped apply() as a traceback and exit 1,
         which an operator's tooling reads as 'usage error, nothing happened' — for a run
-        that changed the account. A directory where timeline.md belongs reproduces it.
+        that changed the account. Was: a directory where timeline.md belongs, since
+        that used to be the last filesystem write inside apply(). Step 11 no longer
+        touches the vault at all — it only emits the HERMES-RESULT-JSON marker on
+        stdout — so the equivalent forcing mechanism is now a stdout stream whose
+        write() raises OSError, reproducing the same 'IO failure strictly after a live
+        mutation landed' shape at the new site of the write.
         """
         cs = self._approved(1)
-        os.mkdir(os.path.join(self.vault, "timeline.md"))   # open(..., "a") will raise
-        with self.assertRaises(SystemExit) as ctx:
-            self._run(cs["changeset_id"])
+        plan = X.build_plan("acme-dental", cs["changeset_id"], NOW,
+                            registry=self.clients, projects=self.projects)
+        with self.assertRaises(SystemExit) as ctx, \
+                contextlib.redirect_stdout(_BrokenStdout()):
+            X.apply(plan, NOW)
         self.assertEqual(ctx.exception.code, 3)
         recs = [json.loads(x) for x in open(C.log_path("acme-dental")) if x.strip()]
         self.assertEqual(len(recs), 1)                      # the mutation is still recorded
