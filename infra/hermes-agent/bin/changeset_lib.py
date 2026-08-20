@@ -147,6 +147,30 @@ def read_workdir(path, project):
     return found
 
 
+def read_mask_paths(path, project):
+    """Workdir-relative paths masked out of the container view.
+
+    A project with no declaration yields [] — nothing claimed, nothing to enforce.
+    A duplicate key refuses, for the same reason read_workdir's does: silently
+    choosing a winner would silently choose which paths stay exposed.
+    """
+    found = None
+    collecting = False
+    for indent, stripped in _iter_project_lines(path, project):
+        if indent == 4 and stripped.startswith("mask_paths:"):
+            if found is not None:
+                raise ValueError(f"duplicate 'mask_paths' key for project {project!r} — "
+                                 "refusing rather than taking the first or last value")
+            found, collecting = [], True
+            continue
+        if collecting:
+            if indent == 6 and stripped.startswith("- "):
+                found.append(stripped[2:].strip())
+                continue
+            collecting = False
+    return found or []
+
+
 def read_block(path, project, block):
     """Parse projects.<project>.<block> into scalars plus `allow` and `caps`.
 

@@ -36,6 +36,17 @@ services:
       - ./skills/claude-code-reviewer:/opt/data/skills/claude-code-reviewer:ro  # kanban review worker skill (read-only)
       - ./skills/claude-code-ads-analyst:/opt/data/skills/claude-code-ads-analyst:ro  # ads-analyst skill (read-only)
       - ./bin:/opt/cc-bin:ro            # operational helpers (run monitor, read-only)
+      # --- credential masks (registry: mask_paths) ---
+      # The repo mount exposes every .env.* under infra/hermes-agent/, including the
+      # live write credential and the draft-PR bot PAT. Nothing in-container consumes
+      # any of them (verified 2026-08-19 with a positive control). Masking the whole
+      # directory covers files that do not exist yet.
+      - type: tmpfs
+        target: /projects/claude_code/infra/hermes-agent
+      # The ads repo keeps its secret in one file at the root, so mask just that file —
+      # masking the root would hide the project. An EMPTY file, not an absent one, so
+      # load_dotenv() reads nothing rather than failing.
+      - ./masks/empty:/projects/claude_google_ads/.env:ro
     ports:
       - "127.0.0.1:9119:9119"           # dashboard, loopback only (optional)
     restart: unless-stopped

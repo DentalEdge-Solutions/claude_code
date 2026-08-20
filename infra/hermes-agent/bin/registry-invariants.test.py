@@ -150,5 +150,35 @@ class TestMutateTierInvariants(unittest.TestCase):
                     self.assertGreaterEqual(val, 1, f"cap {cap} must be >= 1")
 
 
+class TestMaskPathsAreActuallyMounted(unittest.TestCase):
+    """A declared mask that compose does not implement is worse than no declaration:
+    it reads as protection while providing none."""
+
+    def setUp(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "..", "docker-compose.yml"), encoding="utf-8") as f:
+            self.compose = f.read()
+
+    def test_reader_finds_the_declarations(self):
+        """Guards the reader itself: if the indentation convention changes, the
+        assertion below would pass vacuously on an empty list."""
+        total = sum(len(C.read_mask_paths(REGISTRY, p))
+                    for p in discover_projects(REGISTRY))
+        self.assertGreater(total, 0, "read_mask_paths found nothing — reader is blind")
+
+    def test_every_declared_mask_has_a_mount(self):
+        for project in discover_projects(REGISTRY):
+            workdir = C.read_workdir(REGISTRY, project)
+            for rel in C.read_mask_paths(REGISTRY, project):
+                target = "%s/%s" % (workdir.rstrip("/"), rel)
+                self.assertIn(target, self.compose,
+                              "project %r declares mask_paths entry %r but no mount in "
+                              "docker-compose.yml targets %s" % (project, rel, target))
+
+    def test_a_bogus_target_would_be_caught(self):
+        """Control: prove the containment check can fail."""
+        self.assertNotIn("/projects/claude_code/definitely-not-mounted", self.compose)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
