@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Apply an approved change-set to a client's external Google Ads account.
 
-THE ONLY CREDENTIALED ENTRY POINT in the mutation tier. Runs in-container, invoked by
-run-ads-mutate.sh, which injects a SEPARATE Standard-access write credential
-per-invocation via `docker compose exec -e`. Stdlib-only; the SDK lives in the
-project's pinned venv, reached through the allow-listed mutator subprocess.
+THE ONLY CREDENTIALED ENTRY POINT in the mutation tier. Runs inside the ONE-SHOT
+`ads-mutator` container — never the gateway — invoked by run-ads-mutate.sh, which
+injects a SEPARATE Standard-access write credential per-invocation via
+`docker compose run -e`. (It was `docker compose exec -e` into the long-lived gateway
+until 2026-08-19; that put the credential in a container Hermes has a shell in, where
+any same-UID process could read it from /proc/<pid>/environ.) Stdlib-only; the SDK
+lives in the project's pinned venv, reached through the allow-listed mutator
+subprocess.
 
 Guard order is load-bearing (spec §7): every refusal happens BEFORE the credential is
 used, so exit 2 is a promise that nothing was mutated. Exit 3 means at least one live

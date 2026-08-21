@@ -284,13 +284,29 @@ It is **not** sound against a race. In a world where Hermes can write the vault,
 approval to bytes the human never saw.
 
 **Fix:** `approve-changeset.py` copies the reviewed bytes into `governance/approvals/<slug>/` and
-`apply` executes from **that** copy. The hash check stays as defence in depth. The window closes
-completely, because the approved artefact now lives somewhere Hermes cannot write at any point in the
-sequence.
+`apply` executes from **that** copy. The hash check stays as defence in depth.
 
-This is also what makes the brief's requirement literally true: **a model can never author both the
-change and its approval**, because in v1 it authors neither (§17.1), and even under a future relaxation
-it could author only the draft, never the approved copy.
+**Precisely what this closes, and what it does not** (corrected 2026-08-20 — the first draft of this
+section said "the window closes completely", which overclaimed):
+
+| Window | Closed? | By what |
+|---|---|---|
+| **approve → apply** | **Yes, structurally.** | The executed artefact lives in a tree Hermes cannot write, so after `approve` returns nothing can change what runs. This is what the snapshot adds over the pre-existing hash check, which only *detected* a post-approval edit. |
+| **review → approve** | **No.** | `approve` reads the vault copy **at approve time**. Anything written between the human reading the change-set and the operator typing the command is what gets snapshotted and bound. |
+
+The residual window is covered by procedure, not by a mechanism, so `approve` must give the operator
+something to bind their review to: it reads the file **once** and prints the sha256 plus one line per
+action, and accepts `--expect-sha256` to turn the operator's confirmation into a refusal rather than a
+reading task. Note also that the residual window is empty in v1 for a different reason — §17.1 means no
+model authors a change-set at all — and opens only if that rule is ever relaxed.
+
+**The precise claim this design supports:**
+
+- **Holds:** *a model can never author both a change and its approval.* In v1 it authors neither
+  (§17.1); even under a future relaxation it could author only the draft, never the approved copy, the
+  reservation, or the executed snapshot.
+- **Does not hold:** *a model can never author the change.* That is true only because §17.1 forbids it
+  today, not because any mechanism here prevents it.
 
 **Single-use, reserved BEFORE execution.** The broker writes the consumption record host-side (the
 approvals directory is `:ro` inside the container, so the executor cannot do this itself), and `apply`
@@ -500,8 +516,13 @@ Stdlib-only Python suites under `infra/hermes-agent/bin/`, discovered by `run-bi
 
 ## 15 · Guarantees preserved (must hold at whole-branch review)
 
-- Approval binds **bytes** — strengthened, not relaxed, by the snapshot.
+- Approval binds **bytes** — strengthened, not relaxed, by the snapshot, which closes approve → apply
+  structurally. Review → approve is **not** closed by it; see the corrected §7.
 - No model output can become a mutation, even in principle (§17.1 keeps this intact).
+- Nothing Hermes writes into `data/vaults` can steer a host-side write out of that tree. The run-record
+  persist step (§6.5) runs host-side into the one Hermes-writable mount, so it resolves and contains
+  every destination and opens with `O_NOFOLLOW`; a symlink there would otherwise create the kill switch
+  or truncate the audit log.
 - The write credential never enters the gateway/agent environment — re-verified by probe (F3), and now
   also by the credential file being unreadable there (P1) and by the credential no longer transiting
   that container at all (F7/§6.5). **State this precisely in the README**: the old wording ("reaches

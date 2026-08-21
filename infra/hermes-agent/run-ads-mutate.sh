@@ -19,14 +19,19 @@
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 
-# R4 guard: if HERMES_GOVERNANCE_DIR is unset or empty, Docker Compose substitutes
-# an empty string for ${HERMES_GOVERNANCE_DIR} in docker-compose.yml, which would
-# bind-mount /approvals, /control, /registry and /log at the FILESYSTEM ROOT. Refuse
-# before anything else runs.
-if [ -z "${HERMES_GOVERNANCE_DIR:-}" ]; then
-  echo "run-ads-mutate: HERMES_GOVERNANCE_DIR is unset or empty — refusing (an empty value would make Docker Compose bind-mount the governance paths at the filesystem root)" >&2
-  exit 1
-fi
+# Resolves HERMES_GOVERNANCE_DIR (environment first, else parsed as DATA out of .env,
+# which is Compose-interpolation-only and never exported) and exports the two host-side
+# roots. Carries the R4 guard: an empty value would make Docker Compose bind-mount the
+# governance paths at the FILESYSTEM ROOT.
+. "$here/hostenv.sh"
+
+# Pre-flight the executor's access to the governance store BEFORE anything runs. On a
+# Linux VPS the executor is uid 10000 while the store is mode 700 owned by the deploy
+# user, which makes the kill switch read as absent, client resolution raise, and
+# append_log fail MID-APPLY — exit 3 after a live account change has landed. Refusing
+# here converts that into a refusal before Google is reachable. No-op on non-Linux,
+# where Docker Desktop remaps ownership and a stat-based prediction would be false.
+python3 "$here/bin/preflight-governance-access.py" --root "$HERMES_GOVERNANCE_DIR"
 
 # Parse --client out of "$@" so it can be handed to persist-run-record.py, which
 # needs it to resolve the client vault. Supports both `--client X` and `--client=X`.
@@ -93,6 +98,6 @@ cat "$tmp_out"
 # status instead. `|| true` keeps this compound command's own status zero so `set -e`
 # does not fire; persist's own stderr (it prints its own errors there) still reaches
 # the operator since only stdout is redirected.
-VAULT_ROOT="$here/data/vaults" HERMES_GOVERNANCE_ROOT="${HERMES_GOVERNANCE_DIR}" \
-  python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null || true
+# VAULT_ROOT and HERMES_GOVERNANCE_ROOT are exported by hostenv.sh above.
+python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null || true
 exit "$rc"

@@ -246,20 +246,40 @@ class TestHappyPath(Base):
 class TestPreflightRefusals(Base):
     """Every refusal must exit 2 AND never spawn the mutator."""
 
-    def _assert_refused(self, cs_id, now=NOW):
-        with self.assertRaises(SystemExit) as ctx:
+    def _assert_refused(self, cs_id, now=NOW, because=None):
+        """`because` pins WHICH guard refused. Without it a test can keep passing while
+        silently exercising a different guard than its name claims — which is what
+        happened to test_no_approval when the snapshot moved guard 3 ahead of it."""
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(err):
             self._run(cs_id, now=now)
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(self._calls(), [])
+        if because is not None:
+            self.assertIn(because, err.getvalue())
+        return err.getvalue()
 
     def test_kill_switch_absent(self):
         cs = self._approved()
         os.remove(governance_lib.kill_switch_path(self.tmp))
-        self._assert_refused(cs["changeset_id"])
+        self._assert_refused(cs["changeset_id"], because="mutation is disabled")
 
-    def test_no_approval(self):
+    def test_no_snapshot_refuses_at_guard_3(self):
+        """Deferred #4: a change-set that was proposed but never approved now has no
+        SNAPSHOT, so it refuses at guard 3 (`no approved change-set`) — guard 5 is
+        never reached. Pinning the message keeps this test honest about what it
+        covers; the guard-5 missing-approval branch is covered separately below."""
         cs = self._proposed()
-        self._assert_refused(cs["changeset_id"])
+        self._assert_refused(cs["changeset_id"], because="no approved change-set")
+
+    def test_missing_approval_record_refuses_at_guard_5(self):
+        """Deferred #4, the other half: guard 5's missing-approval branch was left
+        uncovered once guard 3 started refusing first. Reach it by approving normally
+        and then deleting ONLY the approval record, leaving the snapshot in place —
+        the one state in which guard 3 passes and guard 5 must refuse."""
+        cs = self._approved()
+        os.remove(C.approval_path("acme-dental", cs["changeset_id"]))
+        self._assert_refused(cs["changeset_id"], because="no approval record")
 
     def test_tampered_snapshot_after_approval_refused(self):
         """apply reads the governance-store SNAPSHOT, not the vault copy — so the

@@ -304,17 +304,30 @@ def snapshot_path(slug, cid):
 
 
 def write_snapshot(slug, cid, src_path):
-    """Copy the reviewed change-set BYTE-FOR-BYTE into the governance store and return
-    its sha256.
+    """Read the reviewed change-set and snapshot it. Convenience wrapper over
+    write_snapshot_bytes for callers that hold a path rather than bytes."""
+    with open(src_path, "rb") as src:
+        return write_snapshot_bytes(slug, cid, src.read())
+
+
+def write_snapshot_bytes(slug, cid, data):
+    """Write the reviewed change-set BYTES verbatim into the governance store and
+    return their sha256.
 
     apply executes from THIS copy. Hashing the writable original would still leave the
     draft -> review -> swap window open; copying it somewhere Hermes cannot write closes
     it (spec section 7).
+
+    Takes BYTES rather than a path so approve can read the vault file exactly once and
+    validate, hash and snapshot the same in-memory bytes. Reading it twice left a
+    (small) window in which the two reads could differ — and, more importantly, meant
+    the digest the operator is shown was not provably taken over the bytes that were
+    validated.
     """
+    if not isinstance(data, bytes):
+        raise ValueError("snapshot payload must be bytes, got %s" % type(data).__name__)
     os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
     dst = governance_lib.snapshot_path(slug, cid)
-    with open(src_path, "rb") as src:
-        data = src.read()
     tmp = dst + ".tmp"
     with open(tmp, "wb") as out:
         out.write(data)

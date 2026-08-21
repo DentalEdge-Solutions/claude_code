@@ -16,7 +16,9 @@ Stdlib-only, like every suite here. Discovered automatically by run-bin-tests.sh
 
 import os
 import re
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -288,6 +290,57 @@ class TestMaskPathsAreActuallyMounted(unittest.TestCase):
         other_entries = _volumes_entries(_service_block(self.compose, "ads-mutator"))
         self.assertFalse(
             _mount_target_present(other_entries, "/projects/claude_code/infra/hermes-agent"))
+
+
+class TestMaskPathsParser(unittest.TestCase):
+    """M4: `read_mask_paths`'s duplicate-key refusal had no test — deleting the raise
+    broke nothing, which is how a fail-closed rule quietly becomes a fail-open one.
+
+    A repeated `mask_paths:` is a merge artifact or a bad hand-edit, and silently
+    taking the first or last block would silently choose WHICH credential files stay
+    exposed in the container. Same rule, same reason, as read_workdir and read_block.
+    """
+
+    def _reg(self, body):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "projects.yaml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(body)
+        return p
+
+    BASE = """version: 1
+
+projects:
+  demo:
+    workdir: /projects/demo
+    mask_paths:
+      - .env.one
+"""
+
+    def test_a_single_declaration_is_read(self):
+        """CONTROL. Without it the refusal below could be satisfied by a parser that
+        refuses everything."""
+        self.assertEqual(C.read_mask_paths(self._reg(self.BASE), "demo"), [".env.one"])
+
+    def test_a_duplicate_mask_paths_key_refuses(self):
+        dup = self.BASE + """    mask_paths:
+      - .env.two
+"""
+        with self.assertRaises(ValueError) as ctx:
+            C.read_mask_paths(self._reg(dup), "demo")
+        self.assertIn("duplicate 'mask_paths'", str(ctx.exception))
+
+    def test_a_project_with_no_declaration_yields_empty(self):
+        """Nothing claimed, nothing to enforce — distinct from a refusal, and the
+        invariant suite above depends on the difference."""
+        none = """version: 1
+
+projects:
+  demo:
+    workdir: /projects/demo
+"""
+        self.assertEqual(C.read_mask_paths(self._reg(none), "demo"), [])
 
 
 if __name__ == "__main__":

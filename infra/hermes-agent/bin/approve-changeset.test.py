@@ -1,4 +1,4 @@
-import datetime, importlib.util, json, os, subprocess, sys, tempfile, unittest
+import datetime, hashlib, importlib.util, json, os, subprocess, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -110,6 +110,70 @@ class T(unittest.TestCase):
              "--operator", "a b", "--registry", self.clients, "--projects", self.projects],
             capture_output=True, text=True, env={**os.environ})
         self.assertEqual(out.returncode, 2)
+
+class TestOperatorCanSeeWhatIsBound(T):
+    """I3 (final whole-branch review). The snapshot closes approve -> apply, not
+    review -> approve: approve binds whatever the vault holds AT APPROVE TIME. The only
+    defence against that residual window is the operator being able to see what they
+    are binding — so the digest and the per-action summary are load-bearing output, not
+    decoration."""
+
+    def _cli(self, *extra):
+        return subprocess.run(
+            [sys.executable, os.path.join(HERE, "approve-changeset.py"),
+             "--client", "acme-dental", "--changeset", self.cs["changeset_id"],
+             "--operator", "erick", "--registry", self.clients,
+             "--projects", self.projects, *extra],
+            capture_output=True, text=True, env={**os.environ})
+
+    def _digest(self):
+        return C.file_digest(C.changeset_path(self.vault, self.cs["changeset_id"]))
+
+    def test_cli_prints_the_digest_and_one_line_per_action(self):
+        out = self._cli()
+        self.assertEqual(out.returncode, 0)
+        self.assertIn(self._digest(), out.stdout)
+        self.assertIn("1 action(s) bound by this approval", out.stdout)
+        self.assertIn("add_campaign_negative", out.stdout)
+        self.assertIn("22233344455", out.stdout)
+
+    def test_expect_sha256_matching_is_accepted(self):
+        """CONTROL for the refusal below: the same flag with the RIGHT digest must
+        approve normally, or the refusal only proves the flag rejects everything."""
+        out = self._cli("--expect-sha256", self._digest())
+        self.assertEqual(out.returncode, 0)
+        self.assertTrue(os.path.isfile(C.approval_path("acme-dental",
+                                                       self.cs["changeset_id"])))
+
+    def test_expect_sha256_mismatch_refuses_and_writes_no_approval(self):
+        out = self._cli("--expect-sha256", "0" * 64)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--expect-sha256 mismatch", out.stderr)
+        self.assertFalse(os.path.exists(C.approval_path("acme-dental",
+                                                        self.cs["changeset_id"])))
+        self.assertFalse(os.path.exists(C.snapshot_path("acme-dental",
+                                                        self.cs["changeset_id"])))
+
+    def test_expect_sha256_that_is_not_a_digest_refuses(self):
+        out = self._cli("--expect-sha256", "not-a-digest")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("invalid --expect-sha256", out.stderr)
+
+    def test_the_summary_describes_the_bytes_that_were_snapshotted(self):
+        """Deferred minor #3: approve used to read the file twice — validate read #1,
+        snapshot read #2. It now reads once, so the digest printed, the actions listed
+        and the bytes in the governance store are provably the same content. Asserted
+        by comparing all three against each other rather than against the vault file,
+        which is the copy that could have changed between reads.
+        """
+        rec = A.approve("acme-dental", self.cs["changeset_id"], "erick", NOW,
+                        registry=self.clients, projects=self.projects)
+        with open(C.snapshot_path("acme-dental", self.cs["changeset_id"]), "rb") as f:
+            snap = f.read()
+        self.assertEqual(rec["sha256"], hashlib.sha256(snap).hexdigest())
+        self.assertEqual(rec["actions"], json.loads(snap.decode("utf-8"))["actions"])
+        self.assertIn(rec["sha256"], A.summarise(rec))
+
 
 if __name__ == "__main__":
     unittest.main()

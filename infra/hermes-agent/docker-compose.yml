@@ -79,6 +79,10 @@ services:
 
   # Credential access audit. Same isolation rationale as ads-mutator: this injects the
   # WRITE credential, and must not do so into the container Hermes has a shell in.
+  #
+  # NOTE the absence of `env_file: .env`, exactly as on ads-mutator above. That is
+  # load-bearing for the same reason: it would put ANTHROPIC_API_KEY and the provider
+  # key into this container's environment.
   ads-credential-audit:
     build: .
     image: hermes-agent-claude

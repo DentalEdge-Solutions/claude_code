@@ -575,9 +575,14 @@ class TestAuditLogInGovernanceStore(unittest.TestCase):
         with open(C.log_path("acme-dental")) as f:
             self.assertEqual(len([x for x in f.read().splitlines() if x.strip()]), 2)
 
-    def test_clients_do_not_share_a_log(self):
-        C.append_log("acme-dental", self._rec())
-        self.assertFalse(os.path.exists(C.log_path("other-clinic")))
+    # DELETED (deferred #6, resolved 2026-08-20): test_clients_do_not_share_a_log
+    # could not fail. It asserted that appending for one slug leaves the OTHER slug's
+    # path absent — two different literal path fragments that never collide under
+    # either the old vault-based signature or the new governance-store one, so it
+    # passed identically against the code it was written to discriminate. Per ruling
+    # R8, a control that cannot fail is deleted rather than shipped. Per-slug log
+    # isolation is genuinely covered by governance_lib.test.py, which asserts
+    # log_path() composes the slug into the filename.
 
     def test_day_counts_reads_the_new_location(self):
         C.append_log("acme-dental", self._rec())
