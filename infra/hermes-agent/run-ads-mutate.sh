@@ -1,11 +1,21 @@
 #!/bin/sh
 # Host-side wrapper: inject the STANDARD-ACCESS (WRITE) Google Ads credential
-# per-invocation and run the applier inside the container. The credential lives in
-# the gitignored .env.gaw (NOT loaded by docker-compose env_file, NOT in the gateway
-# env) — PARSED here (not sourced) and passed via `docker compose exec -e`, so it
-# reaches ONLY this exec'd process. Mirrors run-ads-report.sh, which does the same
-# for the READ-ONLY credential; the two files are deliberately separate so the read
-# path keeps its platform-level backstop.
+# per-invocation into the one-shot ads-mutator container, which Hermes has no shell
+# in. The credential lives in the gitignored .env.gaw (NOT loaded by docker-compose
+# env_file, NOT in the gateway env) — PARSED here (not sourced) and passed via
+# `docker compose run -e` into that one-shot container. It never enters the gateway
+# container at all.
+#
+# (Earlier wording here said it "reaches only this exec'd process" — true of
+# delivery, false of visibility: /proc/<pid>/environ is readable by any same-UID
+# process, and everything in the gateway container runs as the same user, so a
+# same-container boundary was never real isolation. The one-shot, no-shell
+# container is the actual boundary: there is no Hermes-controlled process running
+# there to read it from.)
+#
+# Mirrors run-ads-report.sh, which does the same for the READ-ONLY credential; the
+# two files are deliberately separate so the read path keeps its platform-level
+# backstop.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 

@@ -418,9 +418,13 @@ shared, git-versioned project brain:
   `/opt/data/vaults/<slug>/` (host `data/vaults/<slug>/`, which opens directly in
   Obsidian), never in git.
 
-The **client roster is itself client-private**, so it lives in the vault tier, not
-git: `data/vaults/_registry/clients.json` (gitignored). `registry/projects.yaml`
-stays project-level and client-agnostic. Shape:
+The **client roster is itself client-private** and, since it gates every mutation
+guard, it lives outside the gateway container entirely: in the host-owned governance
+store (see "Governance store" below) at `$HERMES_GOVERNANCE_DIR/registry/clients.json`.
+The gateway container does not mount it at all; only the one-shot executor Hermes has
+no shell in reads it, read-only. `registry/projects.yaml` stays project-level and
+client-agnostic, still version-controlled and mounted read-only into the gateway as
+before. Shape:
 
 ```json
 { "clients": {
@@ -516,7 +520,8 @@ happens before Google is reachable):
 
 1. kill switch present and readable
 2. client slug resolves and is `active`
-3. change-set loads, schema-validates, within the per-change-set action cap
+3. change-set loads from the approved SNAPSHOT in the governance store — never the
+   vault copy Hermes can write — schema-validates, within the per-change-set action cap
 4. change-set identity matches the resolved client
 5. approval hash matches and has not expired
 6. daily caps satisfied, counted from the audit log
@@ -545,10 +550,12 @@ a config edit rather than a code change. Missing or malformed caps **refuse** �
 unreadable limit must never become an unlimited one. Defaults: 25 actions per
 change-set, 100 actions and 5 applies per client per day, 24-hour approval expiry.
 
-**The kill switch** is a marker file on the Hermes volume at
-`data/vaults/_governance/mutation-enabled`. Absent, unreadable, or a directory in its
-place all mean *disabled* — the safe state is the default state, and one `rm` disables
-all mutation across every client.
+**The kill switch** is a marker file in the host-owned governance store (see
+"Governance store" below), at `$HERMES_GOVERNANCE_DIR/control/mutation-enabled` on the
+host. The gateway container does not mount that tree at all, so nothing running inside
+it — including a compromised Hermes session — can create, see, or remove that file.
+Absent, unreadable, or a directory in its place all mean *disabled* — the safe state is
+the default state, and one `rm` on the host disables all mutation across every client.
 
 **Undo bypasses only the kill switch and the daily caps.** Guards constrain *creating*
 change, never *reversing* it: a tripped kill switch that also blocked cleanup would be a
@@ -578,17 +585,32 @@ than during it.
 
 **Credential separation.** The write credential lives **only** in the gitignored
 `.env.gaw` (copy `.env.gaw.example`), is parsed as data rather than sourced, and is
-injected per-invocation via `docker compose exec -e`. It is never in `.env`, never in
-`.env.ga`, and never in the gateway environment. `.env.ga` stays read-only so every
-other path keeps its backstop — **never copy a token between the two files**. The
-mutator in the ads project reads credentials strictly from the injected environment and
-never loads a local `.env`, which would otherwise pick up that project's full-access
-token.
+injected per-invocation into the one-shot `ads-mutator` container via
+`docker compose run -e` — a container Hermes has no shell in. It never enters the
+gateway container at all.
+
+An earlier version of this doc claimed the credential "reaches only this exec'd
+process." That was true of *delivery* and false of *visibility*: `/proc/<pid>/environ`
+is readable by any same-UID process, and everything running in the gateway container
+runs as the same user, so a same-container boundary was never real isolation — any
+process in that container could have read it. The one-shot, no-shell `ads-mutator`
+container is what actually makes the credential inaccessible to Hermes, because Hermes
+has no process running there to read `/proc/<pid>/environ` from.
+
+The credential is never in `.env`, never in `.env.ga`, and never in the gateway
+environment. `.env.ga` stays read-only so every other path keeps its backstop —
+**never copy a token between the two files**. The mutator in the ads project reads
+credentials strictly from the injected environment and never loads a local `.env`,
+which would otherwise pick up that project's full-access token.
 
 **Vault artifacts** (gitignored, per client, under `data/vaults/<slug>/changes/`):
-the change-set, its approval record, a per-run result file, and `log.jsonl` — the
-append-only reversibility record that also feeds the daily caps. Each apply appends a
-line to `timeline.md`, so the next trend audit sees that a change was made.
+the proposed change-set and a per-run result file. The **approval record and the
+byte-exact snapshot `apply` executes from** do not live here — they live in the
+host-owned governance store (see "Governance store" below), so Hermes can write the
+vault copy of a change-set but cannot reach or tamper with what `apply` actually reads.
+The **append-only audit log** (`log.jsonl`, one per client) that feeds the daily caps
+and undo also lives in the governance store, not the vault. Each apply still appends a
+line to the vault's `timeline.md`, so the next trend audit sees that a change was made.
 
 **Tests.** These suites are stdlib-only and are not discoverable by
 `scripts/run-all-tests.js`, which is node-only by design. Run all of them with:
@@ -601,6 +623,56 @@ It discovers every `*.test.py` in that directory rather than listing them, runs 
 them even after one fails, and exits non-zero if any did. Individual suites still run
 directly (`python3 infra/hermes-agent/bin/apply-changeset.test.py`) — note `python3`,
 never `python`.
+
+## Governance store
+
+Every piece of state a mutation guard *trusts* — as opposed to state Hermes merely
+produces, like a proposed change-set or a report — lives outside the container
+entirely, in a host-owned directory tree the gateway container does not mount:
+
+```
+$HERMES_GOVERNANCE_DIR/
+  control/    mutation-enabled            # the kill switch
+  registry/   clients.json                # the client roster
+  approvals/  <slug>/<cid>.approval.json  # approval record: hash + expiry
+              <slug>/<cid>.changeset.json # byte-exact snapshot apply executes from
+  log/        <slug>.jsonl                # append-only audit log; feeds caps + undo
+  seen/       <slug>.jsonl                # replay-protection state (Plan 2)
+```
+
+Path contract in `bin/governance_lib.py`; every other module reaches these paths
+through it rather than composing them independently.
+
+**`HERMES_GOVERNANCE_DIR`** (in `.env`, gitignored) is the absolute host path to this
+tree. It must be **outside this repo** (the repo is bind-mounted into the gateway
+container) and **outside `./data`** (the one read-write mount the gateway does have).
+Create it mode `700` before first use; Compose does not expand `~`, so write the path
+in full (`/Users/you/.hermes/governance`, not `~/.hermes/governance`). See
+`.env.example` for the annotated template.
+
+**Who mounts what:**
+
+| Container | approvals/ control/ registry/ | log/ seen/ |
+|---|---|---|
+| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted at all |
+| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write |
+| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted |
+
+The gateway's total exposure to the governance store is **zero**. Verify at any time:
+
+```bash
+docker compose exec -T hermes-agent sh -c '[ -e /opt/governance ] && echo REACHABLE-BAD || echo unreachable-good'
+```
+
+**Migration** copies the pre-governance-store artifacts (client registry, audit log)
+from the vault tier into the store. Dry run by default; `--apply` performs the copy.
+Originals are left in place as a rollback path — the migration copies, it does not move:
+
+```bash
+python3 infra/hermes-agent/bin/migrate-governance.py \
+  --vault-root infra/hermes-agent/data/vaults \
+  --governance-root "$HERMES_GOVERNANCE_DIR"        # dry run; add --apply to execute
+```
 
 ## Credential access levels — measure, never assert
 
