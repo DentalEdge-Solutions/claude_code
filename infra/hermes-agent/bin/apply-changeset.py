@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Apply an approved change-set to a client's external Google Ads account.
 
-THE ONLY CREDENTIALED ENTRY POINT in the mutation tier. Runs in-container, invoked by
-run-ads-mutate.sh, which injects a SEPARATE Standard-access write credential
-per-invocation via `docker compose exec -e`. Stdlib-only; the SDK lives in the
-project's pinned venv, reached through the allow-listed mutator subprocess.
+THE ONLY CREDENTIALED ENTRY POINT in the mutation tier. Runs inside the ONE-SHOT
+`ads-mutator` container — never the gateway — invoked by run-ads-mutate.sh, which
+injects a SEPARATE Standard-access write credential per-invocation via
+`docker compose run -e`. (It was `docker compose exec -e` into the long-lived gateway
+until 2026-08-19; that put the credential in a container Hermes has a shell in, where
+any same-UID process could read it from /proc/<pid>/environ.) Stdlib-only; the SDK
+lives in the project's pinned venv, reached through the allow-listed mutator
+subprocess.
 
 Guard order is load-bearing (spec §7): every refusal happens BEFORE the credential is
 used, so exit 2 is a promise that nothing was mutated. Exit 3 means at least one live
@@ -74,7 +78,7 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
     # 1. kill switch FIRST, before any per-client parsing — the mandated order is
     #    literal, not approximate. CREATING change only; undo must stay available so
     #    cleanup is never blocked by the switch that stopped the damage.
-    if not undo and not C.kill_switch_ok(vault_lib.vault_root()):
+    if not undo and not C.kill_switch_ok():
         _refuse("mutation is disabled (kill switch absent or unreadable) — this is the safe default")
 
     # 2. client resolves and is active
@@ -97,15 +101,16 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
         # Spec §7.1: resource_name is shape- and prefix-validated against the RESOLVED
         # customer_id inside _undo_targets, so no record can reach argv unvalidated.
         # Uses no credential, so it belongs here with the other cheap checks.
-        actions = _undo_targets(vault, undo, rec["customer_id"])
+        actions = _undo_targets(rec["slug"], undo, rec["customer_id"])
         if not actions:
             _refuse(f"no applied, un-undone actions recorded for change-set {undo!r}")
         operator = actions[0].get("operator", "unknown")
     else:
-        # 3. change-set loads and validates
-        path = C.changeset_path(vault, changeset_id)
+        # 3. change-set loads and validates — from the APPROVED SNAPSHOT in the
+        #    governance store, never the vault copy Hermes can write.
+        path = C.snapshot_path(rec["slug"], changeset_id)
         if not os.path.isfile(path):
-            _refuse(f"no change-set {changeset_id!r} for this client")
+            _refuse(f"no approved change-set {changeset_id!r} for this client")
         try:
             with open(path, encoding="utf-8") as f:
                 cs = json.load(f)
@@ -118,13 +123,13 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
             _refuse("change-set identity does not match the resolved client")
         # 5. approval
         try:
-            approval = C.verify_approval(vault, changeset_id, C.file_digest(path), now)
+            approval = C.verify_approval(rec["slug"], changeset_id, C.file_digest(path), now)
         except (ValueError, OSError, json.JSONDecodeError) as e:
             _refuse(str(e))
         operator = approval["operator"]
         # 6. daily caps
         try:
-            counts = C.day_counts(vault, now.strftime("%Y-%m-%d"))
+            counts = C.day_counts(rec["slug"], now.strftime("%Y-%m-%d"))
         except ValueError as e:
             _refuse(str(e))
         if counts["applies"] + 1 > cfg["caps"]["applies_per_client_day"]:
@@ -171,12 +176,12 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
         _refuse(f"{ROLE_VAR} is {os.environ.get(ROLE_VAR)!r}, expected {WRITE_ROLE!r} — "
                 "the mutation tier refuses the read-only credential")
 
-    return {"vault": vault, "changeset_id": target, "runner": cfg["runner"], "script": script,
-            "actions": actions, "undo": bool(undo), "operator": operator,
+    return {"vault": vault, "slug": rec["slug"], "changeset_id": target, "runner": cfg["runner"],
+            "script": script, "actions": actions, "undo": bool(undo), "operator": operator,
             "customer_id": rec["customer_id"]}
 
 
-def _undo_targets(vault, changeset_id, customer_id):
+def _undo_targets(slug, changeset_id, customer_id):
     """Applied, un-undone actions for this change-set BELONGING TO THIS CUSTOMER.
 
     The customer_id argument is the spec §7.1 guard, and its placement here is
@@ -187,10 +192,11 @@ def _undo_targets(vault, changeset_id, customer_id):
     after it returns, means an unvalidated record cannot escape into argv at all.
 
     Records are read through C.iter_log_records so the undo path and the caps path
-    share one parser with one standard of rigour.
+    share one parser with one standard of rigour, from the same governance-store
+    log an operator's --undo targets — never a copy Hermes itself could steer.
     """
     try:
-        records = list(C.iter_log_records(vault))
+        records = list(C.iter_log_records(slug))
     except ValueError as e:
         _refuse(str(e))
     targets, undone = [], set()
@@ -199,7 +205,7 @@ def _undo_targets(vault, changeset_id, customer_id):
             continue
         rn = r.get("resource_name")
         if not isinstance(rn, str) or not RESOURCE_RE.fullmatch(rn):
-            _refuse(f"audit log at {C.log_path(vault)}:{n} has a malformed resource_name "
+            _refuse(f"audit log at {C.log_path(slug)}:{n} has a malformed resource_name "
                     "— refusing to hand it to the mutator")
         if not rn.startswith(f"customers/{customer_id}/"):
             _refuse("refusing to undo a criterion that belongs to another customer "
@@ -292,7 +298,7 @@ def apply(plan, now):
                        "status": "undone" if plan["undo"] else "applied",
                        "operator": plan["operator"]}
                 try:
-                    C.append_log(plan["vault"], rec)  # fsync'd before the next action starts
+                    C.append_log(plan["slug"], rec)  # fsync'd before the next action starts
                 except Exception as e:
                     # The one place an irreversible side effect can outrun its record. Print
                     # the resource name FIRST: it is the only way back from here, and it is
@@ -302,17 +308,15 @@ def apply(plan, now):
                     raise PostMutationError(f"audit-log write failed after action {i} landed: {_scrub(str(e))}")
                 results.append(rec)
 
-            # 11. result.json + timeline.md
-            C._atomic_write_json(C.result_path(plan["vault"], plan["changeset_id"]),
-                                 {"changeset_id": plan["changeset_id"],
-                                  "undo": plan["undo"], "completed_at": now.strftime(C.ISO),
-                                  "operator": plan["operator"], "actions": results})
-            verb = "undo" if plan["undo"] else "change"
-            with open(os.path.join(plan["vault"], "timeline.md"), "a", encoding="utf-8") as f:
-                f.write(f"- {now.strftime(C.ISO)} · {verb} · {len(results)} action(s) · "
-                        f"changeset {plan['changeset_id']} · by {plan['operator']}\n")
-            print(json.dumps({"ok": True, "changeset_id": plan["changeset_id"],
-                              "undo": plan["undo"], "applied": len(results)}))
+            # 11. Emit the run record for the CALLER to persist. This container does
+            #     not mount the vault; the audit log above is the reversibility record.
+            #     result.json and timeline.md are convenience artifacts written by
+            #     persist-run-record.py from this line, never by the executor itself.
+            result = {"changeset_id": plan["changeset_id"], "undo": plan["undo"],
+                      "status": "ok", "finished_at": now.strftime(C.ISO),
+                      "operator": plan["operator"], "applied": len(results),
+                      "actions": results}
+            print("HERMES-RESULT-JSON " + json.dumps(result, sort_keys=True))
             return 0
         except PostMutationError as e:
             print(f"apply-changeset: {e}", file=sys.stderr)

@@ -80,11 +80,11 @@ audit_one() {
   CREDENTIAL_LABEL="$_cred"
   export CREDENTIAL_LABEL
 
-  docker compose -f "$here/docker-compose.yml" exec \
+  docker compose -f "$here/docker-compose.yml" run --rm --no-deps \
     -e GOOGLE_ADS_DEVELOPER_TOKEN -e GOOGLE_ADS_CLIENT_ID -e GOOGLE_ADS_CLIENT_SECRET \
     -e GOOGLE_ADS_REFRESH_TOKEN -e GOOGLE_ADS_LOGIN_CUSTOMER_ID -e GOOGLE_ADS_CUSTOMER_ID \
     -e GOOGLE_ADS_CREDENTIAL_ROLE -e CREDENTIAL_LABEL \
-    -T hermes-agent /opt/ads-venv/bin/python3 /opt/cc-bin/audit-credential-access.py
+    -T ads-credential-audit
 }
 
 rc_total=0

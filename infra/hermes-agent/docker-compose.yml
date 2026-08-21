@@ -36,6 +36,59 @@ services:
       - ./skills/claude-code-reviewer:/opt/data/skills/claude-code-reviewer:ro  # kanban review worker skill (read-only)
       - ./skills/claude-code-ads-analyst:/opt/data/skills/claude-code-ads-analyst:ro  # ads-analyst skill (read-only)
       - ./bin:/opt/cc-bin:ro            # operational helpers (run monitor, read-only)
+      # --- credential masks (registry: mask_paths) ---
+      # The repo mount exposes every .env.* under infra/hermes-agent/, including the
+      # live write credential and the draft-PR bot PAT. Nothing in-container consumes
+      # any of them (verified 2026-08-19 with a positive control). Masking the whole
+      # directory covers files that do not exist yet.
+      - type: tmpfs
+        target: /projects/claude_code/infra/hermes-agent
+        read_only: true
+      # The ads repo keeps its secret in one file at the root, so mask just that file —
+      # masking the root would hide the project. An EMPTY file, not an absent one, so
+      # load_dotenv() reads nothing rather than failing.
+      - ./masks/empty:/projects/claude_google_ads/.env:ro
     ports:
       - "127.0.0.1:9119:9119"           # dashboard, loopback only (optional)
     restart: unless-stopped
+
+  # One-shot executor for the mutation tier. Deliberately NOT the gateway container:
+  # same container means same security domain, and F7 showed that concretely — same
+  # UID plus a shared PID namespace makes an injected credential readable via /proc.
+  # Started only by run-ads-mutate.sh via `docker compose run`; the `tools` profile
+  # keeps `docker compose up` from ever starting it.
+  #
+  # NOTE the absence of `env_file: .env`. That is load-bearing: it would put
+  # ANTHROPIC_API_KEY and the provider key into this container's environment.
+  ads-mutator:
+    build: .
+    image: hermes-agent-claude
+    profiles: ["tools"]
+    entrypoint: ["python3", "/opt/cc-bin/apply-changeset.py"]
+    environment:
+      HERMES_GOVERNANCE_ROOT: /opt/governance
+    volumes:
+      - ${HERMES_GOVERNANCE_DIR}/approvals:/opt/governance/approvals:ro
+      - ${HERMES_GOVERNANCE_DIR}/control:/opt/governance/control:ro
+      - ${HERMES_GOVERNANCE_DIR}/registry:/opt/governance/registry:ro
+      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log      # writable, like seen (below)
+      - ${HERMES_GOVERNANCE_DIR}/seen:/opt/governance/seen    # writable, like log (above) — replay-protection state
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro
+      - ./registry:/opt/registry:ro
+      - ./bin:/opt/cc-bin:ro
+
+  # Credential access audit. Same isolation rationale as ads-mutator: this injects the
+  # WRITE credential, and must not do so into the container Hermes has a shell in.
+  #
+  # NOTE the absence of `env_file: .env`, exactly as on ads-mutator above. That is
+  # load-bearing for the same reason: it would put ANTHROPIC_API_KEY and the provider
+  # key into this container's environment.
+  ads-credential-audit:
+    build: .
+    image: hermes-agent-claude
+    profiles: ["tools"]
+    entrypoint: ["/opt/ads-venv/bin/python3", "/opt/cc-bin/audit-credential-access.py"]
+    volumes:
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro
+      - ./registry:/opt/registry:ro
+      - ./bin:/opt/cc-bin:ro

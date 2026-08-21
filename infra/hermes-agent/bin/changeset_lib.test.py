@@ -1,6 +1,7 @@
-import json, os, sys, unittest
+import json, os, shutil, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
+import governance_lib as G
 
 def _action(**kw):
     a = {"type": "add_campaign_negative", "campaign_id": "22233344455",
@@ -321,105 +322,133 @@ import datetime
 
 NOW = datetime.datetime(2026, 8, 12, 10, 15, 0, tzinfo=datetime.timezone.utc)
 
-class TestKillSwitch(unittest.TestCase):
+class TestKillSwitchInGovernanceStore(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp()
+        self.root = tempfile.mkdtemp(prefix="gov-")
+        os.makedirs(os.path.join(self.root, "control"))
+        self.addCleanup(shutil.rmtree, self.root, True)
 
-    def test_absent_switch_is_not_ok(self):
+    def _switch(self):
+        return os.path.join(self.root, "control", "mutation-enabled")
+
+    def test_absent_means_disabled(self):
         self.assertFalse(C.kill_switch_ok(self.root))
 
-    def test_present_switch_is_ok(self):
-        d = os.path.join(self.root, C.GOVERNANCE_DIR)
-        os.makedirs(d)
-        with open(os.path.join(d, C.KILL_SWITCH), "w") as f:
-            f.write("enabled\n")
+    def test_present_and_readable_means_enabled(self):
+        open(self._switch(), "w").close()
         self.assertTrue(C.kill_switch_ok(self.root))
 
-    def test_directory_in_place_of_switch_is_not_ok(self):
-        os.makedirs(os.path.join(self.root, C.GOVERNANCE_DIR, C.KILL_SWITCH))
+    def test_directory_in_its_place_means_disabled(self):
+        os.makedirs(self._switch())
         self.assertFalse(C.kill_switch_ok(self.root))
+
+    def test_unreadable_means_disabled(self):
+        open(self._switch(), "w").close()
+        os.chmod(self._switch(), 0o000)
+        try:
+            self.assertFalse(C.kill_switch_ok(self.root))
+        finally:
+            os.chmod(self._switch(), 0o600)
+
+    def test_it_no_longer_reads_the_vault_location(self):
+        """The control that proves the move actually happened: a switch at the OLD
+        vault path must NOT enable mutation."""
+        vault_root = tempfile.mkdtemp(prefix="vault-")
+        self.addCleanup(shutil.rmtree, vault_root, True)
+        os.makedirs(os.path.join(vault_root, "_governance"))
+        open(os.path.join(vault_root, "_governance", "mutation-enabled"), "w").close()
+        self.assertFalse(C.kill_switch_ok(vault_root))
 
 class TestApproval(unittest.TestCase):
     def setUp(self):
-        self.vault = tempfile.mkdtemp()
-        os.makedirs(C.changes_dir(self.vault))
-        self.cs = os.path.join(C.changes_dir(self.vault), "20260812-101500-abcd1234.json")
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        self.slug = "acme-dental"
+        self.srcdir = tempfile.mkdtemp()
+        self.cs = os.path.join(self.srcdir, "20260812-101500-abcd1234.json")
         with open(self.cs, "wb") as f:
             f.write(C.canonical_bytes(_cs()))
         self.digest = C.file_digest(self.cs)
 
     def test_write_then_verify_roundtrip(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
-        rec = C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        rec = C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
         self.assertEqual(rec["operator"], "erick")
 
     def test_missing_approval_refused(self):
         with self.assertRaises(ValueError):
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
 
     def test_directory_in_place_of_approval_refused(self):
-        os.makedirs(C.approval_path(self.vault, "20260812-101500-abcd1234"))
+        os.makedirs(C.approval_path(self.slug, "20260812-101500-abcd1234"))
         with self.assertRaises(ValueError):
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
 
     def test_unreadable_approval_refused(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
-        p = C.approval_path(self.vault, "20260812-101500-abcd1234")
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        p = C.approval_path(self.slug, "20260812-101500-abcd1234")
         os.chmod(p, 0)
         try:
             with self.assertRaises(ValueError):
-                C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+                C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
         finally:
             os.chmod(p, 0o600)      # restore so tempdir cleanup succeeds
 
     def test_non_object_approval_refused(self):
-        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), "w") as f:
+        os.makedirs(G.approvals_dir(self.slug), exist_ok=True)
+        with open(C.approval_path(self.slug, "20260812-101500-abcd1234"), "w") as f:
             f.write('["not", "an", "object"]')
         with self.assertRaises(ValueError):
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
 
     def test_hash_mismatch_refused(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
         with open(self.cs, "ab") as f:
             f.write(b" ")                     # a single whitespace byte
         new_digest = C.file_digest(self.cs)
         with self.assertRaises(ValueError) as ctx:
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", new_digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", new_digest, NOW)
         self.assertIn("modified after approval", str(ctx.exception))
 
     def test_expired_approval_refused(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
         later = NOW + datetime.timedelta(hours=24, seconds=1)
         with self.assertRaises(ValueError) as ctx:
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, later)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, later)
         self.assertIn("expired", str(ctx.exception))
 
     def test_within_ttl_accepted(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
         later = NOW + datetime.timedelta(hours=23, minutes=59)
         self.assertEqual(
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, later)["operator"],
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, later)["operator"],
             "erick")
 
     def test_bad_operator_rejected(self):
         for bad in ["", "a b", "rm -rf /", "x" * 65, "erick\n"]:
             with self.assertRaises(ValueError):
-                C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, bad, NOW, 24)
+                C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, bad, NOW, 24)
 
     def test_non_string_approval_datetime_refused_cleanly(self):
-        C.write_approval(self.vault, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
-        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), encoding="utf-8") as f:
+        C.write_approval(self.slug, "20260812-101500-abcd1234", self.digest, "erick", NOW, 24)
+        with open(C.approval_path(self.slug, "20260812-101500-abcd1234"), encoding="utf-8") as f:
             rec = json.load(f)
         rec["expires_at"] = 123
-        with open(C.approval_path(self.vault, "20260812-101500-abcd1234"), "w", encoding="utf-8") as f:
+        with open(C.approval_path(self.slug, "20260812-101500-abcd1234"), "w", encoding="utf-8") as f:
             json.dump(rec, f)
         with self.assertRaises(ValueError) as ctx:
-            C.verify_approval(self.vault, "20260812-101500-abcd1234", self.digest, NOW)
+            C.verify_approval(self.slug, "20260812-101500-abcd1234", self.digest, NOW)
         self.assertIn("expires_at must be a JSON string", str(ctx.exception))
 
 class TestLog(unittest.TestCase):
     def setUp(self):
-        self.vault = tempfile.mkdtemp()
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        self.slug = "acme-dental"
 
     def _line(self, **kw):
         rec = {"ts": "2026-08-12T10:15:00Z", "changeset_id": "20260812-101500-abcd1234",
@@ -430,35 +459,161 @@ class TestLog(unittest.TestCase):
         return rec
 
     def test_empty_log_counts_zero(self):
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 0, "actions": 0})
 
     def test_counts_actions_and_distinct_applies(self):
-        C.append_log(self.vault, self._line(action_index=0))
-        C.append_log(self.vault, self._line(action_index=1))
-        C.append_log(self.vault, self._line(changeset_id="20260812-120000-beef0001"))
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 2, "actions": 3})
+        C.append_log(self.slug, self._line(action_index=0))
+        C.append_log(self.slug, self._line(action_index=1))
+        C.append_log(self.slug, self._line(changeset_id="20260812-120000-beef0001"))
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 2, "actions": 3})
 
     def test_other_days_not_counted(self):
-        C.append_log(self.vault, self._line(ts="2026-08-11T23:59:59Z"))
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+        C.append_log(self.slug, self._line(ts="2026-08-11T23:59:59Z"))
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 0, "actions": 0})
 
     def test_undone_lines_not_counted_as_applies(self):
-        C.append_log(self.vault, self._line(status="undone"))
-        self.assertEqual(C.day_counts(self.vault, "2026-08-12"), {"applies": 0, "actions": 0})
+        C.append_log(self.slug, self._line(status="undone"))
+        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 0, "actions": 0})
 
     def test_corrupt_log_refuses_rather_than_undercounting(self):
-        C.append_log(self.vault, self._line())
-        with open(C.log_path(self.vault), "a") as f:
+        C.append_log(self.slug, self._line())
+        with open(C.log_path(self.slug), "a") as f:
             f.write("{not json\n")
         with self.assertRaises(ValueError) as ctx:
-            C.day_counts(self.vault, "2026-08-12")
+            C.day_counts(self.slug, "2026-08-12")
         self.assertIn("corrupt", str(ctx.exception))
 
     def test_append_is_durable_and_one_line_per_record(self):
-        C.append_log(self.vault, self._line())
-        C.append_log(self.vault, self._line(action_index=1))
-        with open(C.log_path(self.vault)) as f:
+        C.append_log(self.slug, self._line())
+        C.append_log(self.slug, self._line(action_index=1))
+        with open(C.log_path(self.slug)) as f:
             self.assertEqual(len([x for x in f.read().splitlines() if x.strip()]), 2)
+
+
+class TestApprovalSnapshot(unittest.TestCase):
+    CID = "20260812-101500-abcd1234"
+
+    def setUp(self):
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        # Irregular spacing + a trailing newline: NOT a fixed point of
+        # json.dumps(json.loads(x)) under Python's default separators, so a
+        # parse-and-reserialise implementation of write_snapshot (rather than a true
+        # byte copy) would silently normalise this away and the test would go
+        # undetected. A pretty-printed '{"actions": []}' input would survive such a
+        # round trip unchanged and prove nothing.
+        self.src = os.path.join(self.gov, "draft.json")
+        self.ORIGINAL = '{"actions"  :  []}\n'
+        with open(self.src, "w") as f:
+            f.write(self.ORIGINAL)
+
+    def test_snapshot_is_byte_identical(self):
+        digest = C.write_snapshot("acme-dental", self.CID, self.src)
+        with open(G.snapshot_path("acme-dental", self.CID)) as f:
+            self.assertEqual(f.read(), self.ORIGINAL)
+        self.assertEqual(digest, C.file_digest(self.src))
+
+    def test_editing_the_source_afterwards_does_not_change_the_snapshot(self):
+        """This is the race the snapshot exists to close."""
+        C.write_snapshot("acme-dental", self.CID, self.src)
+        with open(self.src, "w") as f:
+            f.write('{"actions": [{"type": "add_campaign_negative"}]}')
+        with open(G.snapshot_path("acme-dental", self.CID)) as f:
+            self.assertEqual(f.read(), self.ORIGINAL)
+
+    def test_verify_refuses_a_reserved_approval(self):
+        now = datetime.datetime(2026, 8, 12, 10, 0, tzinfo=datetime.timezone.utc)
+        digest = C.write_snapshot("acme-dental", self.CID, self.src)
+        C.write_approval("acme-dental", self.CID, digest, "operator", now, 24)
+        p = G.approval_path("acme-dental", self.CID)
+        with open(p) as f:
+            rec = json.load(f)
+        rec["reserved_at"] = "2026-08-12T10:30:00Z"
+        with open(p, "w") as f:
+            json.dump(rec, f)
+        with self.assertRaises(ValueError) as ctx:
+            C.verify_approval("acme-dental", self.CID, digest, now)
+        self.assertIn("reserved", str(ctx.exception))
+
+    def test_verify_accepts_an_unreserved_approval(self):
+        """The control: without this, the refusal above proves nothing."""
+        now = datetime.datetime(2026, 8, 12, 10, 0, tzinfo=datetime.timezone.utc)
+        digest = C.write_snapshot("acme-dental", self.CID, self.src)
+        C.write_approval("acme-dental", self.CID, digest, "operator", now, 24)
+        rec = C.verify_approval("acme-dental", self.CID, digest, now)
+        self.assertEqual(rec["operator"], "operator")
+
+
+class TestAuditLogInGovernanceStore(unittest.TestCase):
+    def setUp(self):
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.gov
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+
+    def _rec(self, **kw):
+        r = {"changeset_id": "20260812-101500-abcd1234", "action_index": 0,
+             "status": "applied", "operator": "operator",
+             "resource_name": "customers/1234567890/campaignCriteria/111~222",
+             # "ts" is the field day_counts/iter_log_records actually key off of
+             # (see TestLog._line above); "applied_at" is kept alongside it only
+             # because it happens to appear on real records too.
+             "ts": "2026-08-12T10:15:00Z", "applied_at": "2026-08-12T10:15:00Z"}
+        r.update(kw)
+        return r
+
+    def test_append_writes_under_the_governance_root(self):
+        C.append_log("acme-dental", self._rec())
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.gov, "log", "acme-dental.jsonl")))
+
+    def test_one_line_per_record(self):
+        C.append_log("acme-dental", self._rec())
+        C.append_log("acme-dental", self._rec(action_index=1))
+        with open(C.log_path("acme-dental")) as f:
+            self.assertEqual(len([x for x in f.read().splitlines() if x.strip()]), 2)
+
+    # DELETED (deferred #6, resolved 2026-08-20): test_clients_do_not_share_a_log
+    # could not fail. It asserted that appending for one slug leaves the OTHER slug's
+    # path absent — two different literal path fragments that never collide under
+    # either the old vault-based signature or the new governance-store one, so it
+    # passed identically against the code it was written to discriminate. Per ruling
+    # R8, a control that cannot fail is deleted rather than shipped. Per-slug log
+    # isolation is genuinely covered by governance_lib.test.py, which asserts
+    # log_path() composes the slug into the filename.
+
+    def test_day_counts_reads_the_new_location(self):
+        C.append_log("acme-dental", self._rec())
+        counts = C.day_counts("acme-dental", "2026-08-12")
+        self.assertEqual(counts["actions"], 1)
+
+    def test_a_vault_path_argument_is_rejected_not_silently_misread(self):
+        """Control, rewritten from the brief (see task-5-report.md, R8): the
+        brief's original version called C.day_counts("acme-dental", ...) — a bare
+        SLUG — while writing its decoy record under an unrelated tempdir. That
+        decoy is never on the path either signature actually reads for a bare
+        slug, so the assertion (0 actions) held under BOTH the old and the new
+        implementation and proved nothing.
+
+        Before this task, day_counts's first argument was the resolved vault path
+        (<VAULT_ROOT>/<slug> — see vault_lib.resolve: rec["vault_path"] =
+        os.path.join(vault_root(), slug)), never a bare slug; every real
+        pre-migration caller passed that path. This version writes a real record
+        at exactly that OLD location and calls day_counts with that same path —
+        the actual old calling convention — and asserts it is now REFUSED outright
+        rather than silently read (which would either double-count real
+        pre-migration data or return a zero indistinguishable from 'nothing to
+        migrate'). Task 6 migrates any such stray data deliberately."""
+        vault = tempfile.mkdtemp(prefix="vault-")
+        self.addCleanup(shutil.rmtree, vault, True)
+        os.makedirs(os.path.join(vault, "changes"))
+        with open(os.path.join(vault, "changes", "log.jsonl"), "w") as f:
+            f.write(json.dumps(self._rec()) + "\n")
+        with self.assertRaises(ValueError):
+            C.day_counts(vault, "2026-08-12")
+
 
 if __name__ == "__main__":
     unittest.main()
