@@ -111,6 +111,47 @@ class TestHostileReads(unittest.TestCase):
             S.read_request_bytes(self.p)
         self.assertIn("cap", str(cm.exception))
 
+    def test_fstat_precheck_alone_refuses_a_statically_oversized_file(self):
+        # The fstat check in _open_regular_ro and the bounded-read check in
+        # read_request_bytes produce distinguishable wording ("over the ... cap" vs
+        # "... while being read"). A statically-oversized file is caught by fstat
+        # BEFORE any read happens, so asserting the fstat-specific wording here proves
+        # that check independently: if it is deleted, the surviving bounded-read check
+        # still refuses but with the OTHER message, and this assertion goes red.
+        self._write(b"{" + b"x" * (S.MAX_REQUEST_BYTES * 4))
+        with self.assertRaises(S.SpoolRefused) as cm:
+            S.read_request_bytes(self.p)
+        self.assertIn("over the", str(cm.exception))
+        self.assertNotIn("while being read", str(cm.exception))
+
+    def test_bounded_read_alone_refuses_a_file_that_grew_after_fstat(self):
+        # Faithful simulation of the TOCTOU race the bounded read exists to catch:
+        # fstat reports a small size (as if snapshotted before the file grew), but the
+        # actual bytes on disk are oversized. This can only be caught by the bounded
+        # read in read_request_bytes, never by the fstat precheck (which is fooled by
+        # construction) — so it proves the bounded-read check independently: if IT is
+        # deleted, the fooled fstat lets the oversized bytes through undetected.
+        self._write(b"{" + b"x" * (S.MAX_REQUEST_BYTES * 4))
+        real_fstat = S.os.fstat
+
+        class _SmallSizeStat:
+            def __init__(self, real):
+                self._real = real
+                self.st_size = 10  # lie: far below the cap despite the real file size
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        def fake_fstat(fd):
+            return _SmallSizeStat(real_fstat(fd))
+
+        S.os.fstat = fake_fstat
+        self.addCleanup(setattr, S.os, "fstat", real_fstat)
+
+        with self.assertRaises(S.SpoolRefused) as cm:
+            S.read_request_bytes(self.p)
+        self.assertIn("while being read", str(cm.exception))
+
     def test_symlink_refuses_rather_than_dereferences(self):
         # Named GOOD_ID + ".json" (not an arbitrary "target.json") because the control
         # call below goes through load_request(), whose filename/request_id cross-check
