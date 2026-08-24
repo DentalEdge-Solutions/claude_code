@@ -615,5 +615,66 @@ class TestAuditLogInGovernanceStore(unittest.TestCase):
             C.day_counts(vault, "2026-08-12")
 
 
+class TestSpoolQuotas(unittest.TestCase):
+    HEAD = ("version: 1\n"
+            "projects:\n"
+            "  proj:\n"
+            "    workdir: /projects/proj\n"
+            "    mutate_execute:\n"
+            "      runner: /opt/ads-venv/bin/python3\n"
+            "      script_dir: code\n"
+            "      allow:\n"
+            "        - mutate_campaign_negative\n"
+            "      caps:\n")
+
+    def _reg(self, caps_lines):
+        fd, p = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(self.HEAD + caps_lines)
+        self.addCleanup(os.unlink, p)
+        return p
+
+    FULL = ("        actions_per_changeset: 25\n"
+            "        actions_per_client_day: 100\n"
+            "        applies_per_client_day: 5\n"
+            "        approval_ttl_hours: 24\n"
+            "        max_pending_requests: 8\n"
+            "        accepted_requests_per_client_day: 20\n")
+
+    def test_reads_both_quotas(self):
+        q = C.read_spool_quotas(self._reg(self.FULL), "proj")
+        self.assertEqual(q["max_pending_requests"], 8)
+        self.assertEqual(q["accepted_requests_per_client_day"], 20)
+
+    def test_missing_quota_refuses_rather_than_becoming_unlimited(self):
+        for drop in ("max_pending_requests", "accepted_requests_per_client_day"):
+            partial = "".join(l for l in self.FULL.splitlines(True)
+                              if not l.strip().startswith(drop + ":"))
+            with self.assertRaises(ValueError) as cm:
+                C.read_spool_quotas(self._reg(partial), "proj")
+            self.assertIn(drop, str(cm.exception))
+
+    def test_malformed_quota_refuses(self):
+        for bad in ("0", "-1", "abc", "", "1e6", "999999999"):
+            broken = self.FULL.replace("max_pending_requests: 8",
+                                       "max_pending_requests: %s" % bad)
+            with self.assertRaises(ValueError):
+                C.read_spool_quotas(self._reg(broken), "proj")
+
+    def test_control_the_existing_caps_still_parse_unchanged(self):
+        # THE POSITIVE CONTROL for this task: adding two keys to the caps block must
+        # not disturb the executor's own cap reader. If this breaks, the quotas were
+        # added in the wrong place.
+        m = C.read_mutate_execute(self._reg(self.FULL), "proj")
+        self.assertEqual(m["caps"]["applies_per_client_day"], 5)
+        self.assertEqual(m["caps"]["approval_ttl_hours"], 24)
+        self.assertNotIn("max_pending_requests", m["caps"])
+
+    def test_duplicate_quota_key_still_refuses(self):
+        dup = self.FULL + "        max_pending_requests: 9999\n"
+        with self.assertRaises(ValueError):
+            C.read_spool_quotas(self._reg(dup), "proj")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -259,6 +259,34 @@ def read_mutate_execute(path, project):
             "allow": got["allow"], "caps": caps}
 
 
+# Spool quotas live in the SAME caps: block as the mutation caps — tuning them stays a
+# config edit, never a code change (spec §8) — but they are read SEPARATELY. They bound
+# the BROKER, not the executor: refused requests never consume applies_per_client_day,
+# so without these nothing bounds how many requests Hermes can file. Keeping them out
+# of CAP_KEYS is what stops apply-changeset.py refusing over a broker-only setting.
+SPOOL_QUOTA_KEYS = ("max_pending_requests", "accepted_requests_per_client_day")
+
+
+def read_spool_quotas(path, project):
+    """Per-client spool quotas, fail-closed exactly like the mutation caps.
+
+    An unreadable limit must never become an unlimited one — the same rule the caps
+    already follow, and the reason a missing key raises instead of defaulting.
+    """
+    got = read_block(path, project, "mutate_execute")
+    quotas = {}
+    for k in SPOOL_QUOTA_KEYS:
+        v = got["caps"].get(k)
+        if v is None:
+            raise ValueError(
+                f"missing spool quota {k!r} for project {project!r} — quotas are "
+                "fail-closed; an unreadable limit must never become an unlimited one")
+        if not _CAP_VALUE_RE.fullmatch(v) or int(v) < 1:
+            raise ValueError(f"invalid spool quota {k}={v!r} — must be a positive integer")
+        quotas[k] = int(v)
+    return quotas
+
+
 def assert_allow_lists_disjoint(read_allow, mutate_allow):
     """Inc-3's read allow-list states 'readers only; mutators are never allow-listed'.
     This keeps that sentence literally true rather than merely asserted."""

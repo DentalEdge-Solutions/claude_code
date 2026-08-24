@@ -343,5 +343,22 @@ projects:
         self.assertEqual(C.read_mask_paths(self._reg(none), "demo"), [])
 
 
+class TestSpoolQuotasDeclared(unittest.TestCase):
+    def test_the_real_registry_declares_both_quotas(self):
+        # The unit tests above use synthetic registries. This one asserts against the
+        # FILE THAT SHIPS — a quota that parses in a fixture but is absent from
+        # projects.yaml is a broker that refuses every request on the VPS.
+        q = C.read_spool_quotas(REGISTRY, "claude_google_ads")
+        self.assertGreaterEqual(q["max_pending_requests"], 1)
+        self.assertGreaterEqual(q["accepted_requests_per_client_day"], 1)
+
+    def test_quotas_are_not_absurdly_large(self):
+        # A quota of 999999 is a quota in name only. This is a smoke check against a
+        # careless edit, not a policy statement.
+        q = C.read_spool_quotas(REGISTRY, "claude_google_ads")
+        self.assertLessEqual(q["max_pending_requests"], 100)
+        self.assertLessEqual(q["accepted_requests_per_client_day"], 500)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -100,3 +100,9 @@ projects:
         actions_per_client_day: 100
         applies_per_client_day: 5      # load-bearing cap against malfunction
         approval_ttl_hours: 24
+        # --- spool quotas (Plan 2). Read by the BROKER, not the executor. Refused
+        # requests never consume applies_per_client_day, so without these nothing
+        # bounds how many requests Hermes can file: unbounded log noise and a
+        # denial of service on a single-threaded broker.
+        max_pending_requests: 8            # unprocessed requests allowed to queue per client
+        accepted_requests_per_client_day: 20   # accepted (not merely filed) per client per UTC day
