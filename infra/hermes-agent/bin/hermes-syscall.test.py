@@ -1,4 +1,4 @@
-import importlib.util, io, json, os, sys, tempfile, unittest, contextlib
+import contextlib, errno, importlib.util, io, json, os, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -144,6 +144,61 @@ class TestResult(Base):
                       "exit_code": 2})
         _, out, _ = self.run_cli(["result", "--request-id", self.RID])
         self.assertIn("refused_quota", out)
+
+    def test_invalid_utf8_result_is_refused_without_leaking_raw_exception_text(self):
+        # results/ lives inside the spool, which Hermes can write to. A planted
+        # unreadable result must not leak raw codec/OS text into model-facing
+        # output, because that text can carry retry-flavoured wording.
+        path = S.result_path(self.RID, self.root)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"\xff\xfe not valid utf-8")
+        rc, out, _ = self.run_cli(["result", "--request-id", self.RID])
+        self.assertEqual(rc, 2)
+        low = out.lower()
+        for word in ("retry", "try again", "temporar", "transient"):
+            self.assertNotIn(word, low)
+        # Positive control: the unreadable-result branch was actually taken, not
+        # merely silent — this must not pass by rendering nothing at all.
+        self.assertIn("result_unreadable", out)
+
+    def test_malformed_json_result_is_refused_without_leaking_raw_exception_text(self):
+        path = S.result_path(self.RID, self.root)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not valid json")
+        rc, out, _ = self.run_cli(["result", "--request-id", self.RID])
+        self.assertEqual(rc, 2)
+        low = out.lower()
+        for word in ("retry", "try again", "temporar", "transient"):
+            self.assertNotIn(word, low)
+        self.assertIn("result_unreadable", out)
+
+    def test_os_error_reading_result_does_not_leak_retry_flavoured_text(self):
+        # The concrete adversarial trigger: an OSError whose strerror is itself
+        # retry-flavoured. errno EAGAIN renders as "Resource temporarily
+        # unavailable" — a raw '%s' % e interpolation of that text would put
+        # "temporar" directly into exit-2 output. Force exactly that by
+        # monkeypatching the module-global `open` that fetch() resolves to.
+        path = S.result_path(self.RID, self.root)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"status": "applied"}')
+
+        def _raise_eagain(*a, **kw):
+            raise OSError(errno.EAGAIN, os.strerror(errno.EAGAIN))
+
+        K.open = _raise_eagain
+        try:
+            rc, out, _ = self.run_cli(["result", "--request-id", self.RID])
+        finally:
+            del K.open  # restore fallback to the builtin
+
+        self.assertEqual(rc, 2)
+        low = out.lower()
+        for word in ("retry", "try again", "temporar", "transient"):
+            self.assertNotIn(word, low)
+        self.assertIn("result_unreadable", out)
 
 
 if __name__ == "__main__":

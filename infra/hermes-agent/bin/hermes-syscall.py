@@ -32,9 +32,14 @@ _EXIT_BY_CODE = {0: EXIT_OK, 2: EXIT_REFUSED, 3: EXIT_FAILED_AFTER_MUTATION}
 def submit(client, changeset, root=None):
     """Write one request atomically and return its request_id.
 
-    The temp file is DOT-PREFIXED so it cannot match the broker's FILENAME_RE scan: a
-    broker that picked up a half-written request would be reading torn JSON from the
-    one writer it does not trust.
+    The temp file is excluded from the broker's FILENAME_RE scan by tempfile.mkstemp's
+    own naming, not by the dot prefix: mkstemp always inserts its own random 8-character
+    infix between prefix and suffix, and keeps the ".tmp" suffix, so the resulting name
+    can never fullmatch FILENAME_RE, which demands exactly 36 characters before ".json"
+    and nothing else. A broker that picked up a half-written request would be reading
+    torn JSON from the one writer it does not trust. The dot prefix is defence in depth
+    on top of that guarantee — it keeps the temp file out of shell globs and casual
+    directory listings, not out of the broker's regex.
     """
     request_id = str(uuid.uuid4())
     req = {"request_id": request_id, "op": "apply",
@@ -74,7 +79,24 @@ def fetch(request_id, root=None):
         with open(path, encoding="utf-8") as f:
             rec = json.load(f)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
-        return EXIT_REFUSED, "unreadable result for %s: %s" % (request_id, e)
+        # NEVER interpolate the raw exception into model-facing output. An OSError's
+        # strerror or a UnicodeDecodeError's repr can carry arbitrary wording or bytes
+        # (errno EAGAIN renders as "Resource temporarily unavailable" — exactly the
+        # retry-flavoured text this client exists to refuse to say) or embed raw byte
+        # values, and results/ lives inside the spool Hermes can write to: a planted
+        # unreadable result is an adversarial way to get this client to inject its own
+        # retry-inviting wording. The exception detail goes to stderr only, for an
+        # operator or journal — mirroring how the broker keeps executor output
+        # host-side — never into the exit-2 text a model reads.
+        print("hermes-syscall: result %s unreadable: %s" % (request_id, e),
+              file=sys.stderr)
+        return EXIT_REFUSED, (
+            "request %s\n"
+            "  status         refused\n"
+            "  classification result_unreadable\n"
+            "  detail         the result file exists but could not be read as valid "
+            "JSON; this is a refusal, not a pending state — an operator must inspect "
+            "the result file directly" % request_id)
     if not isinstance(rec, dict):
         return EXIT_REFUSED, "malformed result for %s" % request_id
 
