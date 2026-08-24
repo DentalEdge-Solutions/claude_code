@@ -10,6 +10,7 @@ See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 """
 import datetime, hashlib, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import governance_lib
 import vault_lib
 
 ACTION_TYPES = ("add_campaign_negative",)
@@ -146,6 +147,30 @@ def read_workdir(path, project):
     return found
 
 
+def read_mask_paths(path, project):
+    """Workdir-relative paths masked out of the container view.
+
+    A project with no declaration yields [] — nothing claimed, nothing to enforce.
+    A duplicate key refuses, for the same reason read_workdir's does: silently
+    choosing a winner would silently choose which paths stay exposed.
+    """
+    found = None
+    collecting = False
+    for indent, stripped in _iter_project_lines(path, project):
+        if indent == 4 and stripped.startswith("mask_paths:"):
+            if found is not None:
+                raise ValueError(f"duplicate 'mask_paths' key for project {project!r} — "
+                                 "refusing rather than taking the first or last value")
+            found, collecting = [], True
+            continue
+        if collecting:
+            if indent == 6 and stripped.startswith("- "):
+                found.append(stripped[2:].strip())
+                continue
+            collecting = False
+    return found or []
+
+
 def read_block(path, project, block):
     """Parse projects.<project>.<block> into scalars plus `allow` and `caps`.
 
@@ -243,19 +268,16 @@ def assert_allow_lists_disjoint(read_allow, mutate_allow):
                          "a script must never be both reader and mutator")
 
 
-GOVERNANCE_DIR = "_governance"
-KILL_SWITCH = "mutation-enabled"
-
-
-def kill_switch_ok(vault_root=None):
+def kill_switch_ok(root=None):
     """Return whether mutation is deliberately enabled.
 
-    Safe state is disabled: absent, unreadable, or not a regular file all return
-    False. This function never raises because callers turn False into refusal.
+    Reads the HOST-OWNED governance store, which the gateway container does not
+    mount — so this can no longer be enabled from inside the container Hermes runs
+    in. Safe state is disabled: absent, unreadable, or not a regular file all return
+    False. Never raises; callers turn False into refusal.
     """
     try:
-        root = vault_root or vault_lib.vault_root()
-        p = os.path.join(root, GOVERNANCE_DIR, KILL_SWITCH)
+        p = governance_lib.kill_switch_path(root)
         if not os.path.isfile(p):
             return False
         with open(p, "rb") as f:
@@ -273,16 +295,64 @@ def changeset_path(vault, cid):
     return os.path.join(changes_dir(vault), f"{cid}.json")
 
 
-def approval_path(vault, cid):
-    return os.path.join(changes_dir(vault), f"{cid}.approval.json")
+def approval_path(slug, cid):
+    return governance_lib.approval_path(slug, cid)
+
+
+def snapshot_path(slug, cid):
+    return governance_lib.snapshot_path(slug, cid)
+
+
+def write_snapshot(slug, cid, src_path):
+    """Read the reviewed change-set and snapshot it. Convenience wrapper over
+    write_snapshot_bytes for callers that hold a path rather than bytes."""
+    with open(src_path, "rb") as src:
+        return write_snapshot_bytes(slug, cid, src.read())
+
+
+def write_snapshot_bytes(slug, cid, data):
+    """Write the reviewed change-set BYTES verbatim into the governance store and
+    return their sha256.
+
+    apply executes from THIS copy. Hashing the writable original would still leave the
+    draft -> review -> swap window open; copying it somewhere Hermes cannot write closes
+    it (spec section 7).
+
+    Takes BYTES rather than a path so approve can read the vault file exactly once and
+    validate, hash and snapshot the same in-memory bytes. Reading it twice left a
+    (small) window in which the two reads could differ — and, more importantly, meant
+    the digest the operator is shown was not provably taken over the bytes that were
+    validated.
+    """
+    if not isinstance(data, bytes):
+        raise ValueError("snapshot payload must be bytes, got %s" % type(data).__name__)
+    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
+    dst = governance_lib.snapshot_path(slug, cid)
+    tmp = dst + ".tmp"
+    with open(tmp, "wb") as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(tmp, dst)
+    # fsync the directory too — same reasoning as _atomic_write_json and append_log.
+    # write_snapshot is a fourth writer of a newly-named file in this tier; a caller
+    # that snapshots without immediately approving (a later increment does exactly
+    # this) must not be able to lose the rename on crash just because THIS writer was
+    # the one quietly weaker than the others.
+    dfd = os.open(os.path.dirname(dst) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+    return hashlib.sha256(data).hexdigest()
 
 
 def result_path(vault, cid):
     return os.path.join(changes_dir(vault), f"{cid}.result.json")
 
 
-def log_path(vault):
-    return os.path.join(changes_dir(vault), "log.jsonl")
+def log_path(slug):
+    return governance_lib.log_path(slug)
 
 
 DEFAULT_PROJECTS_REGISTRY = "/opt/registry/projects.yaml"
@@ -336,7 +406,7 @@ def _parse_utc_field(rec, field):
         raise ValueError(f"invalid {field}: {raw!r}") from e
 
 
-def write_approval(vault, cid, digest, operator, now, ttl_hours):
+def write_approval(slug, cid, digest, operator, now, ttl_hours):
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
     operator = _require_str(operator, "operator")
@@ -353,15 +423,15 @@ def write_approval(vault, cid, digest, operator, now, ttl_hours):
     rec = {"changeset_id": cid, "sha256": digest, "operator": operator,
            "approved_at": now.strftime(ISO),
            "expires_at": (now + datetime.timedelta(hours=ttl_hours)).strftime(ISO)}
-    os.makedirs(changes_dir(vault), exist_ok=True)
-    _atomic_write_json(approval_path(vault, cid), rec)
+    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
+    _atomic_write_json(approval_path(slug, cid), rec)
     return rec
 
 
-def verify_approval(vault, cid, digest, now):
+def verify_approval(slug, cid, digest, now):
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
-    p = approval_path(vault, cid)
+    p = approval_path(slug, cid)
     if not os.path.isfile(p):
         raise ValueError(f"no approval record for change-set {cid!r} — run approve-changeset.py first")
     try:                       # unreadable / directory-in-place must REFUSE, not leak an OSError
@@ -371,6 +441,15 @@ def verify_approval(vault, cid, digest, now):
         raise ValueError(f"unreadable approval record for {cid!r}: {e}")
     if not isinstance(rec, dict):
         raise ValueError(f"malformed approval record for {cid!r}: expected a JSON object")
+    if "reserved_at" in rec:
+        # Presence, not truthiness: "", null, or 0 must refuse exactly like a real
+        # timestamp does. Every other field here goes through _require_str — reserved_at
+        # is no exception, so a type-confused value refuses loudly instead of reading as
+        # unreserved.
+        reserved_at = _require_str(rec.get("reserved_at"), "reserved_at")
+        raise ValueError(
+            "approval for %r is already reserved (reserved_at=%s) — approvals are "
+            "single-use; approve again to authorise another apply" % (cid, reserved_at))
     if _require_str(rec.get("changeset_id"), "changeset_id") != cid:
         raise ValueError(f"approval record changeset_id does not match {cid!r}")
     approved_digest = _require_str(rec.get("sha256"), "sha256")
@@ -389,11 +468,11 @@ def verify_approval(vault, cid, digest, now):
     return rec
 
 
-def append_log(vault, rec):
+def append_log(slug, rec):
     """Append one audit-log record and fsync before returning."""
-    d = changes_dir(vault)
-    os.makedirs(d, exist_ok=True)
-    with open(log_path(vault), "a", encoding="utf-8") as f:
+    p = log_path(slug)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, sort_keys=True) + "\n")
         f.flush()
         os.fsync(f.fileno())
@@ -401,14 +480,14 @@ def append_log(vault, rec):
     # fsyncing its contents does not persist the directory entry that names it. Losing
     # that entry loses the whole reversibility record, which day_counts would then read
     # as a legitimate zero.
-    dfd = os.open(d, os.O_RDONLY)
+    dfd = os.open(os.path.dirname(p), os.O_RDONLY)
     try:
         os.fsync(dfd)
     finally:
         os.close(dfd)
 
 
-def iter_log_records(vault):
+def iter_log_records(slug):
     """Yield (lineno, record) for every audit-log line, validating the fields all
     readers depend on.
 
@@ -424,7 +503,7 @@ def iter_log_records(vault):
     read as 'under the cap', and an unreadable undo list must not read as 'nothing
     to undo'.
     """
-    p = log_path(vault)
+    p = log_path(slug)
     if not os.path.exists(p):
         return
     try:
@@ -447,7 +526,7 @@ def iter_log_records(vault):
             yield n, rec
 
 
-def day_counts(vault, day):
+def day_counts(slug, day):
     """Count applied actions and distinct applied change-sets for a UTC day.
 
     Corrupt log lines refuse rather than being skipped because the log feeds
@@ -456,7 +535,7 @@ def day_counts(vault, day):
     if not DAY_RE.fullmatch(_require_str(day, "day")):
         raise ValueError(f"invalid day: {day!r}")
     applies, actions = set(), 0
-    for _n, rec in iter_log_records(vault):
+    for _n, rec in iter_log_records(slug):
         if rec["status"] == "applied" and rec["ts"].startswith(day):
             applies.add(rec["changeset_id"])
             actions += 1

@@ -233,8 +233,9 @@ write to **org-owned** repos for collaborators, so `claude_code` lives under the
 (**not** `.env`); a `main` **ruleset** requiring a PR with bypass = repo admin only
 (bot **not** on the bypass list).
 
-**Usage** (operator-invoked; the wrapper sources `.env.pr` and passes the PAT via
-`docker compose exec -e` — it never enters the gateway env):
+**Usage** (operator-invoked; the wrapper parses `.env.pr` **as data, never sourcing
+it** and passes the PAT via `docker compose exec -e` — it never enters the gateway
+`env_file`):
 
 ```bash
 ./infra/hermes-agent/open-proposal-pr.sh --project claude_code --proposal latest
@@ -246,9 +247,21 @@ container recreate needed (the PAT isn't in the gateway env).
 
 **Safety model:** bot ≠ owner; `:ro` mount never written (ephemeral clone only);
 draft-only (a human marks ready + merges); `main` unwritable by the bot (pre-push
-hook + server-side ruleset); and the PAT is kept **out of the gateway env** so no
-agent-launched process can read it — necessary because **Hermes does NOT scrub the
-`CLAUDE_CODE_PR_PAT` name** (it only scrubs known-provider names).
+hook + server-side ruleset); and the PAT is kept **out of the gateway `env_file`** —
+necessary because **Hermes does NOT scrub the `CLAUDE_CODE_PR_PAT` name** (it only
+scrubs known-provider names).
+
+**What that does not mean.** An earlier version of this section said the PAT is out of
+the gateway env "so no agent-launched process can read it." That claim is **false**,
+for the same `/proc/<pid>/environ` reason documented for the Ads write credential
+below. Keeping the PAT out of `env_file` removes the **resting** exposure — it is not
+in the environment of every process, all the time. It does not remove the **timing
+window**: `open-proposal-pr.sh` still `exec -e`s into the *gateway* container, and
+during that run any same-UID process there (everything runs as `hermes`, uid 10000)
+can read the value out of `/proc`. The Ads write credential's fix was to move its
+consumer into a one-shot container Hermes has no shell in; the same move has **not**
+been applied to this path yet. The PAT carries org-repo Contents + Pull-requests
+write, so treat the window as real and rotate on suspicion.
 
 **Tests:** `python3 infra/hermes-agent/bin/open-proposal-pr.test.py` (the hermes
 `bin/` tests aren't auto-discovered by `run-all-tests.js`; run them directly).
@@ -284,10 +297,22 @@ $EDITOR .env.ga              # GOOGLE_ADS_DEVELOPER_TOKEN / CLIENT_ID / CLIENT_S
 ```
 
 `.env.ga` is **not** `docker-compose.yml`'s `env_file` and is never loaded into
-the gateway/agent environment. `run-ads-report.sh` sources it on the host and
-injects the six values **per-invocation** via `docker compose exec -e`, so
-they reach only the one exec'd reader process — the same pattern as the
-Increment-2 PAT in `.env.pr`.
+the gateway/agent environment. `run-ads-report.sh` reads it on the host and
+injects the six values **per-invocation** via `docker compose exec -e` — the same
+pattern as the Increment-2 PAT in `.env.pr`.
+
+**Delivery is not visibility.** This section used to say the values "reach only the one
+exec'd reader process." That is true of *delivery* and **false of visibility**:
+`/proc/<pid>/environ` is readable by any same-UID process, and everything in the
+gateway container runs as `hermes` (uid 10000), so during a report run an
+agent-launched process can read the injected credential out of `/proc`. Per-invocation
+injection removes the *resting* exposure, not the *timing window*. The read path is
+deliberately left on this footing for now because it keeps its platform-level backstop
+— the credential is measured `READ_ONLY` and Google refuses its mutate calls
+server-side — whereas the write path, which has no such backstop, was moved into a
+one-shot container Hermes has no shell in (see "Credential separation" below).
+`run-ads-report.sh` and `bin/run-ads-report.py` are **frozen** (Increment 3), so
+closing this the same way is a later increment, not an edit here.
 
 **Usage:**
 
@@ -418,9 +443,13 @@ shared, git-versioned project brain:
   `/opt/data/vaults/<slug>/` (host `data/vaults/<slug>/`, which opens directly in
   Obsidian), never in git.
 
-The **client roster is itself client-private**, so it lives in the vault tier, not
-git: `data/vaults/_registry/clients.json` (gitignored). `registry/projects.yaml`
-stays project-level and client-agnostic. Shape:
+The **client roster is itself client-private** and, since it gates every mutation
+guard, it lives outside the gateway container entirely: in the host-owned governance
+store (see "Governance store" below) at `$HERMES_GOVERNANCE_DIR/registry/clients.json`.
+The gateway container does not mount it at all; only the one-shot executor Hermes has
+no shell in reads it, read-only. `registry/projects.yaml` stays project-level and
+client-agnostic, still version-controlled and mounted read-only into the gateway as
+before. Shape:
 
 ```json
 { "clients": {
@@ -493,10 +522,35 @@ resource name.
 
 ```bash
 cd infra/hermes-agent
-python3 bin/propose-changeset.py --client <slug> --from actions.json      # no credential
-python3 bin/approve-changeset.py --client <slug> --changeset <id> --operator <name>
+./changeset.sh propose --client <slug> --from actions.json               # no credential
+./changeset.sh approve --client <slug> --changeset <id> --operator <name>
 ./run-ads-mutate.sh --client <slug> --changeset <id>                      # write credential
 ./run-ads-mutate.sh --client <slug> --undo <id>
+```
+
+**Run them through the wrappers, not the scripts directly.** `bin/propose-changeset.py`
+and `bin/approve-changeset.py` default to the **container** paths
+(`/opt/governance/registry/clients.json`, `/opt/data/vaults`), which on the host fail
+with *"client registry not found"*. `changeset.sh` sets the two host-side roots — and
+resolves `HERMES_GOVERNANCE_DIR` the same way `run-ads-mutate.sh` does: from the
+environment if set, otherwise parsed **as data** out of `.env`, which Docker Compose
+reads for interpolation but never exports to your shell. The equivalent by hand, if you
+prefer to invoke the scripts directly, is:
+
+```bash
+export HERMES_GOVERNANCE_ROOT="$HERMES_GOVERNANCE_DIR"   # ...itself exported first
+export VAULT_ROOT="$PWD/data/vaults"
+python3 bin/propose-changeset.py --client <slug> --from actions.json
+```
+
+`approve` prints the **sha256 it binds** and **one line per action**. Read them: that
+printout is the only place the operator can confirm that what is being approved is what
+was reviewed (see "What the snapshot does and does not close" below). To make that a
+refusal rather than a reading task, pass the digest you reviewed:
+
+```bash
+./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
+  --expect-sha256 <hex>        # refuses if the bytes on disk hash to anything else
 ```
 
 `propose` and `approve` hold **no credential and perform no network I/O** — they are
@@ -508,15 +562,29 @@ An operator therefore cannot typo a customer id into a change-set, and the apply
 identity check becomes a genuine tamper check.
 
 **Approval binds bytes.** `approve` records the sha256 of the exact change-set file the
-operator reviewed, plus an expiry. Editing that file afterwards — even by one
-whitespace byte — invalidates the approval, because `apply` recomputes and compares.
+operator reviewed, plus an expiry, and copies those bytes into the host-owned
+governance store. `apply` executes from **that copy**. Editing the vault copy afterwards
+has no effect on what runs; editing the snapshot invalidates the approval, because
+`apply` recomputes and compares.
+
+**What the snapshot does and does not close.** It closes **approve → apply**
+completely: after `approve` returns, the executed artefact lives somewhere Hermes
+cannot write, so nothing can change what runs. It does **not** close
+**review → approve**: the snapshot is taken *at approve time*, from the vault copy, so
+whatever is there when the operator types the command is what gets bound — including
+bytes written after a human read the change-set. The precise claim this rail supports
+is *"a model can never author both a change and its approval"*; it is **not** *"a model
+can never author the change"*. The residual window is covered by procedure and by
+`approve`'s printed digest + per-action summary, not by a mechanism — which is why
+`--expect-sha256` exists.
 
 **Guard order at apply** (fail-closed; the credential is touched last, so every refusal
 happens before Google is reachable):
 
 1. kill switch present and readable
 2. client slug resolves and is `active`
-3. change-set loads, schema-validates, within the per-change-set action cap
+3. change-set loads from the approved SNAPSHOT in the governance store — never the
+   vault copy Hermes can write — schema-validates, within the per-change-set action cap
 4. change-set identity matches the resolved client
 5. approval hash matches and has not expired
 6. daily caps satisfied, counted from the audit log
@@ -545,10 +613,12 @@ a config edit rather than a code change. Missing or malformed caps **refuse** �
 unreadable limit must never become an unlimited one. Defaults: 25 actions per
 change-set, 100 actions and 5 applies per client per day, 24-hour approval expiry.
 
-**The kill switch** is a marker file on the Hermes volume at
-`data/vaults/_governance/mutation-enabled`. Absent, unreadable, or a directory in its
-place all mean *disabled* — the safe state is the default state, and one `rm` disables
-all mutation across every client.
+**The kill switch** is a marker file in the host-owned governance store (see
+"Governance store" below), at `$HERMES_GOVERNANCE_DIR/control/mutation-enabled` on the
+host. The gateway container does not mount that tree at all, so nothing running inside
+it — including a compromised Hermes session — can create, see, or remove that file.
+Absent, unreadable, or a directory in its place all mean *disabled* — the safe state is
+the default state, and one `rm` on the host disables all mutation across every client.
 
 **Undo bypasses only the kill switch and the daily caps.** Guards constrain *creating*
 change, never *reversing* it: a tripped kill switch that also blocked cleanup would be a
@@ -578,17 +648,32 @@ than during it.
 
 **Credential separation.** The write credential lives **only** in the gitignored
 `.env.gaw` (copy `.env.gaw.example`), is parsed as data rather than sourced, and is
-injected per-invocation via `docker compose exec -e`. It is never in `.env`, never in
-`.env.ga`, and never in the gateway environment. `.env.ga` stays read-only so every
-other path keeps its backstop — **never copy a token between the two files**. The
-mutator in the ads project reads credentials strictly from the injected environment and
-never loads a local `.env`, which would otherwise pick up that project's full-access
-token.
+injected per-invocation into the one-shot `ads-mutator` container via
+`docker compose run -e` — a container Hermes has no shell in. It never enters the
+gateway container at all.
+
+An earlier version of this doc claimed the credential "reaches only this exec'd
+process." That was true of *delivery* and false of *visibility*: `/proc/<pid>/environ`
+is readable by any same-UID process, and everything running in the gateway container
+runs as the same user, so a same-container boundary was never real isolation — any
+process in that container could have read it. The one-shot, no-shell `ads-mutator`
+container is what actually makes the credential inaccessible to Hermes, because Hermes
+has no process running there to read `/proc/<pid>/environ` from.
+
+The credential is never in `.env`, never in `.env.ga`, and never in the gateway
+environment. `.env.ga` stays read-only so every other path keeps its backstop —
+**never copy a token between the two files**. The mutator in the ads project reads
+credentials strictly from the injected environment and never loads a local `.env`,
+which would otherwise pick up that project's full-access token.
 
 **Vault artifacts** (gitignored, per client, under `data/vaults/<slug>/changes/`):
-the change-set, its approval record, a per-run result file, and `log.jsonl` — the
-append-only reversibility record that also feeds the daily caps. Each apply appends a
-line to `timeline.md`, so the next trend audit sees that a change was made.
+the proposed change-set and a per-run result file. The **approval record and the
+byte-exact snapshot `apply` executes from** do not live here — they live in the
+host-owned governance store (see "Governance store" below), so Hermes can write the
+vault copy of a change-set but cannot reach or tamper with what `apply` actually reads.
+The **append-only audit log** (`log.jsonl`, one per client) that feeds the daily caps
+and undo also lives in the governance store, not the vault. Each apply still appends a
+line to the vault's `timeline.md`, so the next trend audit sees that a change was made.
 
 **Tests.** These suites are stdlib-only and are not discoverable by
 `scripts/run-all-tests.js`, which is node-only by design. Run all of them with:
@@ -601,6 +686,152 @@ It discovers every `*.test.py` in that directory rather than listing them, runs 
 them even after one fails, and exits non-zero if any did. Individual suites still run
 directly (`python3 infra/hermes-agent/bin/apply-changeset.test.py`) — note `python3`,
 never `python`.
+
+## Governance store
+
+Every piece of state a mutation guard *trusts* — as opposed to state Hermes merely
+produces, like a proposed change-set or a report — lives outside the container
+entirely, in a host-owned directory tree the gateway container does not mount:
+
+```
+$HERMES_GOVERNANCE_DIR/
+  control/    mutation-enabled            # the kill switch
+  registry/   clients.json                # the client roster
+  approvals/  <slug>/<cid>.approval.json  # approval record: hash + expiry
+              <slug>/<cid>.changeset.json # byte-exact snapshot apply executes from
+  log/        <slug>.jsonl                # append-only audit log; feeds caps + undo
+  seen/       <slug>.jsonl                # replay-protection state (Plan 2)
+```
+
+Path contract in `bin/governance_lib.py`; every other module reaches these paths
+through it rather than composing them independently.
+
+**`HERMES_GOVERNANCE_DIR`** (in `.env`, gitignored) is the absolute host path to this
+tree. It must be **outside this repo** (the repo is bind-mounted into the gateway
+container) and **outside `./data`** (the one read-write mount the gateway does have).
+Create it mode `700` before first use; Compose does not expand `~`, so write the path
+in full (`/Users/you/.hermes/governance`, not `~/.hermes/governance`). See
+`.env.example` for the annotated template.
+
+**Who mounts what:**
+
+| Container | approvals/ control/ registry/ | log/ seen/ |
+|---|---|---|
+| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted at all |
+| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write |
+| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted |
+
+The gateway **does not mount any part of the store** — no path in it is readable or
+writable from the container Hermes runs in. Verify at any time:
+
+```bash
+docker compose exec -T hermes-agent sh -c '[ -e /opt/governance ] && echo REACHABLE-BAD || echo unreachable-good'
+```
+
+Stated precisely, because "zero exposure" was an overclaim: the **path** is known to
+the gateway. `HERMES_GOVERNANCE_DIR` is in `.env`, which is the gateway's `env_file`,
+so its value is in the gateway's environment and Hermes can read it. That is
+acceptable — knowing a host path grants nothing, because the tree is not mounted and
+the container has no way to reach the host filesystem. It is worth knowing, though,
+that anything host-side which writes into `data/` on Hermes's behalf is writing with a
+known target available to an attacker; that is exactly the shape of the 2026-08-19
+symlink finding against the run-record persist step, and why
+`bin/persist_run_record_shim.py` now resolves and contains every destination it opens.
+
+### Ownership on a Linux host
+
+The store is documented as mode `700` owned by the deploy/broker user — and the
+one-shot `ads-mutator` executor runs as **uid 10000** (`Dockerfile`: `USER hermes`). On
+Linux those are the same UID namespace, so a `700` store owned by anyone else is simply
+**unreadable to the executor**: the kill switch reads as absent, client resolution
+raises, and `append_log` fails *mid-apply* — exit 3 after a live account change has
+landed. macOS hides this entirely, because Docker Desktop remaps ownership, so the
+local gate passes and the VPS is where it breaks.
+
+Give the store an ownership the executor's UID can use — either group access:
+
+```bash
+sudo chgrp -R 10000 "$HERMES_GOVERNANCE_DIR"
+sudo chmod -R g+rX "$HERMES_GOVERNANCE_DIR"
+sudo chmod -R g+w  "$HERMES_GOVERNANCE_DIR"/log "$HERMES_GOVERNANCE_DIR"/seen
+```
+
+or outright ownership:
+
+```bash
+sudo chown -R 10000:10000 "$HERMES_GOVERNANCE_DIR" && sudo chmod -R 700 "$HERMES_GOVERNANCE_DIR"
+```
+
+**Never `chmod 777`.** The store is the one tree Hermes cannot reach; making it
+world-writable hands it to every process on the host and deletes the isolation the
+whole tier rests on.
+
+`run-ads-mutate.sh` pre-flights this before it does anything else
+(`bin/preflight-governance-access.py`), so the condition surfaces as a refusal with the
+remedy printed, rather than as an exit-3 failure halfway through an apply. The check is
+a no-op on non-Linux, where a stat-based prediction would be false.
+
+**Migration** copies the pre-governance-store artifacts (client registry, audit log)
+from the vault tier into the store. Dry run by default; `--apply` performs the copy.
+Originals are left in place as a rollback path — the migration copies, it does not move:
+
+```bash
+python3 infra/hermes-agent/bin/migrate-governance.py \
+  --vault-root infra/hermes-agent/data/vaults \
+  --governance-root "$HERMES_GOVERNANCE_DIR"        # dry run; add --apply to execute
+```
+
+## Mount masking — keeping credential files out of the container view
+
+The project mounts are `:ro`, which stops Hermes *writing* them. It never stopped
+Hermes *reading* them, and on 2026-08-19 a probe found **five readable non-empty
+credential files** inside the gateway container: the Ads read credential, the Ads write
+credential, Hermes's own `.env`, and the draft-PR bot PAT — all through the repo mount,
+plus the ads project's own `.env`. None of that exposure was intended, and nothing
+in-container consumed any of it. Masking closes it.
+
+**Declared in `registry/projects.yaml`, enforced in `docker-compose.yml`.** Each project
+declares `mask_paths:` — workdir-relative paths that must not be visible in the
+container:
+
+```yaml
+  claude_code:
+    mask_paths:
+      - infra/hermes-agent        # the whole directory: every .env.* lives here
+  claude_google_ads:
+    mask_paths:
+      - .env                      # one file
+```
+
+**Two mask kinds, chosen by what is being hidden:**
+
+| Kind | Compose form | Use when |
+|---|---|---|
+| **Directory tmpfs** | `- type: tmpfs` / `target: <path>` / `read_only: true` | hiding a whole directory. An empty in-memory filesystem is laid over it; it never touches the host, and `read_only: true` keeps it consistent with the read-only-project-mount default. |
+| **Empty-file bind** | `- ./masks/empty:<path>:ro` | hiding one file while its directory must stay visible. The path still exists and reads as 0 bytes, so anything that merely tests for presence is undisturbed. |
+
+**The declaration and the mount are paired by a test, not by discipline.**
+`bin/registry-invariants.test.py` asserts that every declared `mask_paths` entry has a
+**real mount targeting it inside the `hermes-agent` service's own `volumes:` list** — a
+declared mask that Compose does not implement reads as protection while providing none.
+The test is anchored to actual mount syntax and scoped to that one service, so a path
+mentioned only in a comment, or mounted on `ads-mutator` while the gateway stays
+unmasked, does **not** satisfy it; controls in the same suite assert both of those
+failure modes are caught. `read_mask_paths` refuses a duplicate `mask_paths:` key
+rather than silently choosing which paths stay exposed.
+
+**Verify after any change** (the control is what makes the result meaningful — an
+unreadable file proves nothing if the probe itself is broken):
+
+```bash
+# every credential file must be absent or empty ...
+docker compose exec -T hermes-agent sh -c 'for f in /projects/claude_code/infra/hermes-agent/.env*; do [ -s "$f" ] && echo "READABLE-BAD $f"; done; echo done'
+# ... while a known-readable control file still reads normally
+docker compose exec -T hermes-agent sh -c 'head -1 /projects/claude_code/CLAUDE.md >/dev/null && echo control-ok'
+```
+
+Masking a mount can break the reader path, which would be worse than the exposure, so
+re-run a report and a collection afterwards and confirm both still exit 0.
 
 ## Credential access levels — measure, never assert
 

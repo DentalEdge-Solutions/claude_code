@@ -25,6 +25,11 @@ projects:
       Skill & Agent Pipeline Toolkit — THIS repo. Sources, vets, adapts,
       measures, and auto-improves Claude Code skills and agents. Mounted
       read-only at /projects/claude_code.
+    # Paths (workdir-relative) masked out of the container view. The whole directory
+    # is masked rather than each .env.* individually, so a newly minted credential file
+    # cannot silently reappear in the container.
+    mask_paths:
+      - infra/hermes-agent
     # Draft-PR delivery target (Increment 2). The mount stays scope: read — the
     # write path never touches the mount; it operates on a fresh clone of this
     # repo via the bot PAT. {repo, base, path} is structured so client repos
@@ -37,6 +42,10 @@ projects:
   claude_google_ads:
     workdir: /projects/claude_google_ads
     scope: read-execute            # NEW tier: run allow-listed reader scripts only (Inc 3)
+    # A single secret-bearing file: masked with an empty bind rather than a tmpfs, so
+    # the file still EXISTS and load_dotenv() reads nothing instead of erroring.
+    mask_paths:
+      - .env
     default_model: claude-haiku-4-5
     description: >
       Google Ads API integration for the DentalEdge Solutions MCC (Python,

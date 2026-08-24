@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
 """Client-vault registry resolver + slug/id validation. Stdlib-only.
 
-The client registry is CLIENT-PRIVATE and lives OUTSIDE git, on the Hermes
-volume: <VAULT_ROOT>/_registry/clients.json (VAULT_ROOT defaults to
-/opt/data/vaults; host callers pass the host data/vaults path). JSON (not YAML)
-to stay stdlib-only and avoid the hand-parsed-YAML bug class (Inc-3 CRITICAL).
+Reports, results and timelines are NOT client-private and stay on the Hermes
+volume: <VAULT_ROOT>/<slug>/... (VAULT_ROOT defaults to /opt/data/vaults; host
+callers pass the host data/vaults path) — that is `vault_root()` / `vault_path`,
+unchanged. The client registry itself is CLIENT-PRIVATE and lives on the
+host-owned governance store; see `registry_path()`. JSON (not YAML) to stay
+stdlib-only and avoid the hand-parsed-YAML bug class (Inc-3 CRITICAL).
 """
 import argparse, json, os, re, sys
 
-SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+import governance_lib
+
+SLUG_RE = governance_lib.SLUG_RE      # one definition, shared, so the two cannot drift
 CID_RE = re.compile(r"^[0-9]{1,15}$")
 
 def vault_root():
     return os.environ.get("VAULT_ROOT", "/opt/data/vaults")
 
 def registry_path():
-    return os.path.join(vault_root(), "_registry", "clients.json")
+    """The client registry is CLIENT-PRIVATE and moved into the host-owned governance
+    store on 2026-08-19. It was previously under VAULT_ROOT, which is the container's
+    one read-write mount — meaning Hermes could flip a dormant client to 'active'."""
+    return governance_lib.clients_registry_path()
 
 def validate_slug(slug):
     if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
