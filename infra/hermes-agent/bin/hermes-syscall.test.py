@@ -54,14 +54,39 @@ class TestApply(Base):
         self.assertEqual(len(rids), 5)
 
     def test_no_partial_file_is_ever_visible_to_the_broker(self):
+        # Post-rename: after a real, unpatched submit(), exactly one visible
+        # request exists and it DOES match the broker's FILENAME_RE.
         self.run_cli(["apply", "--client", "pilot-1",
                       "--changeset", "20260824-101500-abcdef01"])
         names = os.listdir(S.requests_dir(self.root))
-        # Exactly one visible request; any temp file must be dot-prefixed so the
-        # broker's FILENAME_RE scan cannot pick up a half-written request.
         visible = [n for n in names if not n.startswith(".")]
         self.assertEqual(len(visible), 1)
         self.assertTrue(S.FILENAME_RE.fullmatch(visible[0]))
+
+        # Mid-write: os.replace() is synchronous within submit(), so a real call
+        # never leaves anything to observe mid-flight — the property that actually
+        # matters (a broker scanning DURING a write picks up nothing) can only be
+        # proven by holding the write open. Patch os.replace, as seen by the
+        # hermes-syscall module, to a no-op for one submit() call, so the temp
+        # file is left in place instead of being renamed over the final path. Use
+        # a fresh spool root so this half of the test isn't sharing a directory
+        # with the real file written above.
+        mid_root = tempfile.mkdtemp()
+        real_replace = K.os.replace
+        K.os.replace = lambda *a, **kw: None
+        try:
+            K.submit("pilot-2", "20260824-101500-abcdef02", mid_root)
+        finally:
+            K.os.replace = real_replace
+
+        mid_names = os.listdir(S.requests_dir(mid_root))
+        # Positive control: the temp file is really there — the patch took
+        # effect, so the next assertion is not vacuously true over an empty dir.
+        self.assertGreaterEqual(len(mid_names), 1)
+        # The property that matters: while a request is mid-write, nothing in
+        # requests/ matches FILENAME_RE — a broker scanning at that instant
+        # picks up nothing.
+        self.assertFalse(any(S.FILENAME_RE.fullmatch(n) for n in mid_names))
 
     def test_bad_slug_is_refused_client_side_without_writing_anything(self):
         rc, _, err = self.run_cli(["apply", "--client", "../etc",
