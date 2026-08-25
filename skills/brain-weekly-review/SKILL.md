@@ -1,10 +1,12 @@
 ---
 name: brain-weekly-review
-description: "Use for the periodic brain maintenance ritual — 'weekly review',
-  'brain review', 'refresh the brain', or when brain-lint reports stale items.
-  Reads current brain state first, interviews the user only about deltas
-  ('same' keeps an item), updates status fields only, and stamps review dates.
-  Not for: promoting candidates (brain-promote) or compiling logs (brain-compile)."
+description: "Use when it's time for the periodic brain maintenance ritual —
+  'weekly review', 'brain review', 'refresh the brain', or when brain-lint
+  reports stale items. Reads current brain state first, interviews the user
+  only about deltas ('same' keeps an item), updates status fields only, and
+  stamps review dates. Not for: promoting candidates (brain-promote) or
+  compiling logs (brain-compile)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

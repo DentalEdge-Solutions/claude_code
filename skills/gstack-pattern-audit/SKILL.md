@@ -1,10 +1,12 @@
 ---
 name: gstack-pattern-audit
-description: "Use to extract reusable patterns from the GStack reference source —
-  'analyze gstack', 'extract gstack patterns', 'what can we learn from gstack'.
-  Compares the live GStack repo against its source card and writes synthesis-authority
-  findings into .project-brain/synthesis/gstack-patterns/. Not for: installing a
-  gstack skill (scout → audit → adapt → eval) or generic sources (reference-repo-pattern-extract)."
+description: "Use when reusable patterns should be extracted from the GStack
+  reference source — 'analyze gstack', 'extract gstack patterns', 'what can we
+  learn from gstack'. Compares the live GStack repo against its source card and
+  writes synthesis-authority findings into .project-brain/synthesis/gstack-patterns/.
+  Not for: installing a gstack skill (scout → audit → adapt → eval) or generic
+  sources (reference-repo-pattern-extract)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

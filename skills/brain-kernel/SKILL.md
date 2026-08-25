@@ -1,10 +1,11 @@
 ---
 name: brain-kernel
-description: "Router for second-brain requests when the specific operation is
-  unclear — 'do something with the brain', 'brain status', 'how is the brain',
-  'help me with project memory'. Diagnoses capsule state and routes to the right
-  brain skill. Not for: requests that already name an operation (capture, compile,
-  promote, search, review, setup — invoke those skills directly)."
+description: "Use when a second-brain request names no specific operation — 'do
+  something with the brain', 'brain status', 'how is the brain', 'help me with
+  project memory'. Diagnoses capsule state and routes to the right brain skill.
+  Not for: requests that already name an operation (capture, compile, promote,
+  search, review, setup — invoke those skills directly)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

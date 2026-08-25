@@ -5,6 +5,7 @@ description: "Use when the user asks what the brain knows — 'search the brain 
   brain'. Runs authority-ranked search over .project-brain/ and presents hits with
   their authority level. Not for: searching code (use Grep/Explore), the web, or
   Claude Code native auto-memory."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 
