@@ -324,6 +324,14 @@ def drain(spool=None, projects=None, runner=None, now=None):
     #     OSError from a failed exec, describes the external process misbehaving, not
     #     a bug in this broker — the same category of "operational fault, not a
     #     programming error" that justifies OSError's presence here.
+    #   * KeyError is NOT here for _execute's sake — DETAIL_BY_CLASSIFICATION is looked
+    #     up with .get(), so it cannot raise KeyError even on a future mapping gap (see
+    #     _DETAIL_FALLBACK above). KeyError earns its place in this tuple entirely on
+    #     account of vault_lib.resolve(slug), called from _process: an unknown client
+    #     slug is a legitimate refusal (RULING R4-adjacent — the slug came from an
+    #     untrusted spool file) and vault_lib.resolve raises plain KeyError for it.
+    #     Removing KeyError from this tuple would turn that refusal into an uncaught
+    #     crash that starves every other client's queued requests in the same batch.
     # Deliberately NOT added: NotImplementedError, or a bare Exception/RuntimeError/
     # TypeError/AttributeError catch-all. Those signal a bug in the broker's own code
     # (a stub still standing, a typo, a wrong argument shape) rather than a guard
@@ -339,7 +347,23 @@ def drain(spool=None, projects=None, runner=None, now=None):
         except (ValueError, KeyError, OSError, subprocess.SubprocessError) as e:
             outcome = {"request_id": rid, "classification": "refused_request",
                        "detail": str(e)}
-            _write_result(rid, spool, "refused_request", "refused", 2, str(e), now)
+            # FINDING 1, DEFENSE IN DEPTH (post-Task-6 review): _execute already
+            # swallows its own final _write_result failure (see its own comment) so
+            # this branch should never see a request_id that already has a result on
+            # disk. But this is exactly the kind of guarantee that must be structural,
+            # not just "the one call site we checked happens to uphold it" — a future
+            # refactor of _execute's tail, or any other path that reaches here after
+            # already having written a result, must not get to overwrite a possibly
+            # TRUE result ("a mutation landed") with a possibly FALSE one
+            # ("refused_request" / exit_code=2, which asserts nothing was mutated).
+            # spool_lib.write_result performs an unconditional os.replace with no
+            # already-written guard of its own, so that check belongs here.
+            if os.path.isfile(S.result_path(rid, spool)):
+                print("broker: request %s already has a result on disk; NOT "
+                      "overwriting it with a refused_request derived from: %s"
+                      % (rid, e), file=sys.stderr)
+            else:
+                _write_result(rid, spool, "refused_request", "refused", 2, str(e), now)
         outcomes.append(outcome)
         _discard(path)
     return outcomes
@@ -397,6 +421,17 @@ DETAIL_BY_CLASSIFICATION = {
     "failed_unknown_exit": "the executor exited with an unrecognised status; treat the "
                            "account as possibly modified",
 }
+# FINDING 2 fix (post-Task-6 review): DETAIL_BY_CLASSIFICATION[classification] was a
+# raw subscript. It cannot KeyError today because CLASSIFICATION_BY_RC/UNKNOWN_RC only
+# ever produce classifications with a matching entry above — but if a future edit adds
+# an rc mapping without a matching detail entry, that KeyError would be caught by
+# drain()'s per-request except tuple (it includes KeyError — see that tuple's own
+# comment for why) and rendered as a governance-looking "refused_request", exactly
+# what R12 forbids: a broker defect must fail loudly, never be laundered into what
+# looks like a guard's decision. Made total with .get() and a hedged fallback instead,
+# so a future mapping gap can never raise here at all.
+_DETAIL_FALLBACK = ("no detail text is registered for this classification — treat the "
+                    "account as possibly modified and reconcile manually")
 
 
 def _run_subprocess(argv):
@@ -421,11 +456,13 @@ def _execute(req, spool, runner, now):
         return {"request_id": rid, "classification": "refused_approval", "detail": detail}
 
     argv = [MUTATE_SH, "--client", slug, "--changeset", cid]
+    timed_out = False
     try:
         rc, output = runner(argv)
     except subprocess.TimeoutExpired:
         # A timeout may have left mutations in flight. It is not a refusal.
         rc, output = 3, "executor exceeded %ds" % RUNNER_TIMEOUT_SECONDS
+        timed_out = True
 
     classification, status = CLASSIFICATION_BY_RC.get(rc, UNKNOWN_RC)
     # Host-side only. Never into the spool.
@@ -436,8 +473,46 @@ def _execute(req, spool, runner, now):
     except (ValueError, OSError) as e:
         print("broker: could not record outcome for %s: %s" % (cid, e), file=sys.stderr)
 
-    _write_result(rid, spool, classification, status, rc,
-                  DETAIL_BY_CLASSIFICATION[classification], now)
+    if timed_out:
+        # RIDER fix (post-Task-6 review): rc=3 from a real executor exit and rc=3
+        # synthesised here from a timeout both map to classification
+        # "failed_after_mutation", but they are not equally certain. The fixed detail
+        # text for that classification asserts AS FACT that "the apply failed AFTER
+        # at least one live mutation landed" — true for a genuine executor rc=3, but
+        # overclaiming for a timeout, where (per the comment two lines above) a
+        # mutation only MAY have been left in flight. classification/status/exit_code
+        # are UNCHANGED (still failed_after_mutation/failed/3, the correct
+        # fail-closed reading) — only the human-readable text is hedged, in the same
+        # style as UNKNOWN_RC's "treat the account as possibly modified".
+        detail = ("the executor exceeded its %ds timeout; a mutation MAY have been "
+                  "left in flight — treat the account as possibly modified and "
+                  "reconcile manually" % RUNNER_TIMEOUT_SECONDS)
+    else:
+        detail = DETAIL_BY_CLASSIFICATION.get(classification, _DETAIL_FALLBACK)
+
+    try:
+        _write_result(rid, spool, classification, status, rc, detail, now)
+    except OSError as e:
+        # FINDING 1 fix (post-Task-6 review): this write is the LAST thing _execute
+        # does, after the mutation may already have landed and after record_outcome
+        # has already run. If it raises (disk full, transient I/O, ...), letting it
+        # propagate hands the exception to drain()'s per-request except tuple, which
+        # would write a SECOND result for this request_id: classification
+        # "refused_request", status "refused", exit_code 2. Under spec §12, exit_code
+        # 2 is a GUARANTEE that nothing was mutated — a false guarantee here, exactly
+        # the mirror image of the false-success path this module already guards
+        # against, just in the refusal direction instead. Governance state is not at
+        # risk either way (the approval is already dead via reserve_approval, so no
+        # duplicate mutation is possible) — what is at risk is what an operator or a
+        # future agent reconciles the spool against. A MISSING result is honest: the
+        # spool client already treats absence as PENDING, which is recoverable. A
+        # WRONG result is not. So: log the failure and the payload that could not be
+        # written, to stderr, and swallow it here — this exception must never reach
+        # drain()'s except tuple.
+        print("broker: FAILED to write result for %s (classification=%s status=%s "
+              "exit_code=%d detail=%r): %s — the spool result is MISSING, not wrong; "
+              "reconcile from the governance store and this stderr line"
+              % (rid, classification, status, rc, detail, e), file=sys.stderr)
     return {"request_id": rid, "classification": classification, "exit_code": rc}
 
 

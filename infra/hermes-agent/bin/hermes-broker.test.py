@@ -494,6 +494,45 @@ class TestExecution(Base):
         with open(governance_lib.approval_path(SLUG, CID)) as f:
             self.assertEqual(json.load(f)["outcome"], "accepted_applied")
 
+    def test_a_failure_writing_the_final_result_does_not_launder_into_a_false_refusal(self):
+        # Post-Task-6 review FINDING 1. _execute's final _write_result is the LAST
+        # thing it does, after a mutation may already have landed and after
+        # record_outcome has already run. If THAT write fails (disk full, transient
+        # I/O), the pre-fix code let the OSError propagate straight into drain()'s
+        # per-request except tuple, which would then write a SECOND result for the
+        # same request_id: classification="refused_request", exit_code=2. Under spec
+        # §12, exit_code=2 GUARANTEES nothing was mutated — a false guarantee here,
+        # since rc=0 means the change-set WAS applied. This is the mirror image of the
+        # false-success case the brief already guarded against, just in the refusal
+        # direction. A missing result is honest (the client already treats absence as
+        # PENDING, which is recoverable); a wrong one is not.
+        real_write_result = B.S.write_result
+        calls = {"n": 0}
+
+        def flaky_write_result(request_id, payload, root=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("simulated disk-full on the first write_result call")
+            return real_write_result(request_id, payload, root)
+
+        B.S.write_result = flaky_write_result
+        try:
+            rid = self.file_request()
+            r = RecordingRunner(rc=0)
+            self.drain(r)                      # must not raise
+            # POSITIVE CONTROL: prove the runner actually ran — otherwise this test
+            # would pass against a broker that never executes anything.
+            self.assertEqual(len(r.calls), 1)
+        finally:
+            B.S.write_result = real_write_result
+
+        self.assertFalse(
+            os.path.isfile(S.result_path(rid, self.spool)),
+            "a failed final write must leave NO result on disk, never a false "
+            "refused_request standing in for a request that actually mutated")
+        with self.assertRaises(ValueError):
+            C.verify_approval(SLUG, CID, DIGEST, NOW)
+
 
 if __name__ == "__main__":
     unittest.main()
