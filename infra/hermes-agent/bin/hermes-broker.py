@@ -238,24 +238,6 @@ def drain(spool=None, projects=None, runner=None, now=None):
             outcome = {"request_id": rid, "classification": "refused_request",
                        "detail": str(e)}
             _write_result(rid, spool, "refused_request", "refused", 2, str(e), now)
-        except NotImplementedError as e:
-            # Task 5 leaves _execute (and _run_subprocess) stubbed; Task 6 fills them
-            # in. A request that reaches this point has ALREADY been accepted and
-            # burned in the seen-set by _process — C.append_seen runs strictly before
-            # _execute is called — so that side effect is real and correct and must
-            # stand even though execution itself could not happen yet. This is not a
-            # validation refusal, so it gets its own classification rather than being
-            # mislabeled "refused_request", and it is logged LOUDLY: once Task 6 lands,
-            # this branch should never be reachable again, and silence here would
-            # otherwise hide a broker that is quietly unable to execute anything.
-            outcome = {"request_id": rid, "classification": "refused_not_implemented",
-                       "detail": str(e)}
-            print("hermes-broker: %s for request %s (client %s) — Task 6's execution "
-                  "path is not installed yet; the request_id was already burned in "
-                  "the seen-set before this raised, so no replay of it is possible, "
-                  "but nothing was executed and no approval was reserved or consumed"
-                  % (e, rid, slug), file=sys.stderr)
-            _write_result(rid, spool, "refused_not_implemented", "refused", 2, str(e), now)
         outcomes.append(outcome)
         _discard(path)
     return outcomes
