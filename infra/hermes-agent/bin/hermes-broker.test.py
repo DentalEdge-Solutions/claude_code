@@ -160,6 +160,36 @@ class TestRefusalsNeverExecute(Base):
         self.assertEqual(r.calls, [])
         self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
 
+    def test_replay_is_refused_via_a_directly_seeded_seen_set_without_spawning(self):
+        # Independent of any accept-execute round trip: burns request_id via
+        # C.append_seen directly (exactly what _process does BEFORE calling _execute),
+        # then files a request carrying that same id. This must be refused as a replay
+        # purely from the seen-set check in _process, and must never reach the runner —
+        # provable even while _execute/_run_subprocess are still Task-6 stubs.
+        rid = str(__import__("uuid").uuid4())
+        C.append_seen(SLUG, rid, NOW)
+        self.file_request(request_id=rid)
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
+
+    def test_replay_via_seeded_seen_set_survives_deletion_of_the_whole_spool(self):
+        # The property that justifies putting the seen-set in the governance store
+        # rather than the spool, proven without depending on execution: seed the
+        # seen-set, delete the ENTIRE spool directory, then re-file the same id. It must
+        # still be refused as a replay — Hermes deleting the spool it owns must not
+        # re-admit a request_id the governance store has already burned.
+        rid = str(__import__("uuid").uuid4())
+        C.append_seen(SLUG, rid, NOW)
+        import shutil
+        shutil.rmtree(self.spool)
+        self.file_request(request_id=rid)
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
+
     def test_an_over_limit_client_is_refused_wholesale_until_its_queue_drains(self):
         # RULING R5: max_pending_requests is 2 in the fixture registry, but
         # pending_count is computed ONCE per drain, before any of the five requests are
@@ -190,6 +220,21 @@ class TestRefusalsNeverExecute(Base):
         r = RecordingRunner()
         self.drain(r)
         self.assertEqual(r.calls, [])
+
+    def test_daily_accepted_quota_is_refused_via_a_directly_seeded_seen_set(self):
+        # Independent of any accept-execute round trip: seed the seen-set with
+        # accepted_requests_per_client_day (3, in the fixture registry) entries dated
+        # "today" via C.append_seen directly, then file one more request. It must be
+        # refused as a quota violation purely from _accepted_today's read of the
+        # seen-set, and must never reach the runner — provable even while
+        # _execute/_run_subprocess are still Task-6 stubs.
+        for _ in range(3):
+            C.append_seen(SLUG, str(__import__("uuid").uuid4()), NOW)
+        rid = self.file_request()
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(rid)["classification"], "refused_quota")
 
     def test_symlinked_request_refuses_without_spawning(self):
         d = S.requests_dir(self.spool)
