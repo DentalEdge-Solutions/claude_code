@@ -8,7 +8,7 @@ is fail-closed on every field: unknown action types, unknown fields, non-digit
 ids, and control characters are all refusals, never coercions.
 See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 """
-import datetime, hashlib, json, os, re, sys
+import contextlib, datetime, fcntl, hashlib, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib
 import vault_lib
@@ -609,6 +609,45 @@ def _load_approval(slug, cid):
     return p, rec
 
 
+@contextlib.contextmanager
+def _approval_lock(slug, cid):
+    """Exclusive mutual-exclusion for the read-check-write in reserve_approval and
+    record_outcome, added in FIX ROUND 1 after review found the original
+    read-modify-write TOCTOU against itself.
+
+    Single-use approval is the property Task 4 exists to deliver, and this project's
+    canon says a guardrail secures a path rather than a capability: relying on a
+    caller (the broker, Task 5) to remember to take a lock elsewhere would make
+    single-use a POLICY someone else has to uphold, not a STRUCTURAL guarantee this
+    module makes true by construction. So this function defends itself instead.
+
+    Locks a SIDECAR file (governance_lib.approval_lock_path), never the approval
+    record itself. _atomic_write_json writes a .tmp file and os.replace()s it over
+    the destination; a lock held on the approval file's own fd would be a lock on the
+    OLD inode, and the file that lands after the rename carries no lock at all — the
+    mutual exclusion would be silently fictional. The sidecar's path never changes
+    across rewrites, so flock-ing it is real serialization.
+
+    This is a DIFFERENT file from the broker's future per-client lock at
+    control/.locks/<slug>.lock (Task 5) — do NOT "simplify" the two into one lock.
+    They protect different scopes (one approval record here; the whole
+    request/reserve/execute/record sequence there) and, because they never name the
+    same file, nested acquisition (broker lock held, then this one taken inside it)
+    can never deadlock against itself.
+    """
+    p = governance_lib.approval_lock_path(slug, cid)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    fd = os.open(p, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def reserve_approval(slug, cid, request_id, now):
     """Mark an approval consumed BEFORE the executor is invoked. Returns the record.
 
@@ -620,23 +659,24 @@ def reserve_approval(slug, cid, request_id, now):
     and applying costs one unusable approval, which a human clears by approving again.
     That is a strictly cheaper failure than a duplicate account mutation.
 
-    Concurrency note: this is a plain read-modify-write, NOT atomic against a second
-    concurrent writer — two overlapping calls could both read the record before either
-    writes "reserved_at" and both then \"succeed\". It relies entirely on the caller
-    (the broker, Task 5) holding a per-client advisory lock around the whole
-    request/reserve/execute/record sequence. That is an external guarantee this
-    function cannot see or verify — see task-4-report.md for the assessment of whether
-    that is adequate as written.
+    Concurrency: the entire read-check-write runs inside _approval_lock, an exclusive
+    flock on a sidecar file scoped to this (slug, cid). That makes single-use
+    self-enforcing — a second concurrent caller blocks until the first's lock is
+    released, then reads the now-reserved record and correctly refuses, regardless of
+    scheduling. (An earlier version of this function relied entirely on the broker's
+    future per-client advisory lock for this property; that was reviewed and rejected
+    as policy rather than structure — see task-4-report.md FIX ROUND 1.)
     """
-    p, rec = _load_approval(slug, cid)
-    if "reserved_at" in rec:
-        raise ValueError(
-            "approval for %r is already reserved (reserved_at=%s) — approvals are "
-            "single-use" % (cid, rec.get("reserved_at")))
-    rec["reserved_at"] = now.strftime(ISO)
-    rec["request_id"] = _require_str(request_id, "request_id")
-    _atomic_write_json(p, rec)
-    return rec
+    with _approval_lock(slug, cid):
+        p, rec = _load_approval(slug, cid)
+        if "reserved_at" in rec:
+            raise ValueError(
+                "approval for %r is already reserved (reserved_at=%s) — approvals are "
+                "single-use" % (cid, rec.get("reserved_at")))
+        rec["reserved_at"] = now.strftime(ISO)
+        rec["request_id"] = _require_str(request_id, "request_id")
+        _atomic_write_json(p, rec)
+        return rec
 
 
 def record_outcome(slug, cid, outcome, now):
@@ -651,16 +691,21 @@ def record_outcome(slug, cid, outcome, now):
     case) stays exactly as dead as one that completed: verify_approval refuses on
     reserved_at alone, never on outcome. So the crash costs an unusable approval, never
     a reusable one — the property spec §7 asks for.
+
+    Concurrency: runs inside the same _approval_lock as reserve_approval, scoped to
+    this (slug, cid), for the identical reason — the read-then-write here must not
+    race a concurrent reserve_approval or record_outcome on the same approval.
     """
-    p, rec = _load_approval(slug, cid)
-    if "reserved_at" not in rec:
-        raise ValueError(
-            f"approval {cid!r} has no reserved_at — refusing to record an outcome for "
-            "an apply that was never reserved; the reservation must precede execution")
-    rec["outcome"] = _require_str(outcome, "outcome")
-    rec["finished_at"] = now.strftime(ISO)
-    _atomic_write_json(p, rec)
-    return rec
+    with _approval_lock(slug, cid):
+        p, rec = _load_approval(slug, cid)
+        if "reserved_at" not in rec:
+            raise ValueError(
+                f"approval {cid!r} has no reserved_at — refusing to record an outcome for "
+                "an apply that was never reserved; the reservation must precede execution")
+        rec["outcome"] = _require_str(outcome, "outcome")
+        rec["finished_at"] = now.strftime(ISO)
+        _atomic_write_json(p, rec)
+        return rec
 
 
 def iter_log_records(slug):

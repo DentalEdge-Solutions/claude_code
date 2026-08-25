@@ -788,5 +788,76 @@ class TestReservation(unittest.TestCase):
             C.verify_approval("pilot-1", self.CID, self.DIGEST, NOW)
 
 
+import threading, time, unittest.mock
+
+class TestReservationConcurrency(unittest.TestCase):
+    """FIX ROUND 1: reserve_approval's read-check-write must be mutually exclusive
+    against ITSELF, not just against verify_approval. This proves it, by forcing two
+    concurrent attempts on the SAME approval to actually overlap."""
+    CID = "20260824-101500-abcdef01"
+    RID_A = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"
+    RID_B = "1111aaaa-2222-4bbb-8ccc-3333dddd4444"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        C.write_approval("pilot-1", self.CID, self.DIGEST, "operator", NOW, 24)
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_concurrent_reservations_are_mutually_exclusive(self):
+        # Widen the window between the read-check and the write completing, by
+        # slowing down the (real) write call. This does not change what
+        # reserve_approval does — only how long its write takes — but it makes the
+        # race deterministic to observe either way: WITH the lock, the second thread
+        # cannot even begin its read until the first's entire locked section
+        # (including this slow write) has finished, so it always sees the
+        # already-reserved record and refuses. WITHOUT the lock (see the mutation
+        # proof in task-4-report.md), both threads pass the read-check before either
+        # writes, and both "succeed" — which this test must catch.
+        real_write = C._atomic_write_json
+        calls = []
+
+        def slow_write(path, obj):
+            calls.append(path)
+            time.sleep(0.05)
+            return real_write(path, obj)
+
+        started = []
+        results = {}
+
+        def attempt(name, rid):
+            started.append(name)          # positive control: proves this thread ran
+            try:
+                results[name] = C.reserve_approval("pilot-1", self.CID, rid, NOW)
+            except ValueError as e:
+                results[name] = e
+
+        with unittest.mock.patch.object(C, "_atomic_write_json", slow_write):
+            t1 = threading.Thread(target=attempt, args=("a", self.RID_A))
+            t2 = threading.Thread(target=attempt, args=("b", self.RID_B))
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+
+        # Positive control: both threads must have actually run and recorded a
+        # result, or the assertions below would pass vacuously (e.g. if the second
+        # thread never got scheduled at all).
+        self.assertEqual(sorted(started), ["a", "b"])
+        self.assertEqual(len(results), 2, results)
+
+        successes = [v for v in results.values() if isinstance(v, dict)]
+        failures = [v for v in results.values() if isinstance(v, ValueError)]
+        self.assertEqual(len(successes), 1, results)
+        self.assertEqual(len(failures), 1, results)
+        self.assertIn("already reserved", str(failures[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

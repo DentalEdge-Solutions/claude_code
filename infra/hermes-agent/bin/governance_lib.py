@@ -67,3 +67,20 @@ def log_path(slug, root=None):
 
 def seen_path(slug, root=None):
     return os.path.join(_root(root), "seen", "%s.jsonl" % _slug(slug))
+
+
+def approval_lock_path(slug, cid, root=None):
+    """Sidecar mutual-exclusion file for reserve_approval/record_outcome.
+
+    Deliberately a SEPARATE file from approval_path(), never the approval record
+    itself: changeset_lib._atomic_write_json writes the record to a .tmp path and
+    os.replace()s it over the destination, so a lock held on the approval file's own
+    fd would be a lock on the OLD inode — the file that lands after the rename is a
+    different inode and carries no lock at all. This path's identity never changes
+    across rewrites of the approval record, so flock-ing it is real mutual exclusion.
+
+    Lives in approvals_dir(), i.e. inside the governance store the gateway container
+    does not mount and the executor mounts read-only — no container can take, hold,
+    or delete this lock.
+    """
+    return os.path.join(approvals_dir(slug, root), "%s.approval.lock" % _cid(cid))
