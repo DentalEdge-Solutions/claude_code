@@ -866,13 +866,28 @@ if __name__ == "__main__":
 Run: `cd infra/hermes-agent && python3 bin/hermes-syscall.test.py`
 Expected: `OK`, `Ran 11 tests`.
 
+> **Corrected 2026-08-24 during execution.** The original row here mutated the temp file's
+> dot-PREFIX and claimed that would expose a partial write to the broker. Measured: it does
+> not. The broker's scan filters on `FILENAME_RE`, which is anchored `\.json$`, so a
+> `.tmp`-suffixed temp never matches with or without the dot. The load-bearing protection is
+> the **temp+rename discipline itself**. Corrected twice: a second attempt retargeted the row at
+> `suffix=".tmp"` → `".json"`, and that is unkillable too — `tempfile.mkstemp` always inserts a
+> random 8-char infix, so `<uuid>.<random>.json` can never fullmatch a pattern demanding
+> exactly 36 characters before `.json`. **Measured, all four naming variants: no match.** The
+> honest statement is that this invariant is guaranteed JOINTLY by mkstemp's infix (stdlib,
+> not ours to break) and by writing to a temp at all (ours). The only realistic regression is
+> someone "simplifying" away the temp+rename, so that is what the mutation must be. The
+> dot-prefix is defence in depth (shell globs skip dotfiles). The test must prove the real invariant — that mid-write,
+> nothing in `requests/` matches `FILENAME_RE` — by patching `os.replace` to a no-op so the
+> temp survives long enough to be observed.
+
 - [ ] **Step 5: Mutation proof**
 
 | Edit `hermes-syscall.py` | Test that must turn RED |
 |---|---|
 | In `fetch`, return `EXIT_REFUSED` instead of `EXIT_PENDING` for a missing file | `test_missing_result_is_pending_not_refused` |
 | Append `" — retry later"` to the refusal text | `test_refusal_exits_two_and_is_not_rendered_as_retryable` |
-| `prefix=".%s." % request_id` → `prefix="%s." % request_id` | `test_no_partial_file_is_ever_visible_to_the_broker` |
+| In `submit`, drop the temp+rename entirely and write straight to the final path | `test_no_partial_file_is_ever_visible_to_the_broker` |
 | Add an `undo` subparser calling `submit` | `test_undo_is_not_a_subcommand` |
 
 Revert with `git checkout -- bin/hermes-syscall.py` after each.
