@@ -397,5 +397,103 @@ class TestPoisonedSpoolEntries(Base):
         self.assertNotIn(poison_name, os.listdir(d))
 
 
+class TestExecution(Base):
+    def test_reservation_is_written_before_the_runner_is_called(self):
+        # The ordering property from spec §7, asserted DIRECTLY: the runner inspects
+        # the approval record at the moment it is invoked. If reservation happened
+        # after execution, reserved_at would be absent here.
+        seen = {}
+
+        def runner(argv):
+            p = governance_lib.approval_path(SLUG, CID)
+            with open(p) as f:
+                seen["rec"] = json.load(f)
+            return 0, ""
+
+        self.file_request()
+        self.drain(runner)
+        self.assertIn("reserved_at", seen["rec"])
+
+    def test_a_failing_executor_still_leaves_the_approval_unusable(self):
+        # The crash case. An interrupted apply is not a reusable approval.
+        self.file_request()
+        self.drain(RecordingRunner(rc=3))
+        with self.assertRaises(ValueError):
+            C.verify_approval(SLUG, CID, DIGEST, NOW)
+
+    def test_exit_codes_are_not_collapsed(self):
+        # Deviation from the brief's literal test body, noted per R3/R7-adjacent
+        # transparency rather than silently patched: the shared REGISTRY_YAML fixture
+        # sets accepted_requests_per_client_day to 3, deliberately low so
+        # test_daily_accepted_quota_refuses_without_spawning (elsewhere in this file)
+        # can exercise it cheaply. C.append_seen — and so the daily "accepted" count —
+        # fires in _process for every request that clears classify(), regardless of
+        # what _execute/the runner later does with it; it is not gated on the exit
+        # code. Looping all four rc cases (0,1,2,3) against ONE client under that cap
+        # therefore hits refused_quota on the 4th iteration before the executor is
+        # even invoked, which would make this test assert something untrue about
+        # quota enforcement rather than about exit-code mapping (a different property,
+        # already covered by TestRefusalsNeverExecute). Uses a private copy of the
+        # registry with a higher cap so this test's four sequential accepted requests
+        # are about exit-code handling alone, and does not touch the shared fixture
+        # every other quota test still depends on.
+        registry = os.path.join(self.regdir, "projects-uncapped.yaml")
+        with open(self.registry) as f:
+            body = f.read()
+        with open(registry, "w") as f:
+            f.write(body.replace("accepted_requests_per_client_day: 3",
+                                 "accepted_requests_per_client_day: 100"))
+        cases = {0: ("accepted_applied", "applied"),
+                 1: ("refused_usage", "refused"),
+                 2: ("refused_preflight", "refused"),
+                 3: ("failed_after_mutation", "failed")}
+        for rc, (classification, status) in cases.items():
+            C.write_approval(SLUG, CID, DIGEST, "operator", NOW, 24)
+            rid = self.file_request()
+            B.drain(spool=self.spool, projects=registry, runner=RecordingRunner(rc=rc), now=NOW)
+            got = self.result_for(rid)
+            self.assertEqual(got["classification"], classification, "rc=%d" % rc)
+            self.assertEqual(got["status"], status, "rc=%d" % rc)
+            self.assertEqual(got["exit_code"], rc)
+
+    def test_an_unknown_exit_code_is_treated_as_failure_not_success(self):
+        rid = self.file_request()
+        self.drain(RecordingRunner(rc=42))
+        got = self.result_for(rid)
+        self.assertEqual(got["status"], "failed")
+        self.assertNotEqual(got["classification"], "accepted_applied")
+
+    def test_executor_output_never_reaches_the_spool_result(self):
+        # §17.3: per-action resource names must not reach Hermes. The spool result is
+        # Hermes-readable, so the executor's stdout must not be copied into it.
+        marker = "CAMPAIGN-RESOURCE-NAME-MARKER-9f8e7d"
+        rid = self.file_request()
+        self.drain(RecordingRunner(rc=0, stdout="applied 3 actions %s" % marker))
+        blob = json.dumps(self.result_for(rid))
+        self.assertNotIn(marker, blob)
+
+    def test_a_missing_approval_refuses_without_calling_the_runner(self):
+        os.unlink(governance_lib.approval_path(SLUG, CID))
+        rid = self.file_request()
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(rid)["classification"], "refused_approval")
+
+    def test_an_already_reserved_approval_refuses_without_calling_the_runner(self):
+        C.reserve_approval(SLUG, CID, "1111aaaa-2222-4bbb-8ccc-3333dddd4444", NOW)
+        rid = self.file_request()
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(rid)["classification"], "refused_approval")
+
+    def test_the_outcome_is_recorded_on_the_approval(self):
+        self.file_request()
+        self.drain(RecordingRunner(rc=0))
+        with open(governance_lib.approval_path(SLUG, CID)) as f:
+            self.assertEqual(json.load(f)["outcome"], "accepted_applied")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -303,25 +303,40 @@ def drain(spool=None, projects=None, runner=None, now=None):
     # PER-REQUEST ISOLATION (Finding 3, FIX ROUND 2). This try/except is what stops one
     # bad request from starving every OTHER request already queued in the same batch:
     # an exception here is caught, turned into a refusal for THIS request_id only, and
-    # the for-loop moves on to the next name. That isolation deliberately does NOT
-    # extend to NotImplementedError — Task 5 leaves _execute/_run_subprocess stubbed to
+    # the for-loop moves on to the next name. Through Task 5 that isolation deliberately
+    # did NOT extend to NotImplementedError — _execute/_run_subprocess were stubbed to
     # raise it on purpose (RULING R12: "not built yet" must propagate loudly, not be
-    # laundered into a refusal that looks like a guard decision), so today an accepted
-    # request DOES still abort the remainder of this loop when it reaches the stub.
-    # That is an accepted, temporary consequence of Task 5's scope, not a design goal.
-    # TASK 6: when _execute stops being a stub, whatever exception types a real
-    # subprocess invocation and its bookkeeping can actually raise MUST be added to
-    # this except clause (or handled inside _execute itself) — otherwise a single
-    # unlucky live request (a timeout, a transient I/O error, an unexpected exit
-    # shape) reintroduces exactly the batch-starvation failure mode this comment is
-    # warning against, just with a real subprocess involved instead of a stub.
+    # laundered into a refusal that looks like a guard decision).
+    #
+    # TASK 6 REVISIT, now that _execute is real. Enumerated every exception a genuine
+    # call can raise, rather than guessing:
+    #   * subprocess.TimeoutExpired — the one exception _run_subprocess's own call can
+    #     raise besides OSError — is already caught INSIDE _execute and converted to
+    #     rc=3 ("may have mutated, treat as failed"). It never reaches this frame.
+    #   * A failure to even launch the executor (missing script, exec permission,
+    #     ENOENT/EACCES, ...) surfaces as OSError (FileNotFoundError/PermissionError
+    #     are subclasses) — already in the tuple below.
+    #   * C.reserve_approval and C.record_outcome raise only ValueError or OSError, and
+    #     _execute already catches both around EACH call individually, so neither
+    #     propagates here either.
+    #   * subprocess.SubprocessError is added explicitly, defensively: it is the base
+    #     class for the executor-invocation family (TimeoutExpired included) and, like
+    #     OSError from a failed exec, describes the external process misbehaving, not
+    #     a bug in this broker — the same category of "operational fault, not a
+    #     programming error" that justifies OSError's presence here.
+    # Deliberately NOT added: NotImplementedError, or a bare Exception/RuntimeError/
+    # TypeError/AttributeError catch-all. Those signal a bug in the broker's own code
+    # (a stub still standing, a typo, a wrong argument shape) rather than a guard
+    # saying "no" or an external process misbehaving, and R12's point survives Task 6
+    # unchanged: a programming error must still fail loudly, never be rendered as a
+    # governance refusal.
     for name, req in parsed:
         rid, slug, cid = req["request_id"], req["client"], req["changeset"]
         path = os.path.join(S.requests_dir(spool), name)
         try:
             with _ClientLock(slug):
                 outcome = _process(req, spool, projects, pending[slug], runner, now)
-        except (ValueError, KeyError, OSError) as e:
+        except (ValueError, KeyError, OSError, subprocess.SubprocessError) as e:
             outcome = {"request_id": rid, "classification": "refused_request",
                        "detail": str(e)}
             _write_result(rid, spool, "refused_request", "refused", 2, str(e), now)
@@ -355,12 +370,75 @@ def _process(req, spool, projects, pending_count, runner, now):
     return _execute(req, spool, runner, now)
 
 
+# Exit semantics are load-bearing and must not be collapsed (spec §12):
+#   0 success · 1 usage · 2 pre-flight refusal (NOTHING was mutated) · 3 failure after
+#   at least one live mutation landed.
+# An unrecognised code is treated as a FAILURE, never as a success: the only safe
+# reading of "the executor did something we do not understand" is that it may have
+# touched the account.
+CLASSIFICATION_BY_RC = {
+    0: ("accepted_applied", "applied"),
+    1: ("refused_usage", "refused"),
+    2: ("refused_preflight", "refused"),
+    3: ("failed_after_mutation", "failed"),
+}
+UNKNOWN_RC = ("failed_unknown_exit", "failed")
+
+# Fixed, non-identifying detail strings. The executor's stdout is DELIBERATELY not
+# copied into the spool result: the spool is Hermes-readable, and per-action resource
+# names are exactly what §17.3 keeps out of Hermes's reach. The full executor output
+# goes to the broker's own stderr, which is host-side and lands in the journal.
+DETAIL_BY_CLASSIFICATION = {
+    "accepted_applied": "the change-set was applied",
+    "refused_usage": "the executor refused with a usage error; nothing was mutated",
+    "refused_preflight": "a guard refused before any mutation; nothing was mutated",
+    "failed_after_mutation": "the apply failed AFTER at least one live mutation landed "
+                             "— an operator must reconcile this run",
+    "failed_unknown_exit": "the executor exited with an unrecognised status; treat the "
+                           "account as possibly modified",
+}
+
+
 def _run_subprocess(argv):
-    raise NotImplementedError("Task 6")
+    """Run the mutation wrapper. argv is a LIST — there is no shell here, and no
+    request field is ever part of the program name or an option name."""
+    p = subprocess.run(argv, capture_output=True, text=True,
+                       timeout=RUNNER_TIMEOUT_SECONDS)
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
 def _execute(req, spool, runner, now):
-    raise NotImplementedError("Task 6")
+    rid, slug, cid = req["request_id"], req["client"], req["changeset"]
+
+    # RESERVE FIRST. Not after success — a crash between the mutations landing and the
+    # mark being written would otherwise leave the approval live and the same
+    # change-set applicable a second time (spec §7).
+    try:
+        C.reserve_approval(slug, cid, rid, now)
+    except (ValueError, OSError) as e:
+        detail = "approval unavailable: %s" % e
+        _write_result(rid, spool, "refused_approval", "refused", 2, detail, now)
+        return {"request_id": rid, "classification": "refused_approval", "detail": detail}
+
+    argv = [MUTATE_SH, "--client", slug, "--changeset", cid]
+    try:
+        rc, output = runner(argv)
+    except subprocess.TimeoutExpired:
+        # A timeout may have left mutations in flight. It is not a refusal.
+        rc, output = 3, "executor exceeded %ds" % RUNNER_TIMEOUT_SECONDS
+
+    classification, status = CLASSIFICATION_BY_RC.get(rc, UNKNOWN_RC)
+    # Host-side only. Never into the spool.
+    print("broker: request %s client %s changeset %s rc=%d\n%s"
+          % (rid, slug, cid, rc, output), file=sys.stderr)
+    try:
+        C.record_outcome(slug, cid, classification, now)
+    except (ValueError, OSError) as e:
+        print("broker: could not record outcome for %s: %s" % (cid, e), file=sys.stderr)
+
+    _write_result(rid, spool, classification, status, rc,
+                  DETAIL_BY_CLASSIFICATION[classification], now)
+    return {"request_id": rid, "classification": classification, "exit_code": rc}
 
 
 def main(argv=None):
