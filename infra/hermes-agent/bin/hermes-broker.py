@@ -29,7 +29,7 @@ path (control/.locks/<slug>.lock) is a DIFFERENT FILE from Task 4's sidecar
 (approvals/<slug>/<cid>.approval.lock) — nesting them cannot deadlock, and they must
 not be merged into one lock; see changeset_lib._approval_lock's docstring.
 """
-import argparse, collections, datetime, errno, fcntl, os, subprocess, sys, time
+import argparse, collections, datetime, fcntl, os, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
@@ -87,20 +87,25 @@ class _ClientLock:
 
 def _accepted_today(slug, now):
     """How many request_ids were accepted for this client today, read from the
-    governance-store seen-set. Fail-closed: an unreadable seen-set raises."""
-    p = governance_lib.seen_path(slug)
-    if not os.path.exists(p):
-        return 0
+    governance-store seen-set.
+
+    FIX ROUND 2 (Finding 2): this used to count by substring-matching raw lines for
+    '"seen_at": "<day>' and caught only OSError — so a seen-set whose "seen_at" field
+    was mangled, missing, or moved by a re-serialization simply failed to match the
+    substring and was silently counted as zero, while the docstring claimed "fail
+    closed" and `seen_contains` on the exact same file correctly raised on the same
+    corruption. Two readers of one file, two failure semantics, on the axis that
+    bounds how much work a client can cause. Now reads via
+    changeset_lib.iter_seen_records — the SAME parser seen_contains uses — so this
+    cannot drift out of sync with it again. FAIL-CLOSED: an unreadable seen-set, or
+    any line that is not a well-formed {request_id, seen_at} record, raises
+    ValueError (from iter_seen_records) rather than being skipped or undercounted.
+    """
     day = _utcday(now)
     n = 0
-    try:
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and ('"seen_at": "%s' % day) in line:
-                    n += 1
-    except OSError as e:
-        raise ValueError("unreadable seen-set for %r: %s" % (slug, e))
+    for rec in C.iter_seen_records(slug):
+        if rec["seen_at"].startswith(day):
+            n += 1
     return n
 
 
@@ -149,21 +154,88 @@ def _write_result(rid, spool, classification, status, exit_code, detail, now):
 
 
 def _discard(path):
+    """Remove a processed spool entry. Must never raise: a single poisoned or
+    already-vanished entry must never crash the drain and must never block any other
+    request in the same batch.
+
+    FIX ROUND 2 (Finding 1, CRITICAL): Hermes can `mkdir` a UUID-shaped name in
+    requests/ — `_scan`'s FILENAME_RE only checks the NAME shape, and `_parse_all`
+    correctly refuses it as non-regular, but a bare `os.unlink()` on a directory
+    raises (EISDIR on Linux, observed as a bare PermissionError on macOS), and that
+    exception used to propagate straight out of drain() uncaught. Because the
+    directory was never removed, `_scan` saw it again on the NEXT drain and every
+    drain thereafter died the identical way: one `mkdir` from the exact actor this
+    module's own docstring names as hostile permanently bricked the governed
+    mutation rail, starving every other client's queued requests in the same and
+    every subsequent pass.
+
+    Three-step fallback, each step only tried if the previous one failed:
+      1. os.unlink — the fast, common case. FileNotFoundError (already gone, e.g. a
+         concurrent cleanup or a path replaced out from under us between scan and
+         delete) is success, not an error: something else already resolved it.
+      2. If unlink fails for any other reason — it is a directory, or a permission
+         quirk we cannot otherwise explain — QUARANTINE it: os.replace() it into
+         requests/.quarantine/, a location _scan never looks at, under a
+         collision-proof name. This is chosen over recursively deleting whatever the
+         entry is (which could itself be adversarially deep or surprising — this is
+         hostile-input-handling code and should not recurse into untrusted structure)
+         and over leaving it in requests/ (which would make _scan find it again on
+         every future pass, forever re-triggering the same rejection AND the same
+         failing delete attempt — unbounded repeated "new work" and unbounded stderr
+         noise on every single drain from here on, which is only a slower-motion
+         version of the same permanent stall).
+      3. If even the quarantine move fails (e.g. the entry was swapped again, mid-move,
+         for something else entirely), log once to stderr and give up on this one
+         entry. The drain must survive this by moving on, not by looping.
+    """
     try:
         os.unlink(path)
+        return
+    except FileNotFoundError:
+        return                          # already gone — not this function's problem
+    except OSError:
+        pass                            # not a plain deletable file; fall through
+
+    try:
+        qdir = os.path.join(os.path.dirname(path), ".quarantine")
+        os.makedirs(qdir, exist_ok=True)
+        dest = os.path.join(qdir, "%s.%d.%d" % (os.path.basename(path),
+                                                 time.time_ns(), os.getpid()))
+        os.replace(path, dest)
     except OSError as e:
-        if e.errno != errno.ENOENT:
-            raise
+        print("hermes-broker: could not remove or quarantine %s (%s) — leaving it in "
+              "place; it may be re-scanned and re-rejected on a future drain"
+              % (path, e), file=sys.stderr)
 
 
 def _scan(spool):
     """Return (names, overflow). Only names matching the request-file pattern; a
-    dot-prefixed temp file from a half-written request cannot match."""
+    dot-prefixed temp file from a half-written request cannot match.
+
+    FIX ROUND 2 (Finding 4): previously did `sorted(os.listdir(d) if FILENAME_RE...)`,
+    which materializes and regex-filters the ENTIRE directory before the
+    MAX_SPOOL_FILES slice is ever applied — so the stated purpose of the cap ("the
+    directory scan itself must not become the denial of service") was only half
+    delivered: an extreme flood still paid the full listdir + regex + sort cost every
+    single drain, cap or no cap. Uses os.scandir instead, which yields entries
+    lazily, and breaks out as soon as MAX_SPOOL_FILES + 1 MATCHING names have been
+    seen — at that point we already know this drain will refuse everything on
+    overflow (see drain()), so which exact files beyond the cap were present is
+    irrelevant and not worth enumerating. Below the cap (the overwhelmingly common
+    case), behaviour is identical to before: every matching name, sorted.
+    """
     d = S.requests_dir(spool)
     if not os.path.isdir(d):
         return [], False
-    names = sorted(n for n in os.listdir(d) if S.FILENAME_RE.fullmatch(n))
-    return names[:MAX_SPOOL_FILES], len(names) > MAX_SPOOL_FILES
+    names = []
+    with os.scandir(d) as it:
+        for entry in it:
+            if not S.FILENAME_RE.fullmatch(entry.name):
+                continue
+            names.append(entry.name)
+            if len(names) > MAX_SPOOL_FILES:
+                return [], True                # already over the cap; stop looking
+    return sorted(names), False
 
 
 def _parse_all(spool, names):
@@ -228,6 +300,21 @@ def drain(spool=None, projects=None, runner=None, now=None):
 
     pending = collections.Counter(req["client"] for _, req in parsed)
 
+    # PER-REQUEST ISOLATION (Finding 3, FIX ROUND 2). This try/except is what stops one
+    # bad request from starving every OTHER request already queued in the same batch:
+    # an exception here is caught, turned into a refusal for THIS request_id only, and
+    # the for-loop moves on to the next name. That isolation deliberately does NOT
+    # extend to NotImplementedError — Task 5 leaves _execute/_run_subprocess stubbed to
+    # raise it on purpose (RULING R12: "not built yet" must propagate loudly, not be
+    # laundered into a refusal that looks like a guard decision), so today an accepted
+    # request DOES still abort the remainder of this loop when it reaches the stub.
+    # That is an accepted, temporary consequence of Task 5's scope, not a design goal.
+    # TASK 6: when _execute stops being a stub, whatever exception types a real
+    # subprocess invocation and its bookkeeping can actually raise MUST be added to
+    # this except clause (or handled inside _execute itself) — otherwise a single
+    # unlucky live request (a timeout, a transient I/O error, an unexpected exit
+    # shape) reintroduces exactly the batch-starvation failure mode this comment is
+    # warning against, just with a real subprocess involved instead of a stub.
     for name, req in parsed:
         rid, slug, cid = req["request_id"], req["client"], req["changeset"]
         path = os.path.join(S.requests_dir(spool), name)

@@ -282,6 +282,34 @@ class TestRefusalsNeverExecute(Base):
                          "a half-written temp artifact must be left untouched, not discarded")
 
 
+class TestAcceptedTodayFailsClosed(Base):
+    """FIX ROUND 2 (Finding 2, Important). _accepted_today's docstring claimed
+    "fail-closed: an unreadable seen-set raises", but it counted by substring-matching
+    raw lines and caught only OSError — so a seen-set corrupted in a way that mangles
+    or drops the "seen_at" field silently undercounted (fail-OPEN) instead, while
+    seen_contains on the SAME file correctly raised. Now both share
+    changeset_lib.iter_seen_records, so they cannot drift into different failure
+    semantics for the same file again.
+    """
+
+    def test_a_corrupt_seen_set_raises_rather_than_undercounting(self):
+        # Valid JSON, but missing "seen_at" — exactly the field _accepted_today needs
+        # to decide whether a record counts as "today". The old implementation would
+        # simply fail to match the substring and count this as zero.
+        p = governance_lib.seen_path(SLUG)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(json.dumps({"request_id": str(__import__("uuid").uuid4())}) + "\n")
+        with self.assertRaises(ValueError):
+            B._accepted_today(SLUG, NOW)
+
+    def test_control_an_intact_seen_set_counts_correctly_without_raising(self):
+        # The positive control for the refusal above.
+        for _ in range(2):
+            C.append_seen(SLUG, str(__import__("uuid").uuid4()), NOW)
+        self.assertEqual(B._accepted_today(SLUG, NOW), 2)
+
+
 class TestNoInterpolation(Base):
     def test_the_runner_receives_an_argv_list_of_validated_identifiers_only(self):
         rid = self.file_request()
@@ -309,7 +337,8 @@ class TestGlobalCeiling(Base):
     def test_an_absurd_number_of_request_files_is_refused_wholesale(self):
         d = S.requests_dir(self.spool)
         os.makedirs(d, exist_ok=True)
-        for i in range(B.MAX_SPOOL_FILES + 5):
+        n = B.MAX_SPOOL_FILES + 5
+        for i in range(n):
             with open(os.path.join(d, "%036d.json" % i), "w") as f:
                 f.write("{}")
         r = RecordingRunner()
@@ -317,6 +346,55 @@ class TestGlobalCeiling(Base):
         self.assertEqual(r.calls, [])
         self.assertTrue(any(o.get("classification") == "refused_spool_overflow"
                             for o in out))
+        # FIX ROUND 2 (Finding 5): R6 says the flooded files are deliberately NOT
+        # discarded — asserted only in a comment until now. Prove it: every one of the
+        # flood's files must still be sitting in requests/ after the refusal, so a
+        # human (or a later drain, once the flood is understood) can still find them.
+        self.assertEqual(len(os.listdir(d)), n,
+                          "spool-overflow refusal must not discard the flooded files")
+
+
+class TestPoisonedSpoolEntries(Base):
+    """FIX ROUND 2 (Finding 1, CRITICAL). Hermes can `mkdir` a UUID-shaped name in
+    requests/ to defeat a scanner that only checks NAME shape, not file TYPE. _scan
+    admits it; _parse_all correctly refuses it as non-regular; but a naive _discard
+    doing a bare os.unlink() on a directory raises — uncaught — straight out of
+    drain(). Because the un-removable directory is never cleared, EVERY subsequent
+    drain died the identical way: one mkdir from exactly the actor this module's own
+    docstring names as hostile permanently bricked the governed mutation rail, and
+    starved every other client's requests queued in the same pass.
+    """
+
+    def test_a_poisoned_directory_does_not_crash_the_drain_or_block_other_requests(self):
+        d = S.requests_dir(self.spool)
+        os.makedirs(d, exist_ok=True)
+        poison_name = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.json"
+        os.mkdir(os.path.join(d, poison_name))
+
+        # THE POSITIVE CONTROL: without asserting some OTHER, genuinely valid request
+        # in the SAME batch is actually processed, this test would only prove nothing
+        # crashed — not that the poisoned entry failed to block anyone else. Deliberately
+        # a replay (seen-set seeded directly), not a fresh accept: Task 5 has no working
+        # _execute yet (RULING R12 — the stub must raise, not be swallowed), so a fresh
+        # accept would itself raise NotImplementedError and this test could not tell
+        # that failure apart from the bug under test.
+        other_rid = str(__import__("uuid").uuid4())
+        C.append_seen(SLUG, other_rid, NOW)
+        self.file_request(request_id=other_rid)
+
+        r = RecordingRunner()
+        out = self.drain(r)                              # must not raise
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(other_rid)["classification"], "refused_replay")
+        self.assertNotIn(poison_name, os.listdir(d),
+                          "the poisoned directory must be moved out of requests/, not "
+                          "left for every future drain to re-discover and re-reject")
+
+        # A second drain must not repeat the crash, and must not find the poisoned
+        # entry sitting in requests/ demanding another look — it must not be retried
+        # forever as new work.
+        out2 = self.drain(RecordingRunner())              # must not raise
+        self.assertNotIn(poison_name, os.listdir(d))
 
 
 if __name__ == "__main__":

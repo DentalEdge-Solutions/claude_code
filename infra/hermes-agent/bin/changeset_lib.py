@@ -582,19 +582,31 @@ def append_seen(slug, request_id, now):
         os.close(dfd)
 
 
-def seen_contains(slug, request_id):
-    """True when this request_id has already been accepted for this client.
+def iter_seen_records(slug):
+    """Yield each validated {request_id, seen_at} record from the seen-set, in file
+    order. THE single reader of seen/<slug>.jsonl.
+
+    Added in Task 5 FIX ROUND 2: seen_contains (below) and hermes-broker.py's
+    _accepted_today both need to read this same file, and having each parse it with
+    its own rules is exactly how one of them quietly drifts fail-open — which is what
+    happened. _accepted_today's original implementation counted lines by a raw
+    substring match and caught only OSError, so a seen-set with a mangled or missing
+    "seen_at" field silently undercounted instead of raising, while seen_contains's
+    JSON parse on the SAME file correctly refused. Two readers, two failure
+    semantics, on the axis that bounds how much work a client can cause. Both callers
+    now share this one generator instead.
 
     FAIL-CLOSED on every read error: an unreadable file, a directory sitting where the
-    file should be, or a line that fails to parse as a JSON object with a request_id
-    all RAISE rather than returning False. Returning False here would silently admit
-    every replay for this client — the exact same failure shape as an unreadable daily
-    cap being read as "no usage yet" instead of refused (see read_spool_quotas).
+    file should be, or a line that is not a JSON object carrying a string
+    "request_id" AND a string "seen_at" all RAISE ValueError rather than being
+    skipped or silently treated as absent. Returning nothing here would silently admit
+    every replay for this client and silently undercount every daily quota — the exact
+    same failure shape as an unreadable cap being read as "no usage yet" instead of
+    refused (see read_spool_quotas).
     """
-    request_id = _require_str(request_id, "request_id")
     p = governance_lib.seen_path(slug)
     if not os.path.exists(p):
-        return False                       # nothing has ever been recorded for this client
+        return                              # nothing has ever been recorded for this client
     try:
         with open(p, encoding="utf-8") as f:
             for lineno, line in enumerate(f, 1):
@@ -602,14 +614,27 @@ def seen_contains(slug, request_id):
                 if not line:
                     continue
                 rec = json.loads(line)
-                if not isinstance(rec, dict) or "request_id" not in rec:
+                if (not isinstance(rec, dict)
+                        or not isinstance(rec.get("request_id"), str)
+                        or not isinstance(rec.get("seen_at"), str)):
                     raise ValueError(f"seen-set {p} line {lineno} is malformed")
-                if rec["request_id"] == request_id:
-                    return True
+                yield rec
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
         raise ValueError(
             f"unreadable seen-set for {slug!r} ({e}) — refusing rather than treating "
             "every request_id as unseen") from e
+
+
+def seen_contains(slug, request_id):
+    """True when this request_id has already been accepted for this client.
+
+    FAIL-CLOSED on every read error — see iter_seen_records, the shared parser this
+    now delegates to.
+    """
+    request_id = _require_str(request_id, "request_id")
+    for rec in iter_seen_records(slug):
+        if rec["request_id"] == request_id:
+            return True
     return False
 
 
