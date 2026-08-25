@@ -69,6 +69,23 @@ def seen_path(slug, root=None):
     return os.path.join(_root(root), "seen", "%s.jsonl" % _slug(slug))
 
 
+def lock_path(slug, root=None):
+    """Per-client advisory lock for the broker. Lives under control/, which is mounted
+    :ro into the executor and not mounted at all into the gateway — so no container can
+    take, hold, or delete it. A lock in the spool would be a lock the thing being
+    serialised can remove.
+
+    This is DEFENSE IN DEPTH and a drain-serialisation mechanism, not the guarantee of
+    single-use approval — Task 4's changeset_lib.reserve_approval/record_outcome take
+    their OWN flock on a per-approval sidecar (governance_lib.approval_lock_path),
+    which makes single-use self-enforcing regardless of what holds this lock or
+    whether it is held at all. This lock and that one are DIFFERENT FILES
+    (control/.locks/<slug>.lock here vs. approvals/<slug>/<cid>.approval.lock there),
+    so nesting them can never deadlock — but do not conflate what each one proves.
+    """
+    return os.path.join(_root(root), "control", ".locks", "%s.lock" % _slug(slug))
+
+
 def approval_lock_path(slug, cid, root=None):
     """Sidecar mutual-exclusion file for reserve_approval/record_outcome.
 

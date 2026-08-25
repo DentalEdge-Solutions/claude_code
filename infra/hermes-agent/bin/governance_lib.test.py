@@ -66,5 +66,19 @@ class TestValidation(unittest.TestCase):
             G.log_path("acme-dental\n", "/tmp/gov")
 
 
+class TestLockPath(unittest.TestCase):
+    def test_lock_path(self):
+        self.assertEqual(G.lock_path("acme-dental", "/tmp/gov"),
+                         "/tmp/gov/control/.locks/acme-dental.lock")
+
+    def test_lock_path_is_not_in_the_spool(self):
+        self.assertNotIn("spool", G.lock_path("acme-dental", "/tmp/gov"))
+
+    def test_bad_slug_refuses(self):
+        for bad in ("../etc", "UPPER", "acme-dental\n", ""):
+            with self.assertRaises(ValueError):
+                G.lock_path(bad, "/tmp/gov")
+
+
 if __name__ == "__main__":
     unittest.main()
