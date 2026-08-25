@@ -927,13 +927,21 @@ class TestWriteApprovalConcurrency(unittest.TestCase):
 
 
 class TestFreshApprovalsDirectory(unittest.TestCase):
-    """FIX ROUND 2: the ordering that matters. _approval_lock's sidecar file lives
-    inside approvals_dir(slug), so the directory MUST exist before the lock is taken.
-    Every other TestApproval-family fixture in this file has already caused that
-    directory to exist by the time write_approval runs (via an earlier write_approval
-    or write_snapshot call in the same test), so nothing before this round actually
-    exercised the very first approval ever written for a brand-new client -- the one
-    case where the directory is genuinely absent going in."""
+    """FIX ROUND 2: covers the brand-new-client case, where the approvals directory
+    _approval_lock's sidecar file lives inside does not exist yet. Every other
+    TestApproval-family fixture in this file has already caused that directory to
+    exist by the time write_approval runs (via an earlier write_approval or
+    write_snapshot call in the same test), so nothing before this round actually
+    exercised the very first approval ever written for a client.
+
+    NOTE, corrected after mutation testing: this does NOT prove write_approval's
+    makedirs-then-lock ordering is load-bearing. _approval_lock defensively creates
+    its own sidecar's parent directory before opening it, so this test passes
+    regardless of whether write_approval's own makedirs runs before or after the
+    lock is taken (verified: moving the lock above the makedirs did not turn this
+    test red — see task-4-report.md FIX ROUND 2). What this test actually proves is
+    the narrower, still-true thing: a brand-new client's first approval succeeds and
+    is readable back."""
     CID = "20260824-101500-abcdef01"
     DIGEST = "a" * 64
 

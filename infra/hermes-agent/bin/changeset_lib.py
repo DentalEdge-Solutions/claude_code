@@ -447,15 +447,21 @@ def write_approval(slug, cid, digest, operator, now, ttl_hours):
     WRITES approvals, in a plan about approval-record integrity, is not something to
     leave for later just because it predates this branch.
 
-    ORDERING IS LOAD-BEARING HERE TOO, the other direction from reserve_approval: the
-    directory _approval_lock's sidecar file lives in MUST be created before the lock
-    is taken, not after — the sidecar can't be opened (even for creation) in a
-    directory that doesn't exist yet, and the very first approval ever written for a
-    brand-new client is exactly the case with no pre-existing approvals directory. So
-    this function keeps the os.makedirs call first and takes the lock only around the
-    write that follows it. See TestFreshApprovalsDirectory for the case this ordering
-    protects and FIX ROUND 2's mutation proof (task-4-report.md) for what happens when
-    the ordering is inverted.
+    ORDERING NOTE, checked and corrected during FIX ROUND 2's mutation proof: the
+    directory _approval_lock's sidecar file lives in must exist before that sidecar
+    can be opened, and the first-ever approval for a brand-new client is exactly the
+    case where it doesn't yet. This function keeps the explicit os.makedirs call
+    first for that reason and for clarity about who is responsible for the
+    directory — but it is NOT the only thing making that case safe: _approval_lock
+    itself defensively creates the sidecar's parent directory before opening it (see
+    its docstring), so moving this makedirs below the `with _approval_lock(...)`
+    line does not reproduce the failure the original version of this docstring
+    claimed it would. That claim was tested (mutation: move the lock above this
+    makedirs) and did NOT go red — TestFreshApprovalsDirectory passed either way,
+    because _approval_lock's own defense covers it regardless of caller ordering.
+    Recorded here, not smoothed over, per task-4-report.md FIX ROUND 2: the ordering
+    kept below is good practice and matches which function is nominally responsible
+    for the directory, not a load-bearing requirement.
     """
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
