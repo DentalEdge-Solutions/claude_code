@@ -515,6 +515,154 @@ def append_log(slug, rec):
         os.close(dfd)
 
 
+# --- replay protection -------------------------------------------------------------
+# The seen-set lives in the GOVERNANCE STORE (governance_lib.seen_path), never in the
+# spool. That is the whole point of putting it here rather than beside the request the
+# gateway already writes: the spool is the one tree Hermes can write to, and a replay
+# record Hermes can delete is not replay protection at all (spec §8). The one-shot
+# executor container mounts seen/ read-write for exactly this file, alongside log/ —
+# both are host-owned append targets the executor updates but cannot repudiate, because
+# it never has write access to approvals/, control/, or registry/.
+
+def append_seen(slug, request_id, now):
+    """Record an accepted request_id, fsynced before returning.
+
+    This is written BEFORE the broker acts on the request (mirrors reserve_approval
+    below, and for the identical reason). If the process dies between this append and
+    whatever it authorises, the request_id is already burned and a resubmission is
+    refused as a replay — which costs the caller a fresh request_id, whereas the
+    opposite ordering (append after acting) would let a crashed-and-retried request
+    through twice.
+    """
+    request_id = _require_str(request_id, "request_id")
+    p = governance_lib.seen_path(slug)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    rec = {"request_id": request_id, "seen_at": now.strftime(ISO)}
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    # fsync the DIRECTORY too — same reasoning as append_log: on the first append the
+    # file is newly created, and fsyncing its contents does not persist the directory
+    # entry that names it. Losing that entry loses the whole replay history, which
+    # seen_contains below would then read back as a legitimate "never seen".
+    dfd = os.open(os.path.dirname(p), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def seen_contains(slug, request_id):
+    """True when this request_id has already been accepted for this client.
+
+    FAIL-CLOSED on every read error: an unreadable file, a directory sitting where the
+    file should be, or a line that fails to parse as a JSON object with a request_id
+    all RAISE rather than returning False. Returning False here would silently admit
+    every replay for this client — the exact same failure shape as an unreadable daily
+    cap being read as "no usage yet" instead of refused (see read_spool_quotas).
+    """
+    request_id = _require_str(request_id, "request_id")
+    p = governance_lib.seen_path(slug)
+    if not os.path.exists(p):
+        return False                       # nothing has ever been recorded for this client
+    try:
+        with open(p, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if not isinstance(rec, dict) or "request_id" not in rec:
+                    raise ValueError(f"seen-set {p} line {lineno} is malformed")
+                if rec["request_id"] == request_id:
+                    return True
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(
+            f"unreadable seen-set for {slug!r} ({e}) — refusing rather than treating "
+            "every request_id as unseen") from e
+    return False
+
+
+# --- approval reservation ----------------------------------------------------------
+# write_approval/verify_approval (above) predate this task and already enforce the
+# single-use rule on the READ side: verify_approval refuses whenever "reserved_at" is
+# present on the record, regardless of whether "outcome" was ever written. What was
+# missing is the WRITE side — something that sets reserved_at, and does so before the
+# executor runs rather than after, per spec §7.
+
+def _load_approval(slug, cid):
+    """Shared read for reserve_approval and record_outcome: both need the current
+    record before deciding whether to refuse, and both must refuse identically on a
+    missing, unreadable, or non-object record rather than each growing its own
+    slightly-different check."""
+    p = approval_path(slug, cid)
+    if not os.path.isfile(p):
+        raise ValueError(f"no approval record for change-set {cid!r} — run approve-changeset.py first")
+    try:
+        with open(p, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(f"unreadable approval record for {cid!r}: {e}") from e
+    if not isinstance(rec, dict):
+        raise ValueError(f"malformed approval record for {cid!r}: expected a JSON object")
+    return p, rec
+
+
+def reserve_approval(slug, cid, request_id, now):
+    """Mark an approval consumed BEFORE the executor is invoked. Returns the record.
+
+    THE ORDERING IS LOAD-BEARING (spec §7). If reservation happened AFTER a successful
+    apply instead, there is a window — between the mutation landing at Google Ads and
+    this record being written — in which the approval is still live and a crash or a
+    replayed request in that window applies the same change-set a second time.
+    Reserving first closes that window the other direction: a crash between reserving
+    and applying costs one unusable approval, which a human clears by approving again.
+    That is a strictly cheaper failure than a duplicate account mutation.
+
+    Concurrency note: this is a plain read-modify-write, NOT atomic against a second
+    concurrent writer — two overlapping calls could both read the record before either
+    writes "reserved_at" and both then \"succeed\". It relies entirely on the caller
+    (the broker, Task 5) holding a per-client advisory lock around the whole
+    request/reserve/execute/record sequence. That is an external guarantee this
+    function cannot see or verify — see task-4-report.md for the assessment of whether
+    that is adequate as written.
+    """
+    p, rec = _load_approval(slug, cid)
+    if "reserved_at" in rec:
+        raise ValueError(
+            "approval for %r is already reserved (reserved_at=%s) — approvals are "
+            "single-use" % (cid, rec.get("reserved_at")))
+    rec["reserved_at"] = now.strftime(ISO)
+    rec["request_id"] = _require_str(request_id, "request_id")
+    _atomic_write_json(p, rec)
+    return rec
+
+
+def record_outcome(slug, cid, outcome, now):
+    """Phase two of the two-phase record: what actually happened. Returns the record.
+
+    Requires a prior reservation — an outcome recorded without one means the ordering
+    was inverted somewhere upstream (execution happened, or is about to, without the
+    approval ever having been marked consumed), and that is exactly the defect this
+    refuses to paper over rather than recording anyway.
+
+    An approval that has reserved_at but never gets an outcome (the crash-mid-apply
+    case) stays exactly as dead as one that completed: verify_approval refuses on
+    reserved_at alone, never on outcome. So the crash costs an unusable approval, never
+    a reusable one — the property spec §7 asks for.
+    """
+    p, rec = _load_approval(slug, cid)
+    if "reserved_at" not in rec:
+        raise ValueError(
+            f"approval {cid!r} has no reserved_at — refusing to record an outcome for "
+            "an apply that was never reserved; the reservation must precede execution")
+    rec["outcome"] = _require_str(outcome, "outcome")
+    rec["finished_at"] = now.strftime(ISO)
+    _atomic_write_json(p, rec)
+    return rec
+
+
 def iter_log_records(slug):
     """Yield (lineno, record) for every audit-log line, validating the fields all
     readers depend on.

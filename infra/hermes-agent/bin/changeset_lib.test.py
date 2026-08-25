@@ -676,5 +676,117 @@ class TestSpoolQuotas(unittest.TestCase):
             C.read_spool_quotas(self._reg(dup), "proj")
 
 
+class TestSeenSet(unittest.TestCase):
+    RID = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_unseen_then_seen(self):
+        self.assertFalse(C.seen_contains("pilot-1", self.RID))
+        C.append_seen("pilot-1", self.RID, NOW)
+        self.assertTrue(C.seen_contains("pilot-1", self.RID))
+
+    def test_the_seen_set_is_written_into_the_governance_store(self):
+        # The WHOLE POINT. If this lands in the spool, Hermes can delete it and every
+        # request_id becomes replayable.
+        C.append_seen("pilot-1", self.RID, NOW)
+        expected = G.seen_path("pilot-1", self.root)
+        self.assertTrue(os.path.isfile(expected))
+        self.assertNotIn("spool", expected)
+
+    def test_seen_is_per_client_not_global(self):
+        C.append_seen("pilot-1", self.RID, NOW)
+        self.assertFalse(C.seen_contains("pilot-2", self.RID))
+
+    def test_unreadable_seen_set_refuses_rather_than_reporting_unseen(self):
+        # Fail-closed. An unreadable seen-set reported as "not seen" would ADMIT every
+        # replay — the same shape as the caps rule: an unreadable limit must never
+        # become an unlimited one.
+        p = G.seen_path("pilot-1", self.root)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.mkdir(p)                      # a directory where the file should be
+        with self.assertRaises(ValueError):
+            C.seen_contains("pilot-1", self.RID)
+
+    def test_control_a_readable_seen_set_does_not_raise(self):
+        # The positive control for the refusal above.
+        C.append_seen("pilot-1", self.RID, NOW)
+        self.assertTrue(C.seen_contains("pilot-1", self.RID))
+
+
+class TestReservation(unittest.TestCase):
+    CID = "20260824-101500-abcdef01"
+    RID = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        C.write_approval("pilot-1", self.CID, self.DIGEST, "operator", NOW, 24)
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_reserving_records_the_timestamp_and_the_request(self):
+        rec = C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        self.assertEqual(rec["request_id"], self.RID)
+        self.assertEqual(rec["reserved_at"], NOW.strftime(C.ISO))
+
+    def test_a_reserved_approval_no_longer_verifies(self):
+        # This is the single-use property, asserted through the EXECUTOR's own guard
+        # rather than by re-reading the file — verify_approval is what actually stops
+        # the second apply, so that is what must be shown to refuse.
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        with self.assertRaises(ValueError) as cm:
+            C.verify_approval("pilot-1", self.CID, self.DIGEST, NOW)
+        self.assertIn("already reserved", str(cm.exception))
+
+    def test_control_an_unreserved_approval_verifies(self):
+        # The positive control: without it, the refusal above could be caused by
+        # anything at all.
+        self.assertEqual(
+            C.verify_approval("pilot-1", self.CID, self.DIGEST, NOW)["sha256"],
+            self.DIGEST)
+
+    def test_double_reservation_refuses(self):
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        with self.assertRaises(ValueError):
+            C.reserve_approval("pilot-1", self.CID, "1111aaaa-2222-4bbb-8ccc-3333dddd4444", NOW)
+
+    def test_reserving_a_nonexistent_approval_refuses(self):
+        with self.assertRaises(ValueError):
+            C.reserve_approval("pilot-1", "20260824-101500-99999999", self.RID, NOW)
+
+    def test_outcome_requires_a_prior_reservation(self):
+        # An outcome without a reservation means the ordering was inverted somewhere.
+        with self.assertRaises(ValueError):
+            C.record_outcome("pilot-1", self.CID, "applied", NOW)
+
+    def test_outcome_is_recorded_after_reservation(self):
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        rec = C.record_outcome("pilot-1", self.CID, "applied", NOW)
+        self.assertEqual(rec["outcome"], "applied")
+        self.assertEqual(rec["request_id"], self.RID)
+
+    def test_an_interrupted_apply_is_not_a_reusable_approval(self):
+        # Reserved but no outcome ever written — the crash case. The approval must
+        # still be dead. This is the ordering property from spec §7 stated as a test:
+        # a crash costs an unusable approval, never a duplicate account change.
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        with self.assertRaises(ValueError):
+            C.verify_approval("pilot-1", self.CID, self.DIGEST, NOW)
+
+
 if __name__ == "__main__":
     unittest.main()
