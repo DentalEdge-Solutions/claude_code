@@ -435,6 +435,28 @@ def _parse_utc_field(rec, field):
 
 
 def write_approval(slug, cid, digest, operator, now, ttl_hours):
+    """Write a fresh approval record for (slug, cid).
+
+    FIX ROUND 2: shares the exact same hazard reserve_approval/record_outcome were
+    fixed for in FIX ROUND 1 — _atomic_write_json writes to a shared, deterministic
+    ``<cid>.approval.json.tmp`` path, so two concurrent write_approval calls for the
+    same (slug, cid) can race that tmp path and one thread's os.replace can raise
+    FileNotFoundError when it finds the file already consumed by the other. This was
+    pre-existing and unproven until Task 4's own mutation proof demonstrated the exact
+    failure shape against reserve_approval; the same defect class in the function that
+    WRITES approvals, in a plan about approval-record integrity, is not something to
+    leave for later just because it predates this branch.
+
+    ORDERING IS LOAD-BEARING HERE TOO, the other direction from reserve_approval: the
+    directory _approval_lock's sidecar file lives in MUST be created before the lock
+    is taken, not after — the sidecar can't be opened (even for creation) in a
+    directory that doesn't exist yet, and the very first approval ever written for a
+    brand-new client is exactly the case with no pre-existing approvals directory. So
+    this function keeps the os.makedirs call first and takes the lock only around the
+    write that follows it. See TestFreshApprovalsDirectory for the case this ordering
+    protects and FIX ROUND 2's mutation proof (task-4-report.md) for what happens when
+    the ordering is inverted.
+    """
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
     operator = _require_str(operator, "operator")
@@ -451,8 +473,9 @@ def write_approval(slug, cid, digest, operator, now, ttl_hours):
     rec = {"changeset_id": cid, "sha256": digest, "operator": operator,
            "approved_at": now.strftime(ISO),
            "expires_at": (now + datetime.timedelta(hours=ttl_hours)).strftime(ISO)}
-    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
-    _atomic_write_json(approval_path(slug, cid), rec)
+    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)   # MUST precede the lock — see docstring
+    with _approval_lock(slug, cid):
+        _atomic_write_json(approval_path(slug, cid), rec)
     return rec
 
 

@@ -859,5 +859,106 @@ class TestReservationConcurrency(unittest.TestCase):
         self.assertIn("already reserved", str(failures[0]))
 
 
+class TestWriteApprovalConcurrency(unittest.TestCase):
+    """FIX ROUND 2: write_approval shares the exact _atomic_write_json shared-tmp-path
+    hazard that TestReservationConcurrency's mutation proof demonstrated against
+    reserve_approval — proven, not merely suspected, which is why it gets fixed here
+    rather than ticketed. Two concurrent write_approval calls for the SAME (slug, cid)
+    must neither corrupt the file nor raise from the race on the shared .tmp path."""
+    CID = "20260824-101500-abcdef01"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_concurrent_writes_do_not_corrupt_or_crash(self):
+        # Same widening technique as TestReservationConcurrency: slow the real write
+        # down so any missing serialization is forced to manifest as real overlap,
+        # rather than relying on thread-scheduling luck.
+        real_write = C._atomic_write_json
+
+        def slow_write(path, obj):
+            time.sleep(0.05)
+            return real_write(path, obj)
+
+        started = []
+        results = {}
+
+        def attempt(name, operator):
+            started.append(name)          # positive control: proves this thread ran
+            try:
+                results[name] = C.write_approval(
+                    "pilot-1", self.CID, self.DIGEST, operator, NOW, 24)
+            except Exception as e:
+                results[name] = e
+
+        with unittest.mock.patch.object(C, "_atomic_write_json", slow_write):
+            t1 = threading.Thread(target=attempt, args=("a", "operator-a"))
+            t2 = threading.Thread(target=attempt, args=("b", "operator-b"))
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+
+        # Positive control: both threads must have actually run and recorded a
+        # result, or the assertions below would pass vacuously.
+        self.assertEqual(sorted(started), ["a", "b"])
+        self.assertEqual(len(results), 2, results)
+
+        # Neither call may raise. Catching only the swallowed-exception shape (a
+        # missing result) is not enough here — write_approval never refuses a second
+        # write, so an unlocked race manifests as a raised exception, not as two
+        # results where one should have been a refusal.
+        for name, r in results.items():
+            self.assertNotIsInstance(r, Exception, f"{name} raised: {r!r}")
+
+        # The file left on disk must be valid, complete JSON belonging to one of the
+        # two attempts -- not truncated or interleaved.
+        with open(G.approval_path("pilot-1", self.CID), encoding="utf-8") as f:
+            on_disk = json.load(f)
+        self.assertIn(on_disk["operator"], ("operator-a", "operator-b"))
+
+
+class TestFreshApprovalsDirectory(unittest.TestCase):
+    """FIX ROUND 2: the ordering that matters. _approval_lock's sidecar file lives
+    inside approvals_dir(slug), so the directory MUST exist before the lock is taken.
+    Every other TestApproval-family fixture in this file has already caused that
+    directory to exist by the time write_approval runs (via an earlier write_approval
+    or write_snapshot call in the same test), so nothing before this round actually
+    exercised the very first approval ever written for a brand-new client -- the one
+    case where the directory is genuinely absent going in."""
+    CID = "20260824-101500-abcdef01"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        # Deliberately nothing else here -- the absence of the approvals directory
+        # for this brand-new client IS the case under test.
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_first_ever_approval_for_a_client_succeeds(self):
+        self.assertFalse(os.path.isdir(G.approvals_dir("brand-new-client")))
+        rec = C.write_approval("brand-new-client", self.CID, self.DIGEST, "operator", NOW, 24)
+        self.assertEqual(rec["operator"], "operator")
+        # Positive control: the record actually landed on disk and is independently
+        # readable back through verify_approval, not just that write_approval
+        # returned without raising.
+        readback = C.verify_approval("brand-new-client", self.CID, self.DIGEST, NOW)
+        self.assertEqual(readback["operator"], "operator")
+
+
 if __name__ == "__main__":
     unittest.main()
