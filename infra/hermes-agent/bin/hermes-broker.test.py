@@ -589,6 +589,92 @@ class TestRealSubprocess(Base):
             self.assertEqual(f.read().strip(), "4")   # --client X --changeset Y
 
 
+class TestCliFlagsHonored(Base):
+    """Nothing above proves the CLI actually READS --spool/--projects rather than
+    silently falling back to the environment default that happens to agree with it —
+    Base.setUp sets HERMES_SPOOL_ROOT to self.spool for every test, so a --spool that
+    is quietly ignored is invisible unless the flag and the env default are made to
+    DIFFER. That matters concretely: Task 11's systemd unit passes explicit --spool
+    AND sets HERMES_SPOOL_ROOT in the same Environment block, so today the two always
+    agree — right up until they diverge, at which point a broker that reads the env
+    var instead of the flag would silently drain the wrong directory."""
+
+    def test_cli_honors_explicit_spool_over_the_env_default(self):
+        # HERMES_SPOOL_ROOT (env, set by Base.setUp) == self.spool. --spool points
+        # somewhere ELSE. The flag must win.
+        other = tempfile.mkdtemp()
+        d = S.requests_dir(other)
+        os.makedirs(d, exist_ok=True)
+        rid = str(__import__("uuid").uuid4())
+        with open(os.path.join(d, "%s.json" % rid), "w") as f:
+            json.dump({"request_id": rid, "op": "apply", "client": SLUG,
+                      "changeset": CID}, f)
+
+        rc = B.main(["--once", "--spool", other, "--projects", self.registry])
+        self.assertEqual(rc, 0)
+
+        # POSITIVE: the request filed under --spool was drained.
+        self.assertTrue(
+            os.path.isfile(S.result_path(rid, other)),
+            "the --spool directory's request was never processed — the flag is "
+            "being ignored in favor of HERMES_SPOOL_ROOT")
+        # NEGATIVE CONTROL: the env-default directory (self.spool) was never touched —
+        # no result appears there, because nothing was ever filed there.
+        req_dir = S.requests_dir(self.spool)
+        self.assertFalse(
+            os.path.isdir(req_dir) and os.listdir(req_dir),
+            "a request appeared in HERMES_SPOOL_ROOT even though only --spool was "
+            "given a request to drain")
+        self.assertFalse(os.path.isfile(S.result_path(rid, self.spool)))
+
+    def test_cli_honors_explicit_projects_over_the_env_default(self):
+        # ADS_REGISTRY (env default read by changeset_lib.registry_projects_path) is
+        # pointed at a registry whose max_pending_requests cap refuses two queued
+        # requests on quota; --projects is pointed at self.registry, whose cap (2)
+        # does not. The flag must win, and the same shape must fall back to the env
+        # default's stricter cap when the flag is omitted.
+        bad_registry = os.path.join(self.regdir, "projects-bad.yaml")
+        bad_yaml = REGISTRY_YAML.replace("max_pending_requests: 2",
+                                         "max_pending_requests: 1")
+        assert bad_yaml != REGISTRY_YAML, "replace() found nothing — fixture drifted"
+        with open(bad_registry, "w") as f:
+            f.write(bad_yaml)
+        orig_ads = os.environ.get("ADS_REGISTRY")
+        os.environ["ADS_REGISTRY"] = bad_registry
+        script = os.path.join(self.regdir, "fake-mutate-ok.sh")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(script, 0o755)
+        orig_mutate, B.MUTATE_SH = B.MUTATE_SH, script
+        try:
+            # Two pending requests for the same client -> pending_count == 2.
+            rid_a = self.file_request()
+            rid_b = self.file_request()
+
+            # POSITIVE: explicit --projects (max_pending_requests: 2) must NOT refuse
+            # on quota, even though ADS_REGISTRY's registry (max: 1) would.
+            rc = B.main(["--once", "--spool", self.spool, "--projects", self.registry])
+            self.assertEqual(rc, 0)
+            self.assertNotEqual(self.result_for(rid_a)["classification"], "refused_quota")
+            self.assertNotEqual(self.result_for(rid_b)["classification"], "refused_quota")
+
+            # NEGATIVE CONTROL: same two-pending-requests shape, no --projects this
+            # time -> must fall back to ADS_REGISTRY's stricter registry and refuse
+            # both on quota, purely because pending_count (2) > max_pending_requests (1).
+            rid_c = self.file_request()
+            rid_d = self.file_request()
+            rc2 = B.main(["--once", "--spool", self.spool])
+            self.assertEqual(rc2, 0)
+            self.assertEqual(self.result_for(rid_c)["classification"], "refused_quota")
+            self.assertEqual(self.result_for(rid_d)["classification"], "refused_quota")
+        finally:
+            B.MUTATE_SH = orig_mutate
+            if orig_ads is None:
+                os.environ.pop("ADS_REGISTRY", None)
+            else:
+                os.environ["ADS_REGISTRY"] = orig_ads
+
+
 class TestCli(Base):
     def test_once_returns_zero_on_an_empty_spool(self):
         self.assertEqual(B.main(["--once", "--spool", self.spool,
