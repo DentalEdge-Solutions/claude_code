@@ -684,6 +684,29 @@ class TestCli(Base):
         self.assertNotEqual(B.main(["--once", "--watch", "--spool", self.spool,
                                     "--projects", self.registry]), 0)
 
+    def test_a_zero_interval_is_rejected_before_any_drain_runs(self):
+        # Finding 2 (post-Task-7 review): --interval 0 would spin the drain loop with
+        # no pacing on a privileged daemon. Must be rejected at parse time -- SystemExit
+        # from argparse's own clean usage-error path, exit code 2 -- and the request
+        # filed below must still be sitting in the spool untouched, proving no drain
+        # ran at all.
+        rid = self.file_request()
+        with self.assertRaises(SystemExit) as cm:
+            B.main(["--watch", "--interval", "0", "--spool", self.spool,
+                   "--projects", self.registry])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertTrue(os.path.isfile(S.request_path(rid, self.spool)),
+                        "the request was consumed -- a drain ran despite the bad "
+                        "--interval")
+
+    def test_a_negative_interval_is_rejected_before_any_drain_runs(self):
+        rid = self.file_request()
+        with self.assertRaises(SystemExit) as cm:
+            B.main(["--watch", "--interval", "-1", "--spool", self.spool,
+                   "--projects", self.registry])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertTrue(os.path.isfile(S.request_path(rid, self.spool)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -532,6 +532,29 @@ def watch(spool, projects, interval):
         time.sleep(interval)
 
 
+def _positive_seconds(value):
+    """argparse type= for --interval. RULING (post-Task-7 review, Finding 2): a
+    non-positive interval must be rejected at PARSE time, before watch()'s loop ever
+    starts. --interval 0 would spin drain() back-to-back with no pacing on a
+    privileged daemon; --interval -1 would reach time.sleep(-1) on the FIRST
+    iteration, which raises ValueError from OUTSIDE watch()'s own try/except (that
+    block only guards the drain() call, deliberately, since a stuck drain is the
+    failure mode it exists for) — crashing with a raw traceback after one drain pass
+    had already run. Raising ArgumentTypeError here instead gives argparse's own
+    clean usage-error path: a message on stderr and exit(2), with no drain and no
+    traceback, regardless of --once/--watch."""
+    try:
+        f = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("%r is not a number" % value)
+    if f <= 0:
+        raise argparse.ArgumentTypeError(
+            "--interval must be positive (got %r): 0 spins the drain loop with no "
+            "pacing on a privileged daemon, and a negative value crashes time.sleep "
+            "on the first iteration" % value)
+    return f
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="hermes-broker",
@@ -539,7 +562,7 @@ def main(argv=None):
                     "credential's directory but never its value.")
     ap.add_argument("--once", action="store_true", help="one drain pass, then exit")
     ap.add_argument("--watch", action="store_true", help="poll forever")
-    ap.add_argument("--interval", type=float, default=5.0)
+    ap.add_argument("--interval", type=_positive_seconds, default=5.0)
     ap.add_argument("--spool")
     ap.add_argument("--projects")
     args = ap.parse_args(argv)
