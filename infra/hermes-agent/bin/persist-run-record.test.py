@@ -394,6 +394,33 @@ class TestParkedResiduals(unittest.TestCase):
         with self.assertRaises(P.PersistRefused):
             P.persist(self.vault, self.result, root=self.root)
 
+    def test_a_changes_symlink_resolving_back_inside_the_vault_is_still_refused(self):
+        # Companion to the test above, added while investigating whether deleting
+        # _resolve_subdir's own `os.path.islink(p)` check is a killable mutation.
+        # `elsewhere` above is OUTSIDE the vault, so _resolve_subdir's downstream
+        # _contained() check catches it independently of the islink check — that
+        # mutation does not turn it red. This variant targets a symlink whose target
+        # resolves BACK inside the vault, which slips past _contained() too (the
+        # target IS contained), on the theory that only the islink check would be
+        # left to catch it.
+        #
+        # MEASURED: it still does not turn red when the islink check is deleted.
+        # _open_dir("changes", dir_fd=vfd), added for R20(b), opens the "changes"
+        # component with O_NOFOLLOW independently of anything _resolve_subdir
+        # decided — so a symlinked "changes" is refused by the dirfd chain itself
+        # regardless of target. That makes _resolve_subdir's islink check genuinely
+        # redundant now (good: defense in depth), but also means no behavioural test
+        # can distinguish "the islink check ran" from "the dirfd open blocked it
+        # anyway" — this mutation row is UNKILLABLE with the current architecture.
+        # Kept as coverage of the resolves-back-inside-vault case, not as a killer.
+        decoy = os.path.join(self.vault, "decoy")
+        os.makedirs(decoy, exist_ok=True)
+        changes = os.path.join(self.vault, "changes")
+        os.rmdir(changes)
+        os.symlink(decoy, changes)
+        with self.assertRaises(P.PersistRefused):
+            P.persist(self.vault, self.result, root=self.root)
+
     # --- (c) makedirs before the containment check ---------------------------------
     def test_an_out_of_root_vault_is_refused_without_being_created(self):
         outside = os.path.join(tempfile.mkdtemp(), "not-in-the-root")
