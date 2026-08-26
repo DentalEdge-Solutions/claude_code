@@ -31,9 +31,16 @@ Working tree has pre-existing dirt from before this work (`.project-brain/log.md
 candidates, two `evals/*.json`) — **not yours, do not commit it.**
 
 - `infra/hermes-agent/bin/run-bin-tests.sh` → **23/23 suites**
-- `node scripts/run-all-tests.js` → 21/21 on this branch (22/22 once PR #18 merges to main)
-- CI is **GREEN** — restored on a separate branch, **PR #18**, verified on the real runner.
-  Its two commits were deliberately dropped from this branch so the Hermes PR reviews clean.
+- `node scripts/run-all-tests.js` → 21/21 on this branch
+- **CI is GREEN ON `main`** — PR #18 merged as `4e15142`; all three jobs pass on the real
+  runner. First green pipeline since at least `c3759b0`. The gate now protects every PR.
+- **This branch is BEHIND `main`** by the two CI commits, deliberately — they were dropped from
+  here so the Hermes PR reviews as pure Hermes work, and they now arrive via main instead.
+  **Merge `origin/main` into this branch before opening the Hermes PR**, so CI runs against the
+  restored pipeline. The two sets touch disjoint files (`.github/`, `scripts/`, `skills/` vs
+  `infra/hermes-agent/`), so expect no conflicts — verify rather than assume.
+- The branch is pushed: `origin/feat/hermes-governed-syscall` at `c937724`. No PR yet, by design
+  — the PR belongs after Task 12 and Task 13 so its body can carry their findings.
 
 **Phase A is 9/9 complete**, every task individually reviewed with a fix loop:
 
