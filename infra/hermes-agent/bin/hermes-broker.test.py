@@ -534,5 +534,70 @@ class TestExecution(Base):
             C.verify_approval(SLUG, CID, DIGEST, NOW)
 
 
+class TestRealSubprocess(Base):
+    """The fake runner proves the logic. This proves the WIRING — that the broker can
+    actually start a program and read its status back."""
+
+    def _fake_mutate(self, exit_code, body="echo ran"):
+        p = os.path.join(self.regdir, "fake-mutate.sh")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\n%s\nexit %d\n" % (body, exit_code))
+        os.chmod(p, 0o755)
+        return p
+
+    def test_a_real_subprocess_exit_code_reaches_the_result(self):
+        script = self._fake_mutate(2)
+        orig, B.MUTATE_SH = B.MUTATE_SH, script
+        try:
+            rid = self.file_request()
+            B.drain(spool=self.spool, projects=self.registry, now=NOW)
+            got = self.result_for(rid)
+        finally:
+            B.MUTATE_SH = orig
+        self.assertEqual(got["exit_code"], 2)
+        self.assertEqual(got["classification"], "refused_preflight")
+
+    def test_control_a_real_subprocess_success_also_reaches_the_result(self):
+        # The must-SUCCEED control: without it, "exit 2 arrives" could be produced by a
+        # broker that reports 2 for everything.
+        script = self._fake_mutate(0)
+        orig, B.MUTATE_SH = B.MUTATE_SH, script
+        try:
+            rid = self.file_request()
+            B.drain(spool=self.spool, projects=self.registry, now=NOW)
+            got = self.result_for(rid)
+        finally:
+            B.MUTATE_SH = orig
+        self.assertEqual(got["exit_code"], 0)
+        self.assertEqual(got["classification"], "accepted_applied")
+
+    def test_the_wrapper_is_invoked_with_exactly_four_argv_elements(self):
+        script = os.path.join(self.regdir, "echo-argv.sh")
+        with open(script, "w") as f:
+            f.write('#!/bin/sh\nprintf "%s\\n" "$#" > "$ARGC_OUT"\nexit 0\n')
+        os.chmod(script, 0o755)
+        argc_out = os.path.join(self.regdir, "argc.txt")
+        os.environ["ARGC_OUT"] = argc_out
+        orig, B.MUTATE_SH = B.MUTATE_SH, script
+        try:
+            self.file_request()
+            B.drain(spool=self.spool, projects=self.registry, now=NOW)
+        finally:
+            B.MUTATE_SH = orig
+            os.environ.pop("ARGC_OUT", None)
+        with open(argc_out) as f:
+            self.assertEqual(f.read().strip(), "4")   # --client X --changeset Y
+
+
+class TestCli(Base):
+    def test_once_returns_zero_on_an_empty_spool(self):
+        self.assertEqual(B.main(["--once", "--spool", self.spool,
+                                 "--projects", self.registry]), 0)
+
+    def test_watch_and_once_are_mutually_exclusive(self):
+        self.assertNotEqual(B.main(["--once", "--watch", "--spool", self.spool,
+                                    "--projects", self.registry]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

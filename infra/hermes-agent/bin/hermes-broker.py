@@ -29,7 +29,7 @@ path (control/.locks/<slug>.lock) is a DIFFERENT FILE from Task 4's sidecar
 (approvals/<slug>/<cid>.approval.lock) — nesting them cannot deadlock, and they must
 not be merged into one lock; see changeset_lib._approval_lock's docstring.
 """
-import argparse, collections, datetime, fcntl, os, subprocess, sys, time
+import argparse, collections, datetime, fcntl, json, os, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
@@ -516,14 +516,45 @@ def _execute(req, spool, runner, now):
     return {"request_id": rid, "classification": classification, "exit_code": rc}
 
 
+def watch(spool, projects, interval):
+    """Poll the spool forever. Deliberately a poll rather than inotify: one dependency
+    fewer, portable to macOS for local testing, and a few seconds of latency on a path
+    whose slowest step is a human approval is not worth a platform-specific watcher.
+
+    A single exception must never kill the broker — a dead broker is a silently
+    unprocessed queue, which looks exactly like an idle one.
+    """
+    while True:
+        try:
+            drain(spool=spool, projects=projects)
+        except Exception as e:                       # noqa: BLE001 — see docstring
+            print("broker: drain failed: %s" % e, file=sys.stderr)
+        time.sleep(interval)
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--once", action="store_true",
-                     help="run a single drain pass and exit (Task 6 adds the loop)")
-    ap.parse_args(argv)
-    outcomes = drain()
-    for o in outcomes:
-        print(o.get("classification", "?"), o.get("request_id", ""), file=sys.stderr)
+    ap = argparse.ArgumentParser(
+        prog="hermes-broker",
+        description="Drain the mutation request spool. Host-side; holds the write "
+                    "credential's directory but never its value.")
+    ap.add_argument("--once", action="store_true", help="one drain pass, then exit")
+    ap.add_argument("--watch", action="store_true", help="poll forever")
+    ap.add_argument("--interval", type=float, default=5.0)
+    ap.add_argument("--spool")
+    ap.add_argument("--projects")
+    args = ap.parse_args(argv)
+
+    if args.once == args.watch:
+        print("hermes-broker: pass exactly one of --once or --watch", file=sys.stderr)
+        return 1
+
+    spool = args.spool or S.spool_root()
+    projects = args.projects or C.registry_projects_path()
+    if args.watch:
+        watch(spool, projects, args.interval)
+        return 0
+    for outcome in drain(spool=spool, projects=projects):
+        print(json.dumps(outcome, sort_keys=True))
     return 0
 
 
