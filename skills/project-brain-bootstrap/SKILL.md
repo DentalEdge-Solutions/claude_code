@@ -5,6 +5,7 @@ description: "Use when a project needs a brain capsule created — 'set up a pro
   Copies the second-brain template into .project-brain/, fills identity fields,
   and verifies structure. Not for: configuring brain modes or interviews
   (second-brain-setup, Phase 5), installing the whole toolkit (install.sh)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

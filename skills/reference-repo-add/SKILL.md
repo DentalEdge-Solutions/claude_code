@@ -1,10 +1,11 @@
 ---
 name: reference-repo-add
-description: "Use to register an external repo as governed source material —
-  'register X as a reference repo', 'add this repo to the reference library',
-  'track this source'. Adds a registry entry + scaffolds a source card; never
-  clones or installs the repo. Not for: installing a skill (scout → audit →
+description: "Use when an external repo should be registered as governed source
+  material — 'register X as a reference repo', 'add this repo to the reference
+  library', 'track this source'. Adds a registry entry + scaffolds a source card;
+  never clones or installs the repo. Not for: installing a skill (scout → audit →
   adapt → eval) or auditing an existing entry (reference-repo-audit)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

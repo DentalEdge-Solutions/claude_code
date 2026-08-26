@@ -1,10 +1,11 @@
 ---
 name: brain-context-pack
-description: "Use at the start of a substantial task to load relevant brain context —
-  'pack context for X', 'what should I know before doing Y', 'load the brain for this
-  task'. Runs brain-context-pack.js and folds the result into the working context.
-  Not for: one-off lookups (brain-search) or session bootstrapping (the SessionStart
-  hook already loads the protocol)."
+description: "Use when starting a substantial task and relevant brain context should
+  be loaded up front — 'pack context for X', 'what should I know before doing Y',
+  'load the brain for this task'. Runs brain-context-pack.js and folds the result
+  into the working context. Not for: one-off lookups (brain-search) or session
+  bootstrapping (the SessionStart hook already loads the protocol)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

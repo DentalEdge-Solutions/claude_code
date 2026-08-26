@@ -1,10 +1,11 @@
 ---
 name: brain-promote
-description: "Guided human review and promotion of brain candidates to active
-  decisions or canon. Invoke explicitly with /brain-promote. Presents candidates
+description: "Use when the user explicitly runs /brain-promote to review brain
+  candidates for promotion to active decisions or canon. Presents candidates
   one at a time, records the user's verdict, and only on an explicit per-item
   'approve' runs brain-promote.js --approve. Never promotes autonomously; never
   batch-approves. Not for: capturing (brain-capture) or compiling (brain-compile)."
+compatibility: "Claude Code. Node.js ≥ 18."
 disable-model-invocation: true
 risk_tier: critical
 ---

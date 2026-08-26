@@ -2,6 +2,7 @@
 name: repo-audit
 description: "Use when: auditing a GitHub repository to extract tech stack signals for informing future Claude Code project architecture, running a deep reference audit from project-setup Phase 0 with --deep flag, or when asked to scan/map/audit a GitHub repo. Accepts a public GitHub URL and optional flags: --pipeline (inject into project-context.json), --layer <names> (comma-separated subset), --estimate (preview token count before running). Triggers on: audit this repo, scan this GitHub repo, deep audit, repo-audit, extract stack from, analyze this repository."
 tools: Read, Write, Bash, Agent
+compatibility: "Claude Code. Node.js ≥ 18. Requires npx (Repomix) and network access to GitHub; falls back to Gitingest on Repomix timeout."
 ---
 
 # Repo Audit
