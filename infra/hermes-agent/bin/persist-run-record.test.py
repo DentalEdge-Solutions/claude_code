@@ -329,16 +329,53 @@ class TestParkedResiduals(unittest.TestCase):
         self.assertTrue(os.path.isfile(P.persist(self.vault, self.result,
                                                   root=self.root)))
 
+    def test_hardlinked_tmp_content_survives_even_with_the_precheck_disabled(self):
+        # FINDING 1 (post-implementation review, 2026-08-26): the coordinator measured
+        # that _refuse_if_hardlinked's own check-then-act window is exploitable on the
+        # .tmp path specifically, because the old O_TRUNC open truncated as a side
+        # effect of the open() syscall itself — before the nlink check on the
+        # resulting fd ever ran. The fix is _create_tmp_exclusive's O_CREAT|O_EXCL,
+        # which makes the existence test and the create the SAME syscall, closing the
+        # window structurally rather than tightening the check.
+        #
+        # This test disables the pre-check entirely (monkeypatches
+        # _refuse_if_hardlinked to a no-op) so a pass here can only be explained by
+        # the structural O_EXCL fix, not by the belt-and-braces check. It also makes
+        # the assertion the earlier hardlink tests do not make: not merely that an
+        # exception was raised, but that the outside file's CONTENT is byte-identical
+        # afterwards. A refusal that fires after the damage is not a refusal.
+        outside = os.path.join(self.root, "outside3.txt")
+        known = "do-not-truncate-me\n" * 50
+        with open(outside, "w") as f:
+            f.write(known)
+        tmp_dest = os.path.join(self.vault, "changes",
+                                "20260824-101500-abcdef01.result.json.tmp")
+        os.link(outside, tmp_dest)
+
+        real_refuse = P._refuse_if_hardlinked
+        P._refuse_if_hardlinked = lambda *a, **k: None
+        try:
+            with self.assertRaises(P.PersistRefused):
+                P.persist(self.vault, self.result, root=self.root)
+        finally:
+            P._refuse_if_hardlinked = real_refuse
+
+        with open(outside) as f:
+            self.assertEqual(f.read(), known, "the outside file was truncated "
+                             "through the hardlinked .tmp name even with the "
+                             "pre-check disabled — the structural O_EXCL fix did "
+                             "not hold")
+
     # --- (b) directory-component TOCTOU --------------------------------------------
-    def test_the_changes_directory_is_opened_by_descriptor_not_by_path(self):
-        # Cheap canary, kept alongside the behavioural test below: source-text
-        # evidence that the dirfd chain exists at all. This alone would pass for the
-        # wrong reason if "dir_fd"/"O_DIRECTORY" appeared only in a comment — it
-        # proves nothing about behaviour by itself, which is why the next test exists.
-        import inspect
-        src = inspect.getsource(P)
-        self.assertIn("dir_fd", src)
-        self.assertIn("O_DIRECTORY", src)
+    # NOTE: a source-text canary (asserting "dir_fd"/"O_DIRECTORY" appear via
+    # inspect.getsource) previously lived here and was DELETED on review (2026-08-26).
+    # It passed through the exact regression it was named for: with the dirfd chain
+    # gutted back to path-based opens on the result-file branch (mutation row 3
+    # below), it stayed green because those two strings still appear elsewhere in the
+    # file (in _open_dir and in the untouched timeline.md call). A test whose name
+    # claims a property it structurally cannot verify is worse than no test — it
+    # reads as coverage to a future reader. The behavioural test immediately below
+    # fully supersedes it and is the one mutation-proven to catch that regression.
 
     def test_dirfd_chain_resists_a_swapped_changes_directory(self):
         """Behavioural companion to the canary above. Hooks `P._open_dir` to swap the
