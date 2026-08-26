@@ -1,4 +1,5 @@
 import importlib.util, io, os, shutil, sys, tempfile, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -228,6 +229,75 @@ class TestFileLevelChecks(Base):
         problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
         self.assertEqual(len(problems), 1)
         self.assertTrue(any("changeset.json" in p for p in problems))
+
+    def test_approval_lock_sidecar_is_ignored_healthy_store_stays_healthy(self):
+        """FINDING 1 regression (CRITICAL). approvals/<slug>/ also holds
+        <cid>.approval.lock (governance_lib.approval_lock_path), created 0600 by
+        changeset_lib._approval_lock and deliberately never unlinked — removing it
+        would reopen a wrong-inode race. It is HOST-SIDE ONLY: hermes-broker.py takes
+        it, apply-changeset.py (the executor) never references approval_lock_path at
+        all. A store that has ever reserved a change-set must still report ZERO
+        problems even though this sidecar sits there at an executor-unreadable 0600 —
+        demanding it be readable would false-refuse every such store, which is exactly
+        the class of bug R19 exists to fix, one level down."""
+        self._configure_full_correct_store()
+        slug_dir = os.path.join(self.root, "approvals", self.SLUG)
+        lock = os.path.join(slug_dir, "%s.approval.lock" % self.CID)
+        open(lock, "w").close()
+        os.chmod(lock, 0o600)  # exactly as changeset_lib._approval_lock creates it
+        self.assertEqual(
+            PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+    def test_approval_lock_sidecar_present_does_not_mask_a_real_approval_problem(self):
+        """PAIRED NEGATIVE for Finding 1. Without this, "fixing" the false refusal
+        above by skipping the approvals walk entirely would also pass — this proves
+        the allowlist still catches a genuinely unreadable .approval.json sitting in
+        the very same directory as an ignorable .approval.lock."""
+        self._configure_full_correct_store()
+        slug_dir = os.path.join(self.root, "approvals", self.SLUG)
+        lock = os.path.join(slug_dir, "%s.approval.lock" % self.CID)
+        open(lock, "w").close()
+        os.chmod(lock, 0o600)
+        approval = os.path.join(slug_dir, "%s.approval.json" % self.CID)
+        os.chmod(approval, 0o600)
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(any("approval.json" in p for p in problems))
+        self.assertFalse(any("approval.lock" in p for p in problems))
+
+    def test_kill_switch_path_that_is_a_directory_is_reported_not_a_regular_file(self):
+        """FINDING 3: the fixed-name _check_file path's "not a regular file" branch is
+        reachable with no root and no foreign uid — a directory sitting where a file
+        is expected is enough."""
+        self._configure_full_correct_store()
+        switch = os.path.join(self.root, *PF.KILL_SWITCH_REL)
+        os.remove(switch)
+        os.makedirs(switch)
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(
+            any("mutation-enabled" in p and "not a regular file" in p
+                for p in problems))
+
+    def test_approvals_slug_dir_that_cannot_be_stat_is_reported_not_raised(self):
+        """FINDING 4: forced deterministically via a scoped mock rather than chmod,
+        because chmod-based reproduction of "cannot access" is unreliable when the
+        test runner is root — root bypasses POSIX permission checks entirely, so
+        chmod 000 would not actually block anything."""
+        self._configure_full_correct_store()
+        slug_dir = os.path.join(self.root, "approvals", self.SLUG)
+        real_lstat = os.lstat
+
+        def fake_lstat(path, *a, **kw):
+            if path == slug_dir:
+                raise OSError(13, "Permission denied")
+            return real_lstat(path, *a, **kw)
+
+        with mock.patch.object(PF.os, "lstat", side_effect=fake_lstat):
+            problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(
+            any(slug_dir in p and "cannot stat" in p for p in problems))
 
 
 class TestScope(Base):

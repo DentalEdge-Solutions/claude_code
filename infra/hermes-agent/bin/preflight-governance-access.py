@@ -97,18 +97,41 @@ def _check_file(path, uid, gid, need_write):
     return _describe(path, st, uid, bits, want)
 
 
-def _check_files_in_dir(dirpath, uid, gid, need_write):
+# approvals/<slug>/ is where apply-changeset.py (the executor) reads a reservation
+# from — but it is NOT the only thing that lives there. governance_lib.approval_lock_
+# path puts a THIRD file next to those two: <cid>.approval.lock, created 0600 by
+# changeset_lib._approval_lock and deliberately NEVER unlinked (deleting it would
+# reopen a wrong-inode race — see that function's docstring). That lock is taken
+# HOST-SIDE ONLY by hermes-broker.py; apply-changeset.py never references
+# approval_lock_path and never opens it. An ALLOWLIST of the suffixes the executor
+# actually reads — not a denylist of things to skip — is the only safe way to walk
+# this directory: a denylist means every future host-side artifact dropped into
+# approvals/ (this is already the second one) becomes a fresh false refusal until
+# someone remembers to add it here, and an interrupted _atomic_write_json's leftover
+# `<cid>.approval.json.tmp` would need the same treatment. An allowlist fails in the
+# safer direction instead — an unrecognized file is ignored rather than blocking the
+# broker from starting. Do not "helpfully" invert this into a denylist.
+APPROVAL_FILE_SUFFIXES = (".approval.json", ".changeset.json")
+
+
+def _check_files_in_dir(dirpath, uid, gid, need_write, suffixes=None):
     """Stat every existing regular file directly inside dirpath. Missing dirpath is not
     reported here — the directory-level check already covers that path. A directory we
     cannot even list is itself a problem to REPORT, not an exception to raise (it means
     this process, run ahead of the executor, cannot see what the executor would need
-    to)."""
+    to).
+
+    suffixes, when given, is an ALLOWLIST: only entries whose name ends with one of
+    these exact strings are checked at all, everything else is silently ignored. See
+    APPROVAL_FILE_SUFFIXES above for why this must stay an allowlist."""
     problems = []
     try:
         entries = sorted(os.listdir(dirpath))
     except OSError:
         return problems
     for entry in entries:
+        if suffixes is not None and not entry.endswith(suffixes):
+            continue
         path = os.path.join(dirpath, entry)
         try:
             st = os.lstat(path)
@@ -123,10 +146,18 @@ def _check_files_in_dir(dirpath, uid, gid, need_write):
 
 
 def _check_approvals(root, uid, gid):
-    """approvals/ is nested one level by client slug (approvals/<slug>/<cid>.approval
-    .json, .changeset.json). Walk it defensively: a slug directory this process cannot
-    stat or list is REPORTED, never raised — the whole point of a pre-flight is to
-    surface exactly this kind of thing before the executor hits it mid-apply."""
+    """approvals/ is nested one level by client slug. Each slug directory holds
+    <cid>.approval.json and <cid>.changeset.json — the two files apply-changeset.py
+    (the executor) actually opens, and the ONLY two this function verifies — plus a
+    third, host-side-only file, <cid>.approval.lock (see APPROVAL_FILE_SUFFIXES),
+    which the executor never reads and which this function must NOT demand be
+    readable: doing so would false-refuse every store that has ever reserved a
+    change-set, which is worse than the gap R19 fixed, because a check that cries wolf
+    on a healthy store is one operators learn to disable.
+
+    Walk it defensively regardless: a slug directory this process cannot stat or list
+    is REPORTED, never raised — the whole point of a pre-flight is to surface exactly
+    this kind of thing before the executor hits it mid-apply."""
     problems = []
     approvals_root = os.path.join(root, "approvals")
     try:
@@ -142,7 +173,8 @@ def _check_approvals(root, uid, gid):
             continue
         if not stat.S_ISDIR(st.st_mode):
             continue
-        problems.extend(_check_files_in_dir(slug_dir, uid, gid, need_write=False))
+        problems.extend(_check_files_in_dir(slug_dir, uid, gid, need_write=False,
+                                             suffixes=APPROVAL_FILE_SUFFIXES))
     return problems
 
 
