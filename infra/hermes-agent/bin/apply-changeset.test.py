@@ -143,8 +143,10 @@ class Base(unittest.TestCase):
 
     def _approved(self, n=1):
         cs = self._proposed(n)
+        digest = C.file_digest(C.changeset_path(self.vault, cs["changeset_id"]))
         A.approve("acme-dental", cs["changeset_id"], "erick", NOW,
-                  registry=self.clients, projects=self.projects)
+                  registry=self.clients, projects=self.projects,
+                  expect_sha256=digest)
         return cs
 
     def _calls(self):

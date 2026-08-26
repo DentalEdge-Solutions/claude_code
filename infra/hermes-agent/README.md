@@ -523,7 +523,8 @@ resource name.
 ```bash
 cd infra/hermes-agent
 ./changeset.sh propose --client <slug> --from actions.json               # no credential
-./changeset.sh approve --client <slug> --changeset <id> --operator <name>
+./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
+    --expect-sha256 <hex>
 ./run-ads-mutate.sh --client <slug> --changeset <id>                      # write credential
 ./run-ads-mutate.sh --client <slug> --undo <id>
 ```
@@ -545,13 +546,26 @@ python3 bin/propose-changeset.py --client <slug> --from actions.json
 
 `approve` prints the **sha256 it binds** and **one line per action**. Read them: that
 printout is the only place the operator can confirm that what is being approved is what
-was reviewed (see "What the snapshot does and does not close" below). To make that a
-refusal rather than a reading task, pass the digest you reviewed:
+was reviewed (see "What the snapshot does and does not close" below).
+
+`--expect-sha256 <hex>` is the **default path, not an option** (2026-08-24): omit it and
+`approve` refuses — printing the digest and the per-action summary first, so the refusal
+is a step in the workflow (read the summary, paste the digest back) rather than a bare
+rejection. Supply a digest that does not match and `approve` refuses with the same exit
+code, naming the mismatch:
 
 ```bash
+./changeset.sh approve --client <slug> --changeset <id> --operator <name>
+# refuses: prints the digest + actions and tells you to re-run with --expect-sha256 <hex>
+
 ./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
-  --expect-sha256 <hex>        # refuses if the bytes on disk hash to anything else
+  --expect-sha256 <hex>        # succeeds only if the bytes on disk hash to <hex>
 ```
+
+Be honest about what this buys: it converts a reading task into a mechanical
+confirmation, not more. An operator who pastes the digest back without reading the
+printed summary above it has confirmed nothing. It does not make **review → approve**
+structurally closed — see below.
 
 `propose` and `approve` hold **no credential and perform no network I/O** — they are
 structurally incapable of touching the account. Only `apply` can reach Google.
@@ -575,8 +589,13 @@ whatever is there when the operator types the command is what gets bound — inc
 bytes written after a human read the change-set. The precise claim this rail supports
 is *"a model can never author both a change and its approval"*; it is **not** *"a model
 can never author the change"*. The residual window is covered by procedure and by
-`approve`'s printed digest + per-action summary, not by a mechanism — which is why
-`--expect-sha256` exists.
+`approve`'s printed digest + per-action summary, not by a mechanism.
+`--expect-sha256` being the default path removes the *silent* default — where the
+command bound whatever happened to be on disk with no confirmation step at all — but it
+does not remove the human, and does not close the window structurally: an operator who
+pastes the digest without reading the summary above it has confirmed nothing. The real
+reason this window stays empty in v1 is a separate rule (§17.1: no model authors a
+change-set), not this flag.
 
 **Guard order at apply** (fail-closed; the credential is touched last, so every refusal
 happens before Google is reachable):
