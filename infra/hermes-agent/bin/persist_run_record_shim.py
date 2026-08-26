@@ -32,6 +32,22 @@ import vault_lib
 
 MARKER = "HERMES-RESULT-JSON "
 
+# R20: the whole point of the dirfd chain below is that every write happens relative
+# to an already-open directory descriptor rather than by re-resolving a path — that is
+# what removes the directory-component TOCTOU structurally. If the platform does not
+# support dir_fd on the calls we depend on, silently falling back to path-based opens
+# would reintroduce exactly that TOCTOU without anyone noticing. Refuse loudly instead.
+#
+# Measured, not assumed (2026-08-24, darwin): os.open, os.rename, os.unlink and
+# os.mkdir are all in os.supports_dir_fd, but os.replace is NOT — so the atomic swap
+# below uses os.rename(src_dir_fd=, dst_dir_fd=), never os.replace. On POSIX, rename()
+# and the rename half of replace() are the same syscall and both overwrite atomically;
+# they differ only on Windows, which this tier does not target.
+if os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd:
+    raise RuntimeError("persist_run_record_shim requires openat/renameat support "
+                       "(os.supports_dir_fd); refusing to fall back to path-based "
+                       "opens, which reintroduces the directory-component TOCTOU")
+
 
 class PersistRefused(ValueError):
     """A destination that cannot be proven to stay inside the client vault.
@@ -66,15 +82,29 @@ def _resolve_vault(vault, root=None):
     Refuses a symlinked vault outright even when it resolves back inside the root: the
     guarantee wanted here is "this directory is what it appears to be", and admitting a
     benign-looking symlink today is what makes the next one arguable.
+
+    R20(c): the containment check now precedes the mkdir. The previous order created
+    the directory FIRST and refused afterwards — an out-of-root vault path was left on
+    disk by a refusal that was supposed to be refusing exactly that side effect.
     """
     root_real = os.path.realpath(root or vault_lib.vault_root())
     if os.path.islink(vault):
         raise PersistRefused("vault path is a symlink, refusing: %s" % vault)
+    # Prove containment of the path we are ABOUT to create, using the resolved parent
+    # (the vault itself may not exist yet, so it cannot be realpath'd directly).
+    candidate = os.path.join(os.path.realpath(os.path.dirname(vault)),
+                             os.path.basename(vault))
+    if not _contained(candidate, root_real):
+        raise PersistRefused(
+            "vault %s resolves to %s, which is outside the vault root %s — refusing"
+            % (vault, candidate, root_real))
     if not os.path.exists(vault):
         os.makedirs(vault, exist_ok=True)
     if not os.path.isdir(vault):
         raise PersistRefused("vault path is not a directory, refusing: %s" % vault)
     vault_real = os.path.realpath(vault)
+    # Re-check after creation: the pre-check proved the intent, this proves the result
+    # (belt and suspenders against a race between the two path resolutions).
     if not _contained(vault_real, root_real):
         raise PersistRefused(
             "vault %s resolves to %s, which is outside the vault root %s — refusing"
