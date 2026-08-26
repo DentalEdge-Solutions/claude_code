@@ -263,5 +263,146 @@ class TestMain(_VaultBase):
                                     "when persisting it fails")
 
 
+class TestParkedResiduals(unittest.TestCase):
+    """R20 (a) hardlinks, (b) directory-component TOCTOU, (c) makedirs before check.
+
+    Uses `P` (persist_run_record_shim), the same alias the rest of this file already
+    uses — not the `PR` alias the original task brief used, which does not exist in
+    this file's imports.
+    """
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="vaultroot-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.vault = os.path.join(self.root, "pilot-1")
+        os.makedirs(os.path.join(self.vault, "changes"), exist_ok=True)
+        self.result = {"changeset_id": "20260824-101500-abcdef01",
+                       "status": "applied", "applied": 1,
+                       "finished_at": "2026-08-24T10:15:00Z"}
+
+    def test_control_a_normal_persist_still_works(self):
+        # The must-SUCCEED control. Three refusals are about to be added; if any of
+        # them over-reaches, this is the test that catches it.
+        p = P.persist(self.vault, self.result, root=self.root)
+        self.assertTrue(os.path.isfile(p))
+
+    # --- (a) hardlinks -------------------------------------------------------------
+    def test_a_hardlinked_timeline_is_refused(self):
+        # O_NOFOLLOW does not see a hardlink and S_ISREG accepts one, so both existing
+        # barriers pass it. With the broker running this step as the governance store's
+        # OWNER, a hardlink from the vault to a store file is a write primitive.
+        outside = os.path.join(self.root, "outside.txt")
+        with open(outside, "w") as f:
+            f.write("original\n")
+        os.link(outside, os.path.join(self.vault, "timeline.md"))
+        with self.assertRaises(P.PersistRefused) as cm:
+            P.persist(self.vault, self.result, root=self.root)
+        self.assertIn("hard link", str(cm.exception).lower())
+        with open(outside) as f:
+            self.assertEqual(f.read(), "original\n")   # untouched
+
+    def test_a_hardlinked_result_file_is_refused(self):
+        # Unlike the timeline case, the final result.json is never opened directly —
+        # it is written to a .tmp name and then swapped in with os.rename, and rename
+        # replaces a directory ENTRY rather than writing through the old inode, so a
+        # hard link planted here is not a corruption vector the way timeline.md's is.
+        # It is refused anyway (via _refuse_if_hardlinked, checked before the rename)
+        # as a matter of policy: silently letting a name entangled with a file outside
+        # the vault be swapped is exactly the kind of coincidence R20(a) exists to
+        # surface as a named refusal rather than best-effort silence.
+        outside = os.path.join(self.root, "outside2.txt")
+        with open(outside, "w") as f:
+            f.write("original\n")
+        dest = os.path.join(self.vault, "changes",
+                            "20260824-101500-abcdef01.result.json")
+        os.link(outside, dest)
+        with self.assertRaises(P.PersistRefused):
+            P.persist(self.vault, self.result, root=self.root)
+        with open(outside) as f:
+            self.assertEqual(f.read(), "original\n")
+
+    def test_control_a_single_linked_file_is_accepted(self):
+        # Proves the nlink check refuses hardlinks specifically and not ordinary
+        # pre-existing files.
+        with open(os.path.join(self.vault, "timeline.md"), "w") as f:
+            f.write("- earlier\n")
+        self.assertTrue(os.path.isfile(P.persist(self.vault, self.result,
+                                                  root=self.root)))
+
+    # --- (b) directory-component TOCTOU --------------------------------------------
+    def test_the_changes_directory_is_opened_by_descriptor_not_by_path(self):
+        # Cheap canary, kept alongside the behavioural test below: source-text
+        # evidence that the dirfd chain exists at all. This alone would pass for the
+        # wrong reason if "dir_fd"/"O_DIRECTORY" appeared only in a comment — it
+        # proves nothing about behaviour by itself, which is why the next test exists.
+        import inspect
+        src = inspect.getsource(P)
+        self.assertIn("dir_fd", src)
+        self.assertIn("O_DIRECTORY", src)
+
+    def test_dirfd_chain_resists_a_swapped_changes_directory(self):
+        """Behavioural companion to the canary above. Hooks `P._open_dir` to swap the
+        `changes` directory ENTRY, by path, in the exact gap between persist() opening
+        it (capturing a directory descriptor via openat) and persist() writing through
+        that descriptor. A descriptor obtained via open()/openat() refers to the
+        underlying inode, not the name used to obtain it — an os.rename() of that name
+        afterwards cannot redirect it. If persist() re-resolved the path instead of
+        reusing the descriptor, the write would land in the ATTACKER directory that
+        now occupies the `changes` name; if it genuinely uses the descriptor, the
+        write lands in the original directory regardless of what `changes` now names.
+        """
+        original_changes = os.path.join(self.vault, "changes")
+        attacker_dir = os.path.join(self.root, "attacker-changes")
+        os.makedirs(attacker_dir, exist_ok=True)
+        displaced = os.path.join(self.vault, "changes-displaced")
+
+        real_open_dir = P._open_dir
+        state = {"swapped": False}
+
+        def swapping_open_dir(name, dir_fd=None):
+            fd = real_open_dir(name, dir_fd=dir_fd)
+            # Only the call that opens "changes" RELATIVE TO the vault fd — the
+            # vault-level open itself (dir_fd=None) must be left alone, or nothing
+            # would be left to open the (now-renamed) changes directory through.
+            if not state["swapped"] and name == "changes" and dir_fd is not None:
+                state["swapped"] = True
+                os.rename(original_changes, displaced)
+                os.rename(attacker_dir, original_changes)
+            return fd
+
+        P._open_dir = swapping_open_dir
+        try:
+            path = P.persist(self.vault, self.result, root=self.root)
+        finally:
+            P._open_dir = real_open_dir
+
+        self.assertTrue(state["swapped"], "the hook never fired — test is not "
+                        "exercising the swap it claims to")
+        # The write must have landed in the ORIGINAL directory (now renamed aside),
+        # not in the attacker directory that currently occupies the "changes" name.
+        self.assertTrue(os.path.isfile(os.path.join(displaced, os.path.basename(path))))
+        self.assertEqual(os.listdir(original_changes), [],
+                         "the write followed the swapped NAME instead of the "
+                         "descriptor captured before the swap — the TOCTOU is open")
+
+    def test_a_symlinked_changes_directory_is_still_refused(self):
+        elsewhere = os.path.join(self.root, "elsewhere")
+        os.makedirs(elsewhere, exist_ok=True)
+        changes = os.path.join(self.vault, "changes")
+        os.rmdir(changes)
+        os.symlink(elsewhere, changes)
+        with self.assertRaises(P.PersistRefused):
+            P.persist(self.vault, self.result, root=self.root)
+
+    # --- (c) makedirs before the containment check ---------------------------------
+    def test_an_out_of_root_vault_is_refused_without_being_created(self):
+        outside = os.path.join(tempfile.mkdtemp(), "not-in-the-root")
+        with self.assertRaises(P.PersistRefused):
+            P.persist(outside, self.result, root=self.root)
+        # The mkdir belongs BELOW the check: refusing after creating the directory
+        # leaves an attacker-chosen path on disk.
+        self.assertFalse(os.path.exists(outside))
+
+
 if __name__ == "__main__":
     unittest.main()

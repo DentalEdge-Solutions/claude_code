@@ -145,50 +145,146 @@ def _check_dest(path, vault_real):
                              % (path, final, vault_real))
 
 
-def _open_regular(path, flags):
-    """os.open with O_NOFOLLOW plus a regular-file assertion on the resulting fd.
+def _open_dir(name, dir_fd=None):
+    """Open a directory component with O_NOFOLLOW, relative to an already-open
+    directory descriptor when one is supplied.
 
-    O_NOFOLLOW refuses a symlink at the final component (ELOOP/EMLINK), and the fstat
-    refuses a directory, fifo, device or socket left in that position. Checked on the
-    FD, not the path, so nothing can be swapped between the test and the write.
+    R20(b): resolving a path with realpath and then opening it BY PATH leaves a
+    window in which any directory component (not just the final one) can be swapped
+    out from under the resolved string. Opening each component relative to the
+    previous component's already-open descriptor removes that window structurally —
+    there is no second path resolution left to race, because nothing after the first
+    open ever re-walks the path from the root.
     """
-    fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        return os.open(name, flags) if dir_fd is None else os.open(name, flags, dir_fd=dir_fd)
+    except OSError as e:
+        raise PersistRefused("%s cannot be opened as a directory (%s)" % (name, e))
+
+
+def _open_regular(path, flags, dir_fd=None):
+    """os.open with O_NOFOLLOW plus regular-file AND single-link assertions on the fd.
+
+    O_NOFOLLOW refuses a symlink at the final component and the fstat S_ISREG check
+    refuses a directory, fifo, device or socket in that position — but NEITHER of
+    those sees a HARD LINK (R20(a)). A hard link planted in the vault, pointing at a
+    file inside the governance store, passes both existing barriers, and now that
+    this step runs as the OWNER of the governance store, writing through that link is
+    a write primitive against the store itself. `st_nlink > 1` is the check that
+    closes it.
+
+    Everything is asserted on the FD, never the path, so nothing can be swapped
+    between the test and the write. `dir_fd`, when given, makes the open relative to
+    an already-open directory descriptor rather than a path (R20(b)).
+    """
+    fd = (os.open(path, flags | os.O_NOFOLLOW, 0o600) if dir_fd is None
+          else os.open(path, flags | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             raise PersistRefused("%s is not a regular file, refusing" % path)
+        if st.st_nlink > 1:
+            raise PersistRefused(
+                "%s has %d hard links, refusing: a hard link to a file outside the "
+                "vault passes both O_NOFOLLOW and the regular-file test, and this "
+                "step runs as the owner of the governance store" % (path, st.st_nlink))
     except BaseException:
         os.close(fd)
         raise
     return fd
 
 
+def _refuse_if_hardlinked(name, dir_fd, display_path):
+    """If a file already occupies `name` (relative to `dir_fd`) and it is a hard
+    link (nlink > 1), refuse before doing anything else to it.
+
+    Two distinct reasons this runs BEFORE the operation rather than relying on
+    `_open_regular`'s own nlink check alone:
+
+    - a hard-linked TMP name would otherwise be truncated as a side effect of the
+      open() syscall itself when O_TRUNC is requested — the truncation happens
+      before any Python code can inspect the resulting fd, so detecting the hard
+      link only AFTER that open is already too late to prevent the damage.
+    - a hard-linked FINAL name is not corrupted by the rename that would replace it
+      (rename(2) swaps the directory entry, it does not write through the old
+      inode), but silently replacing a name that is entangled with a file outside
+      the vault is exactly the kind of coincidence R20(a) exists to make a named,
+      operator-visible refusal rather than best-effort silence.
+
+    Symlinks at `name` are not this function's concern — O_NOFOLLOW here means a
+    symlinked name raises OSError (ELOOP) rather than proceeding, and the callers in
+    `persist()` already refuse symlinks at the path level via `_check_dest` before
+    reaching this check.
+    """
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        raise PersistRefused("%s cannot be checked before use (%s)" % (display_path, e))
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+            raise PersistRefused(
+                "%s has %d hard links, refusing: this step runs as the owner of the "
+                "governance store and a hard link out of the vault is a write "
+                "primitive against it" % (display_path, st.st_nlink))
+    finally:
+        os.close(fd)
+
+
 def persist(vault, result, root=None):
     """Write <vault>/changes/<cid>.result.json and append <vault>/timeline.md.
 
-    Every destination is resolved and proven to lie inside the vault first, and opened
-    with O_NOFOLLOW; anything that cannot be proven raises PersistRefused (a
-    ValueError) rather than being skipped.
+    Every destination is proven to lie inside the vault, then opened RELATIVE TO an
+    already-open directory descriptor (R20(b)), with O_NOFOLLOW, a regular-file
+    assertion and a single-link assertion (R20(a)). Anything that cannot be proven
+    raises PersistRefused (a ValueError) rather than being skipped.
     """
     # Canonical location: changeset_lib.result_path is the single definition of where a
     # result file lives — composing a second, divergent path here (e.g. vault root)
     # would leave the next reader looking in the wrong place.
     vault_real = _resolve_vault(vault, root)
-    _resolve_subdir(vault_real, os.path.basename(C.changes_dir(vault_real)), vault_real)
-    path = C.result_path(vault_real, result["changeset_id"])
-    tmp = path + ".tmp"
-    _check_dest(path, vault_real)
-    _check_dest(tmp, vault_real)
-    fd = _open_regular(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, sort_keys=True)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    timeline = os.path.join(vault_real, "timeline.md")
-    _check_dest(timeline, vault_real)
-    fd = _open_regular(timeline, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
-    with os.fdopen(fd, "a", encoding="utf-8") as f:
-        f.write("- %s  change-set `%s`  status=%s  actions=%s\n"
-                % (result.get("finished_at", ""), result["changeset_id"],
-                   result.get("status", "?"), result.get("applied", "?")))
+    changes_name = os.path.basename(C.changes_dir(vault_real))
+    _resolve_subdir(vault_real, changes_name, vault_real)
+
+    vfd = _open_dir(vault_real)
+    try:
+        cfd = _open_dir(changes_name, dir_fd=vfd)
+        try:
+            base = os.path.basename(C.result_path(vault_real, result["changeset_id"]))
+            tmp_base = base + ".tmp"
+            path = os.path.join(vault_real, changes_name, base)
+            _check_dest(path, vault_real)
+            _check_dest(path + ".tmp", vault_real)
+            # R20(a): checked before either the tmp write (which uses O_TRUNC — a
+            # hard link there would be truncated by the open() call itself) or the
+            # rename that replaces the final name.
+            _refuse_if_hardlinked(tmp_base, cfd, path + ".tmp")
+            _refuse_if_hardlinked(base, cfd, path)
+
+            fd = _open_regular(tmp_base, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, dir_fd=cfd)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            # os.rename, NOT os.replace: os.replace is NOT in os.supports_dir_fd on
+            # darwin (measured 2026-08-24), while os.rename IS. On POSIX the two are
+            # the same call — rename(2) already overwrites atomically; replace only
+            # differs on Windows, which this tier does not target.
+            os.rename(tmp_base, base, src_dir_fd=cfd, dst_dir_fd=cfd)
+        finally:
+            os.close(cfd)
+
+        timeline = os.path.join(vault_real, "timeline.md")
+        _check_dest(timeline, vault_real)
+        fd = _open_regular("timeline.md", os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                           dir_fd=vfd)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write("- %s  change-set `%s`  status=%s  actions=%s\n"
+                    % (result.get("finished_at", ""), result["changeset_id"],
+                       result.get("status", "?"), result.get("applied", "?")))
+    finally:
+        os.close(vfd)
     return path
