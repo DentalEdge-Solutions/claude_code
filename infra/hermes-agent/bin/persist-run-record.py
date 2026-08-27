@@ -18,8 +18,14 @@ def main(argv=None):
     try:
         rec = vault_lib.resolve(args.client)
         P.persist(rec["vault_path"], res)
-    except (ValueError, KeyError, OSError, TypeError) as e:
-        print("persist-run-record: %s" % e, file=sys.stderr)
+    # NotImplementedError (S1-M1): this is what Python raises when a dir_fd argument
+    # cannot be honoured, and persist() is built entirely out of dir_fd calls. The
+    # shim's import-time guard should make it unreachable, but "unreachable" is what
+    # this handler exists for — without it the exception escaped as a raw TRACEBACK and
+    # exit 1, which reads as a crash rather than the fail-closed refusal it is. Every
+    # other failure on this path is exit 2 with one line on stderr; so is this one now.
+    except (ValueError, KeyError, OSError, TypeError, NotImplementedError) as e:
+        print("persist-run-record: %s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 2
     return 0
 

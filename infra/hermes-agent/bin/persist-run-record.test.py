@@ -1,4 +1,5 @@
-import contextlib, importlib.util, io, json, os, shutil, sys, tempfile, unittest
+import contextlib, importlib.util, inspect, io, json, os, shutil, sys, tempfile, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -261,6 +262,76 @@ class TestMain(_VaultBase):
         self.assertNotEqual(rc, 0)
         self.assertEqual(out, text, "the executor's output must reach the operator even "
                                     "when persisting it fails")
+
+    def test_a_notimplementederror_from_persist_is_a_refusal_not_a_traceback(self):
+        """S1-M1. persist() is built entirely out of dir_fd calls, and Python raises
+        NotImplementedError for a dir_fd it cannot honour. That was not in main()'s
+        except tuple, so it escaped as a raw TRACEBACK and exit 1 — indistinguishable
+        from a crash, on a path where every other failure is a one-line exit 2.
+
+        Raised from persist() directly rather than by simulating an unsupported
+        platform: the subject under test is main()'s handler, and going through
+        os.supports_dir_fd would test the shim's import guard instead."""
+        text = "HERMES-RESULT-JSON %s\n" % json.dumps(RESULT)
+        err = io.StringIO()
+
+        def boom(*a, **kw):
+            raise NotImplementedError("dir_fd unavailable on this platform")
+
+        with mock.patch.object(PRR.P, "persist", side_effect=boom):
+            with contextlib.redirect_stderr(err):
+                rc, out = self._run(["--client", "acme-dental"], text)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, text)                    # pass-through still happens
+        self.assertIn("NotImplementedError", err.getvalue())
+
+    def test_control_the_same_handler_still_refuses_an_ordinary_oserror(self):
+        """CONTROL: proves the widened tuple did not change the existing paths, so the
+        test above measures the NEW exception type rather than a handler that catches
+        everything for some unrelated reason."""
+        text = "HERMES-RESULT-JSON %s\n" % json.dumps(RESULT)
+        err = io.StringIO()
+        with mock.patch.object(PRR.P, "persist", side_effect=OSError("disk full")):
+            with contextlib.redirect_stderr(err):
+                rc, _ = self._run(["--client", "acme-dental"], text)
+        self.assertEqual(rc, 2)
+        self.assertIn("OSError", err.getvalue())
+
+
+class TestDirFdGuardCoversEveryDependedOnCall(unittest.TestCase):
+    """S1-M1. The import-time guard checked os.open and os.rename only, while the
+    comment beside it named four calls as measured and persist() depends on all four —
+    os.mkdir and os.unlink became load-bearing dir_fd calls in T8 and were never added.
+    A CHECKED set that has drifted from the DEPENDED-ON set is the same defect class as
+    a requirement list written from memory."""
+
+    def test_the_guard_covers_every_dir_fd_call_persist_actually_makes(self):
+        names = {f.__name__ for f in P._REQUIRED_DIR_FD_CALLS}
+        self.assertEqual(names, {"open", "rename", "mkdir", "unlink"})
+
+    def test_the_guarded_set_matches_the_dir_fd_calls_in_the_source(self):
+        """Derives the expected set from the MODULE SOURCE rather than restating the
+        literal, so adding a dir_fd call without adding it to the guard fails here.
+
+        NOT a source-text canary of the shape this plan has already been burnt by: it
+        does not assert that some string is present somewhere. It extracts the os.<fn>
+        calls that are passed a dir_fd/*_dir_fd keyword and asserts that SET equals the
+        guarded set, so it fails on a real divergence and cannot be satisfied by a
+        mention in a comment — comments are stripped by ast before this looks."""
+        import ast
+        tree = ast.parse(inspect.getsource(P))
+        used = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "os"):
+                continue
+            if any(kw.arg and kw.arg.endswith("dir_fd") for kw in node.keywords):
+                used.add(node.func.attr)
+        self.assertTrue(used, "found no dir_fd calls — the extractor is blind")
+        self.assertEqual(used, {f.__name__ for f in P._REQUIRED_DIR_FD_CALLS})
 
 
 class TestParkedResiduals(unittest.TestCase):

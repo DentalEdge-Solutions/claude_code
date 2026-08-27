@@ -52,10 +52,27 @@ MARKER = "HERMES-RESULT-JSON "
 # below uses os.rename(src_dir_fd=, dst_dir_fd=), never os.replace. On POSIX, rename()
 # and the rename half of replace() are the same syscall and both overwrite atomically;
 # they differ only on Windows, which this tier does not target.
-if os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd:
-    raise RuntimeError("persist_run_record_shim requires openat/renameat support "
+#
+# S1-M1: the guard used to check only os.open and os.rename, while the comment above
+# named four calls as measured. os.mkdir and os.unlink became load-bearing dir_fd calls
+# in T8 and were never added, so the CHECKED set and the DEPENDED-ON set had drifted
+# apart — the same defect class as a requirement list written from memory. Derived from
+# one tuple now, so the two cannot drift again: adding a dir_fd call to this module
+# without adding it here is the mistake this is shaped to prevent.
+#
+# Refined by the S1-M1 probe: an unsupported mkdir/unlink was never a silent fallback.
+# Python raises NotImplementedError for a dir_fd it cannot honour, and the probe
+# confirmed nothing is created and no path-based open happens. The hole was therefore
+# documentation plus an ESCAPING exception (see persist-run-record.py's handler), not a
+# TOCTOU. This guard still belongs here: refusing at import with a message beats a
+# NotImplementedError from somewhere in the middle of a write chain.
+_REQUIRED_DIR_FD_CALLS = (os.open, os.rename, os.mkdir, os.unlink)
+_missing = [f.__name__ for f in _REQUIRED_DIR_FD_CALLS if f not in os.supports_dir_fd]
+if _missing:
+    raise RuntimeError("persist_run_record_shim requires dir_fd support for %s "
                        "(os.supports_dir_fd); refusing to fall back to path-based "
-                       "opens, which reintroduces the directory-component TOCTOU")
+                       "operations, which reintroduces the directory-component TOCTOU"
+                       % ", ".join(_missing))
 
 
 class PersistRefused(ValueError):
