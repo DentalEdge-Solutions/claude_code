@@ -1,4 +1,4 @@
-import datetime, importlib.util, json, os, sys, tempfile, unittest
+import datetime, importlib.util, json, os, subprocess, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -331,6 +331,78 @@ class TestNoInterpolation(Base):
         r = RecordingRunner()
         self.drain(r)
         self.assertEqual(r.calls, [])
+
+
+class TimingOutRunner:
+    """A runner that raises subprocess.TimeoutExpired instead of returning.
+
+    Purpose-built rather than a RecordingRunner flag (R16): a runner whose ONLY
+    behaviour is to time out cannot accidentally return a real rc and quietly test the
+    wrong branch. It still records, so "the executor really was invoked" stays
+    assertable — a timeout that never spawned anything would prove nothing about the
+    path that handles one."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        raise subprocess.TimeoutExpired(cmd=list(argv), timeout=B.RUNNER_TIMEOUT_SECONDS)
+
+
+class TestExecutorTimeoutDetail(Base):
+    """R16. rc=3 from a real executor exit and rc=3 SYNTHESISED from a timeout both map
+    to classification failed_after_mutation, but they are not equally certain. The fixed
+    text for that classification asserts as FACT that a mutation landed; for a timeout
+    that overclaims, because a mutation only MAY have been left in flight. The hedge was
+    added for exactly that reason and then shipped with no test, so deleting it broke
+    nothing."""
+
+    def test_a_timeout_gets_the_hedged_detail_not_the_assertive_one(self):
+        r = TimingOutRunner()
+        rid = self.file_request()
+        self.drain(r)
+        self.assertEqual(len(r.calls), 1)            # the executor really was invoked
+        result = self.result_for(rid)
+        # Fail-closed classification is UNCHANGED by the hedge — only the text differs.
+        self.assertEqual(result["classification"], "failed_after_mutation")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["exit_code"], 3)
+        self.assertNotEqual(result["detail"],
+                            B.DETAIL_BY_CLASSIFICATION["failed_after_mutation"])
+        self.assertIn("MAY", result["detail"])
+        self.assertIn(str(B.RUNNER_TIMEOUT_SECONDS), result["detail"])
+
+    def test_control_a_real_rc3_keeps_the_assertive_detail(self):
+        """DISCRIMINATING CONTROL. Same classification, same exit code, different
+        certainty. Without this the test above would pass against a broker that had
+        simply replaced the assertive text everywhere, losing the distinction the hedge
+        exists to draw."""
+        rid = self.file_request()
+        self.drain(RecordingRunner(rc=3, stdout="the mutator died"))
+        result = self.result_for(rid)
+        self.assertEqual(result["classification"], "failed_after_mutation")
+        self.assertEqual(result["exit_code"], 3)
+        self.assertEqual(result["detail"],
+                         B.DETAIL_BY_CLASSIFICATION["failed_after_mutation"])
+        self.assertNotIn("MAY", result["detail"])
+
+    def test_a_timeout_still_records_the_outcome_on_the_approval(self):
+        """A timeout must not leave the approval live: the run may have mutated, so the
+        approval is spent whatever the text says."""
+        self.file_request()
+        self.drain(TimingOutRunner())
+        with open(governance_lib.approval_path(SLUG, CID)) as f:
+            self.assertEqual(json.load(f)["outcome"], "failed_after_mutation")
+
+    def test_a_timeout_leaks_no_command_line_into_the_spool(self):
+        """subprocess.TimeoutExpired carries the full argv it was constructed with, and
+        str() renders it. That must not reach the Hermes-readable spool any more than a
+        raw OSError does (S6)."""
+        rid = self.file_request()
+        self.drain(TimingOutRunner())
+        blob = json.dumps(self.result_for(rid))
+        self.assertNotIn(B.MUTATE_SH, blob)
 
 
 class TestRefusalDetailIsFixedVocabulary(Base):
