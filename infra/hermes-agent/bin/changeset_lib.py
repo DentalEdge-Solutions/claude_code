@@ -548,10 +548,16 @@ def append_log(slug, rec):
 # The seen-set lives in the GOVERNANCE STORE (governance_lib.seen_path), never in the
 # spool. That is the whole point of putting it here rather than beside the request the
 # gateway already writes: the spool is the one tree Hermes can write to, and a replay
-# record Hermes can delete is not replay protection at all (spec §8). The one-shot
-# executor container mounts seen/ read-write for exactly this file, alongside log/ —
-# both are host-owned append targets the executor updates but cannot repudiate, because
-# it never has write access to approvals/, control/, or registry/.
+# record Hermes can delete is not replay protection at all (spec §8).
+#
+# CORRECTED (S3-a). This comment used to say the executor container mounts seen/
+# read-write "alongside log/", and that both are append targets it "cannot repudiate".
+# Neither half held. seen/ is now not mounted into the executor at all — nothing under
+# its entrypoint ever read or wrote the seen-set; append_log is its only governance
+# write. And "cannot repudiate" was never true of either file: write access to a
+# DIRECTORY is what grants unlink, so an executor that could write log/ could always
+# delete log/<slug>.jsonl outright. It still can — see iter_log_records' docstring for
+# what that costs and why closing it is a two-part change parked for its own wave.
 
 def append_seen(slug, request_id, now):
     """Record an accepted request_id, fsynced before returning.
@@ -599,14 +605,28 @@ def iter_seen_records(slug):
     FAIL-CLOSED on every read error: an unreadable file, a directory sitting where the
     file should be, or a line that is not a JSON object carrying a string
     "request_id" AND a string "seen_at" all RAISE ValueError rather than being
-    skipped or silently treated as absent. Returning nothing here would silently admit
+    skipped or silently treated as absent. Returning nothing there would silently admit
     every replay for this client and silently undercount every daily quota — the exact
     same failure shape as an unreadable cap being read as "no usage yet" instead of
     refused (see read_spool_quotas).
+
+    A MISSING FILE IS NOT A READ ERROR AND IS NOT COVERED BY THAT RULE. The `return`
+    below is the fail-OPEN case the paragraph above condemns, and this docstring used
+    to claim otherwise — it described the corrupt-file path and silently overclaimed
+    the missing-file one. Stated plainly rather than left to be discovered: a seen-set
+    that has been DELETED reads here as "nothing has ever been recorded", which admits
+    every previously-seen request_id as fresh.
+
+    What makes that acceptable TODAY is a property of the deployment, not of this
+    function: every caller of the seen-set is host-side in hermes-broker.py, and the
+    executor no longer has seen/ mounted at all (S3-a), so the governed party cannot
+    reach the file to delete it. That is an argument about who can write the store, and
+    it evaporates the moment anything mounts seen/ into a container again. If you are
+    about to do that, this `return` is the thing to fix first.
     """
     p = governance_lib.seen_path(slug)
     if not os.path.exists(p):
-        return                              # nothing has ever been recorded for this client
+        return                              # NOT fail-closed — see the docstring above
     try:
         with open(p, encoding="utf-8") as f:
             for lineno, line in enumerate(f, 1):
@@ -774,13 +794,48 @@ def iter_log_records(slug):
     record missing a field surfaced as an uncaught exception and exit 1 rather than
     a refusal.)
 
-    Every failure mode is a refusal, never a skip: an unreadable counter must not
-    read as 'under the cap', and an unreadable undo list must not read as 'nothing
-    to undo'.
+    Every failure mode BELOW THIS LINE is a refusal, never a skip: an unreadable
+    counter must not read as 'under the cap', and an unreadable undo list must not
+    read as 'nothing to undo'.
+
+    A MISSING LOG IS THE ONE EXCEPTION, AND IT IS NOT COVERED (S3-b, ruling R22).
+    This docstring used to state the rule without that carve-out, and the code
+    immediately below it returns nothing when the file is absent — so a missing
+    counter reads as exactly the 'under the cap' this text forbids, and a missing
+    undo list as exactly the 'nothing to undo'. The text named the precise failure
+    the code implements. Measured, not reasoned: deleting log/<slug>.jsonl takes
+    day_counts from exhausted back to zero, and destroys the reversibility record
+    --undo reads through this same generator.
+
+    It is not merely theoretical for the GOVERNED party either. log/ must stay
+    executor-writable — append_log is fsync'd per action — and on Docker Desktop for
+    macOS the bind mount remaps ownership so uid 10000 can unlink there. The same
+    modes on a Linux VPS would deny uid 10000 even traverse, so the exploit's REACH
+    is platform-conditional and the VPS behaviour is UNMEASURED; do not read a darwin
+    measurement as covering it either way.
+
+    Why this is still a `return` and not a raise: closing it means an
+    append-but-not-unlink layout (host-owned log/ the executor cannot create or
+    unlink in, holding a pre-created per-client file it can append to) plus making a
+    missing log for a REGISTERED client fail closed. Both halves are needed together,
+    and both were measured as out of scope for one fix wave:
+
+      * preflight-governance-access.py demands read+WRITE+traverse on log/, so the
+        very layout the fix creates is refused by the pre-flight (measured: 1 problem,
+        exit 2) — the mutation rail blocked at startup, which is R19's over-checking
+        failure again and worse than the finding.
+      * raising here breaks the FIRST apply for any client, not just fixtures:
+        day_counts reads this log before any log exists (measured: 30 suite tests,
+        including the plain happy path, go red). It is only safe once every registered
+        client is guaranteed a pre-created log — and there is no programmatic
+        client-registration hook to guarantee it: clients.json is hand-edited, and
+        migrate-governance.py only carries logs that ALREADY exist in a vault.
+
+    Until both land together, treat a missing log as UNVERIFIED rather than as zero.
     """
     p = log_path(slug)
     if not os.path.exists(p):
-        return
+        return                              # NOT fail-closed — see the docstring above
     try:
         f = open(p, encoding="utf-8")
     except OSError as e:
