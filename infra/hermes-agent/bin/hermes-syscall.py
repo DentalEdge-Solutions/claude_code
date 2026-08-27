@@ -142,11 +142,36 @@ def main(argv=None):
         print(text)
         return code
     except S.SpoolRefused as e:
+        # A genuine usage error: SpoolRefused off this path means the --client or
+        # --changeset the caller supplied is not a well-formed identifier. Re-crafting
+        # the arguments is the correct response, and exit 1 is what says so.
         print("hermes-syscall: %s" % e, file=sys.stderr)
         return EXIT_USAGE
     except OSError as e:
-        print("hermes-syscall: %s" % e, file=sys.stderr)
-        return EXIT_USAGE
+        # NOT a usage error, and it used to share exit 1 with one. An OSError here is
+        # the spool being absent, read-only, or full — an ENVIRONMENT failure the
+        # caller's arguments had nothing to do with. Exit 1 told a model its arguments
+        # were wrong, so the only response it invites is to re-craft them and try
+        # again: pointless work, and pressure applied to a rail that is simply down.
+        #
+        # EXIT_REFUSED, because it is TRUE here in the sense spec §12 gives it: exit 2
+        # guarantees nothing was mutated, and on this path the request never reached
+        # the spool at all, let alone the broker. Deliberately not a new exit code —
+        # the 0/1/2/3/4 set is the documented contract this client shares with the
+        # broker and the spec, and inventing a sixth value to describe an unreachable
+        # spool is a contract change, not a bug fix.
+        #
+        # The raw exception goes to stderr only, never into the model-facing text,
+        # exactly as the unreadable-result path above does: an errno's strerror is
+        # arbitrary wording the caller does not control ("Resource temporarily
+        # unavailable" is retry-flavoured text this client exists to refuse to say).
+        print("hermes-syscall: %s: %s" % (type(e).__name__, e), file=sys.stderr)
+        print("  status         refused\n"
+              "  classification spool_unavailable\n"
+              "  detail         the request spool could not be reached, so nothing was "
+              "filed and nothing was mutated. This is not a rejected argument and "
+              "re-sending it will not help; an operator must inspect the host.")
+        return EXIT_REFUSED
 
 
 if __name__ == "__main__":

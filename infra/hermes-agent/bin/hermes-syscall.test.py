@@ -102,6 +102,79 @@ class TestApply(Base):
         self.assertNotEqual(rc, 0)
 
 
+class TestEnvironmentFailureIsNotAUsageError(Base):
+    """An OSError out of submit() — the spool absent, read-only, or full — used to
+    return EXIT_USAGE, the same code as a malformed --client. Exit 1 tells a model its
+    ARGUMENTS were wrong, so the only response it invites is to re-craft them and
+    re-send: pointless work, and pressure applied to a rail that is simply down.
+
+    The spool is made genuinely unreachable rather than patched, so this exercises the
+    real errno path a container with a broken mount would hit."""
+
+    def _break_the_spool(self):
+        """Replace the spool root with a read-only directory. submit() must fail while
+        creating its temp file, before anything is filed."""
+        os.chmod(self.root, 0o500)
+        self.addCleanup(os.chmod, self.root, 0o700)
+
+    def test_control_apply_succeeds_while_the_spool_is_writable(self):
+        """POSITIVE CONTROL: proves the fixture files a request normally, so the
+        refusal below is caused by the broken spool and not by the arguments."""
+        rc, out, _ = self.run_cli(["apply", "--client", "pilot-1",
+                                   "--changeset", "20260824-101500-abcdef01"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.strip())
+
+    def test_an_unreachable_spool_is_not_reported_as_a_usage_error(self):
+        self._break_the_spool()
+        rc, out, err = self.run_cli(["apply", "--client", "pilot-1",
+                                     "--changeset", "20260824-101500-abcdef01"])
+        self.assertNotEqual(rc, K.EXIT_USAGE)
+        self.assertEqual(rc, K.EXIT_REFUSED)
+        self.assertIn("spool_unavailable", out)
+        self.assertIn("nothing was mutated", out)
+        self.assertTrue(err.strip(), "the operator gets no diagnostic at all")
+
+    def test_control_a_malformed_argument_IS_still_a_usage_error(self):
+        """DISCRIMINATING CONTROL. A bad --client is a genuine usage error and must
+        keep exit 1: re-crafting the argument is the correct response there. Without
+        this, the test above would pass against a client that had simply stopped using
+        EXIT_USAGE for anything."""
+        rc, _, err = self.run_cli(["apply", "--client", "NOT A SLUG",
+                                   "--changeset", "20260824-101500-abcdef01"])
+        self.assertEqual(rc, K.EXIT_USAGE)
+        self.assertTrue(err.strip())
+
+    def test_the_model_facing_text_invites_no_retry_and_leaks_no_errno_wording(self):
+        """This client exists to refuse to say retry-flavoured things. An errno's
+        strerror is arbitrary wording the caller does not control — EAGAIN renders as
+        "Resource temporarily unavailable", which reads as an invitation to try again —
+        so it belongs on stderr and nowhere near the text a model reads."""
+        self._break_the_spool()
+        _rc, out, err = self.run_cli(["apply", "--client", "pilot-1",
+                                      "--changeset", "20260824-101500-abcdef01"])
+        lowered = out.lower()
+        for word in ("retry", "try again", "temporarily", "permission denied", "errno"):
+            self.assertNotIn(word, lowered, "model-facing text contains %r" % word)
+        self.assertIn("will not help", lowered)
+        # The detail is not destroyed, only relocated.
+        self.assertIn("Error", err)
+
+    def test_nothing_is_left_in_the_spool_after_the_failure(self):
+        """The exit-2 text asserts nothing was filed, and exit 2 is a spec-§12
+        guarantee that nothing was mutated. Verified rather than trusted.
+
+        On a read-only root the requests/ directory cannot even be created, so its
+        ABSENCE is the strongest form of the assertion — no request, and no temp file
+        left behind for the broker to trip over either."""
+        self._break_the_spool()
+        self.run_cli(["apply", "--client", "pilot-1",
+                      "--changeset", "20260824-101500-abcdef01"])
+        d = S.requests_dir(self.root)
+        self.assertEqual(sorted(os.listdir(d)) if os.path.isdir(d) else [], [])
+        self.assertEqual(sorted(os.listdir(self.root)), [])
+
+
 class TestResult(Base):
     RID = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"
 
