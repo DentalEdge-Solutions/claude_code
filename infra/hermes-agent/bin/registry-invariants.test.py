@@ -414,12 +414,33 @@ class TestSpoolQuotasDeclared(unittest.TestCase):
         self.assertGreaterEqual(q["max_pending_requests"], 1)
         self.assertGreaterEqual(q["accepted_requests_per_client_day"], 1)
 
+    # R8. A quota of 999999 is a quota in name only, and catching THAT is all this
+    # check is for. The bound must be unambiguously absurd, never merely "larger than
+    # today's value plus some headroom": this suite's own docstring says it is
+    # deliberately narrow so that it does not become a change-detector, and the previous
+    # ceilings of 100 and 500 broke that promise. Today's values are 8 and 20; a
+    # deliberate operational decision to raise either into the low hundreds is a policy
+    # change for review, not a test failure, and a test that fires on it teaches people
+    # to edit the test rather than think about the number.
+    #
+    # One bound for both, chosen so no defensible operational value can reach it: ten
+    # thousand queued requests for one client, or ten thousand accepted live mutations
+    # against one account in a single UTC day, are not quotas under any reading. What
+    # this still catches is the realistic careless edit — a 999999 paste, or a digit
+    # added by accident.
+    ABSURD = 10000
+
     def test_quotas_are_not_absurdly_large(self):
-        # A quota of 999999 is a quota in name only. This is a smoke check against a
-        # careless edit, not a policy statement.
         q = C.read_spool_quotas(REGISTRY, "claude_google_ads")
-        self.assertLessEqual(q["max_pending_requests"], 100)
-        self.assertLessEqual(q["accepted_requests_per_client_day"], 500)
+        self.assertLess(q["max_pending_requests"], self.ABSURD)
+        self.assertLess(q["accepted_requests_per_client_day"], self.ABSURD)
+
+    def test_control_the_absurdity_check_can_actually_fail(self):
+        """CONTROL. Without it, a bound loosened far enough asserts nothing and would
+        keep passing even if the check were deleted outright. Proves the comparison
+        still rejects the paste it exists to catch."""
+        self.assertFalse(999999 < self.ABSURD)
+        self.assertFalse(self.ABSURD < self.ABSURD)         # the bound is exclusive
 
 
 if __name__ == "__main__":
