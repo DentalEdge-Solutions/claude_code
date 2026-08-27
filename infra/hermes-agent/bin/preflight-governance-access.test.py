@@ -309,6 +309,41 @@ class TestFileLevelChecks(Base):
             any("mutation-enabled" in p and "not a regular file" in p
                 for p in problems))
 
+    def test_approvals_slug_dir_that_the_executor_cannot_traverse_is_reported(self):
+        """S5-M1. Nothing checked the slug DIRECTORY's own bits, only the files inside
+        it — and the file walk runs as this process (the host user, who can happily
+        list its own 0700 directory), so it modelled nothing about the executor's
+        access to the directory itself. Measured before the fix: a host-owned 0700 slug
+        dir returned ZERO problems, while a 0600 file inside it returned one. The check
+        saw through a door the executor cannot open, to files behind it."""
+        self._configure_full_correct_store()
+        slug_dir = os.path.join(self.root, "approvals", self.SLUG)
+        os.chmod(slug_dir, 0o700)                       # owner-only: executor gets ---
+        self.addCleanup(os.chmod, slug_dir, 0o750)
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertTrue(any(slug_dir in p and "read+traverse" in p for p in problems),
+                        problems)
+
+    def test_control_the_same_store_at_the_documented_mode_is_still_healthy(self):
+        """R19b GUARD, and the half that matters more. This is a TIGHTENING of a gate
+        that blocks broker startup, so the documented-remedy layout must still return
+        ZERO problems — a check that cries wolf on a healthy store is one operators
+        learn to disable, which is worse than the gap it closed."""
+        self._configure_full_correct_store()
+        self.assertEqual(
+            PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+    def test_the_slug_dir_is_not_required_to_be_writable(self):
+        """The executor READS approvals and never writes them; approvals/ is mounted
+        :ro into it. Demanding write here would false-refuse every correct store — the
+        exact over-checking shape R19 hit three times. A group r-x directory with no
+        write bit must be healthy."""
+        self._configure_full_correct_store()
+        slug_dir = os.path.join(self.root, "approvals", self.SLUG)
+        os.chmod(slug_dir, 0o750)                       # group r-x, no w
+        self.assertEqual(
+            PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
     def test_approvals_slug_dir_that_cannot_be_stat_is_reported_not_raised(self):
         """FINDING 4: forced deterministically via a scoped mock rather than chmod,
         because chmod-based reproduction of "cannot access" is unreliable when the

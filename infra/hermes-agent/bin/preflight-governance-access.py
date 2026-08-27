@@ -186,6 +186,22 @@ def _check_approvals(root, uid, gid):
             continue
         if not stat.S_ISDIR(st.st_mode):
             continue
+        # S5-M1: the slug directory's OWN bits, which nothing checked. Measured: a
+        # host-owned 0700 slug dir returned ZERO problems, while a 0600 FILE inside it
+        # returned one — so the check saw through a directory the executor cannot even
+        # traverse, to files it could never reach. The file-level walk above runs as
+        # THIS process (the host user, who can list its own 0700 directory), so it
+        # models nothing about the executor's access to the directory itself.
+        #
+        # read+traverse, never write: apply-changeset opens <cid>.approval.json and
+        # <cid>.changeset.json in here and writes neither. This is a tightening, but
+        # not the R19b over-checking kind — an executor that cannot traverse this
+        # directory fails MID-APPLY on a path this pre-flight exists to predict, so
+        # reporting it is the correct answer rather than a wolf cried on a healthy
+        # store.
+        p = _check_dir(slug_dir, uid, gid, need_write=False)
+        if p:
+            problems.append(p)
         problems.extend(_check_files_in_dir(slug_dir, uid, gid, need_write=False,
                                              suffixes=APPROVAL_FILE_SUFFIXES))
     return problems
