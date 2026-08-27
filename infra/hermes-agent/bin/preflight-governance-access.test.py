@@ -221,6 +221,59 @@ class TestFileLevelChecks(Base):
         self.assertEqual(len(problems), 1)
         self.assertTrue(any("log" in p and "acme.jsonl" in p for p in problems))
 
+    def test_a_rotated_log_does_not_false_refuse_and_block_startup(self):
+        """S5-M2. log/ was walked with NO allowlist, so EVERY regular file in it had to
+        be executor-writable. A rotated log or an operator's backup — files the
+        executor never opens — refused the pre-flight and took the whole mutation rail
+        down at startup. That is R19b's over-checking failure on a path R19 did not
+        cover, and over-checking is as harmful as under-checking.
+
+        Every name here is at the harshest mode available, so a walk that still looked
+        at them could not possibly return an empty list."""
+        self._configure_full_correct_store()
+        log_dir = os.path.join(self.root, "log")
+        for junk in ("%s.jsonl.1" % self.SLUG,          # logrotate
+                     "%s.jsonl.bak" % self.SLUG,        # operator backup
+                     "%s.jsonl.gz" % self.SLUG,         # compressed rotation
+                     "%s.jsonl.tmp" % self.SLUG,        # interrupted write
+                     ".DS_Store", "notes.txt", "README"):
+            p = os.path.join(log_dir, junk)
+            with open(p, "w") as f:
+                f.write("x")
+            os.chmod(p, 0o600)                          # executor gets nothing at all
+        self.assertEqual(
+            PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+    def test_control_the_real_client_log_is_STILL_checked(self):
+        """DISCRIMINATING CONTROL, and the one that matters: an allowlist that excluded
+        everything would pass the test above while checking nothing at all. The file
+        the executor actually appends to must still be reported at the same mode the
+        junk above is ignored at."""
+        self._configure_full_correct_store()
+        log_file = os.path.join(self.root, "log", "%s.jsonl" % self.SLUG)
+        os.chmod(log_file, 0o600)
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("%s.jsonl" % self.SLUG, problems[0])
+
+    def test_the_log_allowlist_matches_exactly_what_append_log_opens(self):
+        """Unit-level, so the allowlist's shape is pinned independently of the store
+        fixture. It must accept precisely `<slug>.jsonl` for a governance_lib slug —
+        the only name changeset_lib.log_path can ever produce — and nothing else."""
+        for good in ("acme.jsonl", "acme-dental.jsonl", "a.jsonl", "a_b-9.jsonl"):
+            self.assertTrue(PF.is_client_log_name(good), good)
+        for bad in ("acme.jsonl.1", "acme.jsonl.bak", "acme.jsonl.gz", "acme.jsonl.tmp",
+                    ".DS_Store", "notes.txt", "acme.json", ".jsonl", "jsonl",
+                    "ACME.jsonl", "-acme.jsonl", "../etc.jsonl", "a/b.jsonl"):
+            self.assertFalse(PF.is_client_log_name(bad), bad)
+
+    def test_the_allowlist_shares_one_definition_of_a_slug(self):
+        """Matched against governance_lib.SLUG_RE itself rather than a restated
+        pattern. Restating it is how two validators drift into disagreeing about what a
+        slug is — the failure this repo names explicitly elsewhere."""
+        self.assertTrue(PF.is_client_log_name("x" * 64 + ".jsonl"))
+        self.assertFalse(PF.is_client_log_name("x" * 65 + ".jsonl"))
+
     def test_existing_kill_switch_file_with_bad_mode_is_reported(self):
         """control/mutation-enabled is READ-required, not read+write — a distinct code
         path from log/ and seen/. When it exists with a bad mode it must be reported,

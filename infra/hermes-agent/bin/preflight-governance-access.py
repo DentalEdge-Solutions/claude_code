@@ -21,6 +21,9 @@ back to every process on the host and deletes the isolation the store exists for
 """
 import argparse, os, stat, sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import governance_lib                      # SLUG_RE, shared not restated
+
 EXECUTOR_UID = 10000            # Dockerfile: USER hermes
 EXECUTOR_GID = 10000
 
@@ -127,16 +130,47 @@ def _check_file(path, uid, gid, need_write):
 APPROVAL_FILE_SUFFIXES = (".approval.json", ".changeset.json")
 
 
-def _check_files_in_dir(dirpath, uid, gid, need_write, suffixes=None):
-    """Stat every existing regular file directly inside dirpath. Missing dirpath is not
-    reported here — the directory-level check already covers that path. A directory we
-    cannot even list is itself a problem to REPORT, not an exception to raise (it means
-    this process, run ahead of the executor, cannot see what the executor would need
-    to).
+def is_client_log_name(entry):
+    """S5-M2. The ONLY thing the executor opens in log/ is changeset_lib.log_path(slug),
+    i.e. exactly `<slug>.jsonl` for a slug matching governance_lib.SLUG_RE. Everything
+    else in that directory belongs to somebody else.
 
-    suffixes, when given, is an ALLOWLIST: only entries whose name ends with one of
-    these exact strings are checked at all, everything else is silently ignored. See
-    APPROVAL_FILE_SUFFIXES above for why this must stay an allowlist."""
+    log/ was walked with NO allowlist, so every regular file in it was required to be
+    executor-WRITABLE. A rotated `acme.jsonl.1`, an operator's `acme.jsonl.bak`, a
+    tarball left mid-restore, a stray .DS_Store — any of them refused the pre-flight
+    and BLOCKED BROKER STARTUP over a file the executor never opens. That is R19b's
+    over-checking failure on a path R19 did not cover, and over-checking is as harmful
+    as under-checking: it takes the whole rail down, and a gate that cries wolf on a
+    healthy store is one operators learn to bypass.
+
+    An allowlist, never a denylist — the same rule and the same reasoning as
+    APPROVAL_FILE_SUFFIXES above. A denylist means every future artifact anyone drops
+    in log/ becomes a fresh false refusal until someone remembers to add it here.
+
+    Matched against governance_lib.SLUG_RE directly rather than a restated pattern, so
+    the two cannot drift about what a slug is.
+
+    HONEST RESIDUAL: a rotation scheme whose output is itself a valid slug name —
+    `acme-2026-08-01.jsonl` — is indistinguishable from a real client's log without
+    reading the client registry, and is still checked. Excluding it would need this
+    pre-flight to depend on clients.json, adding a reader and a failure mode to a gate
+    whose failures block startup. Not worth it for a case an operator controls; stated
+    rather than papered over.
+    """
+    suffix = ".jsonl"
+    if not entry.endswith(suffix):
+        return False
+    return bool(governance_lib.SLUG_RE.fullmatch(entry[:-len(suffix)]))
+
+
+def _check_files_in_dir(dirpath, uid, gid, need_write, suffixes=None, name_filter=None):
+    """Stat every existing regular file directly inside dirpath. Missing dirpath is not
+    reported here — the directory-level check already covers that path.
+
+    `suffixes` and `name_filter` are both ALLOWLISTS: an entry is checked only if it
+    passes whichever is supplied, and is silently ignored otherwise. See
+    APPROVAL_FILE_SUFFIXES and is_client_log_name above for why these must stay
+    allowlists and must never be inverted into denylists."""
     problems = []
     try:
         entries = sorted(os.listdir(dirpath))
@@ -144,6 +178,8 @@ def _check_files_in_dir(dirpath, uid, gid, need_write, suffixes=None):
         return problems
     for entry in entries:
         if suffixes is not None and not entry.endswith(suffixes):
+            continue
+        if name_filter is not None and not name_filter(entry):
             continue
         path = os.path.join(dirpath, entry)
         try:
@@ -232,7 +268,8 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
     # (_check_file returns None for it) — most of these files are normally absent.
     for name in READ_WRITE_DIRS:                        # log/: append_log opens
         problems.extend(                                # log/<slug>.jsonl with mode "a"
-            _check_files_in_dir(os.path.join(root, name), uid, gid, need_write=True))
+            _check_files_in_dir(os.path.join(root, name), uid, gid, need_write=True,
+                                name_filter=is_client_log_name))
 
     for rel in (CLIENTS_REGISTRY_REL, KILL_SWITCH_REL):
         p = _check_file(os.path.join(root, *rel), uid, gid, need_write=False)
