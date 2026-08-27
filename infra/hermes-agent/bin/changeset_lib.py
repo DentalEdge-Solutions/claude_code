@@ -479,7 +479,13 @@ def write_approval(slug, cid, digest, operator, now, ttl_hours):
     rec = {"changeset_id": cid, "sha256": digest, "operator": operator,
            "approved_at": now.strftime(ISO),
            "expires_at": (now + datetime.timedelta(hours=ttl_hours)).strftime(ISO)}
-    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)   # MUST precede the lock — see docstring
+    # Kept above the lock for clarity about who is nominally responsible for this
+    # directory, NOT because the ordering is load-bearing: _approval_lock creates the
+    # parent itself, and the mutation that moves this below the lock does not go red.
+    # This comment used to read "MUST precede the lock — see docstring", contradicting
+    # the docstring above, which had already been corrected to say the opposite. An
+    # inline comment that disagrees with the docstring it cites is worse than neither.
+    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
     with _approval_lock(slug, cid):
         _atomic_write_json(approval_path(slug, cid), rec)
     return rec
