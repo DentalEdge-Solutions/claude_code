@@ -88,7 +88,19 @@ def _open_regular_ro(path):
             raise SpoolRefused("%s is a symlink, refusing to follow it" % path)
         raise SpoolRefused("%s cannot be opened: %s" % (path, e))
     try:
-        st = os.fstat(fd)
+        try:
+            st = os.fstat(fd)
+        except OSError as e:
+            # An fstat failure used to re-raise RAW, which broke this module's one
+            # promise: SpoolRefused subclasses ValueError so "callers with an existing
+            # fail-closed ValueError handler refuse rather than crash". A bare OSError
+            # is not that, and the consequence was not local — hermes-broker._parse_all
+            # catches only SpoolRefused, so the exception escaped the whole parse loop,
+            # which sits OUTSIDE drain()'s per-request handler. One unstattable file
+            # would therefore abort the entire drain and starve every other client's
+            # queued requests, which is precisely the batch-wide starvation the rest of
+            # this module's guards exist to prevent.
+            raise SpoolRefused("%s cannot be inspected after opening: %s" % (path, e))
         if not stat.S_ISREG(st.st_mode):
             raise SpoolRefused("%s is not a regular file, refusing" % path)
         if st.st_size > MAX_REQUEST_BYTES:

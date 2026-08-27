@@ -1,4 +1,5 @@
 import json, os, stat, tempfile, unittest, sys
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spool_lib as S
 
@@ -189,6 +190,62 @@ class TestHostileReads(unittest.TestCase):
         self._write(b'{"request_id": "\xff\xfe"}')
         with self.assertRaises(S.SpoolRefused):
             S.load_request(self.p)
+
+
+class TestFstatFailureIsARefusalNotACrash(unittest.TestCase):
+    """_open_regular_ro re-raised a RAW OSError when os.fstat failed, breaking this
+    module's one promise: SpoolRefused subclasses ValueError so "callers with an
+    existing fail-closed ValueError handler refuse rather than crash".
+
+    The consequence was not local. hermes-broker._parse_all catches only SpoolRefused,
+    and its loop sits OUTSIDE drain()'s per-request handler — so one unstattable file
+    aborted the ENTIRE drain and starved every other client's queued requests. That is
+    the batch-wide starvation the rest of this module's guards exist to prevent.
+
+    fstat is failing on an fd this process just opened, so the failure is provoked by
+    patching rather than by arranging a filesystem state. That is deliberate: what is
+    under test is the exception CONTRACT, and a construction that could not be reached
+    on a real filesystem would still leave the contract broken for the ones that can
+    (EIO on a failing device, ENOMEM, a revoked fd)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.p = os.path.join(self.d, GOOD_ID + ".json")
+        with open(self.p, "wb") as f:
+            f.write(json.dumps(GOOD).encode())
+
+    def test_control_the_file_loads_when_fstat_works(self):
+        """POSITIVE CONTROL: the fixture is a genuinely loadable request, so a refusal
+        below is caused by the patched fstat and by nothing else."""
+        self.assertEqual(S.load_request(self.p)["client"], "pilot-1")
+
+    def test_an_fstat_failure_raises_spoolrefused(self):
+        with mock.patch.object(S.os, "fstat", side_effect=OSError(5, "Input/output error")):
+            with self.assertRaises(S.SpoolRefused) as cm:
+                S.read_request_bytes(self.p)
+        self.assertIn("cannot be inspected", str(cm.exception))
+
+    def test_it_is_catchable_as_valueerror_which_is_the_actual_contract(self):
+        """The promise is specifically that a ValueError handler suffices. Asserted
+        against ValueError, not SpoolRefused, because that is the type the callers
+        named in the docstring actually catch."""
+        with mock.patch.object(S.os, "fstat", side_effect=OSError(5, "Input/output error")):
+            with self.assertRaises(ValueError):
+                S.read_request_bytes(self.p)
+
+    def test_the_descriptor_is_still_closed_on_that_path(self):
+        """The conversion must not cost the close-on-any-exception guarantee: a leaked
+        fd per hostile file is its own denial of service against a long-lived broker.
+        Measured by fd count, not by inspection."""
+        def _open_fds():
+            return len(os.listdir("/dev/fd"))
+        with mock.patch.object(S.os, "fstat", side_effect=OSError(5, "Input/output error")):
+            before = _open_fds()
+            for _ in range(20):
+                with self.assertRaises(S.SpoolRefused):
+                    S.read_request_bytes(self.p)
+            after = _open_fds()
+        self.assertLessEqual(after - before, 2, "descriptors leaked on the refusal path")
 
 
 class TestWriteResult(unittest.TestCase):
