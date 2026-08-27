@@ -675,6 +675,55 @@ class TestSpoolQuotas(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.read_spool_quotas(self._reg(dup), "proj")
 
+    # --- one validate loop, two callers -------------------------------------------
+
+    def test_both_readers_apply_the_identical_rule_to_a_malformed_limit(self):
+        """The caps reader and the quota reader validated the same values out of the
+        same block with two near-identical loops, differing only in a noun. Two copies
+        of a fail-closed rule is how one of them quietly drifts fail-open — which this
+        module has already watched happen once, to the seen-set's two readers.
+
+        Asserts the shared rule from BOTH sides for every malformed shape, so a future
+        edit that loosens one caller cannot pass by leaving the other strict."""
+        for bad in ("0", "-1", "abc", "", "1e6", " ", "+1", "1.0"):
+            quota_broken = self.FULL.replace("max_pending_requests: 8",
+                                             "max_pending_requests: %s" % bad)
+            cap_broken = self.FULL.replace("applies_per_client_day: 5",
+                                           "applies_per_client_day: %s" % bad)
+            with self.assertRaises(ValueError, msg="quota accepted %r" % bad):
+                C.read_spool_quotas(self._reg(quota_broken), "proj")
+            with self.assertRaises(ValueError, msg="cap accepted %r" % bad):
+                C.read_mutate_execute(self._reg(cap_broken), "proj")
+
+    def test_control_the_shared_loop_still_accepts_a_valid_limit(self):
+        """CONTROL for the test above: a loop that rejected everything would satisfy
+        every assertion there."""
+        self.assertEqual(
+            C.read_spool_quotas(self._reg(self.FULL), "proj")["max_pending_requests"], 8)
+        self.assertEqual(
+            C.read_mutate_execute(self._reg(self.FULL), "proj")["caps"]["applies_per_client_day"], 5)
+
+    def test_the_two_callers_messages_stay_distinguishable(self):
+        """Sharing the loop must not make the two failures read alike to an operator:
+        a missing broker quota and a missing executor cap are different config
+        mistakes in different places. `label` is what keeps them apart, so it is
+        pinned rather than left as an unasserted courtesy."""
+        no_quota = "".join(l for l in self.FULL.splitlines(True)
+                           if not l.strip().startswith("max_pending_requests:"))
+        no_cap = "".join(l for l in self.FULL.splitlines(True)
+                         if not l.strip().startswith("applies_per_client_day:"))
+        with self.assertRaises(ValueError) as q:
+            C.read_spool_quotas(self._reg(no_quota), "proj")
+        with self.assertRaises(ValueError) as c:
+            C.read_mutate_execute(self._reg(no_cap), "proj")
+        self.assertIn("spool quota", str(q.exception))
+        self.assertNotIn("spool quota", str(c.exception))
+        self.assertIn("cap", str(c.exception))
+        # Both still state the fail-closed reason, which is the part that must not be
+        # lost in the deduplication.
+        for exc in (q.exception, c.exception):
+            self.assertIn("must never become an unlimited one", str(exc))
+
 
 class TestSeenSet(unittest.TestCase):
     RID = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"

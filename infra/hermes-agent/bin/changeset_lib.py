@@ -241,20 +241,39 @@ def read_allow_list(path, project, block):
     return read_block(path, project, block)["allow"]
 
 
+def _read_positive_int_limits(got, keys, project, label):
+    """Validate a set of numeric limits out of a parsed `caps:` block, fail-closed.
+
+    ONE loop, because there were two. read_mutate_execute's mutation caps and
+    read_spool_quotas' broker quotas validated the same values from the same block with
+    near-identical code, differing only in the noun in the error message. Two copies of
+    a fail-closed rule is how one of them quietly drifts fail-open — which this file has
+    already watched happen once, to the seen-set's two readers (see iter_seen_records).
+
+    The rule, stated once: a limit that is MISSING or that is not a positive integer is
+    a refusal, never a default. An unreadable limit must never become an unlimited one.
+    `label` keeps the two callers' messages distinguishable to an operator; it changes
+    nothing about the check.
+    """
+    out = {}
+    for k in keys:
+        v = got["caps"].get(k)
+        if v is None:
+            raise ValueError(f"missing {label} {k!r} for project {project!r} — {label}s are "
+                             "fail-closed; an unreadable limit must never become an "
+                             "unlimited one")
+        if not _CAP_VALUE_RE.fullmatch(v) or int(v) < 1:
+            raise ValueError(f"invalid {label} {k}={v!r} — must be a positive integer")
+        out[k] = int(v)
+    return out
+
+
 def read_mutate_execute(path, project):
     got = read_block(path, project, "mutate_execute")
     if not got.get("runner") or not got.get("script_dir") or not got["allow"]:
         raise ValueError(
             f"no mutate_execute(runner, script_dir, allow) for project {project!r}")
-    caps = {}
-    for k in CAP_KEYS:
-        v = got["caps"].get(k)
-        if v is None:
-            raise ValueError(f"missing cap {k!r} for project {project!r} — caps are fail-closed; "
-                             "an unreadable limit must never become an unlimited one")
-        if not _CAP_VALUE_RE.fullmatch(v) or int(v) < 1:
-            raise ValueError(f"invalid cap {k}={v!r} — must be a positive integer")
-        caps[k] = int(v)
+    caps = _read_positive_int_limits(got, CAP_KEYS, project, "cap")
     return {"runner": got["runner"], "script_dir": got["script_dir"],
             "allow": got["allow"], "caps": caps}
 
@@ -274,17 +293,7 @@ def read_spool_quotas(path, project):
     already follow, and the reason a missing key raises instead of defaulting.
     """
     got = read_block(path, project, "mutate_execute")
-    quotas = {}
-    for k in SPOOL_QUOTA_KEYS:
-        v = got["caps"].get(k)
-        if v is None:
-            raise ValueError(
-                f"missing spool quota {k!r} for project {project!r} — quotas are "
-                "fail-closed; an unreadable limit must never become an unlimited one")
-        if not _CAP_VALUE_RE.fullmatch(v) or int(v) < 1:
-            raise ValueError(f"invalid spool quota {k}={v!r} — must be a positive integer")
-        quotas[k] = int(v)
-    return quotas
+    return _read_positive_int_limits(got, SPOOL_QUOTA_KEYS, project, "spool quota")
 
 
 def assert_allow_lists_disjoint(read_allow, mutate_allow):
