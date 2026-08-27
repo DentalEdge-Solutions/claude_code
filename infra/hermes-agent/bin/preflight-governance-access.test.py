@@ -73,7 +73,7 @@ class TestLinuxSemantics(Base):
 
     def test_group_readable_store_with_a_matching_gid_passes(self):
         """The documented remedy: keep the store off `other`, grant the executor's
-        group. log/ and seen/ additionally need write, hence 0o770 there."""
+        group. log/ additionally needs write, hence 0o770 there."""
         os.chmod(self.root, 0o750)
         for name in PF.READ_ONLY_DIRS:
             os.chmod(os.path.join(self.root, name), 0o750)
@@ -83,8 +83,8 @@ class TestLinuxSemantics(Base):
 
     def test_read_only_store_flags_only_the_writable_directories(self):
         """0o755 throughout: everything is readable, but the executor must WRITE the
-        audit log and the seen-set. A check that only tested readability would pass
-        here and let append_log fail mid-apply — which is the finding."""
+        audit log. A check that only tested readability would pass here and let
+        append_log fail mid-apply — which is the finding."""
         self._chmod_all(0o755)
         problems = PF.check(self.root, self.other_uid, self.other_gid, platform="linux")
         self.assertEqual(len(problems), len(PF.READ_WRITE_DIRS))
@@ -103,9 +103,9 @@ class TestLinuxSemantics(Base):
 
     def test_a_missing_subdirectory_is_reported(self):
         self._chmod_all(0o755)
-        os.rmdir(os.path.join(self.root, "seen"))
+        os.rmdir(os.path.join(self.root, "control"))
         problems = PF.check(self.root, self.uid, self.gid, platform="linux")
-        self.assertTrue(any("seen" in p and "cannot stat" in p for p in problems))
+        self.assertTrue(any("control" in p and "cannot stat" in p for p in problems))
 
 
 class TestFileLevelChecks(Base):
@@ -119,8 +119,8 @@ class TestFileLevelChecks(Base):
     CID = "20260101-000000-deadbeef"
 
     def _configure_group_readable_dirs(self):
-        """The documented remedy layout: root and read-only dirs at 0750, log/ and
-        seen/ additionally group-writable at 0770. Mirrors
+        """The documented remedy layout: root and read-only dirs at 0750, log/
+        additionally group-writable at 0770. Mirrors
         test_group_readable_store_with_a_matching_gid_passes above."""
         os.chmod(self.root, 0o750)
         for name in PF.READ_ONLY_DIRS:
@@ -133,7 +133,7 @@ class TestFileLevelChecks(Base):
         executor. This is the positive control every negative test below starts from —
         breaking exactly one file's mode is the only difference."""
         self._configure_group_readable_dirs()
-        for name in PF.READ_WRITE_DIRS:  # log/, seen/
+        for name in PF.READ_WRITE_DIRS:  # log/
             p = os.path.join(self.root, name, "%s.jsonl" % self.SLUG)
             with open(p, "w") as f:
                 f.write("{}\n")
@@ -181,15 +181,45 @@ class TestFileLevelChecks(Base):
         self.assertEqual(len(problems), 1)
         self.assertTrue(any("log" in p and "acme.jsonl" in p for p in problems))
 
-    def test_existing_seen_file_with_bad_mode_is_reported(self):
-        """append_seen opens seen/<slug>.jsonl with mode "a" the same way append_log
-        does for log/ — both READ_WRITE_DIRS must be checked at the file level."""
+    def test_seen_set_is_not_an_executor_requirement(self):
+        """S3-a, the COUPLED half of dropping seen/ from ads-mutator's mounts.
+
+        A REALISTIC store: seen/ exists next to log/, owned by the host user at a mode
+        that gives the executor's uid nothing at all — 0o700 on the directory and 0o600
+        on the per-client file inside it, which is what the real store looks like. That
+        used to be two problems and a refusal. It must now be ZERO, because the
+        executor no longer has seen/ mounted and no code path under its entrypoint
+        touches the seen-set (every caller is host-side in hermes-broker.py).
+
+        Reporting a problem here would be a FALSE REFUSAL that blocks broker startup
+        over a path the executor cannot even see — the same over-checking failure as
+        R19b, which is exactly as harmful as under-checking. The mode chosen is
+        deliberately the harshest one available: if the seen/ tree were still being
+        walked, this could not return an empty list."""
         self._configure_full_correct_store()
-        seen_file = os.path.join(self.root, "seen", "%s.jsonl" % self.SLUG)
+        seen_dir = os.path.join(self.root, "seen")
+        os.makedirs(seen_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, seen_dir, True)
+        seen_file = os.path.join(seen_dir, "%s.jsonl" % self.SLUG)
+        with open(seen_file, "w") as f:
+            f.write("{}\n")
         os.chmod(seen_file, 0o600)
+        os.chmod(seen_dir, 0o700)
+        self.assertEqual(
+            PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+        self.assertNotIn("seen", PF.READ_WRITE_DIRS)
+        self.assertNotIn("seen", PF.READ_ONLY_DIRS)
+
+    def test_control_the_same_harsh_mode_on_log_IS_still_reported(self):
+        """DISCRIMINATING CONTROL for the test above. Identical construction, on log/
+        instead of seen/. If this also returned [], the test above would prove only
+        that check() had gone blind — not that seen/ was deliberately dropped."""
+        self._configure_full_correct_store()
+        log_file = os.path.join(self.root, "log", "%s.jsonl" % self.SLUG)
+        os.chmod(log_file, 0o600)
         problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
         self.assertEqual(len(problems), 1)
-        self.assertTrue(any("seen" in p and "acme.jsonl" in p for p in problems))
+        self.assertTrue(any("log" in p and "acme.jsonl" in p for p in problems))
 
     def test_existing_kill_switch_file_with_bad_mode_is_reported(self):
         """control/mutation-enabled is READ-required, not read+write — a distinct code

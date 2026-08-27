@@ -71,8 +71,19 @@ services:
       - ${HERMES_GOVERNANCE_DIR}/approvals:/opt/governance/approvals:ro
       - ${HERMES_GOVERNANCE_DIR}/control:/opt/governance/control:ro
       - ${HERMES_GOVERNANCE_DIR}/registry:/opt/governance/registry:ro
-      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log      # writable, like seen (below)
-      - ${HERMES_GOVERNANCE_DIR}/seen:/opt/governance/seen    # writable, like log (above) — replay-protection state
+      # log/ is the ONLY governance directory this container writes: append_log in
+      # apply-changeset.py, fsync'd per action, is the reversibility record --undo
+      # later reads. It must stay writable.
+      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log
+      # NO seen/ MOUNT. The seen-set (replay protection) is written and read entirely
+      # host-side, by the broker — MEASURED, not assumed: every caller of append_seen,
+      # seen_contains and iter_seen_records lives in hermes-broker.py, and nothing
+      # under this entrypoint touches it. It was previously mounted rw here on the
+      # strength of a comment ("writable, like log"), which handed the governed party
+      # delete access to the replay-protection state it is governed BY, for no code
+      # path's benefit. preflight-governance-access.py's READ_WRITE_DIRS is the
+      # coupled half of this: dropping the mount without dropping the pre-flight's
+      # declared requirement would make the pre-flight false-refuse.
       - ../../../claude-google-ads:/projects/claude_google_ads:ro
       - ./registry:/opt/registry:ro
       - ./bin:/opt/cc-bin:ro

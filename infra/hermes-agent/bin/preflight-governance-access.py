@@ -25,7 +25,20 @@ EXECUTOR_UID = 10000            # Dockerfile: USER hermes
 EXECUTOR_GID = 10000
 
 READ_ONLY_DIRS = ("approvals", "control", "registry")
-READ_WRITE_DIRS = ("log", "seen")
+
+# log/ ONLY. `seen/` used to be listed here, and the failure message below asserted the
+# executor "cannot use the governance store" without it — but that requirement was
+# written from memory, never measured. Every caller of append_seen / seen_contains /
+# iter_seen_records is host-side in hermes-broker.py; nothing the ads-mutator entrypoint
+# reaches touches the seen-set. docker-compose.yml no longer mounts seen/ into that
+# container, so a seen/ entry here would be a pure false refusal — the pre-flight would
+# demand executor access to a path the executor cannot even see, and block startup over
+# it. The two are COUPLED: change one only with the other.
+#
+# Nothing checks seen/ now, and that is correct: this script predicts what the EXECUTOR's
+# uid can do, and the executor has no business with seen/. The broker writes it as the
+# host user, whose access is not in question here.
+READ_WRITE_DIRS = ("log",)
 
 # Fixed-name read-only files directly under the store root's directories. The kill
 # switch is normally ABSENT (that is the safe default: no switch => mutation disabled),
@@ -201,8 +214,8 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
     # directories are all correct but whose files were touched by a different writer
     # or a restrictive umask. A file that does not exist yet is never a problem
     # (_check_file returns None for it) — most of these files are normally absent.
-    for name in READ_WRITE_DIRS:                        # log/, seen/: append_log,
-        problems.extend(                                # append_seen open "a"
+    for name in READ_WRITE_DIRS:                        # log/: append_log opens
+        problems.extend(                                # log/<slug>.jsonl with mode "a"
             _check_files_in_dir(os.path.join(root, name), uid, gid, need_write=True))
 
     for rel in (CLIENTS_REGISTRY_REL, KILL_SWITCH_REL):
@@ -220,7 +233,7 @@ Fix by OWNERSHIP, not by widening the mode. Either run the store under a group t
 executor's UID belongs to:
 
     sudo chgrp -R %(gid)d %(root)s
-    sudo chmod -R g+rX %(root)s && sudo chmod -R g+w %(root)s/log %(root)s/seen
+    sudo chmod -R g+rX %(root)s && sudo chmod -R g+w %(root)s/log
 
 or give the store to the executor's UID outright:
 
