@@ -1,4 +1,4 @@
-import contextlib, datetime, importlib.util, io, json, os, stat, subprocess, sys, tempfile, unittest
+import contextlib, datetime, importlib.util, io, json, os, re, stat, subprocess, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -211,6 +211,82 @@ class TestHappyPath(Base):
         self.assertEqual(result["status"], "ok")
         self.assertFalse(os.path.exists(C.result_path(self.vault, cs["changeset_id"])))
         self.assertFalse(os.path.exists(os.path.join(self.vault, "timeline.md")))
+
+    # ---- S7: the resolved customer id must not reach the agent -------------------
+
+    CUSTOMER_ID = "1234567890"          # the fixture's, not a real one
+
+    def _needle(self, text):
+        """The scan used by both halves of the positive control below.
+
+        Deliberately NOT a bare digit search: an earlier probe of this exact question
+        returned nothing because its pattern was broken, and an empty result from a
+        broken pattern is indistinguishable from an empty result from a clean
+        artifact. This looks for the resolved id in the shape that actually leaks —
+        `customers/<id>/` — and the control asserts it FIRES on a source known to
+        contain it before any absence here means anything."""
+        return re.search(r"customers/%s/" % re.escape(self.CUSTOMER_ID), text)
+
+    def test_control_the_needle_fires_on_the_audit_log(self):
+        """POSITIVE CONTROL, and the half that has to come first. The governance audit
+        log DOES contain the resolved customer id — deliberately, it is the
+        reversibility record — so the scan must find it there. Without this, the
+        absence asserted in the next test would be worthless: a scan that can never
+        match anything also "proves" the id is gone."""
+        cs = self._approved(2)
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        with open(C.log_path("acme-dental")) as f:
+            log_text = f.read()
+        self.assertIsNotNone(self._needle(log_text),
+                             "the scan cannot even find the id where it IS — it is broken")
+
+    def test_emitted_result_withholds_the_resolved_customer_id(self):
+        """THE FINDING. The emitted run record is persisted into data/vaults, which
+        docker-compose.yml mounts rw into the GATEWAY, so every field in it is readable
+        by Hermes. It used to carry the per-action resource_name — i.e.
+        `customers/<resolved id>/campaignCriteria/...` — which put the resolved customer
+        id in the agent's reach and silently reversed the 2026-08-19 decision to move
+        the client registry out of the vault.
+
+        Paired with test_control_the_needle_fires_on_the_audit_log above: same needle,
+        same run, True against the log and False against the emitted copy."""
+        cs = self._approved(2)
+        rc, out = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        self.assertIsNone(self._needle(out),
+                          "the resolved customer id reached the agent-readable result")
+        result = PR.parse_result(out)
+        self.assertIsNone(self._needle(json.dumps(result, sort_keys=True)))
+        self.assertEqual(result["applied"], 2)                 # it did run
+        for action in result["actions"]:
+            self.assertNotIn("resource_name", action)
+            self.assertTrue(action["resource_name_withheld"])
+
+    def test_emitted_actions_are_field_allowlisted_not_denylisted(self):
+        """The emitted copy is built from an ALLOWLIST, so a field added to the audit
+        record in future is withheld by default rather than leaking silently. Asserts
+        the exact key set: a `del rec[...]` denylist would pass a test that only
+        checked resource_name's absence, and would then leak the next field added."""
+        cs = self._approved(1)
+        rc, out = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        action = PR.parse_result(out)["actions"][0]
+        self.assertEqual(set(action),
+                         set(X.EMITTED_ACTION_FIELDS) | {"resource_name_withheld"})
+
+    def test_a_new_audit_log_field_does_not_reach_the_emitted_copy(self):
+        """Directly exercises the allowlist's fail-closed direction on the helper: a
+        field nobody has thought about yet must not appear in the Hermes-readable copy.
+        A denylist implementation cannot pass this."""
+        emitted = X._emitted_action({
+            "ts": "t", "changeset_id": "c", "action_index": 0, "type": "x",
+            "status": "applied", "operator": "o",
+            "resource_name": "customers/%s/campaignCriteria/1~2" % self.CUSTOMER_ID,
+            "some_future_field": "customers/%s/whatever" % self.CUSTOMER_ID})
+        self.assertNotIn("some_future_field", emitted)
+        self.assertNotIn("resource_name", emitted)
+        self.assertIsNone(self._needle(json.dumps(emitted, sort_keys=True)))
+        self.assertEqual(emitted["changeset_id"], "c")         # it kept the useful ones
 
     def test_vault_swap_after_approval_executes_the_snapshot_not_the_swap(self):
         """The critical failure mode this task exists to prevent: hashing the right
@@ -502,6 +578,27 @@ class TestUndo(Base):
         undone = {r["resource_name"] for r in recs if r["status"] == "undone"}
         self.assertEqual(len(applied), 2)
         self.assertEqual(undone, applied)                      # every applied resource undone
+
+    def test_undo_still_works_although_the_emitted_copy_withheld_the_names(self):
+        """S7 REGRESSION GUARD, and the reason that fix had to be surgical. The obvious
+        way to stop the resolved customer id reaching the agent is to stop recording
+        resource_name — which would also delete the reversibility record, because
+        _undo_targets reads exactly that field back through C.iter_log_records to build
+        the --undo argv. `--undo` failing IS the log having been stripped.
+
+        Binds both halves in one run: the emitted copy carries no resource name, and
+        the undo driven from the log that same run still reverses every action."""
+        cs = self._approved(2)
+        rc, out = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        for action in PR.parse_result(out)["actions"]:
+            self.assertNotIn("resource_name", action)
+        os.remove(self.calls)
+        applied = [r["resource_name"] for r in self._log_records() if r["status"] == "applied"]
+        self.assertEqual(len(applied), 2)
+        self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
+        undone_args = [c[c.index("--undo") + 1] for c in self._calls() if "--undo" in c]
+        self.assertEqual(set(undone_args), set(applied))
 
     def test_undo_works_with_kill_switch_absent(self):
         """Guards constrain creating change, never reversing it."""

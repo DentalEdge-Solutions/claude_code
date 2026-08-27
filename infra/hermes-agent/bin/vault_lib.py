@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """Client-vault registry resolver + slug/id validation. Stdlib-only.
 
-Reports, results and timelines are NOT client-private and stay on the Hermes
-volume: <VAULT_ROOT>/<slug>/... (VAULT_ROOT defaults to /opt/data/vaults; host
-callers pass the host data/vaults path) — that is `vault_root()` / `vault_path`,
-unchanged. The client registry itself is CLIENT-PRIVATE and lives on the
-host-owned governance store; see `registry_path()`. JSON (not YAML) to stay
-stdlib-only and avoid the hand-parsed-YAML bug class (Inc-3 CRITICAL).
+Reports, results and timelines stay on the Hermes volume: <VAULT_ROOT>/<slug>/...
+(VAULT_ROOT defaults to /opt/data/vaults; host callers pass the host data/vaults
+path) — that is `vault_root()` / `vault_path`, unchanged. The client registry
+itself is CLIENT-PRIVATE and lives on the host-owned governance store; see
+`registry_path()`. JSON (not YAML) to stay stdlib-only and avoid the
+hand-parsed-YAML bug class (Inc-3 CRITICAL).
+
+"Not client-private" is a PROPERTY THE WRITERS MUST MAINTAIN, not a fact about
+this directory. It is not enforced here and cannot be: this module resolves
+paths, it never inspects what is written to them. The vault is mounted rw into
+the gateway, so every field any writer puts here is readable by the agent — and
+S7 caught exactly that going wrong. apply-changeset.py's run record used to carry
+the per-action `resource_name`, i.e. `customers/<resolved id>/...`, which put the
+resolved customer id in the vault and silently reversed the 2026-08-19 decision
+to move the client registry OUT of it. That is now withheld at the emitting end
+(see EMITTED_ACTION_FIELDS there), and hermes-broker.py withholds the same class
+of detail from the spool. Anything new written under here needs the same check
+made deliberately; the storage location grants nothing.
 """
 import argparse, json, os, re, sys
 
