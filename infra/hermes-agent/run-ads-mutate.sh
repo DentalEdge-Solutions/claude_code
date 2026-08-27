@@ -95,9 +95,35 @@ cat "$tmp_out"
 # promise the client's account was not touched. persist-run-record.py failing for an
 # unrelated reason (e.g. it cannot write the vault file) must not override that promise
 # and, under `set -e`, a bare non-zero exit here would abort the script with persist's
-# status instead. `|| true` keeps this compound command's own status zero so `set -e`
-# does not fire; persist's own stderr (it prints its own errors there) still reaches
-# the operator since only stdout is redirected.
+# status instead. So persist's status never becomes the script's status.
+#
+# S1-M2: but it must not VANISH either, which `|| true` made it do. persist-run-record
+# exits 2 for a PersistRefused — a destination that could not be proven to stay inside
+# the client vault, i.e. a symlink or hardlink pointing out of it. That is not a
+# routine I/O failure, it is an ATTACK DETECTION, and swallowing it left the single
+# loudest signal this rail produces as one line of stderr in the middle of the
+# executor's own output, with the exit status discarded entirely.
+#
+# `|| prc=$?` instead of `|| true` — the same pattern the executor invocation above
+# uses — so `set -e` still does not fire, $rc still decides the script's status, and a
+# non-zero persist gets an unmissable banner of its own.
 # VAULT_ROOT and HERMES_GOVERNANCE_ROOT are exported by hostenv.sh above.
-python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null || true
+prc=0
+python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null || prc=$?
+if [ "$prc" -ne 0 ]; then
+  echo "" >&2
+  echo "!!! ================================================================" >&2
+  echo "!!! RUN RECORD NOT PERSISTED — persist-run-record.py exited $prc" >&2
+  echo "!!!" >&2
+  echo "!!! Exit 2 means the destination could not be proven to stay inside the" >&2
+  echo "!!! client vault — a symlink or hardlink pointing out of it. That is a" >&2
+  echo "!!! CONTAINMENT REFUSAL, not an I/O hiccup: treat it as an attempt to make" >&2
+  echo "!!! this step write outside the vault, and inspect the vault before re-running." >&2
+  echo "!!!" >&2
+  echo "!!! The executor's own status ($rc) is UNCHANGED and is still what says" >&2
+  echo "!!! whether the account was touched. This banner is about the RECORD of the" >&2
+  echo "!!! run, which is now missing — reconcile from the governance audit log." >&2
+  echo "!!! ================================================================" >&2
+  echo "" >&2
+fi
 exit "$rc"
