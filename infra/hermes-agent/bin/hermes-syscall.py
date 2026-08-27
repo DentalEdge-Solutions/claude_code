@@ -111,6 +111,24 @@ def fetch(request_id, root=None):
              "  exit_code      %s" % code]
     if rec.get("detail"):
         lines.append("  detail         %s" % rec["detail"])
+    # S6-M1: `_EXIT_BY_CODE.get(code, ...)` on a code read straight out of the result
+    # FILE. results/ lives inside the spool — the one tree Hermes can write — so an
+    # attacker-planted "exit_code": [] or {} made this raise TypeError: unhashable
+    # type. main() catches SpoolRefused and OSError, not TypeError, so it escaped as a
+    # raw traceback and exit 1: a crash, reported with the code that means "your
+    # arguments were wrong", provokable by writing one file.
+    #
+    # Guarded by TYPE, not by try/except, so the fail-closed reading is stated rather
+    # than inferred: the mapping's keys are ints, and anything that is not an int is
+    # not a broker exit code. It gets EXIT_REFUSED, the same answer an unrecognised
+    # integer already got. bool is an int subclass and needs no special case — True
+    # would look up key 1, which is not in the mapping, and land on EXIT_REFUSED too.
+    #
+    # The rendered line above is left VERBATIM on purpose: this client surfaces the
+    # broker's record without re-wording it, and a planted value being visible to the
+    # operator exactly as written is the point.
+    if not isinstance(code, int):
+        return EXIT_REFUSED, "\n".join(lines)
     return _EXIT_BY_CODE.get(code, EXIT_REFUSED), "\n".join(lines)
 
 

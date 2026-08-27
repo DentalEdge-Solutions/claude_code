@@ -181,6 +181,54 @@ class TestResult(Base):
     def _result(self, payload):
         S.write_result(self.RID, payload, self.root)
 
+    def test_an_unhashable_exit_code_is_a_refusal_not_a_crash(self):
+        """S6-M1. results/ is inside the spool — the one tree Hermes can write — so
+        exit_code comes from an attacker-writable file. `_EXIT_BY_CODE.get([])` raises
+        TypeError: unhashable type, which main() does not catch, so it escaped as a raw
+        traceback and exit 1: a crash reported with the code that means "your arguments
+        were wrong", provokable by writing one file."""
+        for planted in ([], {}, [1, 2], {"a": 1}):
+            self._result({"request_id": self.RID, "status": "ok",
+                          "classification": "accepted_applied",
+                          "exit_code": planted, "finished_at": "2026-08-24T10:15:00Z"})
+            rc, out, err = self.run_cli(["result", "--request-id", self.RID])
+            self.assertEqual(rc, K.EXIT_REFUSED, "planted %r gave rc=%s" % (planted, rc))
+            self.assertNotIn("Traceback", err)
+            self.assertIn("request %s" % self.RID, out)
+
+    def test_a_planted_exit_code_never_becomes_a_success(self):
+        """The direction that matters. A non-integer exit_code must never resolve to
+        EXIT_OK: that would let a planted file tell the model a mutation succeeded."""
+        for planted in ([], {}, "0", "ok", None, 0.0, [0]):
+            self._result({"request_id": self.RID, "status": "ok",
+                          "classification": "accepted_applied",
+                          "exit_code": planted, "finished_at": "2026-08-24T10:15:00Z"})
+            rc, _, _ = self.run_cli(["result", "--request-id", self.RID])
+            self.assertNotEqual(rc, K.EXIT_OK, "planted %r read as success" % (planted,))
+
+    def test_control_the_real_integer_codes_still_map(self):
+        """DISCRIMINATING CONTROL. A guard that refused every code would satisfy both
+        tests above while breaking the client's whole purpose — surfacing the broker's
+        verdict unchanged."""
+        for code, expected in ((0, K.EXIT_OK), (2, K.EXIT_REFUSED),
+                               (3, K.EXIT_FAILED_AFTER_MUTATION)):
+            self._result({"request_id": self.RID, "status": "ok",
+                          "classification": "accepted_applied",
+                          "exit_code": code, "finished_at": "2026-08-24T10:15:00Z"})
+            rc, _, _ = self.run_cli(["result", "--request-id", self.RID])
+            self.assertEqual(rc, expected, "code %r" % code)
+
+    def test_the_planted_value_is_still_shown_to_the_operator(self):
+        """This client surfaces the broker's record verbatim; the guard changes the
+        EXIT CODE, not the rendering. A planted value being visible exactly as written
+        is what lets an operator see they were attacked."""
+        self._result({"request_id": self.RID, "status": "ok",
+                      "classification": "accepted_applied",
+                      "exit_code": [7], "finished_at": "2026-08-24T10:15:00Z"})
+        _rc, out, _ = self.run_cli(["result", "--request-id", self.RID])
+        self.assertIn("exit_code", out)
+        self.assertIn("7", out)
+
     def test_missing_result_is_pending_not_refused(self):
         # "No data" and "zero data" are different events; file EXISTENCE is the
         # discriminator. Collapsing these two would let a model read a pending
