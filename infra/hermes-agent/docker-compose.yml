@@ -23,6 +23,26 @@ services:
     image: hermes-agent-claude          # derived: official base + claude CLI
     command: ["gateway", "run"]         # persistent backend (there is no `hermes serve`)
     env_file: .env                      # ANTHROPIC_API_KEY + Hermes provider key (gitignored)
+    environment:
+      # S6/R21. `.env` is BOTH this service's env_file AND Compose's interpolation
+      # source for ${HERMES_GOVERNANCE_DIR} in ads-mutator's volumes below (and
+      # hostenv.sh parses the same file as DATA). It therefore cannot simply be deleted
+      # from `.env` — the executor's mounts and the whole host-side rail resolve through
+      # it. But env_file injects EVERY key it holds, so the gateway's environment was
+      # carrying the absolute host path to the governance store: the one tree this
+      # design keeps unreachable, handed to the party it is kept from.
+      #
+      # `environment` takes precedence over `env_file`, so setting it empty HERE masks
+      # the value for this service only, exactly as ./masks/empty does for the ads
+      # repo's .env above — same idiom, one layer up. Interpolation is unaffected: it
+      # happens while rendering the file, from `.env`, before any container exists.
+      #
+      # Knowing a host path grants nothing on its own — R21 downgraded this from a
+      # novel disclosure for that reason — but it does hand a known target to anything
+      # host-side that writes into data/ on Hermes's behalf, which is the exact shape of
+      # the 2026-08-19 symlink finding. Nothing inside this container reads the variable
+      # (measured: every reader is a host-side shell — run-ads-mutate.sh, hostenv.sh).
+      HERMES_GOVERNANCE_DIR: ""
     depends_on:
       claude-auth-init:
         condition: service_completed_successfully   # auth file exists before gateway boots

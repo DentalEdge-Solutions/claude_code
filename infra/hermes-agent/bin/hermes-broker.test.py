@@ -333,6 +333,119 @@ class TestNoInterpolation(Base):
         self.assertEqual(r.calls, [])
 
 
+class TestRefusalDetailIsFixedVocabulary(Base):
+    """S6. hermes-broker's DETAIL_BY_CLASSIFICATION comment declares that detail
+    strings are fixed and non-identifying and that output is deliberately kept out of
+    the Hermes-readable spool. Two paths bypassed it: drain()'s per-request handler
+    wrote `str(e)`, and _execute's reserve_approval failure wrote
+    "approval unavailable: %s" % e.
+
+    Every test here forces a REAL exception that genuinely carries a host path — proved
+    by a positive control on the raw exception before anything is asserted about the
+    spool — so an absence in the result cannot come from an exception that had nothing
+    to leak in the first place. That is the failure mode that made an earlier probe of
+    this question meaningless.
+
+    Structurally the same fix as Task 2's Important #2 on hermes-syscall.py: fixed
+    vocabulary to the reader that is the agent, full detail to stderr.
+    """
+
+    def _stderr(self):
+        """Captured broker stderr, so 'the detail went host-side' is asserted, not
+        assumed. A fix that merely deleted the text would pass every leak assertion
+        below while destroying the operator's only diagnostic."""
+        return self._err.getvalue()
+
+    def setUp(self):
+        super().setUp()
+        import contextlib, io as _io
+        self._err = _io.StringIO()
+        cm = contextlib.redirect_stderr(self._err)
+        cm.__enter__()
+        self.addCleanup(cm.__exit__, None, None, None)
+
+    def _break_the_approval_write(self):
+        """Make reserve_approval's atomic write fail with a PermissionError naming the
+        governance-store path. Returns the raw exception text for the control."""
+        d = os.path.dirname(governance_lib.approval_path(SLUG, CID))
+        os.chmod(d, 0o500)
+        self.addCleanup(os.chmod, d, 0o700)
+        try:
+            C.reserve_approval(SLUG, CID, "1111aaaa-2222-4bbb-8ccc-3333dddd4444", NOW)
+        except OSError as e:
+            return str(e)
+        self.fail("reserve_approval did not fail — the fixture no longer forces a leak")
+
+    def test_control_the_forced_approval_failure_really_does_carry_the_store_path(self):
+        """POSITIVE CONTROL, and it has to come first. Asserts the exception this test
+        class provokes actually contains the host governance-store path. Without it,
+        the absence asserted below would be satisfied by an exception that never had
+        the path to leak."""
+        raw = self._break_the_approval_write()
+        self.assertIn(self.gov, raw)
+
+    def test_refused_approval_detail_is_fixed_and_leaks_no_store_path(self):
+        raw = self._break_the_approval_write()
+        self.assertIn(self.gov, raw)                     # control, re-asserted in place
+        rid = self.file_request()
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])                    # nothing was executed
+        result = self.result_for(rid)
+        self.assertEqual(result["classification"], "refused_approval")
+        self.assertEqual(result["exit_code"], 2)         # unchanged by this fix
+        self.assertEqual(result["detail"], B.EXCEPTION_DETAIL_REFUSED_APPROVAL)
+        self.assertNotIn(self.gov, json.dumps(result))
+        self.assertIn(self.gov, self._stderr())          # the operator still gets it
+
+    def test_refused_request_detail_is_fixed_and_leaks_no_registry_path(self):
+        """drain()'s per-request except handler. Forced with a registry path that is a
+        DIRECTORY, so read_spool_quotas raises IsADirectoryError naming it — an OSError
+        carrying a host path, reached from inside _process."""
+        os.unlink(self.registry)
+        os.makedirs(self.registry)
+        rid = self.file_request()
+        r = RecordingRunner()
+        outcomes = self.drain(r)
+        self.assertEqual(r.calls, [])
+        result = self.result_for(rid)
+        self.assertEqual(result["classification"], "refused_request")
+        self.assertEqual(result["exit_code"], 2)
+        self.assertEqual(result["detail"], B.EXCEPTION_DETAIL_REFUSED_REQUEST)
+        self.assertNotIn(self.registry, json.dumps(result))
+        # The outcome dict drain() RETURNS carries the same field name; it must not
+        # disagree with the spool copy just because it is read host-side.
+        self.assertEqual(outcomes[0]["detail"], B.EXCEPTION_DETAIL_REFUSED_REQUEST)
+        self.assertNotIn(self.registry, json.dumps(outcomes))
+        self.assertIn(self.registry, self._stderr())     # the operator still gets it
+
+    def test_control_a_healthy_run_leaks_nothing_either(self):
+        """The other half of the pair: with nothing broken, the accepted path must also
+        keep host paths out of the result. Establishes that the two tests above measure
+        the refusal paths specifically, rather than a spool that is empty of paths for
+        some unrelated reason."""
+        rid = self.file_request()
+        self.drain(RecordingRunner(rc=0, stdout="applied"))
+        result = self.result_for(rid)
+        self.assertEqual(result["classification"], "accepted_applied")
+        blob = json.dumps(result)
+        self.assertNotIn(self.gov, blob)
+        self.assertNotIn(self.registry, blob)
+
+    def test_every_spool_detail_string_comes_from_the_declared_vocabulary(self):
+        """Pins the vocabulary itself: the two constants are distinct from each other
+        and from every DETAIL_BY_CLASSIFICATION entry, and none of them is a format
+        string waiting for an exception to be interpolated into it."""
+        vocab = list(B.DETAIL_BY_CLASSIFICATION.values()) + [
+            B._DETAIL_FALLBACK, B.EXCEPTION_DETAIL_REFUSED_REQUEST,
+            B.EXCEPTION_DETAIL_REFUSED_APPROVAL]
+        self.assertEqual(len(set(vocab)), len(vocab))    # no duplicates
+        for text in vocab:
+            self.assertIsInstance(text, str)
+            self.assertNotIn("%s", text)
+            self.assertNotIn("{}", text)
+
+
 class TestGlobalCeiling(Base):
     def test_an_absurd_number_of_request_files_is_refused_wholesale(self):
         d = S.requests_dir(self.spool)

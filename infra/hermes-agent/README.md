@@ -734,11 +734,18 @@ in full (`/Users/you/.hermes/governance`, not `~/.hermes/governance`). See
 
 **Who mounts what:**
 
-| Container | approvals/ control/ registry/ | log/ seen/ |
-|---|---|---|
-| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted at all |
-| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write |
-| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted |
+| Container | approvals/ control/ registry/ | log/ | seen/ |
+|---|---|---|---|
+| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted | not mounted |
+| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write | **not mounted** |
+| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted | not mounted |
+
+`seen/` is not mounted anywhere. The seen-set is replay-protection state written and
+read entirely host-side by the broker; nothing under the executor's entrypoint touches
+it. It used to be mounted read-write into `ads-mutator` on the strength of a comment
+rather than a measurement, which handed the governed party delete access to the state
+it is governed by (S3-a). `log/` must stay writable there — `append_log` is fsync'd per
+action and is the reversibility record `--undo` reads.
 
 The gateway **does not mount any part of the store** — no path in it is readable or
 writable from the container Hermes runs in. Verify at any time:
@@ -747,15 +754,26 @@ writable from the container Hermes runs in. Verify at any time:
 docker compose exec -T hermes-agent sh -c '[ -e /opt/governance ] && echo REACHABLE-BAD || echo unreachable-good'
 ```
 
-Stated precisely, because "zero exposure" was an overclaim: the **path** is known to
-the gateway. `HERMES_GOVERNANCE_DIR` is in `.env`, which is the gateway's `env_file`,
-so its value is in the gateway's environment and Hermes can read it. That is
-acceptable — knowing a host path grants nothing, because the tree is not mounted and
-the container has no way to reach the host filesystem. It is worth knowing, though,
-that anything host-side which writes into `data/` on Hermes's behalf is writing with a
-known target available to an attacker; that is exactly the shape of the 2026-08-19
-symlink finding against the run-record persist step, and why
-`bin/persist_run_record_shim.py` now resolves and contains every destination it opens.
+The store's host **path** is no longer in the gateway's environment either. It used to
+be: `HERMES_GOVERNANCE_DIR` lives in `.env`, which is the gateway's `env_file`, and
+`env_file` injects every key it holds. The variable cannot simply be removed from
+`.env` — Compose interpolates `${HERMES_GOVERNANCE_DIR}` from that same file when
+rendering `ads-mutator`'s mounts, and `hostenv.sh` parses it as data for the host-side
+rail — so the gateway service masks it with an empty `environment` entry instead, the
+same idiom as `masks/empty` for the ads repo's `.env`. Interpolation is unaffected: it
+happens at render time, from the file, before any container exists. Verify:
+
+```bash
+docker compose exec -T hermes-agent sh -c 'echo "[$HERMES_GOVERNANCE_DIR]"'   # => []
+```
+
+Knowing a host path grants nothing on its own — the tree is not mounted and the
+container has no way to reach the host filesystem, which is why this was graded on the
+policy axis rather than as a disclosure. It is worth withholding anyway, because
+anything host-side that writes into `data/` on Hermes's behalf writes to a target an
+attacker would otherwise know; that is exactly the shape of the 2026-08-19 symlink
+finding against the run-record persist step, and why `bin/persist_run_record_shim.py`
+resolves and contains every destination it opens.
 
 ### Ownership on a Linux host
 
@@ -772,8 +790,11 @@ Give the store an ownership the executor's UID can use — either group access:
 ```bash
 sudo chgrp -R 10000 "$HERMES_GOVERNANCE_DIR"
 sudo chmod -R g+rX "$HERMES_GOVERNANCE_DIR"
-sudo chmod -R g+w  "$HERMES_GOVERNANCE_DIR"/log "$HERMES_GOVERNANCE_DIR"/seen
+sudo chmod -R g+w  "$HERMES_GOVERNANCE_DIR"/log
 ```
+
+`log/` only — `seen/` is not mounted into the executor and needs no access for uid
+10000. Widening it would hand the governed party the replay-protection state again.
 
 or outright ownership:
 

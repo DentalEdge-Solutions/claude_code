@@ -345,8 +345,17 @@ def drain(spool=None, projects=None, runner=None, now=None):
             with _ClientLock(slug):
                 outcome = _process(req, spool, projects, pending[slug], runner, now)
         except (ValueError, KeyError, OSError, subprocess.SubprocessError) as e:
+            # S6: the FULL exception goes to stderr (host-side, journalled) and the
+            # FIXED text goes to the spool. The outcome dict returned from drain() is
+            # printed on the broker's own stdout by main(), which is also host-side, so
+            # it could keep the raw text — but it carries the same field name as the
+            # spool record, and two `detail` values that differ by which side of the
+            # boundary you read them on is how the next reader gets this wrong. One
+            # value, the safe one; the detail is on stderr right above it.
+            print("broker: request %s refused: %s: %s"
+                  % (rid, type(e).__name__, e), file=sys.stderr)
             outcome = {"request_id": rid, "classification": "refused_request",
-                       "detail": str(e)}
+                       "detail": EXCEPTION_DETAIL_REFUSED_REQUEST}
             # FINDING 1, DEFENSE IN DEPTH (post-Task-6 review): _execute already
             # swallows its own final _write_result failure (see its own comment) so
             # this branch should never see a request_id that already has a result on
@@ -363,7 +372,8 @@ def drain(spool=None, projects=None, runner=None, now=None):
                       "overwriting it with a refused_request derived from: %s"
                       % (rid, e), file=sys.stderr)
             else:
-                _write_result(rid, spool, "refused_request", "refused", 2, str(e), now)
+                _write_result(rid, spool, "refused_request", "refused", 2,
+                              EXCEPTION_DETAIL_REFUSED_REQUEST, now)
         outcomes.append(outcome)
         _discard(path)
     return outcomes
@@ -421,6 +431,39 @@ DETAIL_BY_CLASSIFICATION = {
     "failed_unknown_exit": "the executor exited with an unrecognised status; treat the "
                            "account as possibly modified",
 }
+
+# S6. The same policy, extended to the two sites that were bypassing it.
+#
+# drain()'s per-request handler wrote `str(e)` into the spool, and _execute's
+# reserve_approval failure wrote `"approval unavailable: %s" % e` — both reach
+# _write_result, i.e. the Hermes-readable spool, forty lines below the comment above
+# declaring that output is deliberately kept out of it. A comment asserting a guarantee
+# the adjacent code does not provide is the defect class this capsule has hit repeatedly.
+#
+# What those exceptions can carry is not hypothetical. OSError renders strerror plus the
+# FILENAME it failed on, which on these paths is a host governance-store path; the
+# KeyError from vault_lib.resolve carries a client slug; reserve_approval's ValueErrors
+# describe approval-store state. Structurally the SAME defect as Task 2's Important #2
+# (raw exception text interpolated into model-facing refusal output), which was fixed in
+# hermes-syscall.py and never on this side of the same seam.
+#
+# Same remedy, same shape as that fix: fixed vocabulary to the spool, FULL detail to
+# stderr — host-side, lands in the journal. classification, status and exit_code are
+# UNCHANGED; only the human-readable text is.
+#
+# Deliberately NOT folded into DETAIL_BY_CLASSIFICATION above. _parse_all's rejection
+# path also writes classification "refused_request", but with a spool_lib SpoolRefused
+# message describing the agent's OWN malformed request file ("filename does not match
+# request_id") — that is legitimate feedback about data Hermes itself wrote, not host
+# state, and keying off the classification would either destroy it or wrongly tell that
+# path's reader to go looking in the journal. Two sites, two constants, no conflation.
+EXCEPTION_DETAIL_REFUSED_REQUEST = (
+    "the request was refused before execution; nothing was mutated. The specific reason "
+    "is recorded host-side in the broker's journal, not here")
+EXCEPTION_DETAIL_REFUSED_APPROVAL = (
+    "the approval for this change-set could not be reserved, so it was not executed; "
+    "nothing was mutated. The specific reason is recorded host-side in the broker's "
+    "journal, not here")
 # FINDING 2 fix (post-Task-6 review): DETAIL_BY_CLASSIFICATION[classification] was a
 # raw subscript. It cannot KeyError today because CLASSIFICATION_BY_RC/UNKNOWN_RC only
 # ever produce classifications with a matching entry above — but if a future edit adds
@@ -451,7 +494,12 @@ def _execute(req, spool, runner, now):
     try:
         C.reserve_approval(slug, cid, rid, now)
     except (ValueError, OSError) as e:
-        detail = "approval unavailable: %s" % e
+        # S6: full reason host-side, fixed text to the spool. An OSError here renders
+        # the governance-store path it failed on, which the agent must not learn from a
+        # refusal it can provoke.
+        print("broker: request %s client %s changeset %s — approval unavailable: %s: %s"
+              % (rid, slug, cid, type(e).__name__, e), file=sys.stderr)
+        detail = EXCEPTION_DETAIL_REFUSED_APPROVAL
         _write_result(rid, spool, "refused_approval", "refused", 2, detail, now)
         return {"request_id": rid, "classification": "refused_approval", "detail": detail}
 
