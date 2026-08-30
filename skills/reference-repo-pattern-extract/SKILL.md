@@ -1,10 +1,11 @@
 ---
 name: reference-repo-pattern-extract
-description: "Use to extract reusable patterns from any registered reference source —
-  'extract patterns from <source>', 'what can we reuse from <source>', 'mine <source>
-  for patterns'. Generic version of gstack-pattern-audit, parameterized by the source
-  card's mapped patterns. Not for: GStack specifically (gstack-pattern-audit) or
-  registering a new source (reference-repo-add)."
+description: "Use when reusable patterns should be extracted from any registered
+  reference source — 'extract patterns from <source>', 'what can we reuse from
+  <source>', 'mine <source> for patterns'. Generic version of gstack-pattern-audit,
+  parameterized by the source card's mapped patterns. Not for: GStack specifically
+  (gstack-pattern-audit) or registering a new source (reference-repo-add)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

@@ -6,6 +6,7 @@ description: "Use when the user wants to record a decision, lesson, or noteworth
   log in .project-brain/sessions/daily/. Not for: promoting knowledge to canon
   (use brain-promote), compiling logs into candidates (use brain-compile), or
   Claude Code's native auto-memory — this writes the git-versioned project capsule."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

@@ -5,6 +5,7 @@ description: "Use when the user wants session logs distilled into reviewable
   session logs into candidates'. Runs brain-compile.js to extract [decision] and
   [lesson] entries into candidate files. Not for: capturing new entries (brain-capture),
   approving candidates (brain-promote), or summarizing the current conversation."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

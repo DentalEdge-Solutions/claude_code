@@ -85,21 +85,5 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Install jq
-        run: sudo apt-get install -y jq
-      - name: Run static scanner on each skill
-        run: |
-          FAILED=0
-          for skill_dir in skills/*/; do
-            skill=$(basename "$skill_dir")
-            verdict=$(node skills/skill-audit/scripts/static-scan.js "$skill_dir" 2>/dev/null | jq -r '.verdict // "ERROR"' 2>/dev/null || echo "ERROR")
-            if [ "$verdict" = "BLOCK" ]; then
-              echo "BLOCK: $skill"
-              FAILED=1
-            elif [ "$verdict" = "FLAG" ]; then
-              echo "FLAG:  $skill (review before merging)"
-            else
-              echo "PASS:  $skill"
-            fi
-          done
-          exit $FAILED
+      - name: Run static scanner against the reviewed baseline
+        run: node scripts/ci-scan-skills.js

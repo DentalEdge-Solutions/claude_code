@@ -1,11 +1,12 @@
 ---
 name: second-brain-setup
-description: "Use to personalize a freshly bootstrapped project brain — 'set up
-  the second brain', 'configure the brain', 'personalize BRAIN.md', or right after
-  project-brain-bootstrap/install --with-second-brain. Interviews the user in 5
-  short rounds and fills BRAIN.md's human sections and brain-profile identity
-  fields in the user's own voice. Not for: creating the capsule (project-brain-
+description: "Use when a freshly bootstrapped project brain needs personalizing —
+  'set up the second brain', 'configure the brain', 'personalize BRAIN.md', or
+  right after project-brain-bootstrap/install --with-second-brain. Interviews
+  the user in 5 short rounds and fills BRAIN.md's human sections and brain-profile
+  identity fields in the user's own voice. Not for: creating the capsule (project-brain-
   bootstrap) or capturing knowledge (brain-capture)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

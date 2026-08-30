@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "Known-reviewed exemptions for the 'static-scan-skills' CI job (.github/workflows/ci.yml).",
+    "That job runs skills/skill-audit/scripts/static-scan.js — the SAME scanner skill-audit uses",
+    "to vet EXTERNALLY SOURCED skills before install — against every skill in this repo's own",
+    "skills/ tree, and fails the build on any BLOCK-severity finding.",
+    "",
+    "The three entries below are BLOCK findings on the 'child-process-require' check, all in",
+    "*.test.js harness files (never a production script) that invoke `node <script-under-test>`",
+    "via execSync/spawnSync to exercise a CLI script end-to-end. That is ordinary test-harness",
+    "usage, not a payload. static-scan.js itself is NOT modified and NOT weakened by this file —",
+    "it still returns BLOCK for these three files when run directly (skill-audit's vetting of",
+    "external skills is completely unaffected). This baseline only narrows what CI's own",
+    "static-scan-skills job treats as a build failure, for these three specific, reviewed files.",
+    "",
+    "scripts/ci-scan-skills.js diffs the scanner's live findings against this list every run:",
+    "  - any BLOCK finding NOT listed here            -> CI FAILS (a genuinely new finding)",
+    "  - any entry listed here that no longer fires    -> CI FAILS as a STALE BASELINE",
+    "    (prune the stale entry — a suppression nobody reviews any more is how a baseline",
+    "    rots into a blanket exemption)",
+    "",
+    "Adding a new entry requires human review — do not add one to silence a finding you have",
+    "not personally read and understood. Reviewed by: erick.sicard@dentaledgesolutions.com,",
+    "2026-08-24, as part of restoring the CI gate to green (see feat/hermes-governed-syscall)."
+  ],
+  "entries": [
+    {
+      "skill": "agent-eval",
+      "file": "scripts/generate-agent-evals.test.js",
+      "check": "child-process-require",
+      "reason": "Test harness uses execSync to invoke `node generate-agent-evals.js` end-to-end and assert on its output; not a production script, no payload.",
+      "reviewed_by": "erick.sicard@dentaledgesolutions.com",
+      "reviewed_date": "2026-08-24"
+    },
+    {
+      "skill": "skill-eval",
+      "file": "scripts/generate-seed-evals.test.js",
+      "check": "child-process-require",
+      "reason": "Test harness uses execSync to invoke `node generate-seed-evals.js` end-to-end and assert on its output; not a production script, no payload.",
+      "reviewed_by": "erick.sicard@dentaledgesolutions.com",
+      "reviewed_date": "2026-08-24"
+    },
+    {
+      "skill": "team-eval",
+      "file": "scripts/generate-team-evals.test.js",
+      "check": "child-process-require",
+      "reason": "Test harness uses spawnSync to invoke `node generate-team-evals.js` end-to-end and assert on its output; not a production script, no payload.",
+      "reviewed_by": "erick.sicard@dentaledgesolutions.com",
+      "reviewed_date": "2026-08-24"
+    }
+  ]
+}

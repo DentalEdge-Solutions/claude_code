@@ -1,10 +1,11 @@
 ---
 name: reference-repo-audit
-description: "Use to check the reference library's safety — 'audit the reference
-  library', 'is <source> safe to use', 'check the reference repos'. Runs the
-  docs-only audit (no executables, no secrets, correct install policy, freshness)
-  and separates security findings from warnings. Not for: registering a source
-  (reference-repo-add) or extracting patterns (reference-repo-pattern-extract)."
+description: "Use when the reference library's safety needs checking — 'audit
+  the reference library', 'is <source> safe to use', 'check the reference repos'.
+  Runs the docs-only audit (no executables, no secrets, correct install policy,
+  freshness) and separates security findings from warnings. Not for: registering
+  a source (reference-repo-add) or extracting patterns (reference-repo-pattern-extract)."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 

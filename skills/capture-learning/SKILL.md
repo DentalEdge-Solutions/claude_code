@@ -1,11 +1,12 @@
 ---
 name: capture-learning
-description: "Use after a correction or mistake worth learning from — the user
-  fixed your approach, a repeated error surfaced, or the user says 'learn from
-  this', '/aprende', 'don't do that again', 'remember not to X'. Reviews the
-  conversation, drafts durable learnings (lesson memories and anti-patterns),
-  and writes them ONLY after per-item user confirmation. Not for: routine
-  decision capture (brain-capture) or conversation summaries."
+description: "Use when a correction or mistake just surfaced that's worth
+  learning from — the user fixed your approach, a repeated error surfaced, or
+  the user says 'learn from this', '/aprende', 'don't do that again', 'remember
+  not to X'. Reviews the conversation, drafts durable learnings (lesson memories
+  and anti-patterns), and writes them ONLY after per-item user confirmation.
+  Not for: routine decision capture (brain-capture) or conversation summaries."
+compatibility: "Claude Code. Node.js ≥ 18."
 risk_tier: standard
 ---
 
