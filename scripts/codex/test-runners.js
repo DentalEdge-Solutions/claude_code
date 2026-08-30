@@ -8,6 +8,17 @@ const { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } = require('
 const path = require('path');
 let ok = true;
 
+// A native-audit fixture is an ACTUAL `iteration-N` directory, not merely the presence of
+// evals/<target>/. evals/ is gitignored, but 41 evals.json files are force-added, so
+// evals/agent-eval/ DOES exist in a clean checkout while the generated iteration-N dirs
+// never do. Guarding on the parent therefore passed on CI and then failed inside the test.
+function hasNativeRun(dir) {
+  if (!existsSync(dir)) return false;
+  try {
+    return require('fs').readdirSync(dir).some((n) => /^iteration-\d+$/.test(n));
+  } catch { return false; }
+}
+
 function test(label, fn) {
   try { fn(); console.log(`PASS ${label}`); }
   catch (e) { console.error(`FAIL ${label}: ${e.message}`); ok = false; }
@@ -256,6 +267,13 @@ if (runnerExists('run-external-skill-eval.js')) {
     if (r.status !== 0) throw new Error(`--help exited ${r.status}`);
   });
   test('run-external-skill-eval smoke dry-run (default) creates artifacts', () => {
+    // Needs evals/skill-scout/evals.json, which is GENERATED and not tracked — absent in
+    // any clean checkout. Skip loudly rather than fail a pipeline over a missing artifact
+    // the repo deliberately does not version.
+    if (!existsSync('evals/skill-scout/evals.json')) {
+      console.log('  (skipped — evals/skill-scout/evals.json not generated)');
+      return;
+    }
     const r = spawnSync('node', ['scripts/codex/run-external-skill-eval.js', 'skill-scout', '--mode', 'smoke'], { stdio: 'pipe', encoding: 'utf8' });
     if (r.status !== 0) throw new Error(r.stderr || `exited ${r.status}`);
     const base = 'evals/codex-runs/skills/skill-scout';
@@ -315,8 +333,8 @@ if (runnerExists('run-native-audit.js')) {
   });
 
   test('run-native-audit dry-run against real fixture (evals/agent-eval) creates artifacts', () => {
-    if (!existsSync('evals/agent-eval')) {
-      console.log('  (skipped — evals/agent-eval fixture not present)');
+    if (!hasNativeRun('evals/agent-eval')) {
+      console.log('  (skipped — no evals/agent-eval/iteration-N native run present)');
       return;
     }
     const r = spawnSync('node', ['scripts/codex/run-native-audit.js', 'agent-eval', 'skill'], { stdio: 'pipe', encoding: 'utf8' });
@@ -337,8 +355,8 @@ if (runnerExists('run-native-audit.js')) {
   });
 
   test('run-native-audit --all-reps includes every rep found', () => {
-    if (!existsSync('evals/agent-eval')) {
-      console.log('  (skipped — evals/agent-eval fixture not present)');
+    if (!hasNativeRun('evals/agent-eval')) {
+      console.log('  (skipped — no evals/agent-eval/iteration-N native run present)');
       return;
     }
     const r = spawnSync('node', ['scripts/codex/run-native-audit.js', 'agent-eval', 'skill', '--all-reps'], { stdio: 'pipe', encoding: 'utf8' });
