@@ -17,12 +17,38 @@ The two properties are in tension and both matter, so both are pinned here:
   * a persist refusal must still be impossible to miss.
 A fix for either one alone would pass half of this file.
 """
-import json, os, shutil, subprocess, sys, tempfile, unittest
+import importlib.util, json, os, shutil, subprocess, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WRAPPER = os.path.join(os.path.dirname(HERE), "run-ads-mutate.sh")
 sys.path.insert(0, HERE)
 import governance_lib
+
+
+def _load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+PF = _load("preflight_governance_access", "preflight-governance-access.py")
+
+# PLATFORM GATE. The wrapper runs the pre-flight (run-ads-mutate.sh:34) before it does
+# anything else, and the pre-flight is a NO-OP off Linux by design (PF.applies()), because
+# bind-mount UID semantics are only direct there. Consequences, both measured 2026-08-30:
+#   * on darwin these tests exercised the wrapper with an INCOMPLETE governance store and
+#     never noticed, because the pre-flight stayed silent;
+#   * on Linux the same fixture is refused at exit 2 before the wrapper reaches the persist
+#     logic under test — 5 of 7 tests failed for a reason that had nothing to do with S1-M2.
+# setUp now builds the COMPLETE store either way. On Linux the store must additionally be
+# usable by EXECUTOR_UID, which holds when the suite itself runs as that uid — true inside
+# the ads-mutator image, which is the identity that actually matters. Anywhere else on Linux
+# we SKIP LOUDLY rather than fail confusingly or pass vacuously.
+_UID_OK = (not PF.applies()) or os.getuid() == PF.EXECUTOR_UID
+_SKIP_WHY = ("Linux pre-flight requires the store to be usable by uid %d; this suite is "
+             "running as uid %d. Run it inside the ads-mutator image to exercise it for "
+             "real." % (PF.EXECUTOR_UID, os.getuid()))
 
 SLUG = "acme-dental"
 CID = "20260824-101500-abcdef01"
@@ -45,6 +71,7 @@ exit %(rc)s
 """
 
 
+@unittest.skipUnless(_UID_OK, _SKIP_WHY)
 class Base(unittest.TestCase):
     """Runs the wrapper from an ISOLATED COPY of its own directory.
 
@@ -86,8 +113,14 @@ class Base(unittest.TestCase):
         os.makedirs(os.path.join(self.vault, "changes"))
 
         self.gov = os.path.join(self.tmp, "governance")
+        # The COMPLETE skeleton. The pre-flight stats every one of these and refuses the
+        # whole run if any is missing; creating only registry/ made this fixture pass on
+        # darwin (pre-flight silent) and fail on Linux (pre-flight live). See the platform
+        # gate above.
+        for _d in ("approvals", "control", "registry", "log", "seen"):
+            os.makedirs(os.path.join(self.gov, _d), exist_ok=True)
         reg = governance_lib.clients_registry_path(self.gov)
-        os.makedirs(os.path.dirname(reg))
+        os.makedirs(os.path.dirname(reg), exist_ok=True)
         with open(reg, "w") as f:
             json.dump({"clients": {SLUG: {"project": "claude_google_ads",
                                           "customer_id": "1234567890",
