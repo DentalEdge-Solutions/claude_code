@@ -17,12 +17,12 @@ reports → a single hand-authored **`ads-analyst`** skill synthesizes them into
 the deliverable (read-only `claude -p`) → the output is a **draft for human
 review**, never auto-sent. This validates a **fixed-fee one-off audit** as a
 monetizable product (canon D-5) against the bar set by the existing hand-made
-Palmetto Dental Studio audit — with no VPS and no account mutation.
+<slug-1> audit — with no VPS and no account mutation.
 
 ## 1. Goal & non-goals
 
 **Goal.** A repeatable, read-only pipeline that produces one client-grade audit
-draft for `claude_google_ads` (the DentalEdge/Palmetto account), good enough that
+draft for `claude_google_ads` (the DentalEdge/<slug-1> account), good enough that
 a human operator would refine and send it — validating the audit as a product.
 
 **Non-goals (this pilot):**
@@ -48,7 +48,7 @@ a human operator would refine and send it — validating the audit as a product.
 
 ## 3. Context — reader taxonomy, `audit_data/`, and the quality bar
 
-**The deliverables already exist** as bespoke one-offs for Palmetto Dental Studio
+**The deliverables already exist** as bespoke one-offs for <slug-1>
 (e.g. `google-ads-executive-summary.md`: *overall condition → largest wasted spend
 → growth opportunity → most urgent tracking problem → top-5 actions → what NOT to
 change yet*; plus a ~37 KB full audit, negative-keyword and RSA/asset audits). They
@@ -198,7 +198,7 @@ The audit draft MUST contain, in this order:
   read-only, with the target account and repo provably untouched.
 - **Benchmark:** on the four judgments it makes (condition, wasted spend, growth,
   tracking problem), the draft **matches or defensibly approaches** the existing
-  hand-made Palmetto exec summary over the same account — assessed by the operator.
+  hand-made <slug-1> exec summary over the same account — assessed by the operator.
   Divergences must be *defensible from the data*, not errors.
 - Every quantitative claim is traceable to a report in the appendix (no invented
   numbers) — the human-review gate spot-checks this.
@@ -216,7 +216,7 @@ candidate (promotable to canon only via `brain-promote --approve`).
 ## 11. Scope boundary & follow-ons
 
 - **This pilot:** host-side read-only collection step + allow-list broadening +
-  bundle runner + `ads-analyst` skill + one Palmetto audit draft + human-review
+  bundle runner + `ads-analyst` skill + one <slug-1> audit draft + human-review
   gate + benchmark.
 - **Follow-ons (not now):** the multi-specialist team (Inc-1 pattern); a polished
   client-facing render (HTML/Artifact); recurring/automated collection+delivery

@@ -8,7 +8,7 @@ is fail-closed on every field: unknown action types, unknown fields, non-digit
 ids, and control characters are all refusals, never coercions.
 See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 """
-import datetime, hashlib, json, os, re, sys
+import contextlib, datetime, fcntl, hashlib, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib
 import vault_lib
@@ -241,22 +241,59 @@ def read_allow_list(path, project, block):
     return read_block(path, project, block)["allow"]
 
 
+def _read_positive_int_limits(got, keys, project, label):
+    """Validate a set of numeric limits out of a parsed `caps:` block, fail-closed.
+
+    ONE loop, because there were two. read_mutate_execute's mutation caps and
+    read_spool_quotas' broker quotas validated the same values from the same block with
+    near-identical code, differing only in the noun in the error message. Two copies of
+    a fail-closed rule is how one of them quietly drifts fail-open — which this file has
+    already watched happen once, to the seen-set's two readers (see iter_seen_records).
+
+    The rule, stated once: a limit that is MISSING or that is not a positive integer is
+    a refusal, never a default. An unreadable limit must never become an unlimited one.
+    `label` keeps the two callers' messages distinguishable to an operator; it changes
+    nothing about the check.
+    """
+    out = {}
+    for k in keys:
+        v = got["caps"].get(k)
+        if v is None:
+            raise ValueError(f"missing {label} {k!r} for project {project!r} — {label}s are "
+                             "fail-closed; an unreadable limit must never become an "
+                             "unlimited one")
+        if not _CAP_VALUE_RE.fullmatch(v) or int(v) < 1:
+            raise ValueError(f"invalid {label} {k}={v!r} — must be a positive integer")
+        out[k] = int(v)
+    return out
+
+
 def read_mutate_execute(path, project):
     got = read_block(path, project, "mutate_execute")
     if not got.get("runner") or not got.get("script_dir") or not got["allow"]:
         raise ValueError(
             f"no mutate_execute(runner, script_dir, allow) for project {project!r}")
-    caps = {}
-    for k in CAP_KEYS:
-        v = got["caps"].get(k)
-        if v is None:
-            raise ValueError(f"missing cap {k!r} for project {project!r} — caps are fail-closed; "
-                             "an unreadable limit must never become an unlimited one")
-        if not _CAP_VALUE_RE.fullmatch(v) or int(v) < 1:
-            raise ValueError(f"invalid cap {k}={v!r} — must be a positive integer")
-        caps[k] = int(v)
+    caps = _read_positive_int_limits(got, CAP_KEYS, project, "cap")
     return {"runner": got["runner"], "script_dir": got["script_dir"],
             "allow": got["allow"], "caps": caps}
+
+
+# Spool quotas live in the SAME caps: block as the mutation caps — tuning them stays a
+# config edit, never a code change (spec §8) — but they are read SEPARATELY. They bound
+# the BROKER, not the executor: refused requests never consume applies_per_client_day,
+# so without these nothing bounds how many requests Hermes can file. Keeping them out
+# of CAP_KEYS is what stops apply-changeset.py refusing over a broker-only setting.
+SPOOL_QUOTA_KEYS = ("max_pending_requests", "accepted_requests_per_client_day")
+
+
+def read_spool_quotas(path, project):
+    """Per-client spool quotas, fail-closed exactly like the mutation caps.
+
+    An unreadable limit must never become an unlimited one — the same rule the caps
+    already follow, and the reason a missing key raises instead of defaulting.
+    """
+    got = read_block(path, project, "mutate_execute")
+    return _read_positive_int_limits(got, SPOOL_QUOTA_KEYS, project, "spool quota")
 
 
 def assert_allow_lists_disjoint(read_allow, mutate_allow):
@@ -407,6 +444,34 @@ def _parse_utc_field(rec, field):
 
 
 def write_approval(slug, cid, digest, operator, now, ttl_hours):
+    """Write a fresh approval record for (slug, cid).
+
+    FIX ROUND 2: shares the exact same hazard reserve_approval/record_outcome were
+    fixed for in FIX ROUND 1 — _atomic_write_json writes to a shared, deterministic
+    ``<cid>.approval.json.tmp`` path, so two concurrent write_approval calls for the
+    same (slug, cid) can race that tmp path and one thread's os.replace can raise
+    FileNotFoundError when it finds the file already consumed by the other. This was
+    pre-existing and unproven until Task 4's own mutation proof demonstrated the exact
+    failure shape against reserve_approval; the same defect class in the function that
+    WRITES approvals, in a plan about approval-record integrity, is not something to
+    leave for later just because it predates this branch.
+
+    ORDERING NOTE, checked and corrected during FIX ROUND 2's mutation proof: the
+    directory _approval_lock's sidecar file lives in must exist before that sidecar
+    can be opened, and the first-ever approval for a brand-new client is exactly the
+    case where it doesn't yet. This function keeps the explicit os.makedirs call
+    first for that reason and for clarity about who is responsible for the
+    directory — but it is NOT the only thing making that case safe: _approval_lock
+    itself defensively creates the sidecar's parent directory before opening it (see
+    its docstring), so moving this makedirs below the `with _approval_lock(...)`
+    line does not reproduce the failure the original version of this docstring
+    claimed it would. That claim was tested (mutation: move the lock above this
+    makedirs) and did NOT go red — TestFreshApprovalsDirectory passed either way,
+    because _approval_lock's own defense covers it regardless of caller ordering.
+    Recorded here, not smoothed over, per task-4-report.md FIX ROUND 2: the ordering
+    kept below is good practice and matches which function is nominally responsible
+    for the directory, not a load-bearing requirement.
+    """
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
     operator = _require_str(operator, "operator")
@@ -423,8 +488,15 @@ def write_approval(slug, cid, digest, operator, now, ttl_hours):
     rec = {"changeset_id": cid, "sha256": digest, "operator": operator,
            "approved_at": now.strftime(ISO),
            "expires_at": (now + datetime.timedelta(hours=ttl_hours)).strftime(ISO)}
+    # Kept above the lock for clarity about who is nominally responsible for this
+    # directory, NOT because the ordering is load-bearing: _approval_lock creates the
+    # parent itself, and the mutation that moves this below the lock does not go red.
+    # This comment used to read "MUST precede the lock — see docstring", contradicting
+    # the docstring above, which had already been corrected to say the opposite. An
+    # inline comment that disagrees with the docstring it cites is worse than neither.
     os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
-    _atomic_write_json(approval_path(slug, cid), rec)
+    with _approval_lock(slug, cid):
+        _atomic_write_json(approval_path(slug, cid), rec)
     return rec
 
 
@@ -487,6 +559,244 @@ def append_log(slug, rec):
         os.close(dfd)
 
 
+# --- replay protection -------------------------------------------------------------
+# The seen-set lives in the GOVERNANCE STORE (governance_lib.seen_path), never in the
+# spool. That is the whole point of putting it here rather than beside the request the
+# gateway already writes: the spool is the one tree Hermes can write to, and a replay
+# record Hermes can delete is not replay protection at all (spec §8).
+#
+# CORRECTED (S3-a). This comment used to say the executor container mounts seen/
+# read-write "alongside log/", and that both are append targets it "cannot repudiate".
+# Neither half held. seen/ is now not mounted into the executor at all — nothing under
+# its entrypoint ever read or wrote the seen-set; append_log is its only governance
+# write. And "cannot repudiate" was never true of either file: write access to a
+# DIRECTORY is what grants unlink, so an executor that could write log/ could always
+# delete log/<slug>.jsonl outright. It still can — see iter_log_records' docstring for
+# what that costs and why closing it is a two-part change parked for its own wave.
+
+def append_seen(slug, request_id, now):
+    """Record an accepted request_id, fsynced before returning.
+
+    This is written BEFORE the broker acts on the request (mirrors reserve_approval
+    below, and for the identical reason). If the process dies between this append and
+    whatever it authorises, the request_id is already burned and a resubmission is
+    refused as a replay — which costs the caller a fresh request_id, whereas the
+    opposite ordering (append after acting) would let a crashed-and-retried request
+    through twice.
+    """
+    request_id = _require_str(request_id, "request_id")
+    p = governance_lib.seen_path(slug)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    rec = {"request_id": request_id, "seen_at": now.strftime(ISO)}
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    # fsync the DIRECTORY too — same reasoning as append_log: on the first append the
+    # file is newly created, and fsyncing its contents does not persist the directory
+    # entry that names it. Losing that entry loses the whole replay history, which
+    # seen_contains below would then read back as a legitimate "never seen".
+    dfd = os.open(os.path.dirname(p), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def iter_seen_records(slug):
+    """Yield each validated {request_id, seen_at} record from the seen-set, in file
+    order. THE single reader of seen/<slug>.jsonl.
+
+    Added in Task 5 FIX ROUND 2: seen_contains (below) and hermes-broker.py's
+    _accepted_today both need to read this same file, and having each parse it with
+    its own rules is exactly how one of them quietly drifts fail-open — which is what
+    happened. _accepted_today's original implementation counted lines by a raw
+    substring match and caught only OSError, so a seen-set with a mangled or missing
+    "seen_at" field silently undercounted instead of raising, while seen_contains's
+    JSON parse on the SAME file correctly refused. Two readers, two failure
+    semantics, on the axis that bounds how much work a client can cause. Both callers
+    now share this one generator instead.
+
+    FAIL-CLOSED on every read error: an unreadable file, a directory sitting where the
+    file should be, or a line that is not a JSON object carrying a string
+    "request_id" AND a string "seen_at" all RAISE ValueError rather than being
+    skipped or silently treated as absent. Returning nothing there would silently admit
+    every replay for this client and silently undercount every daily quota — the exact
+    same failure shape as an unreadable cap being read as "no usage yet" instead of
+    refused (see read_spool_quotas).
+
+    A MISSING FILE IS NOT A READ ERROR AND IS NOT COVERED BY THAT RULE. The `return`
+    below is the fail-OPEN case the paragraph above condemns, and this docstring used
+    to claim otherwise — it described the corrupt-file path and silently overclaimed
+    the missing-file one. Stated plainly rather than left to be discovered: a seen-set
+    that has been DELETED reads here as "nothing has ever been recorded", which admits
+    every previously-seen request_id as fresh.
+
+    What makes that acceptable TODAY is a property of the deployment, not of this
+    function: every caller of the seen-set is host-side in hermes-broker.py, and the
+    executor no longer has seen/ mounted at all (S3-a), so the governed party cannot
+    reach the file to delete it. That is an argument about who can write the store, and
+    it evaporates the moment anything mounts seen/ into a container again. If you are
+    about to do that, this `return` is the thing to fix first.
+    """
+    p = governance_lib.seen_path(slug)
+    if not os.path.exists(p):
+        return                              # NOT fail-closed — see the docstring above
+    try:
+        with open(p, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if (not isinstance(rec, dict)
+                        or not isinstance(rec.get("request_id"), str)
+                        or not isinstance(rec.get("seen_at"), str)):
+                    raise ValueError(f"seen-set {p} line {lineno} is malformed")
+                yield rec
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(
+            f"unreadable seen-set for {slug!r} ({e}) — refusing rather than treating "
+            "every request_id as unseen") from e
+
+
+def seen_contains(slug, request_id):
+    """True when this request_id has already been accepted for this client.
+
+    FAIL-CLOSED on every read error — see iter_seen_records, the shared parser this
+    now delegates to.
+    """
+    request_id = _require_str(request_id, "request_id")
+    for rec in iter_seen_records(slug):
+        if rec["request_id"] == request_id:
+            return True
+    return False
+
+
+# --- approval reservation ----------------------------------------------------------
+# write_approval/verify_approval (above) predate this task and already enforce the
+# single-use rule on the READ side: verify_approval refuses whenever "reserved_at" is
+# present on the record, regardless of whether "outcome" was ever written. What was
+# missing is the WRITE side — something that sets reserved_at, and does so before the
+# executor runs rather than after, per spec §7.
+
+def _load_approval(slug, cid):
+    """Shared read for reserve_approval and record_outcome: both need the current
+    record before deciding whether to refuse, and both must refuse identically on a
+    missing, unreadable, or non-object record rather than each growing its own
+    slightly-different check."""
+    p = approval_path(slug, cid)
+    if not os.path.isfile(p):
+        raise ValueError(f"no approval record for change-set {cid!r} — run approve-changeset.py first")
+    try:
+        with open(p, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(f"unreadable approval record for {cid!r}: {e}") from e
+    if not isinstance(rec, dict):
+        raise ValueError(f"malformed approval record for {cid!r}: expected a JSON object")
+    return p, rec
+
+
+@contextlib.contextmanager
+def _approval_lock(slug, cid):
+    """Exclusive mutual-exclusion for the read-check-write in reserve_approval and
+    record_outcome, added in FIX ROUND 1 after review found the original
+    read-modify-write TOCTOU against itself.
+
+    Single-use approval is the property Task 4 exists to deliver, and this project's
+    canon says a guardrail secures a path rather than a capability: relying on a
+    caller (the broker, Task 5) to remember to take a lock elsewhere would make
+    single-use a POLICY someone else has to uphold, not a STRUCTURAL guarantee this
+    module makes true by construction. So this function defends itself instead.
+
+    Locks a SIDECAR file (governance_lib.approval_lock_path), never the approval
+    record itself. _atomic_write_json writes a .tmp file and os.replace()s it over
+    the destination; a lock held on the approval file's own fd would be a lock on the
+    OLD inode, and the file that lands after the rename carries no lock at all — the
+    mutual exclusion would be silently fictional. The sidecar's path never changes
+    across rewrites, so flock-ing it is real serialization.
+
+    This is a DIFFERENT file from the broker's future per-client lock at
+    control/.locks/<slug>.lock (Task 5) — do NOT "simplify" the two into one lock.
+    They protect different scopes (one approval record here; the whole
+    request/reserve/execute/record sequence there) and, because they never name the
+    same file, nested acquisition (broker lock held, then this one taken inside it)
+    can never deadlock against itself.
+    """
+    p = governance_lib.approval_lock_path(slug, cid)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    fd = os.open(p, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def reserve_approval(slug, cid, request_id, now):
+    """Mark an approval consumed BEFORE the executor is invoked. Returns the record.
+
+    THE ORDERING IS LOAD-BEARING (spec §7). If reservation happened AFTER a successful
+    apply instead, there is a window — between the mutation landing at Google Ads and
+    this record being written — in which the approval is still live and a crash or a
+    replayed request in that window applies the same change-set a second time.
+    Reserving first closes that window the other direction: a crash between reserving
+    and applying costs one unusable approval, which a human clears by approving again.
+    That is a strictly cheaper failure than a duplicate account mutation.
+
+    Concurrency: the entire read-check-write runs inside _approval_lock, an exclusive
+    flock on a sidecar file scoped to this (slug, cid). That makes single-use
+    self-enforcing — a second concurrent caller blocks until the first's lock is
+    released, then reads the now-reserved record and correctly refuses, regardless of
+    scheduling. (An earlier version of this function relied entirely on the broker's
+    future per-client advisory lock for this property; that was reviewed and rejected
+    as policy rather than structure — see task-4-report.md FIX ROUND 1.)
+    """
+    with _approval_lock(slug, cid):
+        p, rec = _load_approval(slug, cid)
+        if "reserved_at" in rec:
+            raise ValueError(
+                "approval for %r is already reserved (reserved_at=%s) — approvals are "
+                "single-use" % (cid, rec.get("reserved_at")))
+        rec["reserved_at"] = now.strftime(ISO)
+        rec["request_id"] = _require_str(request_id, "request_id")
+        _atomic_write_json(p, rec)
+        return rec
+
+
+def record_outcome(slug, cid, outcome, now):
+    """Phase two of the two-phase record: what actually happened. Returns the record.
+
+    Requires a prior reservation — an outcome recorded without one means the ordering
+    was inverted somewhere upstream (execution happened, or is about to, without the
+    approval ever having been marked consumed), and that is exactly the defect this
+    refuses to paper over rather than recording anyway.
+
+    An approval that has reserved_at but never gets an outcome (the crash-mid-apply
+    case) stays exactly as dead as one that completed: verify_approval refuses on
+    reserved_at alone, never on outcome. So the crash costs an unusable approval, never
+    a reusable one — the property spec §7 asks for.
+
+    Concurrency: runs inside the same _approval_lock as reserve_approval, scoped to
+    this (slug, cid), for the identical reason — the read-then-write here must not
+    race a concurrent reserve_approval or record_outcome on the same approval.
+    """
+    with _approval_lock(slug, cid):
+        p, rec = _load_approval(slug, cid)
+        if "reserved_at" not in rec:
+            raise ValueError(
+                f"approval {cid!r} has no reserved_at — refusing to record an outcome for "
+                "an apply that was never reserved; the reservation must precede execution")
+        rec["outcome"] = _require_str(outcome, "outcome")
+        rec["finished_at"] = now.strftime(ISO)
+        _atomic_write_json(p, rec)
+        return rec
+
+
 def iter_log_records(slug):
     """Yield (lineno, record) for every audit-log line, validating the fields all
     readers depend on.
@@ -499,13 +809,48 @@ def iter_log_records(slug):
     record missing a field surfaced as an uncaught exception and exit 1 rather than
     a refusal.)
 
-    Every failure mode is a refusal, never a skip: an unreadable counter must not
-    read as 'under the cap', and an unreadable undo list must not read as 'nothing
-    to undo'.
+    Every failure mode BELOW THIS LINE is a refusal, never a skip: an unreadable
+    counter must not read as 'under the cap', and an unreadable undo list must not
+    read as 'nothing to undo'.
+
+    A MISSING LOG IS THE ONE EXCEPTION, AND IT IS NOT COVERED (S3-b, ruling R22).
+    This docstring used to state the rule without that carve-out, and the code
+    immediately below it returns nothing when the file is absent — so a missing
+    counter reads as exactly the 'under the cap' this text forbids, and a missing
+    undo list as exactly the 'nothing to undo'. The text named the precise failure
+    the code implements. Measured, not reasoned: deleting log/<slug>.jsonl takes
+    day_counts from exhausted back to zero, and destroys the reversibility record
+    --undo reads through this same generator.
+
+    It is not merely theoretical for the GOVERNED party either. log/ must stay
+    executor-writable — append_log is fsync'd per action — and on Docker Desktop for
+    macOS the bind mount remaps ownership so uid 10000 can unlink there. The same
+    modes on a Linux VPS would deny uid 10000 even traverse, so the exploit's REACH
+    is platform-conditional and the VPS behaviour is UNMEASURED; do not read a darwin
+    measurement as covering it either way.
+
+    Why this is still a `return` and not a raise: closing it means an
+    append-but-not-unlink layout (host-owned log/ the executor cannot create or
+    unlink in, holding a pre-created per-client file it can append to) plus making a
+    missing log for a REGISTERED client fail closed. Both halves are needed together,
+    and both were measured as out of scope for one fix wave:
+
+      * preflight-governance-access.py demands read+WRITE+traverse on log/, so the
+        very layout the fix creates is refused by the pre-flight (measured: 1 problem,
+        exit 2) — the mutation rail blocked at startup, which is R19's over-checking
+        failure again and worse than the finding.
+      * raising here breaks the FIRST apply for any client, not just fixtures:
+        day_counts reads this log before any log exists (measured: 30 suite tests,
+        including the plain happy path, go red). It is only safe once every registered
+        client is guaranteed a pre-created log — and there is no programmatic
+        client-registration hook to guarantee it: clients.json is hand-edited, and
+        migrate-governance.py only carries logs that ALREADY exist in a vault.
+
+    Until both land together, treat a missing log as UNVERIFIED rather than as zero.
     """
     p = log_path(slug)
     if not os.path.exists(p):
-        return
+        return                              # NOT fail-closed — see the docstring above
     try:
         f = open(p, encoding="utf-8")
     except OSError as e:

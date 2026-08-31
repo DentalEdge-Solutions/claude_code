@@ -343,5 +343,105 @@ projects:
         self.assertEqual(C.read_mask_paths(self._reg(none), "demo"), [])
 
 
+class TestExecutorGovernanceMounts(unittest.TestCase):
+    """S3-a. The executor is the GOVERNED party. Every governance directory it can
+    write is a directory it can also delete state out of, so the mount list is a
+    capability grant and belongs under test.
+
+    Scoped to `ads-mutator`'s own volumes: via the same parser the mask-path checks
+    use, so a comment mentioning `seen`, or the broker's own access to the same host
+    directory, cannot satisfy or break these assertions.
+    """
+
+    SERVICE = "ads-mutator"
+    GOV = "/opt/governance"
+
+    def setUp(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "..", "docker-compose.yml"), encoding="utf-8") as f:
+            self.compose = f.read()
+        self.entries = _volumes_entries(_service_block(self.compose, self.SERVICE))
+
+    def test_reader_finds_this_services_mounts(self):
+        """Guards the reader: without this, every assertion below could pass
+        vacuously on an empty entry list."""
+        self.assertTrue(self.entries, "no volume entries parsed for %s" % self.SERVICE)
+
+    def test_the_executor_has_no_seen_set_mount(self):
+        """THE FINDING. seen/ was mounted rw here, handing the governed party delete
+        access to the replay-protection state it is governed BY — while every caller
+        of the seen-set (append_seen, seen_contains, iter_seen_records) is host-side
+        in hermes-broker.py and nothing under this entrypoint reads or writes it.
+
+        Asserted against the parsed mount ENTRIES, not the raw file: the compose file
+        still discusses seen/ in a comment explaining why there is no mount, and a
+        substring search would be satisfied by that comment forever."""
+        self.assertFalse(
+            _mount_target_present(self.entries, "%s/seen" % self.GOV),
+            "ads-mutator mounts the seen-set; no code path under its entrypoint uses it")
+        for _indent, content in self.entries:
+            self.assertNotIn(
+                "/seen", content,
+                "a seen-set path survives in an ads-mutator mount entry: %r" % content)
+
+    def test_control_the_log_mount_is_still_present_and_writable(self):
+        """DISCRIMINATING CONTROL. append_log is the executor's one governance write
+        and the reversibility record --undo reads, so log/ MUST stay mounted rw. If
+        this failed, the test above would prove only that the parser had gone blind
+        — or that someone had fixed the finding by breaking the executor."""
+        self.assertTrue(_mount_target_present(self.entries, "%s/log" % self.GOV))
+        log_entries = [c for _i, c in self.entries if c.endswith("%s/log" % self.GOV)]
+        self.assertEqual(len(log_entries), 1, self.entries)
+        self.assertFalse(log_entries[0].endswith(":ro"))
+
+    def test_control_the_read_only_governance_mounts_are_still_read_only(self):
+        """The kill switch, the approvals and the registry must remain :ro to the
+        governed party. Pinned here so a future edit to this mount list cannot
+        quietly widen them while satisfying the seen check above."""
+        for name in ("approvals", "control", "registry"):
+            target = "%s/%s" % (self.GOV, name)
+            self.assertTrue(_mount_target_present(self.entries, target), target)
+            matching = [c for _i, c in self.entries if c.endswith("%s:ro" % target)]
+            self.assertEqual(len(matching), 1, "%s is not mounted :ro" % target)
+
+
+class TestSpoolQuotasDeclared(unittest.TestCase):
+    def test_the_real_registry_declares_both_quotas(self):
+        # The unit tests above use synthetic registries. This one asserts against the
+        # FILE THAT SHIPS — a quota that parses in a fixture but is absent from
+        # projects.yaml is a broker that refuses every request on the VPS.
+        q = C.read_spool_quotas(REGISTRY, "claude_google_ads")
+        self.assertGreaterEqual(q["max_pending_requests"], 1)
+        self.assertGreaterEqual(q["accepted_requests_per_client_day"], 1)
+
+    # R8. A quota of 999999 is a quota in name only, and catching THAT is all this
+    # check is for. The bound must be unambiguously absurd, never merely "larger than
+    # today's value plus some headroom": this suite's own docstring says it is
+    # deliberately narrow so that it does not become a change-detector, and the previous
+    # ceilings of 100 and 500 broke that promise. Today's values are 8 and 20; a
+    # deliberate operational decision to raise either into the low hundreds is a policy
+    # change for review, not a test failure, and a test that fires on it teaches people
+    # to edit the test rather than think about the number.
+    #
+    # One bound for both, chosen so no defensible operational value can reach it: ten
+    # thousand queued requests for one client, or ten thousand accepted live mutations
+    # against one account in a single UTC day, are not quotas under any reading. What
+    # this still catches is the realistic careless edit — a 999999 paste, or a digit
+    # added by accident.
+    ABSURD = 10000
+
+    def test_quotas_are_not_absurdly_large(self):
+        q = C.read_spool_quotas(REGISTRY, "claude_google_ads")
+        self.assertLess(q["max_pending_requests"], self.ABSURD)
+        self.assertLess(q["accepted_requests_per_client_day"], self.ABSURD)
+
+    def test_control_the_absurdity_check_can_actually_fail(self):
+        """CONTROL. Without it, a bound loosened far enough asserts nothing and would
+        keep passing even if the check were deleted outright. Proves the comparison
+        still rejects the paste it exists to catch."""
+        self.assertFalse(999999 < self.ABSURD)
+        self.assertFalse(self.ABSURD < self.ABSURD)         # the bound is exclusive
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

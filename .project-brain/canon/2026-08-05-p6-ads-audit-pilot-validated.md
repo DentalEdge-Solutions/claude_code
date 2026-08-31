@@ -1,17 +1,26 @@
 ---
 type: decision
 title: P6 monetization pilot validated — Hermes produces client-grade Google Ads audits (read-only)
-description: The ads-analyst pipeline produced a client-grade audit draft matching the hand-made benchmark; validates the fixed-fee one-off audit as a product. GO.
+description: The ads-analyst pipeline produced a client-grade audit draft matching the hand-made benchmark; validates the fixed-fee one-off audit as a product. GO. Redacted 2026-08-26 — a client name was present in the body, contradicting this record's own meta-only rule.
 tags: [hermes, monetization, ads-analyst, read-only, pilot]
 timestamp: 2026-08-05T18:00:00
+amended_at: 2026-08-26
 sources: [docs/superpowers/specs/2026-08-05-hermes-ads-analyst-pilot-design.md, docs/superpowers/plans/2026-08-05-hermes-ads-analyst-pilot.md]
 status: canon
-promoted_at: 2026-08-05
+promoted_at: 2026-08-26
 ---
 
 ## Outcome: GO — the fixed-fee read-only Google Ads audit is a validated product
 
 **Meta-only record. No client business data is stored here (hard rule).**
+
+> **Redaction amendment, 2026-08-26.** When this record was promoted it claimed the line
+> above and then named a real client in the benchmark paragraph below — the claim and the
+> content disagreed for three weeks. The name is now `<slug-1>`, per the capsule rule that
+> client names never appear in git, specs, or the brain. Nothing else is changed: no
+> judgement, number, or conclusion is altered. Recorded rather than silently corrected,
+> because a record that quietly rewrites itself is worth less than one that shows where it
+> was wrong.
 
 The P6 pilot proved Hermes can produce a **client-grade Google Ads audit draft** for a
 real DentalEdge client account via a repeatable, **read-only** pipeline, at trivial
@@ -23,7 +32,7 @@ collectors under the read-only credential → refreshes `audit_data/`) → Inc-3
 readers → the single hand-authored `claude-code-ads-analyst` skill (`claude -p`, plan mode,
 opus) → audit DRAFT in `/opt/data/audits/`.
 
-**Quality vs the bar:** benchmarked against the existing hand-made Palmetto exec summary
+**Quality vs the bar:** benchmarked against the existing hand-made `<slug-1>` exec summary
 (different reporting period, so judgments compared, not raw numbers). The draft **matched
 the hand-made audit on all four core judgments** (deteriorating account / wrong bid
 strategy; ad-to-landing-page language mismatch as the growth lever; duplicate-call

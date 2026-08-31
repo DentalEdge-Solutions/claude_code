@@ -14,13 +14,34 @@ review -> approve: whatever is in the vault copy when this command runs is what 
 snapshotted and bound, so bytes written after the human read the change-set and before
 the operator typed this command are what the approval binds. That is why this command
 PRINTS the digest and one line per action: the printed summary is the operator's chance
-to confirm that what is being bound is what was reviewed. `--expect-sha256` turns that
-confirmation into a refusal instead of a reading task.
+to confirm that what is being bound is what was reviewed.
+
+`--expect-sha256` is now the DEFAULT path (2026-08-24): omitting it refuses instead of
+binding silently, printing the digest and one line per action first so the operator can
+read what they are about to bind and re-run with a paste-ready value. This converts a
+reading task into a mechanical confirmation — it does NOT make review -> approve
+structurally closed. An operator who pastes the digest without reading the printed
+summary above it has confirmed nothing. The real reason that window stays empty in v1
+is a separate rule (spec §17.1: no model authors a change-set), not this flag. What this
+removes is the silent default, not the human.
 """
 import argparse, datetime, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
 import vault_lib
+
+
+class ExpectShaRequired(Exception):
+    """Not an error in the change-set — the operator has not yet confirmed the bytes.
+
+    Carries everything needed to print a paste-ready next command, so the refusal is a
+    step in the workflow rather than an obstacle to route around. A refusal an operator
+    learns to bypass is worse than no refusal.
+    """
+
+    def __init__(self, digest, actions, changeset_id):
+        super().__init__("confirmation required")
+        self.digest, self.actions, self.changeset_id = digest, actions, changeset_id
 
 
 def approve(client, changeset_id, operator, now, registry=None, projects=None,
@@ -47,16 +68,22 @@ def approve(client, changeset_id, operator, now, registry=None, projects=None,
     C.validate_changeset(cs, caps["actions_per_changeset"])
     if cs["client"] != rec["slug"] or cs["customer_id"] != rec["customer_id"]:
         raise ValueError("change-set identity does not match the resolved client")
-    if expect_sha256 is not None:
-        import hashlib
-        actual = hashlib.sha256(data).hexdigest()
-        if not C.SHA256_RE.fullmatch(expect_sha256.strip().lower()):
-            raise ValueError(f"invalid --expect-sha256: {expect_sha256!r}")
-        if actual != expect_sha256.strip().lower():
-            raise ValueError(
-                f"--expect-sha256 mismatch: the change-set on disk hashes to {actual}, "
-                f"not {expect_sha256.strip().lower()} — these are not the bytes you "
-                "reviewed; re-read it before approving")
+    import hashlib
+    actual = hashlib.sha256(data).hexdigest()
+    if expect_sha256 is None:
+        # The review -> approve window is not closed by the snapshot (spec §7). Making
+        # --expect-sha256 the DEFAULT path turns the operator's confirmation into a
+        # refusal rather than a reading task. It does not remove the human: an operator
+        # who pastes without reading has confirmed nothing. What it removes is the
+        # silent default, where the command bound whatever happened to be on disk.
+        raise ExpectShaRequired(actual, cs["actions"], changeset_id)
+    if not C.SHA256_RE.fullmatch(expect_sha256.strip().lower()):
+        raise ValueError(f"invalid --expect-sha256: {expect_sha256!r}")
+    if actual != expect_sha256.strip().lower():
+        raise ValueError(
+            f"--expect-sha256 mismatch: the change-set on disk hashes to {actual}, "
+            f"not {expect_sha256.strip().lower()} — these are not the bytes you "
+            "reviewed; re-read it before approving")
     digest = C.write_snapshot_bytes(rec["slug"], changeset_id, data)
     out = dict(C.write_approval(rec["slug"], changeset_id, digest, operator, now,
                                 caps["approval_ttl_hours"]))
@@ -87,13 +114,25 @@ def main(argv=None):
     ap.add_argument("--registry")
     ap.add_argument("--projects")
     ap.add_argument("--expect-sha256", dest="expect_sha256",
-                    help="refuse unless the change-set on disk hashes to this value — "
-                         "binds the approval to the bytes you actually reviewed")
+                    help="required: refuse unless the change-set on disk hashes to "
+                         "this value — binds the approval to the bytes you actually "
+                         "reviewed. Omit it on a first attempt to see the digest and "
+                         "action summary you need to build this value, then re-run "
+                         "with it.")
     args = ap.parse_args(argv)
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     try:
         rec = approve(args.client, args.changeset, args.operator, now, args.registry,
                       args.projects, args.expect_sha256)
+    except ExpectShaRequired as e:
+        print("change-set %s binds these %d action(s):" % (e.changeset_id, len(e.actions)))
+        for i, a in enumerate(e.actions, 1):
+            print("    %d. %s  campaign %s  %s  %r"
+                  % (i, a["type"], a["campaign_id"], a["match_type"], a["keyword"]))
+        print("\n  sha256 %s" % e.digest)
+        print("\nRead the actions above. If they are what you reviewed, re-run with:\n"
+              "  --expect-sha256 %s" % e.digest, file=sys.stderr)
+        return 2
     except (ValueError, KeyError, OSError, TypeError, json.JSONDecodeError,
             UnicodeDecodeError) as e:
         print(f"approve-changeset: {e}", file=sys.stderr)

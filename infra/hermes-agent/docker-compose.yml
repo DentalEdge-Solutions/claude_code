@@ -23,6 +23,26 @@ services:
     image: hermes-agent-claude          # derived: official base + claude CLI
     command: ["gateway", "run"]         # persistent backend (there is no `hermes serve`)
     env_file: .env                      # ANTHROPIC_API_KEY + Hermes provider key (gitignored)
+    environment:
+      # S6/R21. `.env` is BOTH this service's env_file AND Compose's interpolation
+      # source for ${HERMES_GOVERNANCE_DIR} in ads-mutator's volumes below (and
+      # hostenv.sh parses the same file as DATA). It therefore cannot simply be deleted
+      # from `.env` — the executor's mounts and the whole host-side rail resolve through
+      # it. But env_file injects EVERY key it holds, so the gateway's environment was
+      # carrying the absolute host path to the governance store: the one tree this
+      # design keeps unreachable, handed to the party it is kept from.
+      #
+      # `environment` takes precedence over `env_file`, so setting it empty HERE masks
+      # the value for this service only, exactly as ./masks/empty does for the ads
+      # repo's .env above — same idiom, one layer up. Interpolation is unaffected: it
+      # happens while rendering the file, from `.env`, before any container exists.
+      #
+      # Knowing a host path grants nothing on its own — R21 downgraded this from a
+      # novel disclosure for that reason — but it does hand a known target to anything
+      # host-side that writes into data/ on Hermes's behalf, which is the exact shape of
+      # the 2026-08-19 symlink finding. Nothing inside this container reads the variable
+      # (measured: every reader is a host-side shell — run-ads-mutate.sh, hostenv.sh).
+      HERMES_GOVERNANCE_DIR: ""
     depends_on:
       claude-auth-init:
         condition: service_completed_successfully   # auth file exists before gateway boots
@@ -71,8 +91,19 @@ services:
       - ${HERMES_GOVERNANCE_DIR}/approvals:/opt/governance/approvals:ro
       - ${HERMES_GOVERNANCE_DIR}/control:/opt/governance/control:ro
       - ${HERMES_GOVERNANCE_DIR}/registry:/opt/governance/registry:ro
-      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log      # writable, like seen (below)
-      - ${HERMES_GOVERNANCE_DIR}/seen:/opt/governance/seen    # writable, like log (above) — replay-protection state
+      # log/ is the ONLY governance directory this container writes: append_log in
+      # apply-changeset.py, fsync'd per action, is the reversibility record --undo
+      # later reads. It must stay writable.
+      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log
+      # NO seen/ MOUNT. The seen-set (replay protection) is written and read entirely
+      # host-side, by the broker — MEASURED, not assumed: every caller of append_seen,
+      # seen_contains and iter_seen_records lives in hermes-broker.py, and nothing
+      # under this entrypoint touches it. It was previously mounted rw here on the
+      # strength of a comment ("writable, like log"), which handed the governed party
+      # delete access to the replay-protection state it is governed BY, for no code
+      # path's benefit. preflight-governance-access.py's READ_WRITE_DIRS is the
+      # coupled half of this: dropping the mount without dropping the pre-flight's
+      # declared requirement would make the pre-flight false-refuse.
       - ../../../claude-google-ads:/projects/claude_google_ads:ro
       - ./registry:/opt/registry:ro
       - ./bin:/opt/cc-bin:ro

@@ -523,7 +523,8 @@ resource name.
 ```bash
 cd infra/hermes-agent
 ./changeset.sh propose --client <slug> --from actions.json               # no credential
-./changeset.sh approve --client <slug> --changeset <id> --operator <name>
+./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
+    --expect-sha256 <hex>
 ./run-ads-mutate.sh --client <slug> --changeset <id>                      # write credential
 ./run-ads-mutate.sh --client <slug> --undo <id>
 ```
@@ -545,13 +546,26 @@ python3 bin/propose-changeset.py --client <slug> --from actions.json
 
 `approve` prints the **sha256 it binds** and **one line per action**. Read them: that
 printout is the only place the operator can confirm that what is being approved is what
-was reviewed (see "What the snapshot does and does not close" below). To make that a
-refusal rather than a reading task, pass the digest you reviewed:
+was reviewed (see "What the snapshot does and does not close" below).
+
+`--expect-sha256 <hex>` is the **default path, not an option** (2026-08-24): omit it and
+`approve` refuses — printing the digest and the per-action summary first, so the refusal
+is a step in the workflow (read the summary, paste the digest back) rather than a bare
+rejection. Supply a digest that does not match and `approve` refuses with the same exit
+code, naming the mismatch:
 
 ```bash
+./changeset.sh approve --client <slug> --changeset <id> --operator <name>
+# refuses: prints the digest + actions and tells you to re-run with --expect-sha256 <hex>
+
 ./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
-  --expect-sha256 <hex>        # refuses if the bytes on disk hash to anything else
+  --expect-sha256 <hex>        # succeeds only if the bytes on disk hash to <hex>
 ```
+
+Be honest about what this buys: it converts a reading task into a mechanical
+confirmation, not more. An operator who pastes the digest back without reading the
+printed summary above it has confirmed nothing. It does not make **review → approve**
+structurally closed — see below.
 
 `propose` and `approve` hold **no credential and perform no network I/O** — they are
 structurally incapable of touching the account. Only `apply` can reach Google.
@@ -575,8 +589,13 @@ whatever is there when the operator types the command is what gets bound — inc
 bytes written after a human read the change-set. The precise claim this rail supports
 is *"a model can never author both a change and its approval"*; it is **not** *"a model
 can never author the change"*. The residual window is covered by procedure and by
-`approve`'s printed digest + per-action summary, not by a mechanism — which is why
-`--expect-sha256` exists.
+`approve`'s printed digest + per-action summary, not by a mechanism.
+`--expect-sha256` being the default path removes the *silent* default — where the
+command bound whatever happened to be on disk with no confirmation step at all — but it
+does not remove the human, and does not close the window structurally: an operator who
+pastes the digest without reading the summary above it has confirmed nothing. The real
+reason this window stays empty in v1 is a separate rule (§17.1: no model authors a
+change-set), not this flag.
 
 **Guard order at apply** (fail-closed; the credential is touched last, so every refusal
 happens before Google is reachable):
@@ -687,6 +706,111 @@ them even after one fails, and exits non-zero if any did. Individual suites stil
 directly (`python3 infra/hermes-agent/bin/apply-changeset.test.py`) — note `python3`,
 never `python`.
 
+## Governed mutation syscall — how Hermes asks for a change (Plan 2, Phase A)
+
+The mutation tier above is host-side: an operator runs `run-ads-mutate.sh`. The syscall is how
+**Hermes itself** asks for an approved change-set to be applied, without ever holding the write
+credential, reaching the governance store, or getting a shell on the host.
+
+It is a **spool**, not an API. Hermes writes a request file; a host-side broker picks it up. There
+is no listener, no socket, and no network path between the two — the only channel is a directory
+the agent can write and the broker can read.
+
+### Spool layout
+
+`data/spool/` (inside the container, `/opt/data/spool`), overridable with `HERMES_SPOOL_ROOT`:
+
+```
+data/spool/
+  requests/<request_id>.json    # Hermes writes; the broker reads and deletes
+  results/<request_id>.json     # the broker writes; Hermes reads
+```
+
+`<request_id>` is a uuid, and the filename must match the `request_id` inside the file. The broker
+treats every byte here as hostile: closed schema, size cap, regular-files-only, no symlinks, no
+directories, and a quarantine for entries it cannot parse.
+
+### Client — `hermes-syscall`, in-container
+
+Identifier-only. It passes a client slug and a change-set id, never a customer id, never a
+credential, never a file path.
+
+```bash
+python3 /opt/cc-bin/hermes-syscall.py apply  --client <slug> --changeset <id>
+python3 /opt/cc-bin/hermes-syscall.py result --request <request_id>
+```
+
+| Exit | Meaning |
+|---|---|
+| 0 | applied |
+| 1 | usage error (bad arguments) |
+| 2 | **refused** — a guard said no; nothing was mutated |
+| 3 | failed *after* at least one live mutation landed — an operator must reconcile |
+| 4 | **pending — NOT refused** |
+
+**Exit 4 is the one that gets misread.** It means the broker has not written a result yet. The
+request is still queued and may still succeed. Treat it as "ask again later", never as a refusal,
+and never re-file the request — a second request for the same change-set is refused as a replay,
+and the original is still in flight.
+
+### Broker — host-side
+
+```bash
+python3 bin/hermes-broker.py --once                  # one drain pass, then exit
+python3 bin/hermes-broker.py --watch --interval 5    # poll forever
+```
+
+`--once` is what a timer or a smoke test should call; `--watch` is for the long-running unit. Exactly
+one of the two is required. The broker is single-threaded with one advisory lock per client slug, so
+two drains cannot process the same client concurrently.
+
+### The two quotas
+
+Both live in the client registry, both **fail closed** — an unreadable or missing limit is a refusal,
+never "unlimited":
+
+| Key | Refusal | What it bounds |
+|---|---|---|
+| `max_pending_requests` | `refused_quota` | Unread requests per client at drain time |
+| `accepted_requests_per_client_day` | `refused_quota` | Requests accepted per client per UTC day |
+
+A client already over `max_pending_requests` has **every** request refused that drain, not merely the
+surplus — the count is computed once per pass. That is deliberate: a flooding client gets nothing
+until it drains.
+
+### Spool overflow (R6) — a flood stalls the client until an operator clears it
+
+Above `MAX_SPOOL_FILES` (256) matching request files, the broker **refuses the entire drain**:
+
+- it writes **no per-request result files** — so `hermes-syscall result` reports *pending* (exit 4),
+  which is honest: no decision was made about any individual request;
+- it **does not delete the flooding files**. Attributing them to a client would require parsing
+  them, which is the very work the cap exists to avoid;
+- it logs loudly to stderr, so the condition is visible in the journal.
+
+The consequence is deliberate and worth stating plainly: **a flooded spool stalls that client until
+an operator clears it.** This is a documented departure from "a result on every outcome" (spec §12) —
+overflow is a broker-level event, not a per-request outcome. There is no automatic pruning of
+quarantined entries either; both are operator tasks today.
+
+### Deploy sequence
+
+Order matters — the pre-flight exists to stop a half-configured store becoming an exit-3 *after* a
+live mutation:
+
+1. **Governance store in place** — `approvals/`, `control/`, `registry/`, `log/`, `seen/` all present.
+   `seen/` is host-only and must **not** be mounted into the executor.
+2. **Pre-flight passes** — `python3 bin/preflight-governance-access.py --root "$HERMES_GOVERNANCE_DIR"`
+   exits 0. It is a deliberate **no-op off Linux**, so a clean run on macOS proves nothing.
+3. **Mutation disabled at rest** — no kill-switch file. Absence means disabled; that is the safe default.
+4. **Broker started** (`--watch`) as its own user, never as root.
+5. **Approve per action** — `approve-changeset.py` with `--expect-sha256`, which binds the approval to
+   the exact reviewed bytes.
+
+> **Not deployable to the VPS as of 2026-08-31.** Phase B (the body-inspecting Docker socket proxy
+> and the systemd units) is not built, and without it the broker's Docker access on a VPS is host
+> root. See `docs/evaluations/2026-08-30-hermes-phase-a-deployment-readiness.md`.
+
 ## Governance store
 
 Every piece of state a mutation guard *trusts* — as opposed to state Hermes merely
@@ -715,11 +839,18 @@ in full (`/Users/you/.hermes/governance`, not `~/.hermes/governance`). See
 
 **Who mounts what:**
 
-| Container | approvals/ control/ registry/ | log/ seen/ |
-|---|---|---|
-| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted at all |
-| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write |
-| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted |
+| Container | approvals/ control/ registry/ | log/ | seen/ |
+|---|---|---|---|
+| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted | not mounted |
+| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write | **not mounted** |
+| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted | not mounted |
+
+`seen/` is not mounted anywhere. The seen-set is replay-protection state written and
+read entirely host-side by the broker; nothing under the executor's entrypoint touches
+it. It used to be mounted read-write into `ads-mutator` on the strength of a comment
+rather than a measurement, which handed the governed party delete access to the state
+it is governed by (S3-a). `log/` must stay writable there — `append_log` is fsync'd per
+action and is the reversibility record `--undo` reads.
 
 The gateway **does not mount any part of the store** — no path in it is readable or
 writable from the container Hermes runs in. Verify at any time:
@@ -728,15 +859,26 @@ writable from the container Hermes runs in. Verify at any time:
 docker compose exec -T hermes-agent sh -c '[ -e /opt/governance ] && echo REACHABLE-BAD || echo unreachable-good'
 ```
 
-Stated precisely, because "zero exposure" was an overclaim: the **path** is known to
-the gateway. `HERMES_GOVERNANCE_DIR` is in `.env`, which is the gateway's `env_file`,
-so its value is in the gateway's environment and Hermes can read it. That is
-acceptable — knowing a host path grants nothing, because the tree is not mounted and
-the container has no way to reach the host filesystem. It is worth knowing, though,
-that anything host-side which writes into `data/` on Hermes's behalf is writing with a
-known target available to an attacker; that is exactly the shape of the 2026-08-19
-symlink finding against the run-record persist step, and why
-`bin/persist_run_record_shim.py` now resolves and contains every destination it opens.
+The store's host **path** is no longer in the gateway's environment either. It used to
+be: `HERMES_GOVERNANCE_DIR` lives in `.env`, which is the gateway's `env_file`, and
+`env_file` injects every key it holds. The variable cannot simply be removed from
+`.env` — Compose interpolates `${HERMES_GOVERNANCE_DIR}` from that same file when
+rendering `ads-mutator`'s mounts, and `hostenv.sh` parses it as data for the host-side
+rail — so the gateway service masks it with an empty `environment` entry instead, the
+same idiom as `masks/empty` for the ads repo's `.env`. Interpolation is unaffected: it
+happens at render time, from the file, before any container exists. Verify:
+
+```bash
+docker compose exec -T hermes-agent sh -c 'echo "[$HERMES_GOVERNANCE_DIR]"'   # => []
+```
+
+Knowing a host path grants nothing on its own — the tree is not mounted and the
+container has no way to reach the host filesystem, which is why this was graded on the
+policy axis rather than as a disclosure. It is worth withholding anyway, because
+anything host-side that writes into `data/` on Hermes's behalf writes to a target an
+attacker would otherwise know; that is exactly the shape of the 2026-08-19 symlink
+finding against the run-record persist step, and why `bin/persist_run_record_shim.py`
+resolves and contains every destination it opens.
 
 ### Ownership on a Linux host
 
@@ -753,8 +895,11 @@ Give the store an ownership the executor's UID can use — either group access:
 ```bash
 sudo chgrp -R 10000 "$HERMES_GOVERNANCE_DIR"
 sudo chmod -R g+rX "$HERMES_GOVERNANCE_DIR"
-sudo chmod -R g+w  "$HERMES_GOVERNANCE_DIR"/log "$HERMES_GOVERNANCE_DIR"/seen
+sudo chmod -R g+w  "$HERMES_GOVERNANCE_DIR"/log
 ```
+
+`log/` only — `seen/` is not mounted into the executor and needs no access for uid
+10000. Widening it would hand the governed party the replay-protection state again.
 
 or outright ownership:
 

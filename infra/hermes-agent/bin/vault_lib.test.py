@@ -94,4 +94,72 @@ class TestRegistryLivesInGovernanceStore(unittest.TestCase):
         with self.assertRaises(KeyError):
             V.resolve("other-clinic")
 
+
+class TestResolveDormantPilot(unittest.TestCase):
+    """P7. The live gate may mutate exactly one client, and must never infer which.
+
+    Every case below is about REFUSING rather than choosing. The one positive case is
+    last, so a regression that made the resolver always-raise would still be caught.
+    """
+
+    def _reg(self, clients):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "clients.json")
+        with open(p, "w") as f:
+            json.dump({"clients": clients}, f)
+        return p
+
+    ACTIVE = {"customer_id": "1234567890", "status": "active", "project": "p"}
+
+    def test_no_marked_client_refuses(self):
+        p = self._reg({"alpha": dict(self.ACTIVE), "beta": dict(self.ACTIVE)})
+        with self.assertRaises(ValueError) as cm:
+            V.resolve_dormant_pilot(p)
+        self.assertIn("mutation_target", str(cm.exception))
+
+    def test_absence_of_the_field_means_LIVE_not_eligible(self):
+        # The fail-safe default, and the reason absence must not read as "safe": every
+        # registry written before this field existed has no marks at all.
+        p = self._reg({"alpha": dict(self.ACTIVE)})
+        with self.assertRaises(ValueError):
+            V.resolve_dormant_pilot(p)
+
+    def test_two_marked_clients_refuse_rather_than_pick(self):
+        a = dict(self.ACTIVE, mutation_target="dormant_pilot")
+        b = dict(self.ACTIVE, mutation_target="dormant_pilot")
+        p = self._reg({"alpha": a, "beta": b})
+        with self.assertRaises(ValueError) as cm:
+            V.resolve_dormant_pilot(p)
+        self.assertIn("exactly one", str(cm.exception))
+
+    def test_refusal_never_names_the_candidate_slugs(self):
+        # A refusal that listed eligible clients would print client-private identifiers
+        # into whatever log or terminal caught it.
+        a = dict(self.ACTIVE, mutation_target="dormant_pilot")
+        b = dict(self.ACTIVE, mutation_target="dormant_pilot")
+        p = self._reg({"zebraclient": a, "quokkaclient": b})
+        with self.assertRaises(ValueError) as cm:
+            V.resolve_dormant_pilot(p)
+        msg = str(cm.exception)
+        self.assertNotIn("zebraclient", msg)
+        self.assertNotIn("quokkaclient", msg)
+
+    def test_a_near_miss_value_does_not_count_as_marked(self):
+        for bad in ("dormant", "DORMANT_PILOT", "pilot", True, 1, None, ""):
+            p = self._reg({"alpha": dict(self.ACTIVE, mutation_target=bad)})
+            with self.assertRaises(ValueError):
+                V.resolve_dormant_pilot(p)
+
+    def test_status_active_does_not_disqualify_the_marked_client(self):
+        # mutation_target is deliberately independent of status: the pilot is an active
+        # engagement, and that must not make it ineligible.
+        p = self._reg({"alpha": dict(self.ACTIVE),
+                       "beta": dict(self.ACTIVE, mutation_target="dormant_pilot")})
+        rec = V.resolve_dormant_pilot(p)
+        self.assertEqual(rec["slug"], "beta")
+        self.assertEqual(rec["status"], "active")
+        self.assertEqual(rec["customer_id"], "1234567890")
+
+
 if __name__ == "__main__": unittest.main()

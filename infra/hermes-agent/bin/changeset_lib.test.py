@@ -615,5 +615,407 @@ class TestAuditLogInGovernanceStore(unittest.TestCase):
             C.day_counts(vault, "2026-08-12")
 
 
+class TestSpoolQuotas(unittest.TestCase):
+    HEAD = ("version: 1\n"
+            "projects:\n"
+            "  proj:\n"
+            "    workdir: /projects/proj\n"
+            "    mutate_execute:\n"
+            "      runner: /opt/ads-venv/bin/python3\n"
+            "      script_dir: code\n"
+            "      allow:\n"
+            "        - mutate_campaign_negative\n"
+            "      caps:\n")
+
+    def _reg(self, caps_lines):
+        fd, p = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(self.HEAD + caps_lines)
+        self.addCleanup(os.unlink, p)
+        return p
+
+    FULL = ("        actions_per_changeset: 25\n"
+            "        actions_per_client_day: 100\n"
+            "        applies_per_client_day: 5\n"
+            "        approval_ttl_hours: 24\n"
+            "        max_pending_requests: 8\n"
+            "        accepted_requests_per_client_day: 20\n")
+
+    def test_reads_both_quotas(self):
+        q = C.read_spool_quotas(self._reg(self.FULL), "proj")
+        self.assertEqual(q["max_pending_requests"], 8)
+        self.assertEqual(q["accepted_requests_per_client_day"], 20)
+
+    def test_missing_quota_refuses_rather_than_becoming_unlimited(self):
+        for drop in ("max_pending_requests", "accepted_requests_per_client_day"):
+            partial = "".join(l for l in self.FULL.splitlines(True)
+                              if not l.strip().startswith(drop + ":"))
+            with self.assertRaises(ValueError) as cm:
+                C.read_spool_quotas(self._reg(partial), "proj")
+            self.assertIn(drop, str(cm.exception))
+
+    def test_malformed_quota_refuses(self):
+        for bad in ("0", "-1", "abc", "", "1e6", "999999999"):
+            broken = self.FULL.replace("max_pending_requests: 8",
+                                       "max_pending_requests: %s" % bad)
+            with self.assertRaises(ValueError):
+                C.read_spool_quotas(self._reg(broken), "proj")
+
+    def test_control_the_existing_caps_still_parse_unchanged(self):
+        # THE POSITIVE CONTROL for this task: adding two keys to the caps block must
+        # not disturb the executor's own cap reader. If this breaks, the quotas were
+        # added in the wrong place.
+        m = C.read_mutate_execute(self._reg(self.FULL), "proj")
+        self.assertEqual(m["caps"]["applies_per_client_day"], 5)
+        self.assertEqual(m["caps"]["approval_ttl_hours"], 24)
+        self.assertNotIn("max_pending_requests", m["caps"])
+
+    def test_duplicate_quota_key_still_refuses(self):
+        dup = self.FULL + "        max_pending_requests: 9999\n"
+        with self.assertRaises(ValueError):
+            C.read_spool_quotas(self._reg(dup), "proj")
+
+    # --- one validate loop, two callers -------------------------------------------
+
+    def test_both_readers_apply_the_identical_rule_to_a_malformed_limit(self):
+        """The caps reader and the quota reader validated the same values out of the
+        same block with two near-identical loops, differing only in a noun. Two copies
+        of a fail-closed rule is how one of them quietly drifts fail-open — which this
+        module has already watched happen once, to the seen-set's two readers.
+
+        Asserts the shared rule from BOTH sides for every malformed shape, so a future
+        edit that loosens one caller cannot pass by leaving the other strict."""
+        for bad in ("0", "-1", "abc", "", "1e6", " ", "+1", "1.0"):
+            quota_broken = self.FULL.replace("max_pending_requests: 8",
+                                             "max_pending_requests: %s" % bad)
+            cap_broken = self.FULL.replace("applies_per_client_day: 5",
+                                           "applies_per_client_day: %s" % bad)
+            with self.assertRaises(ValueError, msg="quota accepted %r" % bad):
+                C.read_spool_quotas(self._reg(quota_broken), "proj")
+            with self.assertRaises(ValueError, msg="cap accepted %r" % bad):
+                C.read_mutate_execute(self._reg(cap_broken), "proj")
+
+    def test_control_the_shared_loop_still_accepts_a_valid_limit(self):
+        """CONTROL for the test above: a loop that rejected everything would satisfy
+        every assertion there."""
+        self.assertEqual(
+            C.read_spool_quotas(self._reg(self.FULL), "proj")["max_pending_requests"], 8)
+        self.assertEqual(
+            C.read_mutate_execute(self._reg(self.FULL), "proj")["caps"]["applies_per_client_day"], 5)
+
+    def test_the_two_callers_messages_stay_distinguishable(self):
+        """Sharing the loop must not make the two failures read alike to an operator:
+        a missing broker quota and a missing executor cap are different config
+        mistakes in different places. `label` is what keeps them apart, so it is
+        pinned rather than left as an unasserted courtesy."""
+        no_quota = "".join(l for l in self.FULL.splitlines(True)
+                           if not l.strip().startswith("max_pending_requests:"))
+        no_cap = "".join(l for l in self.FULL.splitlines(True)
+                         if not l.strip().startswith("applies_per_client_day:"))
+        with self.assertRaises(ValueError) as q:
+            C.read_spool_quotas(self._reg(no_quota), "proj")
+        with self.assertRaises(ValueError) as c:
+            C.read_mutate_execute(self._reg(no_cap), "proj")
+        self.assertIn("spool quota", str(q.exception))
+        self.assertNotIn("spool quota", str(c.exception))
+        self.assertIn("cap", str(c.exception))
+        # Both still state the fail-closed reason, which is the part that must not be
+        # lost in the deduplication.
+        for exc in (q.exception, c.exception):
+            self.assertIn("must never become an unlimited one", str(exc))
+
+
+class TestSeenSet(unittest.TestCase):
+    RID = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_unseen_then_seen(self):
+        self.assertFalse(C.seen_contains("pilot-1", self.RID))
+        C.append_seen("pilot-1", self.RID, NOW)
+        self.assertTrue(C.seen_contains("pilot-1", self.RID))
+
+    def test_the_seen_set_is_written_into_the_governance_store(self):
+        # The WHOLE POINT. If this lands in the spool, Hermes can delete it and every
+        # request_id becomes replayable.
+        C.append_seen("pilot-1", self.RID, NOW)
+        expected = G.seen_path("pilot-1", self.root)
+        self.assertTrue(os.path.isfile(expected))
+        self.assertNotIn("spool", expected)
+
+    def test_seen_is_per_client_not_global(self):
+        C.append_seen("pilot-1", self.RID, NOW)
+        self.assertFalse(C.seen_contains("pilot-2", self.RID))
+
+    def test_unreadable_seen_set_refuses_rather_than_reporting_unseen(self):
+        # Fail-closed. An unreadable seen-set reported as "not seen" would ADMIT every
+        # replay — the same shape as the caps rule: an unreadable limit must never
+        # become an unlimited one.
+        p = G.seen_path("pilot-1", self.root)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.mkdir(p)                      # a directory where the file should be
+        with self.assertRaises(ValueError):
+            C.seen_contains("pilot-1", self.RID)
+
+    def test_control_a_readable_seen_set_does_not_raise(self):
+        # The positive control for the refusal above.
+        C.append_seen("pilot-1", self.RID, NOW)
+        self.assertTrue(C.seen_contains("pilot-1", self.RID))
+
+
+class TestReservation(unittest.TestCase):
+    CID = "20260824-101500-abcdef01"
+    RID = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        C.write_approval("pilot-1", self.CID, self.DIGEST, "operator", NOW, 24)
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_reserving_records_the_timestamp_and_the_request(self):
+        rec = C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        self.assertEqual(rec["request_id"], self.RID)
+        self.assertEqual(rec["reserved_at"], NOW.strftime(C.ISO))
+
+    def test_a_reserved_approval_no_longer_verifies(self):
+        # This is the single-use property, asserted through the EXECUTOR's own guard
+        # rather than by re-reading the file — verify_approval is what actually stops
+        # the second apply, so that is what must be shown to refuse.
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        with self.assertRaises(ValueError) as cm:
+            C.verify_approval("pilot-1", self.CID, self.DIGEST, NOW)
+        self.assertIn("already reserved", str(cm.exception))
+
+    def test_control_an_unreserved_approval_verifies(self):
+        # The positive control: without it, the refusal above could be caused by
+        # anything at all.
+        self.assertEqual(
+            C.verify_approval("pilot-1", self.CID, self.DIGEST, NOW)["sha256"],
+            self.DIGEST)
+
+    def test_double_reservation_refuses(self):
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        with self.assertRaises(ValueError):
+            C.reserve_approval("pilot-1", self.CID, "1111aaaa-2222-4bbb-8ccc-3333dddd4444", NOW)
+
+    def test_reserving_a_nonexistent_approval_refuses(self):
+        with self.assertRaises(ValueError):
+            C.reserve_approval("pilot-1", "20260824-101500-99999999", self.RID, NOW)
+
+    def test_outcome_requires_a_prior_reservation(self):
+        # An outcome without a reservation means the ordering was inverted somewhere.
+        with self.assertRaises(ValueError):
+            C.record_outcome("pilot-1", self.CID, "applied", NOW)
+
+    def test_outcome_is_recorded_after_reservation(self):
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        rec = C.record_outcome("pilot-1", self.CID, "applied", NOW)
+        self.assertEqual(rec["outcome"], "applied")
+        self.assertEqual(rec["request_id"], self.RID)
+
+    def test_an_interrupted_apply_is_not_a_reusable_approval(self):
+        # Reserved but no outcome ever written — the crash case. The approval must
+        # still be dead. This is the ordering property from spec §7 stated as a test:
+        # a crash costs an unusable approval, never a duplicate account change.
+        C.reserve_approval("pilot-1", self.CID, self.RID, NOW)
+        with self.assertRaises(ValueError):
+            C.verify_approval("pilot-1", self.CID, self.DIGEST, NOW)
+
+
+import threading, time, unittest.mock
+
+class TestReservationConcurrency(unittest.TestCase):
+    """FIX ROUND 1: reserve_approval's read-check-write must be mutually exclusive
+    against ITSELF, not just against verify_approval. This proves it, by forcing two
+    concurrent attempts on the SAME approval to actually overlap."""
+    CID = "20260824-101500-abcdef01"
+    RID_A = "0f9c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071"
+    RID_B = "1111aaaa-2222-4bbb-8ccc-3333dddd4444"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        C.write_approval("pilot-1", self.CID, self.DIGEST, "operator", NOW, 24)
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_concurrent_reservations_are_mutually_exclusive(self):
+        # Widen the window between the read-check and the write completing, by
+        # slowing down the (real) write call. This does not change what
+        # reserve_approval does — only how long its write takes — but it makes the
+        # race deterministic to observe either way: WITH the lock, the second thread
+        # cannot even begin its read until the first's entire locked section
+        # (including this slow write) has finished, so it always sees the
+        # already-reserved record and refuses. WITHOUT the lock (see the mutation
+        # proof in task-4-report.md), both threads pass the read-check before either
+        # writes, and both "succeed" — which this test must catch.
+        real_write = C._atomic_write_json
+        calls = []
+
+        def slow_write(path, obj):
+            calls.append(path)
+            time.sleep(0.05)
+            return real_write(path, obj)
+
+        started = []
+        results = {}
+
+        def attempt(name, rid):
+            started.append(name)          # positive control: proves this thread ran
+            try:
+                results[name] = C.reserve_approval("pilot-1", self.CID, rid, NOW)
+            except ValueError as e:
+                results[name] = e
+
+        with unittest.mock.patch.object(C, "_atomic_write_json", slow_write):
+            t1 = threading.Thread(target=attempt, args=("a", self.RID_A))
+            t2 = threading.Thread(target=attempt, args=("b", self.RID_B))
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+
+        # Positive control: both threads must have actually run and recorded a
+        # result, or the assertions below would pass vacuously (e.g. if the second
+        # thread never got scheduled at all).
+        self.assertEqual(sorted(started), ["a", "b"])
+        self.assertEqual(len(results), 2, results)
+
+        successes = [v for v in results.values() if isinstance(v, dict)]
+        failures = [v for v in results.values() if isinstance(v, ValueError)]
+        self.assertEqual(len(successes), 1, results)
+        self.assertEqual(len(failures), 1, results)
+        self.assertIn("already reserved", str(failures[0]))
+
+
+class TestWriteApprovalConcurrency(unittest.TestCase):
+    """FIX ROUND 2: write_approval shares the exact _atomic_write_json shared-tmp-path
+    hazard that TestReservationConcurrency's mutation proof demonstrated against
+    reserve_approval — proven, not merely suspected, which is why it gets fixed here
+    rather than ticketed. Two concurrent write_approval calls for the SAME (slug, cid)
+    must neither corrupt the file nor raise from the race on the shared .tmp path."""
+    CID = "20260824-101500-abcdef01"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_concurrent_writes_do_not_corrupt_or_crash(self):
+        # Same widening technique as TestReservationConcurrency: slow the real write
+        # down so any missing serialization is forced to manifest as real overlap,
+        # rather than relying on thread-scheduling luck.
+        real_write = C._atomic_write_json
+
+        def slow_write(path, obj):
+            time.sleep(0.05)
+            return real_write(path, obj)
+
+        started = []
+        results = {}
+
+        def attempt(name, operator):
+            started.append(name)          # positive control: proves this thread ran
+            try:
+                results[name] = C.write_approval(
+                    "pilot-1", self.CID, self.DIGEST, operator, NOW, 24)
+            except Exception as e:
+                results[name] = e
+
+        with unittest.mock.patch.object(C, "_atomic_write_json", slow_write):
+            t1 = threading.Thread(target=attempt, args=("a", "operator-a"))
+            t2 = threading.Thread(target=attempt, args=("b", "operator-b"))
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+
+        # Positive control: both threads must have actually run and recorded a
+        # result, or the assertions below would pass vacuously.
+        self.assertEqual(sorted(started), ["a", "b"])
+        self.assertEqual(len(results), 2, results)
+
+        # Neither call may raise. Catching only the swallowed-exception shape (a
+        # missing result) is not enough here — write_approval never refuses a second
+        # write, so an unlocked race manifests as a raised exception, not as two
+        # results where one should have been a refusal.
+        for name, r in results.items():
+            self.assertNotIsInstance(r, Exception, f"{name} raised: {r!r}")
+
+        # The file left on disk must be valid, complete JSON belonging to one of the
+        # two attempts -- not truncated or interleaved.
+        with open(G.approval_path("pilot-1", self.CID), encoding="utf-8") as f:
+            on_disk = json.load(f)
+        self.assertIn(on_disk["operator"], ("operator-a", "operator-b"))
+
+
+class TestFreshApprovalsDirectory(unittest.TestCase):
+    """FIX ROUND 2: covers the brand-new-client case, where the approvals directory
+    _approval_lock's sidecar file lives inside does not exist yet. Every other
+    TestApproval-family fixture in this file has already caused that directory to
+    exist by the time write_approval runs (via an earlier write_approval or
+    write_snapshot call in the same test), so nothing before this round actually
+    exercised the very first approval ever written for a client.
+
+    NOTE, corrected after mutation testing: this does NOT prove write_approval's
+    makedirs-then-lock ordering is load-bearing. _approval_lock defensively creates
+    its own sidecar's parent directory before opening it, so this test passes
+    regardless of whether write_approval's own makedirs runs before or after the
+    lock is taken (verified: moving the lock above the makedirs did not turn this
+    test red — see task-4-report.md FIX ROUND 2). What this test actually proves is
+    the narrower, still-true thing: a brand-new client's first approval succeeds and
+    is readable back."""
+    CID = "20260824-101500-abcdef01"
+    DIGEST = "a" * 64
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self._saved = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        # Deliberately nothing else here -- the absence of the approvals directory
+        # for this brand-new client IS the case under test.
+
+    def tearDown(self):
+        os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
+        if self._saved is not None:
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._saved
+
+    def test_first_ever_approval_for_a_client_succeeds(self):
+        self.assertFalse(os.path.isdir(G.approvals_dir("brand-new-client")))
+        rec = C.write_approval("brand-new-client", self.CID, self.DIGEST, "operator", NOW, 24)
+        self.assertEqual(rec["operator"], "operator")
+        # Positive control: the record actually landed on disk and is independently
+        # readable back through verify_approval, not just that write_approval
+        # returned without raising.
+        readback = C.verify_approval("brand-new-client", self.CID, self.DIGEST, NOW)
+        self.assertEqual(readback["operator"], "operator")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -77,6 +77,29 @@ jobs:
           [ $FAILED -eq 0 ] && echo "Static fallback: PASSED"
           exit $FAILED
 
+  tests:
+    name: Test suites (node + hermes bin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      # Both runners, because neither discovers the other. run-all-tests.js is node-only
+      # BY DESIGN and never sees infra/hermes-agent/bin/*.test.py, so the entire governed
+      # mutation rail was outside CI until this job existed: every suite could go red and
+      # a PR would still merge green.
+      - name: Node suites
+        run: node scripts/run-all-tests.js
+      # Stdlib-only Python, no install step needed; ubuntu-latest ships python3.
+      # NOTE ON UID: run-ads-mutate.test.py exercises the wrapper through
+      # preflight-governance-access.py, which is live on Linux and requires the governance
+      # store to be usable by EXECUTOR_UID (10000). A GitHub runner is not that uid, so that
+      # one class SKIPS here and says so. It is exercised for real inside the ads-mutator
+      # image, which runs as 10000. Every other suite runs fully.
+      - name: Hermes bin suites
+        run: infra/hermes-agent/bin/run-bin-tests.sh
+
   static-scan-skills:
     name: Static scan all skills
     runs-on: ubuntu-latest

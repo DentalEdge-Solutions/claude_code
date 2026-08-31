@@ -217,6 +217,42 @@ def _undo_targets(slug, changeset_id, customer_id):
     return [r for r in reversed(targets) if r["resource_name"] not in undone]
 
 
+# S7. The audit-log record and the EMITTED run record are two different documents with
+# two different readers, and they must stop being the same dict.
+#
+#   * the audit-log record goes to C.append_log, i.e. to the governance store, which is
+#     host-owned and which Hermes cannot read. It KEEPS resource_name: that field is the
+#     reversibility record, and _undo_targets reads it back through C.iter_log_records to
+#     build the --undo argv. Removing it there would silently destroy reversibility.
+#
+#   * the emitted record is printed on stdout, and the caller persists it into
+#     data/vaults, which docker-compose.yml mounts rw into the GATEWAY. Anything in it is
+#     readable by the agent. A per-action resource name is `customers/<id>/...`, i.e. the
+#     resolved customer id — the very field the 2026-08-19 decision moved the client
+#     registry out of the vault to protect, and which hermes-broker.py's
+#     DETAIL_BY_CLASSIFICATION comment says §17.3 keeps out of Hermes's reach.
+#
+# An ALLOWLIST, not a `del rec["resource_name"]`. A denylist leaks by omission: the next
+# field added to the log record (a customer_id, an account label, a raw mutator echo)
+# would flow straight through to the vault, and the leak would arrive silently in a
+# commit about something else. Unknown fields are withheld by default here.
+#
+# Correlation back to the audit log survives without the name: (changeset_id,
+# action_index) identifies the log line exactly, and an operator reading result.json has
+# the governance store to hand.
+EMITTED_ACTION_FIELDS = ("ts", "changeset_id", "action_index", "type", "status",
+                         "operator")
+
+
+def _emitted_action(rec):
+    """The Hermes-readable copy of one audit-log record: allowlisted fields only."""
+    out = {k: rec[k] for k in EMITTED_ACTION_FIELDS if k in rec}
+    # Stated, not silently absent — a reader of result.json must be able to tell the
+    # difference between "this run had no resource name" and "it was withheld".
+    out["resource_name_withheld"] = True
+    return out
+
+
 def _invoke(plan, args, scratch):
     """Returns RAW (unscrubbed) stdout/stderr — the live-loop JSON payload must be
     parsed byte-exact. Scrubbing happens only where text is embedded into a
@@ -306,7 +342,7 @@ def apply(plan, now):
                     print(f"apply-changeset: action {i} LANDED but its audit-log write failed. "
                           f"RECORD THIS NOW — it is in no log: {resource}", file=sys.stderr)
                     raise PostMutationError(f"audit-log write failed after action {i} landed: {_scrub(str(e))}")
-                results.append(rec)
+                results.append(_emitted_action(rec))
 
             # 11. Emit the run record for the CALLER to persist. This container does
             #     not mount the vault; the audit log above is the reversibility record.
