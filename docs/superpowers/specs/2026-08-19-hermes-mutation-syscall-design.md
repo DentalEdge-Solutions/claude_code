@@ -216,6 +216,38 @@ decision, 2026-08-19: accept it **with a socket proxy** — the broker does not 
 proxy restricted to `create` and `start` on the single `ads-mutator` image. A broker compromise then
 yields the ability to start that one container, not the ability to do anything on the host.
 
+> **DEVIATION D1, recorded 2026-08-31 (Task 14). MEASURED, not estimated.** The allow-list above is
+> too narrow to work. A `create`/`start`-only proxy would break the rail outright.
+>
+> One `docker compose run --rm --no-deps ads-mutator` was passed through a logging pass-through on
+> the Docker socket. It makes **14 calls across 10 distinct endpoints**; `create` and `start` are
+> **2 of the 14**:
+>
+> | Endpoint | Why the rail needs it |
+> |---|---|
+> | `HEAD /_ping` | CLI handshake |
+> | `GET /containers/json` | Compose resolves the project's existing containers (3 calls, varying filters) |
+> | `GET /networks`, `GET /volumes` | Compose resolves project-labelled resources |
+> | `GET /images/<ref>/json` | Image resolution for the pinned tag |
+> | `POST /containers/create` | Creates the one-shot executor |
+> | `GET /containers/<id>/json` | Inspect after create (2 calls) |
+> | `POST /containers/<id>/attach` | **Load-bearing.** How the wrapper reads the executor's stdout, which carries the `HERMES-RESULT-JSON` line the whole result path depends on |
+> | `POST /containers/<id>/wait` | **Load-bearing.** How the wrapper obtains the exit code the refusal/failure classification is built on |
+> | `POST /containers/<id>/start` | Starts it |
+>
+> Two consequences for Task 10, which owns the proxy:
+>
+> 1. **`attach` is requested with `stdin=1`** (`?stderr=1&stdin=1&stdout=1&stream=1`), so the proxy
+>    grants a bidirectional stream, not a read-only tail. That is a wider grant than "start one
+>    container" and must be reasoned about explicitly rather than inherited from the CLI's defaults.
+> 2. **`POST /containers/create` is the call that carries the bind mounts**, so it is the one whose
+>    *body* must be inspected — confirming Task 10's body-inspecting design rather than a
+>    path-and-verb allow-list, which would let a compromised broker create the permitted container
+>    with attacker-chosen mounts.
+>
+> Measured on darwin. The endpoint set is a property of the Compose CLI, not the kernel, so it should
+> hold on the VPS — but per R22 that is **unverified on Linux** and Task 10 must re-measure there.
+
 The broker remains privileged code and must be reviewed as such: small, no network listener, a closed
 input schema, and hostile-input handling on the spool (§8).
 
@@ -251,8 +283,21 @@ all eleven guards are preserved unchanged — they simply run where Hermes has n
 **The run record moves to the broker.** `apply-changeset.py` currently writes `result.json`
 (`:306`) and appends `timeline.md` (`:311`) into the vault under `data/`, which this container does not
 mount. Left alone, step 11 would fail *after* live mutations had landed and turn a successful apply
-into exit 3. So the executor emits the result payload on **stdout**, and the broker persists
-`result.json` and appends `timeline.md` host-side.
+into exit 3. So the executor emits the result payload on **stdout**, and ~~the broker persists
+`result.json` and appends `timeline.md` host-side~~ — see the correction immediately below.
+
+> **CORRECTED 2026-08-31 (Task 14).** The struck text is false as shipped, and was false when
+> written. The **broker does not persist anything**. `run-ads-mutate.sh` — the wrapper — pipes the
+> executor's stdout into `bin/persist-run-record.py` (`run-ads-mutate.sh:112`), and that script
+> writes `result.json` and appends `timeline.md`. `apply-changeset.py` says so at the emitting end:
+> *"result.json and timeline.md are convenience artifacts written by persist-run-record.py from
+> this line, never by the executor itself."* The broker's only writes are the spool result file and
+> the approval-consumption record.
+>
+> The distinction is not bookkeeping. Persist runs **as the governance store's owner, into
+> `data/vaults`, which the agent can write** — the privilege gradient that Task 12's seam S1 was
+> built to probe, and the reason `persist_run_record_shim.py` carries `dir_fd`-anchored containment
+> checks. Attributing that step to the broker sends a reader auditing it to the wrong file.
 
 This is a deliberate split of responsibility, not a workaround: the **audit log** in the governance
 store is the reversibility record and stays owned by the executor, written and fsynced per action

@@ -706,6 +706,111 @@ them even after one fails, and exits non-zero if any did. Individual suites stil
 directly (`python3 infra/hermes-agent/bin/apply-changeset.test.py`) — note `python3`,
 never `python`.
 
+## Governed mutation syscall — how Hermes asks for a change (Plan 2, Phase A)
+
+The mutation tier above is host-side: an operator runs `run-ads-mutate.sh`. The syscall is how
+**Hermes itself** asks for an approved change-set to be applied, without ever holding the write
+credential, reaching the governance store, or getting a shell on the host.
+
+It is a **spool**, not an API. Hermes writes a request file; a host-side broker picks it up. There
+is no listener, no socket, and no network path between the two — the only channel is a directory
+the agent can write and the broker can read.
+
+### Spool layout
+
+`data/spool/` (inside the container, `/opt/data/spool`), overridable with `HERMES_SPOOL_ROOT`:
+
+```
+data/spool/
+  requests/<request_id>.json    # Hermes writes; the broker reads and deletes
+  results/<request_id>.json     # the broker writes; Hermes reads
+```
+
+`<request_id>` is a uuid, and the filename must match the `request_id` inside the file. The broker
+treats every byte here as hostile: closed schema, size cap, regular-files-only, no symlinks, no
+directories, and a quarantine for entries it cannot parse.
+
+### Client — `hermes-syscall`, in-container
+
+Identifier-only. It passes a client slug and a change-set id, never a customer id, never a
+credential, never a file path.
+
+```bash
+python3 /opt/cc-bin/hermes-syscall.py apply  --client <slug> --changeset <id>
+python3 /opt/cc-bin/hermes-syscall.py result --request <request_id>
+```
+
+| Exit | Meaning |
+|---|---|
+| 0 | applied |
+| 1 | usage error (bad arguments) |
+| 2 | **refused** — a guard said no; nothing was mutated |
+| 3 | failed *after* at least one live mutation landed — an operator must reconcile |
+| 4 | **pending — NOT refused** |
+
+**Exit 4 is the one that gets misread.** It means the broker has not written a result yet. The
+request is still queued and may still succeed. Treat it as "ask again later", never as a refusal,
+and never re-file the request — a second request for the same change-set is refused as a replay,
+and the original is still in flight.
+
+### Broker — host-side
+
+```bash
+python3 bin/hermes-broker.py --once                  # one drain pass, then exit
+python3 bin/hermes-broker.py --watch --interval 5    # poll forever
+```
+
+`--once` is what a timer or a smoke test should call; `--watch` is for the long-running unit. Exactly
+one of the two is required. The broker is single-threaded with one advisory lock per client slug, so
+two drains cannot process the same client concurrently.
+
+### The two quotas
+
+Both live in the client registry, both **fail closed** — an unreadable or missing limit is a refusal,
+never "unlimited":
+
+| Key | Refusal | What it bounds |
+|---|---|---|
+| `max_pending_requests` | `refused_quota` | Unread requests per client at drain time |
+| `accepted_requests_per_client_day` | `refused_quota` | Requests accepted per client per UTC day |
+
+A client already over `max_pending_requests` has **every** request refused that drain, not merely the
+surplus — the count is computed once per pass. That is deliberate: a flooding client gets nothing
+until it drains.
+
+### Spool overflow (R6) — a flood stalls the client until an operator clears it
+
+Above `MAX_SPOOL_FILES` (256) matching request files, the broker **refuses the entire drain**:
+
+- it writes **no per-request result files** — so `hermes-syscall result` reports *pending* (exit 4),
+  which is honest: no decision was made about any individual request;
+- it **does not delete the flooding files**. Attributing them to a client would require parsing
+  them, which is the very work the cap exists to avoid;
+- it logs loudly to stderr, so the condition is visible in the journal.
+
+The consequence is deliberate and worth stating plainly: **a flooded spool stalls that client until
+an operator clears it.** This is a documented departure from "a result on every outcome" (spec §12) —
+overflow is a broker-level event, not a per-request outcome. There is no automatic pruning of
+quarantined entries either; both are operator tasks today.
+
+### Deploy sequence
+
+Order matters — the pre-flight exists to stop a half-configured store becoming an exit-3 *after* a
+live mutation:
+
+1. **Governance store in place** — `approvals/`, `control/`, `registry/`, `log/`, `seen/` all present.
+   `seen/` is host-only and must **not** be mounted into the executor.
+2. **Pre-flight passes** — `python3 bin/preflight-governance-access.py --root "$HERMES_GOVERNANCE_DIR"`
+   exits 0. It is a deliberate **no-op off Linux**, so a clean run on macOS proves nothing.
+3. **Mutation disabled at rest** — no kill-switch file. Absence means disabled; that is the safe default.
+4. **Broker started** (`--watch`) as its own user, never as root.
+5. **Approve per action** — `approve-changeset.py` with `--expect-sha256`, which binds the approval to
+   the exact reviewed bytes.
+
+> **Not deployable to the VPS as of 2026-08-31.** Phase B (the body-inspecting Docker socket proxy
+> and the systemd units) is not built, and without it the broker's Docker access on a VPS is host
+> root. See `docs/evaluations/2026-08-30-hermes-phase-a-deployment-readiness.md`.
+
 ## Governance store
 
 Every piece of state a mutation guard *trusts* — as opposed to state Hermes merely
