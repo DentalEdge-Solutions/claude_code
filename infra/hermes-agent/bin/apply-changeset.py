@@ -33,6 +33,11 @@ WRITE_ROLE = "write"
 # before it is persisted as the reversibility record.
 RESOURCE_RE = re.compile(r"^customers/[0-9]{1,15}/campaignCriteria/[0-9]{1,20}~[0-9]{1,20}$")
 
+# --request is the broker's request id (a UUID). Validated at the CLI boundary so a
+# malformed value is a usage error, not an opaque approval refusal reaching
+# changeset_lib.verify_approval's comparison.
+REQUEST_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+
 # Mirrors run-ads-report.py: the mutator gets the credentials plus a minimal benign
 # runtime whitelist, and nothing else — never ANTHROPIC_API_KEY or the OpenRouter key.
 _RUNTIME_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
@@ -69,7 +74,8 @@ def _child_env():
     return env
 
 
-def build_plan(client, changeset_id, now, registry=None, projects=None, undo=None):
+def build_plan(client, changeset_id, now, registry=None, projects=None, undo=None,
+               request_id=None):
     """Guards 1-8. Returns everything apply() needs; raises SystemExit(2) on any refusal."""
     target = undo or changeset_id
     if not C.CHANGESET_ID_RE.fullmatch(target or ""):
@@ -123,7 +129,8 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
             _refuse("change-set identity does not match the resolved client")
         # 5. approval
         try:
-            approval = C.verify_approval(rec["slug"], changeset_id, C.file_digest(path), now)
+            approval = C.verify_approval(rec["slug"], changeset_id, C.file_digest(path), now,
+                                         request_id=request_id)
         except (ValueError, OSError, json.JSONDecodeError) as e:
             _refuse(str(e))
         operator = approval["operator"]
@@ -394,9 +401,18 @@ def main(argv=None):
     ap.add_argument("--registry")
     ap.add_argument("--projects")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--request",
+                    help="the broker's request id. Proves this run is the one the "
+                         "approval was reserved for. Omit it for a manual operator "
+                         "apply, which uses an unreserved approval.")
     args = ap.parse_args(argv)
+    if args.request is not None and not REQUEST_ID_RE.fullmatch(args.request):
+        print("apply-changeset: invalid --request: %r (expected a 36-character request id)"
+              % args.request, file=sys.stderr)
+        return 1
     now = _utcnow()
-    plan = build_plan(args.client, args.changeset, now, args.registry, args.projects, args.undo)
+    plan = build_plan(args.client, args.changeset, now, args.registry, args.projects, args.undo,
+                      request_id=args.request)
     if args.dry_run:
         print(f"vault:   {plan['vault']}")
         print(f"runner:  {plan['runner']}")
