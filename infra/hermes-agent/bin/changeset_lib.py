@@ -500,7 +500,29 @@ def write_approval(slug, cid, digest, operator, now, ttl_hours):
     return rec
 
 
-def verify_approval(slug, cid, digest, now):
+def verify_approval(slug, cid, digest, now, request_id=None):
+    """Confirm the approval record for (slug, cid) authorises applying digest at now.
+
+    RESERVATION HANDOFF (2026-09-02). `request_id` is how the executor proves it is
+    the run the broker reserved this approval FOR. The broker reserves before
+    spawning (spec §7 — reserving after a successful apply leaves a window in which
+    a replay could apply the same change-set twice), and the executor then
+    re-verifies the same record as the guard of last resort. Before this parameter
+    existed those two correct behaviours contradicted each other and NO apply
+    through the syscall could succeed; it was measured live on 2026-09-01, refusing
+    at refused_preflight every time.
+
+    Accepting a reservation is narrower than it looks:
+      * no reserved_at              -> accept (the manual operator path, unchanged)
+      * reserved for THIS request,
+        and not yet completed       -> accept
+      * reserved and COMPLETED      -> refuse, even for its own request_id. Once
+                                       record_outcome has written the outcome the run
+                                       is over, and re-running it would re-apply.
+      * anything else               -> refuse, exactly as before
+    Callers that pass no request_id are unaffected, so single-use is unchanged for
+    every path that is not the broker's own in-flight run.
+    """
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
     p = approval_path(slug, cid)
@@ -519,9 +541,23 @@ def verify_approval(slug, cid, digest, now):
         # is no exception, so a type-confused value refuses loudly instead of reading as
         # unreserved.
         reserved_at = _require_str(rec.get("reserved_at"), "reserved_at")
-        raise ValueError(
-            "approval for %r is already reserved (reserved_at=%s) — approvals are "
-            "single-use; approve again to authorise another apply" % (cid, reserved_at))
+        # A finished run is dead regardless of who asks. Checked BEFORE the request_id
+        # comparison so that a completed run cannot be re-entered by the very request
+        # that completed it.
+        if "outcome" in rec or "finished_at" in rec:
+            raise ValueError(
+                "approval for %r was reserved at %s and has already completed — "
+                "approvals are single-use; approve again to authorise another apply"
+                % (cid, reserved_at))
+        if request_id is None:
+            raise ValueError(
+                "approval for %r is already reserved (reserved_at=%s) — approvals are "
+                "single-use; approve again to authorise another apply" % (cid, reserved_at))
+        reserved_for = _require_str(rec.get("request_id"), "request_id")
+        if reserved_for != _require_str(request_id, "request_id"):
+            raise ValueError(
+                "approval for %r is reserved for a different request (reserved_at=%s) "
+                "— approvals are single-use" % (cid, reserved_at))
     if _require_str(rec.get("changeset_id"), "changeset_id") != cid:
         raise ValueError(f"approval record changeset_id does not match {cid!r}")
     approved_digest = _require_str(rec.get("sha256"), "sha256")
@@ -676,9 +712,10 @@ def seen_contains(slug, request_id):
 # --- approval reservation ----------------------------------------------------------
 # write_approval/verify_approval (above) predate this task and already enforce the
 # single-use rule on the READ side: verify_approval refuses whenever "reserved_at" is
-# present on the record, regardless of whether "outcome" was ever written. What was
-# missing is the WRITE side — something that sets reserved_at, and does so before the
-# executor runs rather than after, per spec §7.
+# present and the caller is not the run it was reserved for (see verify_approval),
+# regardless of whether "outcome" was ever written. What was missing is the WRITE
+# side — something that sets reserved_at, and does so before the executor runs
+# rather than after, per spec §7.
 
 def _load_approval(slug, cid):
     """Shared read for reserve_approval and record_outcome: both need the current
