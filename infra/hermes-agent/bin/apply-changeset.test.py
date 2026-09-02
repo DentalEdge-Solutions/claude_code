@@ -742,6 +742,40 @@ class TestRequestIdIsThreadedToTheApproval(Base):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("request", (r.stderr or "").lower())
 
+    def test_cli_forwards_a_valid_request_id_and_it_is_accepted(self):
+        """THE WIRE ITSELF. build_plan and verify_approval are each tested above (and
+        in changeset_lib.test.py) with the other side mocked or called directly —
+        neither of those tests can catch main() silently failing to pass args.request
+        through to build_plan. This one runs the real subprocess CLI end to end: it
+        reserves the approval for a specific request_id exactly the way the broker
+        does before spawning the executor (changeset_lib.reserve_approval), then
+        invokes apply-changeset.py with that same id and asserts the run is ACCEPTED,
+        not refused as reserved-for-a-different-request. --dry-run keeps this fast;
+        main() calls build_plan (and so verify_approval) before checking args.dry_run,
+        so the approval check still runs.
+
+        A long approval_ttl_hours is written into the fixture's projects.yaml before
+        approving: the approval's expires_at is anchored to the fixture's frozen NOW,
+        but this subprocess computes its own now() from the real wall clock, so the
+        default 24h TTL would make the run refuse as EXPIRED and mask the thing this
+        test exists to check.
+        """
+        with open(self.projects, "w") as f:
+            f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
+                                              "actions_per_client_day": 100,
+                                              "applies_per_client_day": 5,
+                                              "approval_ttl_hours": 999999}))
+        cs = self._approved(1)
+        request_id = "11111111-2222-3333-4444-555555555555"
+        C.reserve_approval("acme-dental", cs["changeset_id"], request_id, NOW)
+        r = subprocess.run([sys.executable, APPLY, "--client", "acme-dental",
+                            "--changeset", cs["changeset_id"], "--request", request_id,
+                            "--registry", self.clients, "--projects", self.projects,
+                            "--dry-run"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("reserved", (r.stderr or "").lower())
+
 
 if __name__ == "__main__":
     unittest.main()
