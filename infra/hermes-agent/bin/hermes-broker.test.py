@@ -319,10 +319,13 @@ class TestNoInterpolation(Base):
         self.assertIsInstance(argv, list)
         self.assertIn("--client", argv)
         self.assertIn("--changeset", argv)
+        self.assertIn("--request", argv)
         self.assertEqual(argv[argv.index("--client") + 1], SLUG)
         self.assertEqual(argv[argv.index("--changeset") + 1], CID)
-        # No request field reaches the command as anything but these two values.
-        self.assertNotIn(rid, argv)
+        self.assertEqual(argv[argv.index("--request") + 1], rid)
+        # The request id reaches the command in exactly ONE place — the --request
+        # value — never smuggled into another field or appended as a stray element.
+        self.assertEqual(argv.count(rid), 1)
         # And undo is never passed, on any path.
         self.assertNotIn("--undo", argv)
 
@@ -679,6 +682,22 @@ class TestExecution(Base):
         with open(governance_lib.approval_path(SLUG, CID)) as f:
             self.assertEqual(json.load(f)["outcome"], "accepted_applied")
 
+    def test_argv_carries_the_request_id_that_was_reserved(self):
+        """The reservation and the executor's proof must be the SAME id. A broker that
+        reserved with one id and spawned with another would refuse every apply — the
+        2026-09-01 defect in a new disguise."""
+        rid = self.file_request()
+        r = RecordingRunner(rc=0)
+        self.drain(r)
+        argv = r.calls[0]
+        self.assertIn("--request", argv)
+        rid_in_argv = argv[argv.index("--request") + 1]
+        self.assertEqual(rid_in_argv, rid)
+        with open(governance_lib.approval_path(SLUG, CID)) as f:
+            rec = json.load(f)
+        self.assertEqual(rec["request_id"], rid_in_argv,
+                         "argv id must match the id written by reserve_approval")
+
     def test_a_failure_writing_the_final_result_does_not_launder_into_a_false_refusal(self):
         # Post-Task-6 review FINDING 1. _execute's final _write_result is the LAST
         # thing it does, after a mutation may already have landed and after
@@ -756,7 +775,10 @@ class TestRealSubprocess(Base):
         self.assertEqual(got["exit_code"], 0)
         self.assertEqual(got["classification"], "accepted_applied")
 
-    def test_the_wrapper_is_invoked_with_exactly_four_argv_elements(self):
+    def test_the_wrapper_is_invoked_with_exactly_six_argv_elements(self):
+        # Was four (--client X --changeset Y) before the broker also passed the
+        # reserved request id (--request Z) so the executor can re-verify the same
+        # approval it was spawned for — see test_argv_carries_the_request_id_that_was_reserved.
         script = os.path.join(self.regdir, "echo-argv.sh")
         with open(script, "w") as f:
             f.write('#!/bin/sh\nprintf "%s\\n" "$#" > "$ARGC_OUT"\nexit 0\n')
@@ -771,7 +793,7 @@ class TestRealSubprocess(Base):
             B.MUTATE_SH = orig
             os.environ.pop("ARGC_OUT", None)
         with open(argc_out) as f:
-            self.assertEqual(f.read().strip(), "4")   # --client X --changeset Y
+            self.assertEqual(f.read().strip(), "6")   # --client X --changeset Y --request Z
 
 
 class TestCliFlagsHonored(Base):
