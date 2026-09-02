@@ -782,8 +782,13 @@ def reserve_approval(slug, cid, request_id, now):
     this record being written — in which the approval is still live and a crash or a
     replayed request in that window applies the same change-set a second time.
     Reserving first closes that window the other direction: a crash between reserving
-    and applying costs one unusable approval, which a human clears by approving again.
-    That is a strictly cheaper failure than a duplicate account mutation.
+    and applying leaves the approval reserved but unfinished (no outcome/finished_at
+    yet), which verify_approval's reservation-handoff clause (2026-09-02, see
+    record_outcome's docstring) lets the SAME request_id retry directly, without a
+    human re-approving — that request_id is the only one it will accept. Only a
+    request_id other than the one that reserved it is turned away and needs a fresh
+    human approval. Either way the crash cannot be exploited to apply the change-set a
+    second time: that is a strictly cheaper failure than a duplicate account mutation.
 
     Concurrency: the entire read-check-write runs inside _approval_lock, an exclusive
     flock on a sidecar file scoped to this (slug, cid). That makes single-use
@@ -814,9 +819,19 @@ def record_outcome(slug, cid, outcome, now):
     refuses to paper over rather than recording anyway.
 
     An approval that has reserved_at but never gets an outcome (the crash-mid-apply
-    case) stays exactly as dead as one that completed: verify_approval refuses on
-    reserved_at alone, never on outcome. So the crash costs an unusable approval, never
-    a reusable one — the property spec §7 asks for.
+    case) is NOT as dead as one that completed — the two are governed by different
+    rules now. verify_approval's reservation-handoff clause (2026-09-02) accepts a
+    request_id that matches the reservation as long as no outcome/finished_at has
+    been written yet, precisely so the broker's own crashed-and-restarted run can
+    retry the SAME apply instead of being permanently locked out by its own prior
+    attempt — that request_id is the only one it will accept; every other caller
+    still refuses. Once record_outcome writes outcome and finished_at below, that
+    same clause refuses unconditionally, checked before the request_id comparison,
+    so a completed run is dead to everyone, including the very request_id that
+    completed it. Two rules rather than one, but the property spec §7 asks for still
+    holds: a crash-mid-apply approval costs at most one retry by its own reserving
+    request, never a reusable approval any other caller can apply — and once
+    record_outcome closes it, never a re-apply by anyone, including that request.
 
     Concurrency: runs inside the same _approval_lock as reserve_approval, scoped to
     this (slug, cid), for the identical reason — the read-then-write here must not
