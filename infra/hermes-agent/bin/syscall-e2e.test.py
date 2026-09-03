@@ -37,6 +37,8 @@ def _load(name, filename):
 
 P = _load("propose_changeset_e2e", "propose-changeset.py")
 A = _load("approve_changeset_e2e", "approve-changeset.py")
+B = _load("hermes_broker_e2e", "hermes-broker.py")
+import spool_lib as S
 
 APPLY = os.path.join(HERE, "apply-changeset.py")
 
@@ -92,6 +94,8 @@ projects:
         actions_per_client_day: 100
         applies_per_client_day: 5
         approval_ttl_hours: 24
+        max_pending_requests: 2
+        accepted_requests_per_client_day: 3
 """
 
 
