@@ -190,6 +190,33 @@ class TestRefusalsNeverExecute(Base):
         self.assertEqual(r.calls, [])
         self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
 
+    def test_seen_replay_refuses_BEFORE_reserve_approval_ever_runs(self):
+        # The seen-set is now the SOLE barrier against a duplicate mutation in the
+        # record_outcome-failed case (changeset_lib.reserve_approval /
+        # record_outcome docstrings, CORRECTED 2026-09-03): a reservation left
+        # unfinished by a swallowed record_outcome failure is retryable by its own
+        # reserving request_id. That makes it load-bearing that a seen rid is refused
+        # at _process (:386) BEFORE _execute (:404) ever calls C.reserve_approval
+        # (:495) — not just that the classification comes back "refused_replay".
+        #
+        # The other seen-set tests above prove r.calls stays empty (the runner, i.e.
+        # the executor, is never spawned). This test proves the ordering one step
+        # earlier: the approval record itself is never touched. If refusal happened
+        # AFTER reserve_approval instead of before, the approval would come out of
+        # this test reserved — a live, retryable reservation left behind by a request
+        # that was supposedly refused — even though the runner was never called.
+        rid = str(__import__("uuid").uuid4())
+        C.append_seen(SLUG, rid, NOW)
+        self.file_request(request_id=rid)
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
+        with open(C.approval_path(SLUG, CID), encoding="utf-8") as f:
+            approval = json.load(f)
+        self.assertNotIn("reserved_at", approval)
+        self.assertNotIn("request_id", approval)
+
     def test_an_over_limit_client_is_refused_wholesale_until_its_queue_drains(self):
         # RULING R5: max_pending_requests is 2 in the fixture registry, but
         # pending_count is computed ONCE per drain, before any of the five requests are
