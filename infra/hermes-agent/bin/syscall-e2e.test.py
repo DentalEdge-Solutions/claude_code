@@ -42,7 +42,14 @@ import spool_lib as S
 
 APPLY = os.path.join(HERE, "apply-changeset.py")
 
-NOW = datetime.datetime(2026, 9, 2, 10, 15, 0, tzinfo=datetime.timezone.utc)
+# Real wall-clock "now", not a fixed constant: apply-changeset.py's own _utcnow()
+# (called inside the REAL subprocess this suite spawns) is not injectable and always
+# reads the actual system clock. A fixed historical constant here would drift out of
+# the approval's 24h TTL window the moment real time passes it — exactly what
+# happened when this suite was first written against a fixed 2026-09-02 constant and
+# the host's clock later advanced past it. Computed once at import time, which is
+# always within microseconds of when the tests that use it actually run.
+NOW = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
 RID = "11111111-2222-3333-4444-555555555555"
 FOREIGN_RID = "99999999-9999-9999-9999-999999999999"
 
@@ -167,6 +174,73 @@ class Base(unittest.TestCase):
         if request_id:
             argv += ["--request", request_id]
         return subprocess.run(argv, capture_output=True, text=True, timeout=120)
+
+
+class TestBrokerBuiltArgvComposition(Base):
+    """The composition Task 4 exists to net: the BROKER constructs the argv
+    (hermes-broker.py:506) and the REAL EXECUTOR PROCESS (apply-changeset.py's
+    main(), via subprocess) consumes it. TestReservationHandoffEndToEnd above
+    simulates the broker's half in-process (C.reserve_approval called directly)
+    and hand-builds its own argv — that proves the executor accepts a
+    CLI-presented reservation, which apply-changeset.test.py's
+    test_cli_forwards_a_valid_request_id_and_it_is_accepted already covers from the
+    executor's side. This class is the missing third leg: hermes-broker.py's OWN
+    argv construction, fed to a real executor process, with nothing hand-built in
+    between.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # TRAP (fix round 1): hermes-broker.py's _process() resolves the client via
+        # vault_lib.resolve(slug) with NO registry override, which reads
+        # governance_lib.clients_registry_path() == <root>/registry/clients.json —
+        # a DIFFERENT file from the `_registry/clients.json` copy Base.setUp wrote
+        # above (which propose/approve/the executor are pointed at explicitly via
+        # --registry). Both copies must exist with identical content, or drain()
+        # fails on client resolution and looks like a broken seam when it is not.
+        gov_clients = governance_lib.clients_registry_path(self.tmp)
+        os.makedirs(os.path.dirname(gov_clients), exist_ok=True)
+        with open(gov_clients, "w") as f:
+            json.dump({"clients": {"acme-dental": {
+                "project": "claude_google_ads", "customer_id": "1234567890",
+                "status": "active"}}}, f)
+        self.spool = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.spool, True)
+
+    def _file_request(self, cid, request_id):
+        req = {"request_id": request_id, "op": "apply", "client": "acme-dental",
+               "changeset": cid}
+        os.makedirs(S.requests_dir(self.spool), exist_ok=True)
+        with open(S.request_path(request_id, self.spool), "w") as f:
+            json.dump(req, f)
+
+    def _real_executor_runner(self, argv):
+        """argv[0] is MUTATE_SH in production (hermes-broker.py:41); argv[1:] is the
+        BROKER'S OWN construction at hermes-broker.py:506 —
+        ["--client", slug, "--changeset", cid, "--request", rid]. --dry-run and the
+        explicit --registry/--projects are added here only to keep this test at zero
+        spend and pointed at the temp fixture; they are not part of what the broker
+        itself builds."""
+        cmd = [sys.executable, APPLY] + list(argv[1:]) + [
+            "--dry-run", "--registry", self.clients, "--projects", self.projects]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+    def test_the_broker_built_argv_runs_against_the_real_executor(self):
+        """THE COMPOSITION THAT FAILED IN PRODUCTION: the broker reserves the
+        approval AND builds the argv that is handed to the executor, and that exact
+        argv is fed to the REAL apply-changeset.py subprocess — no hand-built argv,
+        no in-process reservation shortcut."""
+        cs = self._approved()
+        self._file_request(cs["changeset_id"], RID)
+        outcomes = B.drain(spool=self.spool, projects=self.projects,
+                           runner=self._real_executor_runner, now=NOW)
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]["classification"], "accepted_applied")
+        with open(S.result_path(RID, self.spool)) as f:
+            result = json.load(f)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["classification"], "accepted_applied")
 
 
 class TestReservationHandoffEndToEnd(Base):
