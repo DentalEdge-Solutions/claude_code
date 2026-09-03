@@ -19,6 +19,16 @@ DEFAULT_ROOT = "/opt/governance"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 CHANGESET_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$")
 
+# One definition, shared, so the two cannot drift (vault_lib.py's rule, applied here
+# too). This is the STRICT lowercase-only class — the pattern spool_lib enforces on
+# what a request file's own name and body may claim, and the only one that can
+# actually reach the broker. apply-changeset.py's --request flag validates against
+# this same object so a CLI-typed uppercase value cannot diverge from what the spool
+# already accepted (CORRECTED 2026-09-03 — the two were previously defined twice and
+# had already drifted: apply-changeset.py's copy accepted uppercase hex, spool_lib's
+# did not).
+REQUEST_ID_RE = re.compile(r"^[0-9a-f-]{36}$")
+
 
 def governance_root():
     return os.environ.get("HERMES_GOVERNANCE_ROOT", DEFAULT_ROOT)

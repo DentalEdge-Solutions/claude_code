@@ -19,6 +19,7 @@ See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 import argparse, datetime, json, os, re, shutil, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
+import governance_lib
 import vault_lib
 
 CRED_VARS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID",
@@ -35,8 +36,14 @@ RESOURCE_RE = re.compile(r"^customers/[0-9]{1,15}/campaignCriteria/[0-9]{1,20}~[
 
 # --request is the broker's request id (a UUID). Validated at the CLI boundary so a
 # malformed value is a usage error, not an opaque approval refusal reaching
-# changeset_lib.verify_approval's comparison.
-REQUEST_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+# changeset_lib.verify_approval's comparison. Shared with spool_lib via
+# governance_lib rather than restated here (vault_lib.py's rule: "one definition,
+# shared, so the two cannot drift") — this used to be its own uppercase-permissive
+# copy that had already drifted from spool_lib's lowercase-only one (CORRECTED
+# 2026-09-03). The spool's stricter class wins: that is what can actually reach the
+# broker, so a --request value this CLI would accept but the spool never could is not
+# a value worth accepting either.
+REQUEST_ID_RE = governance_lib.REQUEST_ID_RE
 
 # Mirrors run-ads-report.py: the mutator gets the credentials plus a minimal benign
 # runtime whitelist, and nothing else — never ANTHROPIC_API_KEY or the OpenRouter key.

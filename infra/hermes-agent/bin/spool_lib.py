@@ -32,7 +32,9 @@ OPS = ("apply",)                      # v1: apply only. NEVER undo — spec §17
 # gratuitous divergence from the written spec is a worse defect than a permissive
 # charset over a value that is never interpolated anywhere.
 FILENAME_RE = re.compile(r"^[0-9a-f-]{36}\.json$")
-REQUEST_ID_RE = re.compile(r"^[0-9a-f-]{36}$")
+# Shared with apply-changeset.py via governance_lib, so the two definitions of "what a
+# request id looks like" cannot drift the way they had (CORRECTED 2026-09-03).
+REQUEST_ID_RE = governance_lib.REQUEST_ID_RE
 
 
 class SpoolRefused(ValueError):
