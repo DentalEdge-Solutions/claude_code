@@ -1,4 +1,4 @@
-import json, os, shutil, sys, tempfile, unittest
+import datetime, json, os, shutil, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
 import governance_lib as G
@@ -1015,6 +1015,93 @@ class TestFreshApprovalsDirectory(unittest.TestCase):
         # returned without raising.
         readback = C.verify_approval("brand-new-client", self.CID, self.DIGEST, NOW)
         self.assertEqual(readback["operator"], "operator")
+
+
+class TestVerifyApprovalReservationHandoff(unittest.TestCase):
+    """The broker reserves BEFORE spawning the executor, and the executor then
+    re-verifies the same approval. Without this handoff the broker's own
+    correctness guarantee makes every legitimate apply impossible — measured
+    live on 2026-09-01, every syscall apply refused at refused_preflight.
+
+    The negative cases matter more than the positive one: this parameter is the
+    only thing standing between "single-use" and "reusable", so each way it must
+    still refuse gets its own test.
+    """
+
+    SLUG = "acmedental"
+    CID = "20260902-101500-abcdef01"
+    DIGEST = "a" * 64
+    RID = "11111111-2222-3333-4444-555555555555"
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+        self.now = datetime.datetime(2026, 9, 2, 10, 0, 0, tzinfo=datetime.timezone.utc)
+        C.write_approval(self.SLUG, self.CID, self.DIGEST, "operator", self.now, 24)
+
+    def test_unreserved_approval_still_verifies_without_a_request_id(self):
+        # The manual operator path. Must not regress.
+        rec = C.verify_approval(self.SLUG, self.CID, self.DIGEST, self.now)
+        self.assertEqual(rec["changeset_id"], self.CID)
+
+    def test_reserved_approval_verifies_for_the_request_that_reserved_it(self):
+        # THE POSITIVE CONTROL. Without this the whole feature is dead, and its
+        # absence is exactly why the defect survived every prior review.
+        C.reserve_approval(self.SLUG, self.CID, self.RID, self.now)
+        rec = C.verify_approval(self.SLUG, self.CID, self.DIGEST, self.now,
+                                request_id=self.RID)
+        self.assertEqual(rec["request_id"], self.RID)
+
+    def test_reserved_approval_refuses_a_different_request_id(self):
+        C.reserve_approval(self.SLUG, self.CID, self.RID, self.now)
+        with self.assertRaises(ValueError) as cm:
+            C.verify_approval(self.SLUG, self.CID, self.DIGEST, self.now,
+                              request_id="99999999-9999-9999-9999-999999999999")
+        self.assertIn("reserved", str(cm.exception))
+
+    def test_reserved_approval_still_refuses_when_no_request_id_is_supplied(self):
+        # The operator path must NOT become a way to consume a broker reservation.
+        C.reserve_approval(self.SLUG, self.CID, self.RID, self.now)
+        with self.assertRaises(ValueError):
+            C.verify_approval(self.SLUG, self.CID, self.DIGEST, self.now)
+
+    def test_a_completed_run_refuses_even_its_own_request_id(self):
+        # The clause a naive fix forgets. record_outcome marks the run finished;
+        # after that the same request id must not be able to apply again.
+        C.reserve_approval(self.SLUG, self.CID, self.RID, self.now)
+        C.record_outcome(self.SLUG, self.CID, "accepted_applied", self.now)
+        with self.assertRaises(ValueError) as cm:
+            C.verify_approval(self.SLUG, self.CID, self.DIGEST, self.now,
+                              request_id=self.RID)
+        self.assertIn("already completed", str(cm.exception))
+
+    def test_a_type_confused_request_id_in_the_record_refuses(self):
+        # Fail closed, matching every other field in this function.
+        C.reserve_approval(self.SLUG, self.CID, self.RID, self.now)
+        p = C.approval_path(self.SLUG, self.CID)
+        rec = json.load(open(p))
+        for bad in (None, 123, [], {}, ""):
+            rec["request_id"] = bad
+            with open(p, "w") as f:
+                json.dump(rec, f)
+            with self.assertRaises(ValueError):
+                C.verify_approval(self.SLUG, self.CID, self.DIGEST, self.now,
+                                  request_id=self.RID)
+
+    def test_the_digest_and_expiry_checks_still_run_on_the_reserved_path(self):
+        # The new clause must not become a bypass around the other guards.
+        C.reserve_approval(self.SLUG, self.CID, self.RID, self.now)
+        with self.assertRaises(ValueError) as cm:
+            C.verify_approval(self.SLUG, self.CID, "b" * 64, self.now,
+                              request_id=self.RID)
+        self.assertIn("hash mismatch", str(cm.exception))
+        later = self.now + datetime.timedelta(hours=48)
+        with self.assertRaises(ValueError) as cm2:
+            C.verify_approval(self.SLUG, self.CID, self.DIGEST, later,
+                              request_id=self.RID)
+        self.assertIn("expired", str(cm2.exception))
 
 
 if __name__ == "__main__":

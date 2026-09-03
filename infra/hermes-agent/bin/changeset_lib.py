@@ -500,7 +500,29 @@ def write_approval(slug, cid, digest, operator, now, ttl_hours):
     return rec
 
 
-def verify_approval(slug, cid, digest, now):
+def verify_approval(slug, cid, digest, now, request_id=None):
+    """Confirm the approval record for (slug, cid) authorises applying digest at now.
+
+    RESERVATION HANDOFF (2026-09-02). `request_id` is how the executor proves it is
+    the run the broker reserved this approval FOR. The broker reserves before
+    spawning (spec §7 — reserving after a successful apply leaves a window in which
+    a replay could apply the same change-set twice), and the executor then
+    re-verifies the same record as the guard of last resort. Before this parameter
+    existed those two correct behaviours contradicted each other and NO apply
+    through the syscall could succeed; it was measured live on 2026-09-01, refusing
+    at refused_preflight every time.
+
+    Accepting a reservation is narrower than it looks:
+      * no reserved_at              -> accept (the manual operator path, unchanged)
+      * reserved for THIS request,
+        and not yet completed       -> accept
+      * reserved and COMPLETED      -> refuse, even for its own request_id. Once
+                                       record_outcome has written the outcome the run
+                                       is over, and re-running it would re-apply.
+      * anything else               -> refuse, exactly as before
+    Callers that pass no request_id are unaffected, so single-use is unchanged for
+    every path that is not the broker's own in-flight run.
+    """
     cid = _require_str(cid, "changeset_id")
     digest = _require_str(digest, "sha256")
     p = approval_path(slug, cid)
@@ -519,9 +541,23 @@ def verify_approval(slug, cid, digest, now):
         # is no exception, so a type-confused value refuses loudly instead of reading as
         # unreserved.
         reserved_at = _require_str(rec.get("reserved_at"), "reserved_at")
-        raise ValueError(
-            "approval for %r is already reserved (reserved_at=%s) — approvals are "
-            "single-use; approve again to authorise another apply" % (cid, reserved_at))
+        # A finished run is dead regardless of who asks. Checked BEFORE the request_id
+        # comparison so that a completed run cannot be re-entered by the very request
+        # that completed it.
+        if "outcome" in rec or "finished_at" in rec:
+            raise ValueError(
+                "approval for %r was reserved at %s and has already completed — "
+                "approvals are single-use; approve again to authorise another apply"
+                % (cid, reserved_at))
+        if request_id is None:
+            raise ValueError(
+                "approval for %r is already reserved (reserved_at=%s) — approvals are "
+                "single-use; approve again to authorise another apply" % (cid, reserved_at))
+        reserved_for = _require_str(rec.get("request_id"), "request_id")
+        if reserved_for != _require_str(request_id, "request_id"):
+            raise ValueError(
+                "approval for %r is reserved for a different request (reserved_at=%s) "
+                "— approvals are single-use" % (cid, reserved_at))
     if _require_str(rec.get("changeset_id"), "changeset_id") != cid:
         raise ValueError(f"approval record changeset_id does not match {cid!r}")
     approved_digest = _require_str(rec.get("sha256"), "sha256")
@@ -676,9 +712,10 @@ def seen_contains(slug, request_id):
 # --- approval reservation ----------------------------------------------------------
 # write_approval/verify_approval (above) predate this task and already enforce the
 # single-use rule on the READ side: verify_approval refuses whenever "reserved_at" is
-# present on the record, regardless of whether "outcome" was ever written. What was
-# missing is the WRITE side — something that sets reserved_at, and does so before the
-# executor runs rather than after, per spec §7.
+# present and the caller is not the run it was reserved for (see verify_approval),
+# regardless of whether "outcome" was ever written. What was missing is the WRITE
+# side — something that sets reserved_at, and does so before the executor runs
+# rather than after, per spec §7.
 
 def _load_approval(slug, cid):
     """Shared read for reserve_approval and record_outcome: both need the current
@@ -745,8 +782,27 @@ def reserve_approval(slug, cid, request_id, now):
     this record being written — in which the approval is still live and a crash or a
     replayed request in that window applies the same change-set a second time.
     Reserving first closes that window the other direction: a crash between reserving
-    and applying costs one unusable approval, which a human clears by approving again.
-    That is a strictly cheaper failure than a duplicate account mutation.
+    and applying leaves the approval reserved but unfinished (no outcome/finished_at
+    yet), which verify_approval's reservation-handoff clause (2026-09-02, see
+    record_outcome's docstring) lets the SAME request_id retry directly — that
+    request_id is the only one it will accept. Only a request_id other than the one
+    that reserved it is turned away and needs a fresh human approval.
+
+    WHO CAN ACTUALLY RETRY (CORRECTED 2026-09-03): "the same request_id retries" is an
+    OPERATOR-path property, not a broker one. hermes-broker.py burns the request_id
+    into governance/seen/<slug>.jsonl (:403) BEFORE calling _execute (:404), and
+    _process refuses any seen rid at :386 as refused_replay before this function is
+    ever reached again for that id. So in the broker's own path this clause is only
+    ever exercised on a reservation's FIRST consumption — the broker can never
+    re-present a crashed run's request_id to retry it. The retry this clause enables
+    is reachable only by a host operator hand-invoking
+    apply-changeset.py --request <rid> with the SAME rid the crashed run reserved
+    with; that is not something the broker can do to itself.
+
+    Either way the crash cannot be exploited to apply the change-set a second time:
+    that is a strictly cheaper failure than a duplicate account mutation. But see the
+    cost this buys, spelled out in record_outcome's docstring below — it is a real
+    reduction in defence in depth, not a free win.
 
     Concurrency: the entire read-check-write runs inside _approval_lock, an exclusive
     flock on a sidecar file scoped to this (slug, cid). That makes single-use
@@ -777,9 +833,42 @@ def record_outcome(slug, cid, outcome, now):
     refuses to paper over rather than recording anyway.
 
     An approval that has reserved_at but never gets an outcome (the crash-mid-apply
-    case) stays exactly as dead as one that completed: verify_approval refuses on
-    reserved_at alone, never on outcome. So the crash costs an unusable approval, never
-    a reusable one — the property spec §7 asks for.
+    case) is NOT as dead as one that completed — the two are governed by different
+    rules now. verify_approval's reservation-handoff clause (2026-09-02) accepts a
+    request_id that matches the reservation as long as no outcome/finished_at has
+    been written yet, so that request_id — and only that request_id — can retry the
+    SAME apply instead of being permanently locked out by its own prior attempt;
+    every other caller still refuses. Once record_outcome writes outcome and
+    finished_at below, that same clause refuses unconditionally, checked before the
+    request_id comparison, so a completed run is dead to everyone, including the very
+    request_id that completed it. Two rules rather than one, but the property spec §7
+    asks for still holds: a crash-mid-apply approval costs at most one retry by its
+    own reserving request, never a reusable approval any other caller can apply — and
+    once record_outcome closes it, never a re-apply by anyone, including that request.
+
+    WHO THIS RETRY ACTUALLY SERVES (CORRECTED 2026-09-03): the previous wording of
+    this paragraph said the clause exists "precisely so the broker's own
+    crashed-and-restarted run can retry the SAME apply" — that overclaims. The broker
+    burns its request_id into governance/seen/<slug>.jsonl (hermes-broker.py:403)
+    BEFORE invoking the executor (:404), and refuses any seen rid up front as
+    refused_replay (:386). A restarted broker can therefore never re-present the rid
+    of a run it already attempted, so it can never reach this retry path for itself.
+    The retryable window this clause opens is an OPERATOR-path property: a human
+    running apply-changeset.py --request <rid> by hand, with the same rid the
+    crashed run reserved.
+
+    THE COST THIS BUYS (must be documented, not sold as a feature): hermes-broker.py
+    deliberately swallows a record_outcome failure (:519-522 — prints to stderr,
+    continues) rather than treating it as fatal. Before this clause existed, that
+    combination — a successful apply whose outcome write then fails — left an
+    approval that verify_approval refused unconditionally; the failure was contained.
+    Now that same approval is reserved-but-unfinished and is accepted again for its
+    reserving request_id. That moves the duplicate-mutation property from TWO
+    independent barriers (verify_approval's unconditional refusal, AND the seen-set)
+    down to ONE (the seen-set alone). It is not exploitable — the seen-set fails
+    closed and the broker can never re-present that rid — but it is a real reduction
+    in defence in depth for this one failure mode, not a benefit to describe without
+    the cost attached.
 
     Concurrency: runs inside the same _approval_lock as reserve_approval, scoped to
     this (slug, cid), for the identical reason — the read-then-write here must not

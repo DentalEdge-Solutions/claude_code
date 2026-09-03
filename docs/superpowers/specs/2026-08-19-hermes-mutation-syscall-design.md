@@ -361,13 +361,34 @@ refuses an approval that carries one.
 succeeds. Consuming afterwards leaves a window: if the broker or host dies between the mutations
 landing and the mark being written, the approval is still live and the same change-set can be applied a
 second time. That is the 2026-08-19 lesson applied — *order irreversible operations so a wrong
-assumption costs nothing*. Reserving first means a crash costs an unusable approval, which a human
-recovers by approving again; consuming last means a crash costs an unintended change to a client's
+assumption costs nothing*. ~~Reserving first means a crash costs an unusable approval, which a human
+recovers by approving again~~; consuming last means a crash costs an unintended change to a client's
 account, which is recoverable only by undo.
 
-The record is therefore two-phase: `reserved_at` + `request_id` written before invocation, `outcome`
+~~The record is therefore two-phase: `reserved_at` + `request_id` written before invocation, `outcome`
 written after. An approval with `reserved_at` is refused regardless of whether `outcome` was ever
-written — an interrupted apply is not a reusable approval.
+written — an interrupted apply is not a reusable approval.~~
+
+> **CORRECTED 2026-09-03.** Both struck passages are false as shipped. `verify_approval(slug, cid,
+> digest, now, request_id=None)` does not refuse every `reserved_at` unconditionally, and a crash no
+> longer costs an unusable approval that only a human can recover — it costs a narrower thing, and the
+> human is out of the loop for the request that made the reservation. The actual rule is three-way:
+>
+> - no `reserved_at`                                     → accept (the manual operator path, unchanged)
+> - `reserved_at`, matching `request_id`, not completed   → accept — the run the reservation was made
+>   *for* may retry directly
+> - `reserved_at` and completed (`outcome`/`finished_at`) → refuse, even for its own `request_id`
+> - anything else                                         → refuse
+>
+> This exists because reservation happens before invocation (§6.4/§8) but `verify_approval` is also
+> the guard the executor itself calls inside that same invocation — unconditional refusal on
+> `reserved_at` meant the executor refused the very reservation the broker had just made *for it*, and
+> no apply through the syscall could ever succeed. Measured live on 2026-09-01 (`refused_preflight`,
+> every time) before the fix, and live again on 2026-09-03 after it. A crash between reserving and
+> applying is not costless: it still requires a human to re-approve for every caller *except* the one
+> request_id that made the reservation, and once `record_outcome` writes an outcome the approval is
+> dead to everyone, including that request_id. See `changeset_lib.verify_approval`'s docstring for the
+> full statement.
 
 Rationale for single-use at all: the rail's caps were sized for a human typing a command. A machine
 caller can repeat a request, and "at most 5 applies per client per day" is a much looser bound than
@@ -423,7 +444,7 @@ What changes is only *where the state they read lives*:
 | 2 client resolves and is `active` | reads `/opt/governance/registry/clients.json` |
 | 3 change-set loads and validates | reads the **approved snapshot**, not the vault copy (§7) |
 | 4 identity match | unchanged |
-| 5 approval hash + expiry | plus: refuse if `reserved_at` is present (§7 — reservation precedes execution) |
+| 5 approval hash + expiry | ~~plus: refuse if `reserved_at` is present (§7 — reservation precedes execution)~~ plus: refuse if `reserved_at` is present *unless* it names this exact `request_id` and the run has not completed (§7, CORRECTED 2026-09-03) |
 | 6 daily caps | counted from `/opt/governance/log/<slug>.jsonl` |
 | 6b injected credential belongs to this client | unchanged |
 | 7 allow-list resolution + disjointness | unchanged |

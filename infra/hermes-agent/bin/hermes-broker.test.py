@@ -190,6 +190,33 @@ class TestRefusalsNeverExecute(Base):
         self.assertEqual(r.calls, [])
         self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
 
+    def test_seen_replay_refuses_BEFORE_reserve_approval_ever_runs(self):
+        # The seen-set is now the SOLE barrier against a duplicate mutation in the
+        # record_outcome-failed case (changeset_lib.reserve_approval /
+        # record_outcome docstrings, CORRECTED 2026-09-03): a reservation left
+        # unfinished by a swallowed record_outcome failure is retryable by its own
+        # reserving request_id. That makes it load-bearing that a seen rid is refused
+        # at _process (:386) BEFORE _execute (:404) ever calls C.reserve_approval
+        # (:495) — not just that the classification comes back "refused_replay".
+        #
+        # The other seen-set tests above prove r.calls stays empty (the runner, i.e.
+        # the executor, is never spawned). This test proves the ordering one step
+        # earlier: the approval record itself is never touched. If refusal happened
+        # AFTER reserve_approval instead of before, the approval would come out of
+        # this test reserved — a live, retryable reservation left behind by a request
+        # that was supposedly refused — even though the runner was never called.
+        rid = str(__import__("uuid").uuid4())
+        C.append_seen(SLUG, rid, NOW)
+        self.file_request(request_id=rid)
+        r = RecordingRunner()
+        self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
+        with open(C.approval_path(SLUG, CID), encoding="utf-8") as f:
+            approval = json.load(f)
+        self.assertNotIn("reserved_at", approval)
+        self.assertNotIn("request_id", approval)
+
     def test_an_over_limit_client_is_refused_wholesale_until_its_queue_drains(self):
         # RULING R5: max_pending_requests is 2 in the fixture registry, but
         # pending_count is computed ONCE per drain, before any of the five requests are
@@ -319,10 +346,13 @@ class TestNoInterpolation(Base):
         self.assertIsInstance(argv, list)
         self.assertIn("--client", argv)
         self.assertIn("--changeset", argv)
+        self.assertIn("--request", argv)
         self.assertEqual(argv[argv.index("--client") + 1], SLUG)
         self.assertEqual(argv[argv.index("--changeset") + 1], CID)
-        # No request field reaches the command as anything but these two values.
-        self.assertNotIn(rid, argv)
+        self.assertEqual(argv[argv.index("--request") + 1], rid)
+        # The request id reaches the command in exactly ONE place — the --request
+        # value — never smuggled into another field or appended as a stray element.
+        self.assertEqual(argv.count(rid), 1)
         # And undo is never passed, on any path.
         self.assertNotIn("--undo", argv)
 
@@ -679,6 +709,22 @@ class TestExecution(Base):
         with open(governance_lib.approval_path(SLUG, CID)) as f:
             self.assertEqual(json.load(f)["outcome"], "accepted_applied")
 
+    def test_argv_carries_the_request_id_that_was_reserved(self):
+        """The reservation and the executor's proof must be the SAME id. A broker that
+        reserved with one id and spawned with another would refuse every apply — the
+        2026-09-01 defect in a new disguise."""
+        rid = self.file_request()
+        r = RecordingRunner(rc=0)
+        self.drain(r)
+        argv = r.calls[0]
+        self.assertIn("--request", argv)
+        rid_in_argv = argv[argv.index("--request") + 1]
+        self.assertEqual(rid_in_argv, rid)
+        with open(governance_lib.approval_path(SLUG, CID)) as f:
+            rec = json.load(f)
+        self.assertEqual(rec["request_id"], rid_in_argv,
+                         "argv id must match the id written by reserve_approval")
+
     def test_a_failure_writing_the_final_result_does_not_launder_into_a_false_refusal(self):
         # Post-Task-6 review FINDING 1. _execute's final _write_result is the LAST
         # thing it does, after a mutation may already have landed and after
@@ -756,7 +802,10 @@ class TestRealSubprocess(Base):
         self.assertEqual(got["exit_code"], 0)
         self.assertEqual(got["classification"], "accepted_applied")
 
-    def test_the_wrapper_is_invoked_with_exactly_four_argv_elements(self):
+    def test_the_wrapper_is_invoked_with_exactly_six_argv_elements(self):
+        # Was four (--client X --changeset Y) before the broker also passed the
+        # reserved request id (--request Z) so the executor can re-verify the same
+        # approval it was spawned for — see test_argv_carries_the_request_id_that_was_reserved.
         script = os.path.join(self.regdir, "echo-argv.sh")
         with open(script, "w") as f:
             f.write('#!/bin/sh\nprintf "%s\\n" "$#" > "$ARGC_OUT"\nexit 0\n')
@@ -771,7 +820,7 @@ class TestRealSubprocess(Base):
             B.MUTATE_SH = orig
             os.environ.pop("ARGC_OUT", None)
         with open(argc_out) as f:
-            self.assertEqual(f.read().strip(), "4")   # --client X --changeset Y
+            self.assertEqual(f.read().strip(), "6")   # --client X --changeset Y --request Z
 
 
 class TestCliFlagsHonored(Base):

@@ -503,7 +503,7 @@ def _execute(req, spool, runner, now):
         _write_result(rid, spool, "refused_approval", "refused", 2, detail, now)
         return {"request_id": rid, "classification": "refused_approval", "detail": detail}
 
-    argv = [MUTATE_SH, "--client", slug, "--changeset", cid]
+    argv = [MUTATE_SH, "--client", slug, "--changeset", cid, "--request", rid]
     timed_out = False
     try:
         rc, output = runner(argv)
