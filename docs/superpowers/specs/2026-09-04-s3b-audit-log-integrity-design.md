@@ -297,10 +297,23 @@ the mutant before believing a silent result:
 | drop the registry-driven existence check | the new missing-log negative |
 | `iter_log_records` returns instead of raising | the `day_counts` and `_undo_targets` refusals |
 | `bootstrap_logs` skips the gid/mode verification | the wrong-gid refusal test |
-| `bootstrap_logs` uses `open(p,"w")` instead of `O_EXCL` | the byte-identical idempotency test |
+| `bootstrap_logs` uses `open(p,"w")` instead of `O_EXCL` | ~~the byte-identical idempotency test~~ the `0660` mode test — **CORRECTED 2026-09-04, see below** |
 
 **An inert mutation is itself a finding** — if one reds nothing, that is a coverage claim to
 chase, not a result to accept.
+
+> **CORRECTED 2026-09-04, while writing the plan.** The struck expectation is wrong, and
+> would have produced exactly the inert mutation the line above warns about. A truncating
+> `open(p,"w")` cannot red the idempotency test: `bootstrap_logs` takes the `skipped` branch
+> on an existing file and **never reaches the create**, so there is nothing there to
+> truncate. That mutant reds through the umask instead — `open(p,"w")` yields `0644` rather
+> than `0660` — killing `test_apply_creates_one_empty_log_per_registered_client_at_0660`.
+>
+> `O_EXCL` stays, but the honest reason is narrower than the original row implied: it is
+> defense in depth against a raced or later-removed `os.path.exists` guard, not the thing
+> that protects the existing record. **What protects the existing record is the `skipped`
+> branch**, and the byte-identical test is that branch's proof — which is why the test
+> stays exactly as specified even though this row no longer points at it.
 
 ### 6.6 Baselines
 
