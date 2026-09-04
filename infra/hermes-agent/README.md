@@ -895,11 +895,26 @@ Give the store an ownership the executor's UID can use — either group access:
 ```bash
 sudo chgrp -R 10000 "$HERMES_GOVERNANCE_DIR"
 sudo chmod -R g+rX "$HERMES_GOVERNANCE_DIR"
-sudo chmod -R g+w  "$HERMES_GOVERNANCE_DIR"/log
+sudo chmod g+s "$HERMES_GOVERNANCE_DIR"/log
+sudo find "$HERMES_GOVERNANCE_DIR"/log -type f -name '*.jsonl' -exec chmod 0660 {} +
 ```
 
-`log/` only — `seen/` is not mounted into the executor and needs no access for uid
-10000. Widening it would hand the governed party the replay-protection state again.
+`log/` gets **no group write**. Write on a directory is what grants `unlink`, and
+both the undo path and the daily caps read through `iter_log_records`, so an
+executor that can delete `log/<slug>.jsonl` destroys the reversibility record — not
+merely a quota. It appends to a **pre-created** per-client file instead; `setgid` on
+`log/` is what makes those files inherit gid 10000, without which `0660` grants
+the operator's own group and uid 10000 falls through to `other`.
+
+Create the per-client logs — required for every registered client, and idempotent:
+
+```bash
+infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs            # dry run
+infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs --apply
+```
+
+`seen/` is not mounted into the executor at all and needs no access for uid 10000.
+Widening it would hand the governed party the replay-protection state again.
 
 or outright ownership:
 

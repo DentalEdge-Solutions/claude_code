@@ -255,8 +255,15 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
         p = _check_dir(os.path.join(root, name), uid, gid, need_write=False)
         if p:
             problems.append(p)
+    # S3-b: read+traverse on the DIRECTORY, never write. Directory write is what grants
+    # unlink, so a log/ the executor can write is a log/ it can delete — and both the
+    # undo path and the caps path read through iter_log_records, so a deleted log costs
+    # REVERSIBILITY, not merely quota. What the executor actually needs here is r-x:
+    # append_log opens log/<slug>.jsonl with mode "a" (the FILE-level check below covers
+    # that) and then fsyncs the log/ DIRECTORY fd via os.open(dirname, O_RDONLY), which
+    # is why read is required and traverse alone would not be enough.
     for name in READ_WRITE_DIRS:
-        p = _check_dir(os.path.join(root, name), uid, gid, need_write=True)
+        p = _check_dir(os.path.join(root, name), uid, gid, need_write=False)
         if p:
             problems.append(p)
 
@@ -286,7 +293,18 @@ Fix by OWNERSHIP, not by widening the mode. Either run the store under a group t
 executor's UID belongs to:
 
     sudo chgrp -R %(gid)d %(root)s
-    sudo chmod -R g+rX %(root)s && sudo chmod -R g+w %(root)s/log
+    sudo chmod -R g+rX %(root)s
+    sudo chmod g+s %(root)s/log
+    sudo find %(root)s/log -type f -name '*.jsonl' -exec chmod 0660 {} +
+
+log/ gets NO group write: write on a directory is what grants unlink, and a deleted
+audit log costs reversibility (both --undo and the daily caps read through it), not
+merely quota. The executor appends to a PRE-CREATED per-client file instead, and setgid
+on log/ is what makes host-created files inherit gid %(gid)d — without it, 0660 grants
+the wrong group and uid %(uid)d falls through to `other`. Create missing per-client logs
+with:
+
+    migrate-governance.py --bootstrap-logs --apply
 
 or give the store to the executor's UID outright:
 

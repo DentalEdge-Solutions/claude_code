@@ -73,7 +73,23 @@ class TestLinuxSemantics(Base):
 
     def test_group_readable_store_with_a_matching_gid_passes(self):
         """The documented remedy: keep the store off `other`, grant the executor's
-        group. log/ additionally needs write, hence 0o770 there."""
+        group. log/ is 2750 — group read+traverse, NO group write (write on the
+        directory is what grants unlink), setgid so host-created log files inherit
+        gid 10000."""
+        os.chmod(self.root, 0o750)
+        for name in PF.READ_ONLY_DIRS:
+            os.chmod(os.path.join(self.root, name), 0o750)
+        for name in PF.READ_WRITE_DIRS:
+            os.chmod(os.path.join(self.root, name), 0o2750)
+        self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+    def test_group_writable_log_dir_still_passes_because_it_over_grants(self):
+        """HONEST NEGATIVE RESULT, recorded rather than hidden. This gate checks that
+        the executor CAN work, not that it is minimally privileged, so the old 0770
+        layout still returns zero problems — the pre-flight is NOT what stops an
+        operator re-widening log/. The deploy documentation and REMEDY text are, and
+        Task 5's container probe is what measures the difference. Asserting a refusal
+        here would be asserting a guarantee this script does not make."""
         os.chmod(self.root, 0o750)
         for name in PF.READ_ONLY_DIRS:
             os.chmod(os.path.join(self.root, name), 0o750)
@@ -81,17 +97,34 @@ class TestLinuxSemantics(Base):
             os.chmod(os.path.join(self.root, name), 0o770)
         self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
 
-    def test_read_only_store_flags_only_the_writable_directories(self):
-        """0o755 throughout: everything is readable, but the executor must WRITE the
-        audit log. A check that only tested readability would pass here and let
-        append_log fail mid-apply — which is the finding."""
+    def test_world_readable_store_passes_the_dirs_but_flags_an_unwritable_log_file(self):
+        """S3-b moved the write requirement from the DIRECTORY to the FILE. 0o755
+        throughout is now a correct layout for log/ itself — r-x is all append_log needs
+        from the directory — so the directory pass here is not a weakened check, it is
+        the check landing on the right object. The requirement did not go away: an
+        existing log/<slug>.jsonl the executor cannot append to is still exactly the
+        mid-apply exit-3 this script exists to prevent, and is still reported."""
         self._chmod_all(0o755)
+        log_file = os.path.join(self.root, "log", "acme.jsonl")
+        with open(log_file, "w") as f:
+            f.write("{}\n")
+        os.chmod(log_file, 0o644)          # readable, NOT writable by group or other
         problems = PF.check(self.root, self.other_uid, self.other_gid, platform="linux")
-        self.assertEqual(len(problems), len(PF.READ_WRITE_DIRS))
-        for name in PF.READ_WRITE_DIRS:
-            self.assertTrue(any(name in p for p in problems), name)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("acme.jsonl", problems[0])
         for name in PF.READ_ONLY_DIRS:
-            self.assertFalse(any(name in p for p in problems), name)
+            self.assertFalse(any("%s:" % name in p for p in problems), name)
+
+    def test_control_the_same_store_with_an_appendable_log_file_is_healthy(self):
+        """POSITIVE CONTROL for the test above. Without it, that assertion would also
+        pass against an implementation that reported every log file as a problem."""
+        self._chmod_all(0o755)
+        log_file = os.path.join(self.root, "log", "acme.jsonl")
+        with open(log_file, "w") as f:
+            f.write("{}\n")
+        os.chmod(log_file, 0o666)
+        self.assertEqual(
+            PF.check(self.root, self.other_uid, self.other_gid, platform="linux"), [])
 
     def test_owner_class_wins_even_when_group_and_other_are_wider(self):
         """POSIX selects exactly ONE permission class. A directory owned by the
@@ -119,14 +152,17 @@ class TestFileLevelChecks(Base):
     CID = "20260101-000000-deadbeef"
 
     def _configure_group_readable_dirs(self):
-        """The documented remedy layout: root and read-only dirs at 0750, log/
-        additionally group-writable at 0770. Mirrors
+        """The documented remedy layout (S3-b): root and read-only dirs at 0750, and
+        log/ at 2750 — group read+traverse but NOT group write, because directory write
+        is what grants unlink, and setgid so host-created log files inherit the
+        executor's group. append_log fsyncs the log/ directory fd, so r-x is required
+        and traverse alone would not do. Mirrors
         test_group_readable_store_with_a_matching_gid_passes above."""
         os.chmod(self.root, 0o750)
         for name in PF.READ_ONLY_DIRS:
             os.chmod(os.path.join(self.root, name), 0o750)
         for name in PF.READ_WRITE_DIRS:
-            os.chmod(os.path.join(self.root, name), 0o770)
+            os.chmod(os.path.join(self.root, name), 0o2750)
 
     def _configure_full_correct_store(self):
         """Directories AND files all at the correct mode for a group-matching
