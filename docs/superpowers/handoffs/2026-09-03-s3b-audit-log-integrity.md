@@ -1,6 +1,12 @@
 # Session prompt — S3-b: audit-log integrity
 
-Paste this as the opening message of a new session.
+Open a new session and point it here rather than pasting the body:
+
+> Read `docs/superpowers/handoffs/2026-09-03-s3b-audit-log-integrity.md`, then confirm your
+> understanding and flag any drift before starting.
+
+Pointing at the file keeps corrections versioned; pasting a stale copy is how the drifts
+corrected on 2026-09-04 got into the last session in the first place.
 
 ---
 
@@ -26,18 +32,61 @@ executes the **S3-b wave: audit-log integrity**.
 
 ## STATE — measured, not asserted
 
-`main` at **`15907a5`**. Nothing in flight. Open PR #21 (the S3-b brief, docs only).
+> **Corrected 2026-09-04.** The original STATE was written before PR #21 merged and carried four
+> drifts, each re-measured below. The struck values are kept so a reader can tell a correction
+> from a fresh claim.
 
-- `infra/hermes-agent/bin/run-bin-tests.sh` → **25/25 suites**
-- `node scripts/run-all-tests.js` → **22/22 suites**
+`main` at **`a9fb2bf`** (~~`15907a5`~~ — that is PR #20's merge, two commits back). **Nothing in
+flight.** PR #21 is **MERGED** (~~open~~), so the brief and this file are already on `main`.
+
+- `infra/hermes-agent/bin/run-bin-tests.sh` → **25/25 suites** (re-measured 2026-09-04, exit 0)
+- `node scripts/run-all-tests.js` → **22/22 suites** (re-measured 2026-09-04, exit 0)
 - CI has four jobs and **does now run the tests** — verified in the runner log, not the tick.
-- Kill switch `~/.hermes/governance/control/` — **absent. Mutation disabled at rest.** Leave it
-  that way except where a live gate demands otherwise, and turn it off again immediately after.
-- Working tree has **pre-existing dirt that is NOT yours** — `.project-brain/log.md`, two deleted
-  `.project-brain` candidates, two `evals/*.json`, untracked `.obsidian/`. Never `git add -A`.
+- Kill switch: the switch is the **file** `~/.hermes/governance/control/mutation-enabled`
+  (`preflight-governance-access.py:50`), and it is **absent — mutation disabled at rest.**
+  ~~The directory `control/` is absent~~ — **the directory EXISTS** and holds `.locks/`, so
+  `ls control/` returns 0 and proves nothing. **Test the file, and pair it with a live control**
+  (create → detect → remove); a directory-existence check here is exactly the no-op gate this
+  document warns about below. Leave the switch off except where a live gate demands otherwise,
+  and turn it off again immediately after.
+- Working tree dirt — **5 tracked changes and 43 untracked entries**, not the ~~5 tracked plus
+  `.obsidian/`~~ originally stated. Tracked: `.project-brain/log.md`, two deleted
+  `.project-brain` candidates, two `evals/*.json`. Untracked: `.obsidian/`, ~40 files under
+  `.project-brain/reports/` and `.project-brain/decisions/candidates/`, and three under
+  `evals/`. **`evals/` is only PARTIALLY gitignored**, contrary to the rule in `CLAUDE.md`.
+  Never `git add -A` — and for the same reason never `git add .project-brain/` or
+  `git add evals/`. **Stage by explicit path only.**
 - The dormant pilot is marked `mutation_target="dormant_pilot"` in the registry. Resolve it
   programmatically via `vault_lib.resolve_dormant_pilot()` — **never hardcode a client**. The
   resolver refuses if zero or more than one client is marked.
+
+### Corrections to the documents this file points at
+
+- **`HANDOFF.md` is stale on one parked minor.** Its deferred-minors list still shows the
+  `REQUEST_ID_RE` divergence (its item 8) as open. It was **fixed in `6645879`** — unified into
+  `governance_lib` — and is already on `main`. Nothing to do there.
+- **The brief's line reference has drifted.** It cites `apply-changeset.py:194` for "the undo
+  path and the caps path both read through `iter_log_records`". The claim is verbatim-correct
+  but now lives at **`:208`** (docstring) and **`:213`** (the call). `changeset_lib.py:610`
+  independently documents that the executor can still delete the log — a useful anchor.
+- **Image name.** The brief's prose says "the `ads-mutator` image" while its own example command
+  says `hermes-agent-claude`. Only **`hermes-agent-claude:latest`** exists as an image;
+  `ads-mutator` is the **compose service** name. Use the image tag in `docker run`.
+
+### Environment changes landed 2026-09-04 (a `/doctor` pass, unrelated to S3-b)
+
+Harmless to the wave, but they change what you will see, so do not mistake them for drift:
+
+- **`CLAUDE.md`'s Codex External Eval Layer moved** to `.claude/skills/codex-eval/SKILL.md` and
+  now loads on demand. Its **`Never` list stayed in `CLAUDE.md`** — safety prohibitions remain
+  always-loaded. S3-b touches none of it.
+- **`Bash(node *)`, `Bash(curl *)`, `Bash(python3 *)`, `Bash(gh api *)`, `Bash(git fetch *)` and
+  `Bash(git pull *)` were removed** from `.claude/settings.local.json`'s allow-list — they were
+  standing arbitrary-execution grants. `node scripts/run-all-tests.js` is therefore evaluated
+  rather than waved through. **This is expected. Do not re-add a wildcard to silence it.**
+- **Auto mode is now the default permission mode**, and 151 dormant skills were archived to
+  `~/.claude/skills-removed-2026-09-04/` (restorable via `_RESTORE.sh`). The skill listing is
+  39 entries, not 190.
 
 ## The task
 
