@@ -91,14 +91,12 @@ Replace it with:
             os.chmod(os.path.join(self.root, name), 0o2750)
 ```
 
-And in `_restore_modes` (`:40`), change the same line so cleanup mirrors the layout under test:
-
-```python
-        for name in PF.READ_WRITE_DIRS:
-            os.chmod(os.path.join(self.root, name), 0o2750)
-```
-
-`_restore_modes` exists so `shutil.rmtree` can run; the tests own these directories and owner bits are `rwx` in `2750`, so cleanup is unaffected.
+**Leave `_restore_modes` alone.** (CORRECTED 2026-09-04 during execution — an earlier
+revision of this step told you to edit it, from a misread of the file.) It is
+`os.chmod(self.root, 0o700)` followed by a uniform `0o700` over `ALL_DIRS` with an
+`isdir` guard; it has no `READ_WRITE_DIRS`-specific line to change. It exists only so
+`shutil.rmtree` can run, and `0o700` already gives the owner `rwx`, so cleanup is
+unaffected by the layout under test.
 
 - [ ] **Step 2: Run the suite to verify it fails, and record which tests fail**
 
@@ -236,8 +234,14 @@ python3 - <<'PY'
 import io
 p = "preflight-governance-access.py"
 s = io.open(p).read()
-old = "        p = _check_dir(os.path.join(root, name), uid, gid, need_write=False)"
-assert s.count(old) == 1, "expected exactly one inverted call, found %d" % s.count(old)
+# The inversion makes the READ_ONLY_DIRS and READ_WRITE_DIRS _check_dir calls TEXTUALLY
+# IDENTICAL, so match on the surrounding loop, not the call alone. (CORRECTED 2026-09-04
+# during execution: an earlier revision asserted the call line was unique. It is not —
+# and the assert tripped BEFORE mutating, so the run exited 0 on an unmutated file and
+# read as a passing mutation proof. That is the inert-mutation trap wearing a green hat.)
+old = ("    for name in READ_WRITE_DIRS:\n"
+       "        p = _check_dir(os.path.join(root, name), uid, gid, need_write=False)")
+assert s.count(old) == 1, "expected exactly one READ_WRITE_DIRS _check_dir loop, found %d" % s.count(old)
 io.open(p, "w").write(s.replace(old, old.replace("need_write=False", "need_write=True")))
 PY
 python3 -c "import ast; ast.parse(open('preflight-governance-access.py').read())" && echo "mutant parses"
