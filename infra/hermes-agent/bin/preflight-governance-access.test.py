@@ -510,5 +510,89 @@ class TestCli(Base):
         self.assertIn("Do NOT `chmod 777`", err)
 
 
+class TestRegisteredClientLogs(Base):
+    """S3-b/D2. Under the append-but-not-unlink layout the executor cannot CREATE
+    log/<slug>.jsonl, so a registered client with no log is a store it cannot use —
+    R19's own class of finding, and R19 exists so that surfaces at startup rather than
+    mid-apply as exit 3 after a live account change."""
+
+    def _write_registry(self, text):
+        reg = os.path.join(self.root, *PF.CLIENTS_REGISTRY_REL)
+        with open(reg, "w") as f:
+            f.write(text)
+        os.chmod(reg, 0o640)
+
+    def _healthy_dirs(self):
+        os.chmod(self.root, 0o750)
+        for name in PF.READ_ONLY_DIRS:
+            os.chmod(os.path.join(self.root, name), 0o750)
+        for name in PF.READ_WRITE_DIRS:
+            os.chmod(os.path.join(self.root, name), 0o2750)
+
+    def test_a_registered_client_without_a_log_is_refused(self):
+        self._healthy_dirs()
+        self._write_registry('{"clients": {"acme-dental": {"status": "active"}}}')
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("--bootstrap-logs", problems[0])
+
+    def test_control_the_same_registry_with_the_log_present_is_healthy(self):
+        """POSITIVE CONTROL. Without it the refusal above would also pass against a
+        check that refused every store with a non-empty registry."""
+        self._healthy_dirs()
+        self._write_registry('{"clients": {"acme-dental": {"status": "active"}}}')
+        p = os.path.join(self.root, "log", "acme-dental.jsonl")
+        with open(p, "w"):
+            pass
+        os.chmod(p, 0o660)
+        self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+    def test_the_refusal_names_a_count_not_the_slugs(self):
+        """Client slugs are client-private and this text reaches stderr, which the
+        systemd journal captures under Phase B. vault_lib.resolve_dormant_pilot makes
+        the same choice for the same reason."""
+        self._healthy_dirs()
+        self._write_registry(
+            '{"clients": {"acme-dental": {"status": "active"}, '
+            '"other-clinic": {"status": "dormant_pilot"}}}')
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("2", problems[0])
+        self.assertNotIn("acme-dental", problems[0])
+        self.assertNotIn("other-clinic", problems[0])
+
+    def test_an_unparseable_registry_is_refused(self):
+        self._healthy_dirs()
+        self._write_registry("{not json")
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertTrue(any("registry" in p for p in problems))
+
+    def test_a_registry_this_process_cannot_read_is_not_double_reported(self):
+        """Ruling 9. This is the ONLY check in the module that does real I/O rather than
+        simulating access for a hypothetical (uid, gid). When the checking process itself
+        cannot read the registry, the registry/ directory check has ALREADY reported that
+        fault — adding a second problem for the same cause counts one fault twice and
+        breaks the exact-count assertions, which is R19b's over-checking failure again."""
+        self._healthy_dirs()
+        self._write_registry('{"clients": {"acme-dental": {"status": "active"}}}')
+        reg = os.path.join(self.root, *PF.CLIENTS_REGISTRY_REL)
+        os.chmod(reg, 0o000)                       # unreadable by THIS process
+        self.addCleanup(os.chmod, reg, 0o640)
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertFalse(any("malformed" in p for p in problems))
+
+    def test_an_absent_registry_is_not_a_fault(self):
+        """Absence stays absence. _check_file already treats a missing registry as the
+        normal resting state of a fresh store, and this check must not change that —
+        turning a fresh store into a refusal is R19b's cry-wolf failure."""
+        self._healthy_dirs()
+        self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+    def test_an_empty_registry_requires_nothing(self):
+        self._healthy_dirs()
+        self._write_registry('{"clients": {}}')
+        self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

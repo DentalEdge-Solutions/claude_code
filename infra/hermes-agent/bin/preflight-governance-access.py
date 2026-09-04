@@ -19,7 +19,7 @@ locally is a check operators learn to bypass.
 The remedy is ownership, never `chmod 777`: making the store world-readable hands it
 back to every process on the host and deletes the isolation the store exists for.
 """
-import argparse, os, stat, sys
+import argparse, json, os, stat, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib                      # SLUG_RE, shared not restated
@@ -243,6 +243,85 @@ def _check_approvals(root, uid, gid):
     return problems
 
 
+def _check_registered_logs(root):
+    """Every REGISTERED client must have a pre-created audit log (S3-b).
+
+    log/ is host-owned 2750, so the executor cannot create log/<slug>.jsonl — append_log
+    opens it with mode "a", which creates, and that now fails with EACCES. Catching it
+    only in iter_log_records surfaces it MID-APPLY, and R19 exists precisely so a store
+    the executor cannot use is refused at startup instead: mid-apply is exit 3 after a
+    live account change, while a startup refusal costs one idempotent command.
+
+    This is NOT R19b's over-checking. Every false refusal in that lineage — the
+    .approval.lock sidecar, a rotated log, an operator's backup — was this gate demanding
+    access to a file the executor never opens, from a requirement list written from
+    memory. This requirement is the inverse: log/<slug>.jsonl for a registered slug is
+    the one file the executor certainly opens, and it is DERIVED from the same
+    clients.json vault_lib.resolve already gates on, never from a listing of log/. Files
+    in log/ that no registered slug names stay ignored, exactly as before.
+
+    A MISSING registry is not a fault — _check_file already treats it as the normal
+    resting state of a fresh store, and turning that into a refusal is the cry-wolf
+    failure. An UNPARSEABLE one is: no client resolves through it, so "zero registered
+    clients" would be a silent pass over a store that cannot work at all.
+
+    The message carries a COUNT, never the slugs. Client slugs are client-private, this
+    text goes to stderr, and the systemd journal captures stderr under Phase B —
+    vault_lib.resolve_dormant_pilot refuses to name candidates for the same reason.
+    """
+    reg = governance_lib.clients_registry_path(root)
+    try:
+        with open(reg, encoding="utf-8") as f:
+            data = json.load(f)
+    # Ruling 9. Missing OR unreadable-by-this-process, and NEITHER is this check's to
+    # report. Absence is the normal resting state of a fresh store — _check_file
+    # already treats it that way. Unreadability is ALREADY reported by the registry/
+    # directory check and the clients.json file check above, so reporting it again
+    # counts one fault twice: measured at 6 problems for a store with 5 faults, which
+    # broke test_owner_class_wins_even_when_group_and_other_are_wider's exact count.
+    # That is R19b's over-checking failure on a new path.
+    #
+    # This is also the one place in this module that does REAL I/O rather than
+    # simulating access for a hypothetical (uid, gid) via _perm_bits. Every sibling
+    # check predicts whether uid 10000 WOULD have access; only this one needs the
+    # checking process itself to read a file. Returning [] keeps that asymmetry out of
+    # the results.
+    #
+    # Residual, stated rather than hidden: a registry the EXECUTOR can read but the
+    # CHECKER cannot silently skips this check. That is a "cannot verify", not a pass,
+    # and Task 4's iter_log_records raise is the backstop that still catches a missing
+    # log mid-apply. This check is the early warning, not the only guard.
+    except OSError:
+        return []
+    except ValueError as e:
+        return ["%s: malformed client registry (%s) — refusing, because a registry that "
+                "will not parse resolves no client, and reading it as 'zero registered "
+                "clients' would pass a store that cannot work" % (reg, e)]
+    # data.get("clients", {}) — WITH the default, matching vault_lib.load_registry:49
+    # exactly. An ABSENT "clients" key means zero registered clients, which is how
+    # load_registry already reads it; only a PRESENT but non-object "clients" is a fault.
+    # Dropping the default here would return None for a registry of "{}" and refuse it —
+    # reding the very controls this check is supposed to leave untouched, since
+    # _configure_full_correct_store writes exactly that.
+    clients = data.get("clients", {}) if isinstance(data, dict) else None
+    if not isinstance(clients, dict):
+        return ["%s: registry 'clients' must be a JSON object" % reg]
+
+    missing = 0
+    for slug in clients:
+        if not isinstance(slug, str) or not governance_lib.SLUG_RE.fullmatch(slug):
+            continue        # vault_lib.resolve would refuse it; not this gate's call
+        if not os.path.isfile(os.path.join(root, "log", "%s.jsonl" % slug)):
+            missing += 1
+    if not missing:
+        return []
+    return ["%s/log: %d registered client(s) have no pre-created audit log. The executor "
+            "cannot create one (log/ is host-owned %04o by design), so this surfaces "
+            "mid-apply as exit 3 after a live account change. Fix with: "
+            "migrate-governance.py --bootstrap-logs --apply"
+            % (root, missing, governance_lib.LOG_DIR_MODE)]
+
+
 def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
     """Return a list of human-readable problems; empty means the executor can work."""
     if not applies(platform):
@@ -284,6 +363,7 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
             problems.append(p)
 
     problems.extend(_check_approvals(root, uid, gid))
+    problems.extend(_check_registered_logs(root))
 
     return problems
 
