@@ -853,6 +853,9 @@ class TestRegisteredClientLogs(Base):
         problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
         self.assertEqual(len(problems), 1)
         self.assertIn("--bootstrap-logs", problems[0])
+        # The discriminating partner to the two-client test below: together they prove the
+        # number tracks the count rather than being a constant that happens to match.
+        self.assertIn("1 registered client(s)", problems[0])
 
     def test_control_the_same_registry_with_the_log_present_is_healthy(self):
         """POSITIVE CONTROL. Without it the refusal above would also pass against a
@@ -875,7 +878,11 @@ class TestRegisteredClientLogs(Base):
             '"other-clinic": {"status": "dormant_pilot"}}}')
         problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
         self.assertEqual(len(problems), 1)
-        self.assertIn("2", problems[0])
+        # CORRECTED 2026-09-04 during execution: this was assertIn("2", ...), which is
+        # VACUOUS — the message interpolates LOG_DIR_MODE as %04o, i.e. "2750", so a "2"
+        # is present however wrong the count is. Verified: a message built with
+        # missing=99 still satisfies assertIn("2"). Match the whole phrase instead.
+        self.assertIn("2 registered client(s)", problems[0])
         self.assertNotIn("acme-dental", problems[0])
         self.assertNotIn("other-clinic", problems[0])
 
