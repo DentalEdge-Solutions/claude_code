@@ -207,7 +207,7 @@ class TestFileLevelChecks(Base):
 
     def test_existing_log_file_with_bad_mode_is_reported(self):
         """THE NEGATIVE. The exact case that returned zero problems before this fix:
-        directories correct (0770, matching gid), but an existing log/<slug>.jsonl at
+        directories correct (2750, matching gid), but an existing log/<slug>.jsonl at
         an owner-only mode. append_log opens this file with mode "a" — this is the
         mid-apply exit-3 the pre-flight exists to prevent."""
         self._configure_full_correct_store()
@@ -474,7 +474,7 @@ class TestScope(Base):
         for name in PF.READ_ONLY_DIRS:
             os.chmod(os.path.join(self.root, name), 0o750)
         for name in PF.READ_WRITE_DIRS:
-            os.chmod(os.path.join(self.root, name), 0o770)
+            os.chmod(os.path.join(self.root, name), 0o2750)
         log_file = os.path.join(self.root, "log", "acme.jsonl")
         with open(log_file, "w") as f:
             f.write("{}\n")
