@@ -24,8 +24,8 @@ import argparse, os, stat, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib                      # SLUG_RE, shared not restated
 
-EXECUTOR_UID = 10000            # Dockerfile: USER hermes
-EXECUTOR_GID = 10000
+EXECUTOR_UID = governance_lib.EXECUTOR_UID
+EXECUTOR_GID = governance_lib.EXECUTOR_GID
 
 READ_ONLY_DIRS = ("approvals", "control", "registry")
 

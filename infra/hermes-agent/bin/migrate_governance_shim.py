@@ -25,7 +25,9 @@ Two properties a naive copy-then-check does NOT give you, and this module must:
    (changeset_lib.iter_log_records / day_counts), and refuses on the first line that
    doesn't parse rather than silently declining to count it.
 """
-import json, os, shutil
+import json, os, shutil, stat, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import governance_lib
 
 
 def _count_lines(path):
@@ -94,6 +96,98 @@ def _atomic_copy(src, dst):
     os.replace(tmp, dst)
 
 
+def bootstrap_logs(governance_root, dry_run=True, expected_gid=None):
+    """Guarantee every REGISTERED client a pre-created audit log.
+
+    S3-b's second half. Under the append-but-not-unlink layout the executor cannot
+    CREATE log/<slug>.jsonl — log/ is host-owned 2750 — so a missing log is no longer a
+    normal resting state for a registered client, and iter_log_records fails closed on
+    it. That is only safe once every registered client is guaranteed a log, and there is
+    no programmatic registration hook: clients.json is hand-edited, and migrate() only
+    carries logs that ALREADY exist in a vault. Hence this rides the same operator CLI
+    (ruling R23), as a separate mode rather than folded into migrate(): migration is a
+    one-time vault->store move, registration is continuous, and the pre-flight's refusal
+    has to name a command an operator can run right after editing the registry.
+
+    Three properties this must have, each earned:
+
+    1. It REFUSES a missing log/ rather than creating one. _ensure_dir would lay it down
+       at 0700, producing exactly the unusable store the pre-flight exists to catch.
+    2. Creation is O_CREAT|O_EXCL, never open(p, "w"). Truncation would destroy the
+       reversibility record this whole wave protects, and an existence-only idempotency
+       check would call that a pass.
+    3. It VERIFIES what it created and refuses on a mismatch. log/ without its setgid
+       bit gives a new file the creating user's primary group; 0660 then grants the
+       wrong group and uid 10000 falls through to `other`, so the executor can neither
+       append nor unlink. That layout passes a delete probe and fails an append control
+       — it looks like a fix. Creating the file is not evidence; stat'ing it is.
+    """
+    if expected_gid is None:
+        expected_gid = governance_lib.EXECUTOR_GID
+    log_dir = os.path.join(governance_root, "log")
+    if not os.path.isdir(log_dir):
+        raise RuntimeError(
+            "no log directory at %s — refusing to create it, because a log/ laid down "
+            "here would get the wrong mode and produce a store the executor cannot use. "
+            "Create it host-side at mode %04o (see the README's ownership section) and "
+            "re-run." % (log_dir, governance_lib.LOG_DIR_MODE))
+
+    reg = os.path.join(governance_root, "registry", "clients.json")
+    try:
+        with open(reg, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(
+            "cannot read the client registry at %s (%s) — refusing, because a registry "
+            "that will not parse resolves no client, and reading it as 'zero registered "
+            "clients' would report success over a store that cannot work" % (reg, e))
+    # WITH the default, matching vault_lib.load_registry:49 — an absent "clients" key is
+    # zero registered clients, not a malformed registry.
+    clients = data.get("clients", {}) if isinstance(data, dict) else None
+    if not isinstance(clients, dict):
+        raise RuntimeError("registry 'clients' must be a JSON object: %s" % reg)
+
+    result = {"created": [], "skipped": []}
+    for slug in sorted(clients):
+        if not isinstance(slug, str) or not governance_lib.SLUG_RE.fullmatch(slug):
+            raise RuntimeError(
+                "registry contains a slug that is not resolvable (%r) — refusing rather "
+                "than skipping it, because a skipped registration is exactly the "
+                "ambiguity this function exists to remove" % (slug,))
+        dst = os.path.join(log_dir, "%s.jsonl" % slug)
+        if os.path.exists(dst):
+            result["skipped"].append(slug)
+            continue
+        if dry_run:
+            result["created"].append(slug)
+            continue
+        fd = os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                     governance_lib.LOG_FILE_MODE)
+        os.close(fd)
+        try:
+            os.chmod(dst, governance_lib.LOG_FILE_MODE)   # defeat the umask
+            st = os.stat(dst)
+            mode = stat.S_IMODE(st.st_mode)
+            if mode != governance_lib.LOG_FILE_MODE:
+                raise RuntimeError(
+                    "%s landed at mode %04o, not %04o — refusing"
+                    % (dst, mode, governance_lib.LOG_FILE_MODE))
+            if st.st_gid != expected_gid:
+                raise RuntimeError(
+                    "%s landed with group %d, not the executor's group %d — refusing. "
+                    "log/ is almost certainly missing its setgid bit, without which a "
+                    "new file inherits the creating user's primary group and mode %04o "
+                    "grants the WRONG group: uid %d then falls through to `other` and "
+                    "can neither append nor unlink. Run `chmod g+s %s` and re-run."
+                    % (dst, st.st_gid, expected_gid, governance_lib.LOG_FILE_MODE,
+                       governance_lib.EXECUTOR_UID, log_dir))
+        except Exception:
+            os.remove(dst)      # created by THIS call; never remove a pre-existing log
+            raise
+        result["created"].append(slug)
+    return result
+
+
 def migrate(vault_root, governance_root, dry_run=False):
     result = {"moved": [], "skipped": [], "counts_before": {}, "counts_after": {}}
 
@@ -130,7 +224,7 @@ def migrate(vault_root, governance_root, dry_run=False):
             continue
 
         dst_log_dir = os.path.dirname(dst_log)
-        _ensure_dir(dst_log_dir)
+        _ensure_dir(dst_log_dir, mode=governance_lib.LOG_DIR_MODE)
         tmp_log = dst_log + ".tmp"
         try:
             shutil.copy2(src_log, tmp_log)

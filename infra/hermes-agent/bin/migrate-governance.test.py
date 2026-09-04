@@ -1,6 +1,17 @@
-import json, os, shutil, sys, tempfile, unittest
+import importlib.util, json, os, shutil, stat, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import migrate_governance_shim as M  # see Step 3 note on the module name
+
+
+def _load_cli():
+    """migrate-governance.py has a hyphen in its name, so it cannot be imported —
+    the same loader idiom preflight-governance-access.test.py uses."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "migrate_governance_cli", os.path.join(here, "migrate-governance.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class TestMigration(unittest.TestCase):
@@ -126,12 +137,17 @@ class TestMigration(unittest.TestCase):
         """Ruling R14 (promoted minor): a later task requires the governance store's
         subdirectories to be mode 700 throughout and will assert it. os.makedirs's own
         mode= argument is itself umask-affected, so directories this module creates
-        must be chmod'd explicitly after creation."""
+        must be chmod'd explicitly after creation.
+
+        S3-b (abeb662) is that later task, and it decided log/ must be 2750 — setgid,
+        group read+traverse, NOT group-writable — so the executor can append without
+        being able to unlink. R14's blanket 700-everywhere assumption is superseded for
+        log/ specifically; registry/ is untouched by that decision and stays 700."""
         M.migrate(self.vault, self.gov)
         reg_mode = os.stat(os.path.join(self.gov, "registry")).st_mode & 0o777
-        log_mode = os.stat(os.path.join(self.gov, "log")).st_mode & 0o777
+        log_mode = os.stat(os.path.join(self.gov, "log")).st_mode & 0o7777
         self.assertEqual(reg_mode, 0o700)
-        self.assertEqual(log_mode, 0o700)
+        self.assertEqual(log_mode, M.governance_lib.LOG_DIR_MODE)
 
 
 class TestCountLines(unittest.TestCase):
@@ -168,6 +184,107 @@ class TestCountLines(unittest.TestCase):
                 f.write(json.dumps({"changeset_id": "20260812-101500-abcd1234",
                                     "action_index": i, "status": "applied"}) + "\n")
         self.assertEqual(M._count_lines(path), 3)
+
+
+class TestBootstrapLogs(unittest.TestCase):
+    """S3-b: every REGISTERED client must be guaranteed a pre-created log, or a missing
+    log stays ambiguous between 'never used' and 'deleted'."""
+
+    def setUp(self):
+        self.gov = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.gov, True)
+        os.makedirs(os.path.join(self.gov, "registry"))
+        os.makedirs(os.path.join(self.gov, "log"), mode=0o2750)
+        with open(os.path.join(self.gov, "registry", "clients.json"), "w") as f:
+            json.dump({"clients": {
+                "acme-dental": {"customer_id": "1234567890", "status": "active"},
+                "other-clinic": {"customer_id": "9998887776", "status": "dormant_pilot"},
+            }}, f)
+
+    def _log(self, slug):
+        return os.path.join(self.gov, "log", "%s.jsonl" % slug)
+
+    def test_dry_run_creates_nothing(self):
+        res = M.bootstrap_logs(self.gov, expected_gid=os.getgid())
+        self.assertEqual(sorted(res["created"]), ["acme-dental", "other-clinic"])
+        self.assertFalse(os.path.exists(self._log("acme-dental")))
+        self.assertFalse(os.path.exists(self._log("other-clinic")))
+
+    def test_apply_creates_one_empty_log_per_registered_client_at_0660(self):
+        res = M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertEqual(sorted(res["created"]), ["acme-dental", "other-clinic"])
+        for slug in ("acme-dental", "other-clinic"):
+            st = os.stat(self._log(slug))
+            self.assertEqual(stat.S_IMODE(st.st_mode), 0o660, slug)
+            self.assertEqual(st.st_size, 0, slug)
+
+    def test_an_existing_log_is_skipped_and_left_byte_identical(self):
+        """THE load-bearing idempotency test. A bootstrap that opened the file with mode
+        'w' would truncate exactly the reversibility record this wave exists to protect,
+        and an existence-only assertion would call that a pass."""
+        M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        with open(self._log("acme-dental"), "w") as f:
+            f.write('{"status": "applied", "ts": "2026-09-04T00:00:00Z", '
+                    '"changeset_id": "20260904-000000-abcd1234"}\n')
+        with open(self._log("acme-dental"), "rb") as f:
+            before = f.read()
+        res = M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertEqual(sorted(res["skipped"]), ["acme-dental", "other-clinic"])
+        self.assertEqual(res["created"], [])
+        with open(self._log("acme-dental"), "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_a_missing_log_directory_refuses_rather_than_creating_it(self):
+        """Creating log/ here would lay it down at the wrong mode and produce exactly
+        the unusable store the pre-flight exists to catch."""
+        shutil.rmtree(os.path.join(self.gov, "log"))
+        with self.assertRaises(RuntimeError) as cm:
+            M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertIn("log", str(cm.exception))
+
+    def test_a_file_landing_with_the_wrong_group_refuses(self):
+        """THE D4 HAZARD as an executable test. log/ without setgid gives new files the
+        creating user's primary group; 0660 then grants the WRONG group and uid 10000
+        falls through to `other` — a layout that passes a delete probe and fails the
+        append control. A bootstrap that only created the file would report success on a
+        log the executor cannot use. Forced here by asking for a gid this process cannot
+        produce, which needs no root."""
+        with self.assertRaises(RuntimeError) as cm:
+            M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid() + 4242)
+        self.assertIn("group", str(cm.exception))
+        self.assertFalse(os.path.exists(self._log("acme-dental")),
+                         "a file that failed verification must not be left behind")
+
+    def test_control_the_same_call_with_the_real_gid_succeeds(self):
+        """POSITIVE CONTROL for the test above — without it, that refusal would also
+        pass against a bootstrap that refused everything."""
+        res = M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertEqual(sorted(res["created"]), ["acme-dental", "other-clinic"])
+
+    def test_an_unparseable_registry_refuses(self):
+        with open(os.path.join(self.gov, "registry", "clients.json"), "w") as f:
+            f.write("{not json")
+        with self.assertRaises(RuntimeError):
+            M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+
+    def test_cli_dry_run_then_apply(self):
+        import governance_lib
+        CLI = _load_cli()
+        real = governance_lib.EXECUTOR_GID
+        governance_lib.EXECUTOR_GID = os.getgid()
+        self.addCleanup(setattr, governance_lib, "EXECUTOR_GID", real)
+        self.assertEqual(
+            CLI.main(["--bootstrap-logs", "--governance-root", self.gov]), 0)
+        self.assertFalse(os.path.exists(self._log("acme-dental")))
+        self.assertEqual(
+            CLI.main(["--bootstrap-logs", "--governance-root", self.gov, "--apply"]), 0)
+        self.assertTrue(os.path.isfile(self._log("acme-dental")))
+
+    def test_cli_returns_2_on_a_missing_log_directory(self):
+        CLI = _load_cli()
+        shutil.rmtree(os.path.join(self.gov, "log"))
+        self.assertEqual(
+            CLI.main(["--bootstrap-logs", "--governance-root", self.gov, "--apply"]), 2)
 
 
 if __name__ == "__main__":
