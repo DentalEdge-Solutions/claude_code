@@ -885,6 +885,20 @@ class TestRegisteredClientLogs(Base):
         problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
         self.assertTrue(any("registry" in p for p in problems))
 
+    def test_a_registry_this_process_cannot_read_is_not_double_reported(self):
+        """Ruling 9. This is the ONLY check in the module that does real I/O rather than
+        simulating access for a hypothetical (uid, gid). When the checking process itself
+        cannot read the registry, the registry/ directory check has ALREADY reported that
+        fault — adding a second problem for the same cause counts one fault twice and
+        breaks the exact-count assertions, which is R19b's over-checking failure again."""
+        self._healthy_dirs()
+        self._write_registry('{"clients": {"acme-dental": {"status": "active"}}}')
+        reg = os.path.join(self.root, *PF.CLIENTS_REGISTRY_REL)
+        os.chmod(reg, 0o000)                       # unreadable by THIS process
+        self.addCleanup(os.chmod, reg, 0o640)
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertFalse(any("malformed" in p for p in problems))
+
     def test_an_absent_registry_is_not_a_fault(self):
         """Absence stays absence. _check_file already treats a missing registry as the
         normal resting state of a fresh store, and this check must not change that —
@@ -943,12 +957,34 @@ def _check_registered_logs(root):
     try:
         with open(reg, encoding="utf-8") as f:
             data = json.load(f)
-    except FileNotFoundError:
+    except OSError:
+        # CORRECTED 2026-09-04 during execution (Ruling 9). Missing OR unreadable-by-this-
+        # process, and NEITHER is this check's to report.
+        #
+        # Absence is the normal resting state of a fresh store — _check_file already treats
+        # it that way. Unreadability is ALREADY reported by the registry/ directory check
+        # and the clients.json file check above, so reporting it again counts one fault
+        # twice: measured at 6 problems where the store has 5 faults, which broke
+        # test_owner_class_wins_even_when_group_and_other_are_wider's exact count. That is
+        # R19b's over-checking failure, on a new path.
+        #
+        # This is also the one place in this module that does REAL I/O rather than
+        # simulating access for a hypothetical (uid, gid) via _perm_bits. Every sibling
+        # check predicts whether uid 10000 WOULD have access; only this one needs the
+        # checking process itself to read a file. Returning [] keeps that asymmetry from
+        # leaking into the results.
+        #
+        # Residual, stated rather than hidden: a registry the EXECUTOR can read but the
+        # CHECKER cannot silently skips this check. That is a "cannot verify", not a pass —
+        # and Task 4's iter_log_records raise is the backstop that still catches the
+        # missing log mid-apply. This check is the early warning, not the only guard.
         return []
-    except (OSError, ValueError) as e:
-        return ["%s: unreadable or malformed client registry (%s) — refusing, because a "
-                "registry that will not parse resolves no client, and reading it as "
-                "'zero registered clients' would pass a store that cannot work" % (reg, e)]
+    except ValueError as e:
+        # Readable but not parseable — a genuinely different condition from the permission
+        # problems above, and the one the spec's D2 requires to fail closed.
+        return ["%s: malformed client registry (%s) — refusing, because a registry that "
+                "will not parse resolves no client, and reading it as 'zero registered "
+                "clients' would pass a store that cannot work" % (reg, e)]
     # data.get("clients", {}) — WITH the default, matching vault_lib.load_registry:49
     # exactly. An ABSENT "clients" key means zero registered clients, which is how
     # load_registry already reads it; only a PRESENT but non-object "clients" is a fault.
@@ -998,7 +1034,7 @@ out=$(python3 preflight-governance-access.test.py 2>&1); rc=$?
 printf '%s\n' "$out" | tail -6; echo "exit: $rc"
 ```
 
-Expected: PASS (`OK`), **38** tests — 32 from Task 1, plus 6.
+Expected: PASS (`OK`), **39** tests — 32 from Task 1, plus 7 (six from Step 1 and the Ruling-9 regression test).
 
 - [ ] **Step 5: Confirm the pre-existing controls did not move**
 
