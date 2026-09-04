@@ -17,6 +17,7 @@ P = _load("propose_changeset", "propose-changeset.py")
 A = _load("approve_changeset", "approve-changeset.py")
 X = _load("apply_changeset", "apply-changeset.py")
 import persist_run_record_shim as PR
+import migrate_governance_shim as M
 
 NOW = datetime.datetime(2026, 8, 12, 10, 15, 0, tzinfo=datetime.timezone.utc)
 
@@ -132,6 +133,23 @@ class Base(unittest.TestCase):
         with open(switch, "w") as f:
             f.write("enabled\n")
         self.vault = os.path.join(self.tmp, "acme-dental")
+        # S3-b Task 4: iter_log_records now raises on a missing log, and log/ is
+        # host-owned 2750 in production so the executor can no longer create its own.
+        # Give acme-dental a pre-created log through the real deploy path
+        # (migrate-governance.py --bootstrap-logs) rather than hand-writing one, so
+        # every test built on this fixture exercises the same "registered client
+        # already has a log" state production guarantees. bootstrap_logs reads the
+        # registry from the CANONICAL governance-store path (registry/clients.json),
+        # which is distinct from self.clients (_registry/clients.json, the path
+        # propose()/approve() are handed explicitly below) — both are written with the
+        # same client data.
+        reg_dir = os.path.join(self.tmp, "registry"); os.makedirs(reg_dir)
+        with open(os.path.join(reg_dir, "clients.json"), "w") as f:
+            json.dump({"clients": {"acme-dental": {
+                "project": "claude_google_ads", "customer_id": "1234567890",
+                "status": "active"}}}, f)
+        os.makedirs(os.path.join(self.tmp, "log"), mode=0o2750)
+        M.bootstrap_logs(self.tmp, dry_run=False, expected_gid=os.getgid())
 
     def _actions(self, n=1):
         return [{"type": "add_campaign_negative", "campaign_id": str(22233344450 + i),
@@ -172,6 +190,24 @@ class Base(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             rc = X.apply(plan, now)
         return rc, buf.getvalue()
+
+    def _assert_refused(self, cs_id, now=NOW, because=None):
+        """`because` pins WHICH guard refused. Without it a test can keep passing while
+        silently exercising a different guard than its name claims — which is what
+        happened to test_no_approval when the snapshot moved guard 3 ahead of it.
+
+        Moved here from TestPreflightRefusals (S3-b Task 4) so TestUndo — which owns
+        `_applied` and needs this same clean-refusal assertion on the caps path — can
+        use it too, without a second harness that checks the same thing a different
+        way."""
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(err):
+            self._run(cs_id, now=now)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+        if because is not None:
+            self.assertIn(because, err.getvalue())
+        return err.getvalue()
 
 class TestHappyPath(Base):
     def test_two_actions_validate_then_apply(self):
@@ -326,19 +362,6 @@ class TestHappyPath(Base):
 class TestPreflightRefusals(Base):
     """Every refusal must exit 2 AND never spawn the mutator."""
 
-    def _assert_refused(self, cs_id, now=NOW, because=None):
-        """`because` pins WHICH guard refused. Without it a test can keep passing while
-        silently exercising a different guard than its name claims — which is what
-        happened to test_no_approval when the snapshot moved guard 3 ahead of it."""
-        err = io.StringIO()
-        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(err):
-            self._run(cs_id, now=now)
-        self.assertEqual(ctx.exception.code, 2)
-        self.assertEqual(self._calls(), [])
-        if because is not None:
-            self.assertIn(because, err.getvalue())
-        return err.getvalue()
-
     def test_kill_switch_absent(self):
         cs = self._approved()
         os.remove(governance_lib.kill_switch_path(self.tmp))
@@ -461,6 +484,10 @@ class TestPreflightRefusals(Base):
 
 class TestValidateOnlyGate(Base):
     def test_validate_failure_applies_nothing(self):
+        """S3-b Task 4: the log file itself is no longer evidence of "nothing
+        applied" — every registered client's fixture now has a pre-created EMPTY
+        log (bootstrap_logs, in Base.setUp), so the file exists before this test
+        even runs. The log having zero records is the actual evidence."""
         cs = self._approved(2)
         self._mode("fail_validate")
         with self.assertRaises(SystemExit) as ctx:
@@ -468,7 +495,8 @@ class TestValidateOnlyGate(Base):
         self.assertEqual(ctx.exception.code, 2)
         calls = self._calls()
         self.assertTrue(all("--validate-only" in c for c in calls))   # zero live calls
-        self.assertFalse(os.path.exists(C.log_path("acme-dental")))
+        with open(C.log_path("acme-dental")) as f:
+            self.assertEqual([x for x in f if x.strip()], [])
 
     def test_stderr_secrets_are_scrubbed_in_failure_message(self):
         """A mutator failure must not surface credential values in the message."""
@@ -699,6 +727,30 @@ class TestUndo(Base):
         with self.assertRaises(SystemExit) as ctx:
             self._run(cs["changeset_id"], undo=cs["changeset_id"])
         self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+
+    def test_a_missing_log_refuses_cleanly_on_the_caps_path(self):
+        """S3-b/D6, guard 6. iter_log_records now raises ValueError on a missing log,
+        and day_counts' call site already wraps it in `except ValueError -> _refuse`.
+        Asserted rather than trusted: an uncaught ValueError would be exit 1 with a
+        traceback instead of a governed exit-2 refusal, which is a materially different
+        failure for the broker to read."""
+        self._applied()                                   # creates the log via append_log
+        os.remove(C.log_path("acme-dental"))
+        nxt = self._approved()
+        self._assert_refused(nxt["changeset_id"], because="missing audit log")
+
+    def test_a_missing_log_refuses_cleanly_on_the_undo_path(self):
+        """The other call site. _undo_targets reads through the same generator, and
+        _assert_refused cannot drive the undo path (it takes no undo argument), so this
+        makes the same assertions inline."""
+        cs = self._applied()
+        os.remove(C.log_path("acme-dental"))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(err):
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("missing audit log", err.getvalue())
         self.assertEqual(self._calls(), [])
 
 
