@@ -1503,11 +1503,11 @@ cd /Users/ericksicard/Projects/claude_code
 git status --porcelain | grep -v '^??'
 echo "--- tracked-dirty count (expect 5) ---"
 git status --porcelain | grep -v '^??' | wc -l
-echo "--- untracked count (expect 43) ---"
+echo "--- untracked count (expect 44) ---"
 git status --porcelain | grep '^??' | wc -l
 ```
 
-Expected: the same 5 tracked and 43 untracked entries the branch started with — `.project-brain/log.md`, two deleted `.project-brain` candidates, two `evals/*.json`, plus `.obsidian/` and the `.project-brain/reports/` set. Nothing from this wave is left unstaged. If a file you do not recognise appears, **inspect it before doing anything with it**: a leftover after an interrupted run is either real work or an unreverted mutation, and committing the latter commits a deliberate bug.
+Expected: the same 5 tracked entries the branch started with — `.project-brain/log.md`, two deleted `.project-brain` candidates, two `evals/*.json` — and **44** untracked: `.obsidian/`, the `.project-brain/reports/` set, and `evals/`. (CORRECTED 2026-09-04 during execution: the count was 43 at branch start and is now 44. The extra entry is `.project-brain/reports/compile/2026-09-04.json`, written 13:52:10 by the second-brain compile hook and containing `{"written": 0, "skipped": 0, "outputs": []}` — an environment artifact, not this wave's. Leave it alone; do not stage it and do not delete it.) Nothing from this wave is left unstaged. If a file you do not recognise appears, **inspect it before doing anything with it**: a leftover after an interrupted run is either real work or an unreverted mutation, and committing the latter commits a deliberate bug.
 
 - [ ] **Step 4: Confirm the kill switch is still off**
 
