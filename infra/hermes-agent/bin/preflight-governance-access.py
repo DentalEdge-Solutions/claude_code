@@ -262,7 +262,10 @@ def _check_registered_logs(root):
 
     A MISSING registry is not a fault — _check_file already treats it as the normal
     resting state of a fresh store, and turning that into a refusal is the cry-wolf
-    failure. An UNPARSEABLE one is: no client resolves through it, so "zero registered
+    failure. Nor is a registry UNREADABLE BY THE CHECKING PROCESS ITSELF: that fault is
+    already reported by the registry/ directory and clients.json file checks above (see
+    Ruling 9 below), and reporting it a second time here would double-count one fault as
+    two. An UNPARSEABLE one is: no client resolves through it, so "zero registered
     clients" would be a silent pass over a store that cannot work at all.
 
     The message carries a COUNT, never the slugs. Client slugs are client-private, this
