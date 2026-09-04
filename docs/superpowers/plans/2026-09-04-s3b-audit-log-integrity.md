@@ -32,7 +32,7 @@
 | File | Responsibility | Task |
 |---|---|---|
 | `infra/hermes-agent/bin/preflight-governance-access.py` | The startup gate. Loses its directory-write demand on `log/`; gains a registry-driven log-existence check; its `REMEDY` text becomes the setgid layout. | 1, 3 |
-| `infra/hermes-agent/bin/preflight-governance-access.test.py` | Fixtures move to the new documented layout; one test is rewritten onto the file-level axis; six new tests for the existence check. | 1, 3 |
+| `infra/hermes-agent/bin/preflight-governance-access.test.py` | Fixtures move to the new documented layout; two tests are each replaced by a pair (net +2); six new tests for the existence check. | 1, 3 |
 | `infra/hermes-agent/bin/governance_lib.py` | Gains `EXECUTOR_UID`/`EXECUTOR_GID` and the log modes as the single definition, following `6645879`'s `REQUEST_ID_RE` precedent. | 2 |
 | `infra/hermes-agent/bin/migrate_governance_shim.py` | Gains `bootstrap_logs()`. `migrate()`'s `_ensure_dir` call learns the new `log/` mode. | 2 |
 | `infra/hermes-agent/bin/migrate-governance.py` | Gains `--bootstrap-logs`, sharing the dry-run-by-default contract. | 2 |
@@ -225,7 +225,7 @@ out=$(python3 preflight-governance-access.test.py 2>&1); rc=$?
 printf '%s\n' "$out" | tail -6; echo "exit: $rc"
 ```
 
-Expected: PASS (`OK`), 33 tests — 30 before, one rewritten in place, three added.
+Expected: PASS (`OK`), **32** tests — 30 before, and two replacements that each turn one test into two (Step 5 and Step 6), so net +2.
 
 - [ ] **Step 8: Mutation proof — revert the inversion and confirm it reds**
 
@@ -621,7 +621,9 @@ def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
             "cannot read the client registry at %s (%s) — refusing, because a registry "
             "that will not parse resolves no client, and reading it as 'zero registered "
             "clients' would report success over a store that cannot work" % (reg, e))
-    clients = data.get("clients") if isinstance(data, dict) else None
+    # WITH the default, matching vault_lib.load_registry:49 — an absent "clients" key is
+    # zero registered clients, not a malformed registry.
+    clients = data.get("clients", {}) if isinstance(data, dict) else None
     if not isinstance(clients, dict):
         raise RuntimeError("registry 'clients' must be a JSON object: %s" % reg)
 
@@ -943,7 +945,13 @@ def _check_registered_logs(root):
         return ["%s: unreadable or malformed client registry (%s) — refusing, because a "
                 "registry that will not parse resolves no client, and reading it as "
                 "'zero registered clients' would pass a store that cannot work" % (reg, e)]
-    clients = data.get("clients") if isinstance(data, dict) else None
+    # data.get("clients", {}) — WITH the default, matching vault_lib.load_registry:49
+    # exactly. An ABSENT "clients" key means zero registered clients, which is how
+    # load_registry already reads it; only a PRESENT but non-object "clients" is a fault.
+    # Dropping the default here would return None for a registry of "{}" and refuse it —
+    # reding the very controls this check is supposed to leave untouched, since
+    # _configure_full_correct_store writes exactly that.
+    clients = data.get("clients", {}) if isinstance(data, dict) else None
     if not isinstance(clients, dict):
         return ["%s: registry 'clients' must be a JSON object" % reg]
 
@@ -986,7 +994,7 @@ out=$(python3 preflight-governance-access.test.py 2>&1); rc=$?
 printf '%s\n' "$out" | tail -6; echo "exit: $rc"
 ```
 
-Expected: PASS (`OK`), 39 tests — 33 from Task 1, plus 6.
+Expected: PASS (`OK`), **38** tests — 32 from Task 1, plus 6.
 
 - [ ] **Step 5: Confirm the pre-existing controls did not move**
 
