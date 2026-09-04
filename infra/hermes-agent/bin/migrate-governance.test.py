@@ -1,4 +1,5 @@
 import importlib.util, json, os, shutil, stat, sys, tempfile, unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import migrate_governance_shim as M  # see Step 3 note on the module name
 
@@ -205,7 +206,12 @@ class TestBootstrapLogs(unittest.TestCase):
         return os.path.join(self.gov, "log", "%s.jsonl" % slug)
 
     def test_dry_run_creates_nothing(self):
-        res = M.bootstrap_logs(self.gov, expected_gid=os.getgid())
+        """dry_run is passed explicitly here, not relied on as a default. The library
+        default is dry_run=False, matching migrate()'s own signature in this same module
+        (rule 6645879 — one behavior, not two functions quietly disagreeing on what their
+        shared parameter name means); dry-run-by-default is a CLI-level property, and the
+        CLI gets it by passing dry_run=not args.apply explicitly for both functions."""
+        res = M.bootstrap_logs(self.gov, dry_run=True, expected_gid=os.getgid())
         self.assertEqual(sorted(res["created"]), ["acme-dental", "other-clinic"])
         self.assertFalse(os.path.exists(self._log("acme-dental")))
         self.assertFalse(os.path.exists(self._log("other-clinic")))
@@ -285,6 +291,49 @@ class TestBootstrapLogs(unittest.TestCase):
         shutil.rmtree(os.path.join(self.gov, "log"))
         self.assertEqual(
             CLI.main(["--bootstrap-logs", "--governance-root", self.gov, "--apply"]), 2)
+
+    def test_a_toctou_race_between_the_exists_check_and_create_refuses_without_clobbering(
+            self):
+        """THE O_EXCL WITNESS. `os.path.exists(dst)` and the `os.open(..., O_EXCL, ...)`
+        that follows it are two separate syscalls with a window between them. If another
+        process (a concurrent bootstrap run, or the real client writing its first record)
+        creates log/<slug>.jsonl inside that window, O_CREAT|O_EXCL is what makes THIS
+        call's os.open fail loudly instead of silently truncating a file someone else just
+        wrote. Simulated by making the exists() check lie exactly once for the target
+        path — reporting 'missing' while the file is genuinely present with real content
+        on disk — while every other path keeps answering truthfully, so the missing-log/
+        and unparseable-registry refusals are not what fires here.
+
+        A mutation to plain `open(dst, 'w')` (Mutant B from Step 8) cannot fail this race
+        at all — it would silently truncate the winner's file — so this is the test that
+        must kill it; test_an_existing_log_is_skipped_and_left_byte_identical cannot, since
+        a truthful exists() check there never reaches the create line in the first place.
+        """
+        M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        target = self._log("acme-dental")
+        with open(target, "w") as f:
+            f.write('{"status": "applied", "ts": "2026-09-04T00:00:00Z", '
+                    '"changeset_id": "20260904-000000-abcd1234"}\n')
+        with open(target, "rb") as f:
+            before = f.read()
+
+        real_exists = os.path.exists
+        lied = {"done": False}
+
+        def fake_exists(p):
+            if not lied["done"] and p == target:
+                lied["done"] = True
+                return False
+            return real_exists(p)
+
+        with mock.patch.object(M.os.path, "exists", side_effect=fake_exists):
+            with self.assertRaises(FileExistsError):
+                M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+
+        self.assertTrue(lied["done"], "the race was never actually simulated")
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), before,
+                              "a lost create race must not destroy the pre-existing log")
 
 
 if __name__ == "__main__":

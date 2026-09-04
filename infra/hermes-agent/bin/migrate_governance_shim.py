@@ -96,7 +96,7 @@ def _atomic_copy(src, dst):
     os.replace(tmp, dst)
 
 
-def bootstrap_logs(governance_root, dry_run=True, expected_gid=None):
+def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
     """Guarantee every REGISTERED client a pre-created audit log.
 
     S3-b's second half. Under the append-but-not-unlink layout the executor cannot
