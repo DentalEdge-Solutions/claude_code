@@ -297,7 +297,7 @@ the mutant before believing a silent result:
 | drop the registry-driven existence check | the new missing-log negative |
 | `iter_log_records` returns instead of raising | the `day_counts` and `_undo_targets` refusals |
 | `bootstrap_logs` skips the gid/mode verification | the wrong-gid refusal test |
-| `bootstrap_logs` uses `open(p,"w")` instead of `O_EXCL` | ~~the byte-identical idempotency test~~ the `0660` mode test — **CORRECTED 2026-09-04, see below** |
+| `bootstrap_logs` uses `open(p,"w")` instead of `O_EXCL` | ~~the byte-identical idempotency test~~ ~~the `0660` mode test~~ the TOCTOU test — **CORRECTED TWICE, see below** |
 
 **An inert mutation is itself a finding** — if one reds nothing, that is a coverage claim to
 chase, not a result to accept.
@@ -314,6 +314,22 @@ chase, not a result to accept.
 > that protects the existing record. **What protects the existing record is the `skipped`
 > branch**, and the byte-identical test is that branch's proof — which is why the test
 > stays exactly as specified even though this row no longer points at it.
+>
+> **CORRECTED AGAIN 2026-09-04, during execution — the umask claim above was also wrong.**
+> The implementer ran the mutant, got exit 0 and zero failures, and chased it instead of
+> accepting a green result. `bootstrap_logs` calls `os.chmod(dst, LOG_FILE_MODE)`
+> immediately after creating the file, which defeats the umask regardless of how the file
+> was created — so the `0644` red predicted above cannot happen either. **Nothing in the
+> suite killed this mutation.** Two successive predictions about this one row were wrong,
+> which is itself the argument for running mutations rather than reasoning about them.
+>
+> Closed by adding the test the row always needed: a TOCTOU test that forces
+> `os.path.exists` to miss exactly once for the target path while the file genuinely exists
+> on disk, then asserts BOTH that the call refuses AND that the pre-existing bytes are
+> unchanged — the second assertion being the difference between "it errored" and "it did
+> not destroy the audit log". It carries its own control (`assertTrue(lied["done"])`)
+> proving the race was actually simulated. Mutant B reds it. **The row now reads: `O_EXCL`
+> replaced by `open(p,"w")` -> the TOCTOU test.**
 
 ### 6.6 Baselines
 
