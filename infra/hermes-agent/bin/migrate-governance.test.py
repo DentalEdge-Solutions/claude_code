@@ -21,6 +21,17 @@ class TestMigration(unittest.TestCase):
         self.gov = tempfile.mkdtemp(prefix="gov-")
         self.addCleanup(shutil.rmtree, self.vault, True)
         self.addCleanup(shutil.rmtree, self.gov, True)
+        # I3: migrate() now verifies a freshly-created log/'s group against
+        # governance_lib.EXECUTOR_GID (10000) before trusting it — the same
+        # D4 setgid-inheritance hazard S3-b closes for bootstrap_logs, applied here
+        # because migrate() can also be the one laying log/ down from scratch. These
+        # fixtures create log/ as THIS test process, whose real primary group is
+        # whatever the host/CI assigns it, not 10000 — patch the expectation to match,
+        # the same idiom test_cli_dry_run_then_apply already uses for bootstrap_logs.
+        import governance_lib
+        real_gid = governance_lib.EXECUTOR_GID
+        governance_lib.EXECUTOR_GID = os.getgid()
+        self.addCleanup(setattr, governance_lib, "EXECUTOR_GID", real_gid)
         os.makedirs(os.path.join(self.vault, "_registry"))
         with open(os.path.join(self.vault, "_registry", "clients.json"), "w") as f:
             json.dump({"clients": {"acme-dental": {
@@ -150,6 +161,24 @@ class TestMigration(unittest.TestCase):
         self.assertEqual(reg_mode, 0o700)
         self.assertEqual(log_mode, M.governance_lib.LOG_DIR_MODE)
 
+    def test_a_freshly_created_log_dir_with_the_wrong_group_refuses(self):
+        """I3/D4: migrate() can be the one laying log/ down from scratch (the normal
+        deploy pre-creates it host-side, but nothing enforces that before migration
+        runs) — _ensure_dir sets the MODE but a directory made by an unprivileged
+        process still inherits that process's own primary group, not EXECUTOR_GID.
+        Reproduces the exact hazard bootstrap_logs' own D4 test proves, one call site
+        over. Forced by asking for a gid this process cannot land on, same technique as
+        the bootstrap_logs equivalent."""
+        import governance_lib
+        governance_lib.EXECUTOR_GID = os.getgid() + 4242
+        self.addCleanup(setattr, governance_lib, "EXECUTOR_GID", os.getgid())
+        with self.assertRaises(RuntimeError) as cm:
+            M.migrate(self.vault, self.gov)
+        self.assertIn("group", str(cm.exception))
+        self.assertFalse(
+            os.path.exists(os.path.join(self.gov, "log")),
+            "a log/ this call created and then refused must not be left behind")
+
 
 class TestCountLines(unittest.TestCase):
     def setUp(self):
@@ -254,16 +283,32 @@ class TestBootstrapLogs(unittest.TestCase):
         falls through to `other` — a layout that passes a delete probe and fails the
         append control. A bootstrap that only created the file would report success on a
         log the executor cannot use. Forced here by asking for a gid this process cannot
-        produce, which needs no root."""
+        produce, which needs no root.
+
+        I2(b) NOTE: this fixture's log/ already carries the wrong group (setUp never
+        chgrp's it to the requested expected_gid), so as of I2(b) this is now caught by
+        the upfront directory-level check rather than the per-file check exercised
+        before — same root cause, earlier refusal point. Both paths raise RuntimeError
+        naming "group", so this assertion still discriminates correctly."""
         with self.assertRaises(RuntimeError) as cm:
             M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid() + 4242)
         self.assertIn("group", str(cm.exception))
         self.assertFalse(os.path.exists(self._log("acme-dental")),
                          "a file that failed verification must not be left behind")
 
+    def test_a_group_writable_log_directory_refuses(self):
+        """I2(b): a log/ that is group-writable is refused before any file is created,
+        regardless of gid — write on a directory is what grants unlink, and populating
+        such a store with correctly-owned files would not close that hole."""
+        os.chmod(os.path.join(self.gov, "log"), 0o2770)
+        with self.assertRaises(RuntimeError) as cm:
+            M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertIn("group-writable", str(cm.exception))
+        self.assertFalse(os.path.exists(self._log("acme-dental")))
+
     def test_control_the_same_call_with_the_real_gid_succeeds(self):
-        """POSITIVE CONTROL for the test above — without it, that refusal would also
-        pass against a bootstrap that refused everything."""
+        """POSITIVE CONTROL for the two tests above — without it, either refusal would
+        also pass against a bootstrap that refused everything."""
         res = M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
         self.assertEqual(sorted(res["created"]), ["acme-dental", "other-clinic"])
 

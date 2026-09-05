@@ -53,6 +53,22 @@ happy path).
   about who can write the store, not about the function. Named here so its survival reads as a
   decision rather than an oversight — **and so that anything re-mounting `seen/` into a
   container fixes this `return` first.**
+- **Truncation.** This wave closes `unlink` on `log/<slug>.jsonl` (directory write, not
+  file mode, is what grants it) but does nothing about the executor rewriting the
+  file's own contents — `0660` grants the owner/group write on the FILE, and write
+  includes truncate. Measured on the shipped layout (container, uid 10000, log/ at
+  2750 host-owned, file at 0660 host-owned): `rm -f log/acme.jsonl` → `Permission
+  denied`, file still present (unlink closed). Then `: > log/acme.jsonl` on the same
+  file → exit 0, record count 1 → 0 (truncation open). Because the file still exists
+  afterward, `iter_log_records` reads it cleanly — a store the pre-flight and
+  `bootstrap_logs` both call healthy can still have its audit trail emptied by the
+  party it audits, at the same reversibility cost as the deletion this wave stops
+  (the daily-cap and `--undo` reads through `iter_log_records` see zero records
+  either way). Closing this needs append-only semantics the mode system alone cannot
+  express — `chattr +a` (Linux-specific, and the bind-mount's underlying filesystem
+  would need to support it) or moving the write off the executor entirely (a
+  host-side writer the container talks to instead of opening the file itself). Both
+  are a real design change, not a mode tweak, and are left for a separate wave.
 
 ## 3. Design decisions
 

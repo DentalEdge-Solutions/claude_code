@@ -96,6 +96,31 @@ def _atomic_copy(src, dst):
     os.replace(tmp, dst)
 
 
+def _check_log_dir(log_dir, expected_gid):
+    """Stat what append_log and bootstrap_logs both rely on before trusting log_dir to
+    create anything inside it: it must not be group-writable (write on a directory is
+    what grants unlink — the S3-b hazard) and it must carry the executor's group
+    (setgid then propagates that group to every file created here; the wrong group
+    means a new file inherits something other than EXECUTOR_GID even with setgid set).
+
+    Named after whichever is actually wrong, rather than assuming a single cause —
+    "missing setgid" and "wrong directory group" are different faults with different
+    remedies, and conflating them sends an operator to fix the wrong thing."""
+    st = os.stat(log_dir)
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o020:
+        raise RuntimeError(
+            "%s is group-writable (mode %04o) — refusing, because write on a directory "
+            "is what grants unlink and this would reinstate the hazard S3-b closed. Fix "
+            "with: sudo chmod 2750 %s" % (log_dir, mode, log_dir))
+    if st.st_gid != expected_gid:
+        raise RuntimeError(
+            "%s has group %d, not the executor's group %d — refusing, because a file "
+            "created here inherits THIS directory's group under setgid, so the wrong "
+            "directory group means every new file lands wrong too. Fix with: "
+            "sudo chgrp %d %s" % (log_dir, st.st_gid, expected_gid, expected_gid, log_dir))
+
+
 def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
     """Guarantee every REGISTERED client a pre-created audit log.
 
@@ -131,6 +156,16 @@ def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
             "here would get the wrong mode and produce a store the executor cannot use. "
             "Create it host-side at mode %04o (see the README's ownership section) and "
             "re-run." % (log_dir, governance_lib.LOG_DIR_MODE))
+    # I2(b): stat what we are about to create files under, not just what we are about
+    # to create them AS. A log/ that already exists but is group-writable or carries
+    # the wrong group is a store this function would otherwise populate with files
+    # that pass its own per-file check below by accident (e.g. expected_gid happening
+    # to equal the caller's own primary group) while remaining unsafe for the real
+    # executor. This mostly subsumes the per-file group check's wrong-gid branch below
+    # for the fresh-file case; it does NOT catch a missing setgid bit on an otherwise
+    # correctly-owned directory, which only shows up once a file is actually created —
+    # that residual is still the per-file check's job.
+    _check_log_dir(log_dir, expected_gid)
 
     reg = os.path.join(governance_root, "registry", "clients.json")
     try:
@@ -173,16 +208,30 @@ def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
                     "%s landed at mode %04o, not %04o — refusing"
                     % (dst, mode, governance_lib.LOG_FILE_MODE))
             if st.st_gid != expected_gid:
+                # Stat log_dir itself rather than assuming a single cause: "missing
+                # setgid" and "setgid present but the directory's own group is wrong"
+                # are different faults with different remedies, and a message that
+                # always blames setgid sends an operator to run the wrong command when
+                # the real problem is the directory's group.
+                dir_st = os.stat(log_dir)
+                if dir_st.st_mode & stat.S_ISGID:
+                    cause = ("%s has group %d, not the executor's group %d — a new "
+                              "file inherits THIS directory's group under setgid, so "
+                              "the directory's own group is wrong. Run `sudo chgrp %d "
+                              "%s`" % (log_dir, dir_st.st_gid, expected_gid,
+                                       expected_gid, log_dir))
+                else:
+                    cause = ("%s is missing its setgid bit, without which a new file "
+                              "inherits the creating user's primary group instead of "
+                              "the directory's. Run `chmod g+s %s`" % (log_dir, log_dir))
                 raise RuntimeError(
-                    "%s landed with group %d, not the executor's group %d — refusing. "
-                    "log/ is almost certainly missing its setgid bit, without which a "
-                    "new file inherits the creating user's primary group and mode %04o "
-                    "grants the WRONG group: uid %d then falls through to `other` and "
-                    "can neither append nor unlink. Run `chmod g+s %s` and re-run."
-                    % (dst, st.st_gid, expected_gid, governance_lib.LOG_FILE_MODE,
-                       governance_lib.EXECUTOR_UID, log_dir))
+                    "%s landed with group %d, not the executor's group %d — refusing: "
+                    "%s, then re-run." % (dst, st.st_gid, expected_gid, cause))
         except Exception:
-            os.remove(dst)      # created by THIS call; never remove a pre-existing log
+            try:
+                os.remove(dst)  # created by THIS call; never remove a pre-existing log
+            except OSError:
+                pass
             raise
         result["created"].append(slug)
     return result
@@ -224,7 +273,26 @@ def migrate(vault_root, governance_root, dry_run=False):
             continue
 
         dst_log_dir = os.path.dirname(dst_log)
+        # I3 / D4: if THIS call is the one laying down log/ (the normal deploy already
+        # created it host-side per the README's ownership section before migration
+        # ever runs), _ensure_dir's mode= sets the MODE but not the GROUP — a directory
+        # made by an unprivileged process inherits that process's own primary group,
+        # not EXECUTOR_GID. setgid then propagates that wrong group to every log
+        # migrated in, reproducing the exact hazard this wave exists to close. Verify
+        # only on first creation (not on a pre-existing log/), and remove what we just
+        # made on failure so a retry starts clean instead of silently reusing a
+        # directory this call already proved is wrong.
+        log_dir_created_here = not os.path.isdir(dst_log_dir)
         _ensure_dir(dst_log_dir, mode=governance_lib.LOG_DIR_MODE)
+        if log_dir_created_here:
+            try:
+                _check_log_dir(dst_log_dir, governance_lib.EXECUTOR_GID)
+            except RuntimeError:
+                try:
+                    os.rmdir(dst_log_dir)
+                except OSError:
+                    pass
+                raise
         tmp_log = dst_log + ".tmp"
         try:
             shutil.copy2(src_log, tmp_log)

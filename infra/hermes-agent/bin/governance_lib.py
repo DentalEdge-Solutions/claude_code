@@ -3,7 +3,9 @@
 
 Everything the mutation guards TRUST lives here, and nothing Hermes can write does.
 The gateway container does not mount this tree at all. The one-shot executor mounts
-approvals/, control/ and registry/ READ-ONLY and log/ + seen/ read-write.
+approvals/, control/ and registry/ READ-ONLY and log/ read-write (append, not unlink —
+see preflight-governance-access.py). seen/ is NOT mounted into the executor at all
+(S3-a) — the broker writes it host-side, and the executor has no business with it.
 
 This module is deliberately the bottom of the dependency graph — it imports nothing
 from bin/ — so it can own the shared identifier regexes instead of leaving duplicates

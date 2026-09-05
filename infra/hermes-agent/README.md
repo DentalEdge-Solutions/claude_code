@@ -895,7 +895,7 @@ Give the store an ownership the executor's UID can use — either group access:
 ```bash
 sudo chgrp -R 10000 "$HERMES_GOVERNANCE_DIR"
 sudo chmod -R g+rX "$HERMES_GOVERNANCE_DIR"
-sudo chmod g+s "$HERMES_GOVERNANCE_DIR"/log
+sudo chmod 2750 "$HERMES_GOVERNANCE_DIR"/log
 sudo find "$HERMES_GOVERNANCE_DIR"/log -type f -name '*.jsonl' -exec chmod 0660 {} +
 ```
 

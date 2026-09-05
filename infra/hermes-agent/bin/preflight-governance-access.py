@@ -377,7 +377,7 @@ executor's UID belongs to:
 
     sudo chgrp -R %(gid)d %(root)s
     sudo chmod -R g+rX %(root)s
-    sudo chmod g+s %(root)s/log
+    sudo chmod 2750 %(root)s/log
     sudo find %(root)s/log -type f -name '*.jsonl' -exec chmod 0660 {} +
 
 log/ gets NO group write: write on a directory is what grants unlink, and a deleted
