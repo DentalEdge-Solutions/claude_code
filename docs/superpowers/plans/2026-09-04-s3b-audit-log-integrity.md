@@ -1283,9 +1283,16 @@ python3 - <<'PY'
 import io, re
 p = "changeset_lib.py"
 s = io.open(p).read()
+# CORRECTED 2026-09-04 during execution. The original regex required the raise's closing
+# paren to sit ALONE on its own line (`        )`), but this plan's own Step 1 snippet
+# closes it on the SAME line as the final f-string segment (`...from populated to empty.")`).
+# The script therefore contradicted the code the same brief told the implementer to write:
+# the assert tripped, and only an implementer who reported it instead of forcing it kept
+# that from reading as a passing proof. Anchor on the `try:` that unconditionally follows
+# the branch instead, which does not depend on the raise's line shape.
 new, n = re.subn(
-    r"    p = log_path\(slug\)\n    if not os\.path\.exists\(p\):\n        raise ValueError\(\n(?:            .*\n)+?        \)\n",
-    "    p = log_path(slug)\n    if not os.path.exists(p):\n        return\n",
+    r"    if not os\.path\.exists\(p\):\n        raise ValueError\(\n(?:.+\n)+?    try:\n",
+    "    if not os.path.exists(p):\n        return\n    try:\n",
     s, count=1)
 assert n == 1, "MUTATION DID NOT APPLY — a silent miss would read as an inert mutation"
 io.open(p, "w").write(new)
