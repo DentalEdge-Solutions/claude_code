@@ -1162,7 +1162,7 @@ out=$(infra/hermes-agent/bin/run-bin-tests.sh 2>&1); rc=$?
 printf '%s\n' "$out"; echo "exit: $rc"
 ```
 
-Expected: FAIL. R24(b) measured ~30 tests red across `changeset_lib.test.py` and `apply-changeset.test.py`, including the plain happy path. Record the exact sorted list — it is the input to Step 3 and the evidence that this half genuinely needed the other three.
+Expected: FAIL. R24(b) measured ~30 tests red across `changeset_lib.test.py` and `apply-changeset.test.py`, including the plain happy path. **MEASURED DURING EXECUTION: 36 tests across THREE suites** — apply-changeset 32/46, changeset_lib 1/109, and `syscall-e2e.test.py` 3/6, which the original estimate missed entirely. Establish a baseline first (stash only `changeset_lib.py` and confirm 25/25) so every failure is attributable to this one change. Record the exact sorted list — it is the input to Step 3 and the evidence that this half genuinely needed the other three.
 
 - [ ] **Step 3: Regenerate the affected fixtures through the real code path**
 
