@@ -571,8 +571,18 @@ class TestRegisteredClientLogs(Base):
         self._healthy_dirs()
         self._write_registry("{not json")
         problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
-        self.assertTrue(any("registry" in p for p in problems))
+        # Deferred-3: "registry" alone matches on the PATH (every problem this check
+        # can report names a path under registry/) and would pass on any
+        # registry-related fault, not specifically this one. "malformed client
+        # registry" is the distinctive text _check_registered_logs's ValueError branch
+        # actually emits.
+        self.assertTrue(any("malformed client registry" in p for p in problems))
 
+    @unittest.skipIf(os.geteuid() == 0,
+                     "root ignores chmod 0000 (CAP_DAC_OVERRIDE), so under any "
+                     "container run as root this would pass for the wrong reason — "
+                     "the registry would still be genuinely readable, not refused "
+                     "by the directory check this test relies on running first")
     def test_a_registry_this_process_cannot_read_is_not_double_reported(self):
         """Ruling 9. This is the ONLY check in the module that does real I/O rather than
         simulating access for a hypothetical (uid, gid). When the checking process itself

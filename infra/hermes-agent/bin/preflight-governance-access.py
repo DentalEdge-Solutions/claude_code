@@ -41,6 +41,15 @@ READ_ONLY_DIRS = ("approvals", "control", "registry")
 # Nothing checks seen/ now, and that is correct: this script predicts what the EXECUTOR's
 # uid can do, and the executor has no business with seen/. The broker writes it as the
 # host user, whose access is not in question here.
+#
+# M4: despite the name, this is now checked READ-ONLY at the directory level (S3-b:
+# _check_dir is always called with need_write=False for every name in here — see
+# _check_dir's own docstring). The name predates that change and still means "the
+# directories the executor writes something INTO" (append_log opens a FILE here with
+# mode "a"; the file-level check below is where write is actually required) — it is
+# no longer "the directories the executor needs directory-level write on", which
+# would be the S3-b hazard this whole wave closes. Kept as-is rather than renamed:
+# docker-compose.yml references READ_WRITE_DIRS by this exact name in its own comments.
 READ_WRITE_DIRS = ("log",)
 
 # Fixed-name read-only files directly under the store root's directories. The kill
@@ -77,6 +86,13 @@ def _describe(path, st, uid, bits, want):
 
 
 def _check_dir(path, uid, gid, need_write):
+    """M3/M4: `need_write=True` has no caller at all as of S3-b, production or test —
+    every call site below (and every test) passes `need_write=False`, since log/
+    moved from "the executor needs write on the directory" to "the executor needs
+    write on the FILE, read+traverse on the directory" (directory write is what
+    grants unlink). Kept as a parameter rather than dropped, for symmetry with
+    `_check_file`, which DOES still have a real `need_write=True` caller (the
+    per-file check on log/<slug>.jsonl)."""
     try:
         st = os.stat(path)
     except OSError as e:
@@ -249,8 +265,12 @@ def _check_registered_logs(root):
     log/ is host-owned 2750, so the executor cannot create log/<slug>.jsonl — append_log
     opens it with mode "a", which creates, and that now fails with EACCES. Catching it
     only in iter_log_records surfaces it MID-APPLY, and R19 exists precisely so a store
-    the executor cannot use is refused at startup instead: mid-apply is exit 3 after a
-    live account change, while a startup refusal costs one idempotent command.
+    the executor cannot use is refused before any mutation is attempted instead:
+    mid-apply is exit 3 after a live account change, while a pre-flight refusal costs
+    one idempotent command. (This runs per-request, in run-ads-mutate.sh, which the
+    broker spawns fresh for each apply — hermes-broker.py never invokes this script
+    itself. "Refused before any mutation" is the safety property; it is not a
+    broker-startup check.)
 
     This is NOT R19b's over-checking. Every false refusal in that lineage — the
     .approval.lock sidecar, a rotated log, an operator's backup — was this gate demanding
@@ -304,7 +324,7 @@ def _check_registered_logs(root):
     # exactly. An ABSENT "clients" key means zero registered clients, which is how
     # load_registry already reads it; only a PRESENT but non-object "clients" is a fault.
     # Dropping the default here would return None for a registry of "{}" and refuse it —
-    # reding the very controls this check is supposed to leave untouched, since
+    # breaking the very controls this check is supposed to leave untouched, since
     # _configure_full_correct_store writes exactly that.
     clients = data.get("clients", {}) if isinstance(data, dict) else None
     if not isinstance(clients, dict):
@@ -313,8 +333,16 @@ def _check_registered_logs(root):
     missing = 0
     for slug in clients:
         if not isinstance(slug, str) or not governance_lib.SLUG_RE.fullmatch(slug):
-            continue        # vault_lib.resolve would refuse it; not this gate's call
-        if not os.path.isfile(os.path.join(root, "log", "%s.jsonl" % slug)):
+            # vault_lib.resolve would refuse it; not this gate's call. NOTE: this
+            # SILENTLY SKIPS an invalid slug rather than raising, unlike
+            # migrate_governance_shim.bootstrap_logs's identical filter, which RAISES.
+            # Both are defensible — this is a read-only refusal gate that must not
+            # itself fail loudly on a registry an operator is free to hand-edit
+            # incorrectly, while bootstrap_logs is a mutating tool where silently
+            # skipping a bad registration would be the exact ambiguity it exists to
+            # remove — but nothing else says they differ, so it is stated here.
+            continue
+        if not os.path.isfile(governance_lib.log_path(slug, root)):
             missing += 1
     if not missing:
         return []

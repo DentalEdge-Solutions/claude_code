@@ -167,7 +167,7 @@ def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
     # that residual is still the per-file check's job.
     _check_log_dir(log_dir, expected_gid)
 
-    reg = os.path.join(governance_root, "registry", "clients.json")
+    reg = governance_lib.clients_registry_path(governance_root)
     try:
         with open(reg, encoding="utf-8") as f:
             data = json.load(f)
@@ -184,12 +184,19 @@ def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
 
     result = {"created": [], "skipped": []}
     for slug in sorted(clients):
+        # NOTE: this RAISES on an invalid slug, unlike preflight-governance-access.py's
+        # _check_registered_logs's identical SLUG_RE filter, which silently CONTINUEs.
+        # Both are defensible — this is a mutating tool where silently skipping a bad
+        # registration would be exactly the ambiguity it exists to remove, while the
+        # pre-flight is a read-only refusal gate that must not itself fail loudly on a
+        # registry an operator is free to hand-edit incorrectly — but nothing else says
+        # they differ, so it is stated here.
         if not isinstance(slug, str) or not governance_lib.SLUG_RE.fullmatch(slug):
             raise RuntimeError(
                 "registry contains a slug that is not resolvable (%r) — refusing rather "
                 "than skipping it, because a skipped registration is exactly the "
                 "ambiguity this function exists to remove" % (slug,))
-        dst = os.path.join(log_dir, "%s.jsonl" % slug)
+        dst = governance_lib.log_path(slug, governance_root)
         if os.path.exists(dst):
             result["skipped"].append(slug)
             continue

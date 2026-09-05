@@ -189,7 +189,10 @@ merely weaker.
   check at `:269–272` already requires write on `<slug>.jsonl` (R19's fix) and is unchanged.
 - New check, run after the existing ones and only inside the `applies()` guard: read the
   registry via `governance_lib.clients_registry_path()`, and for each registered slug require
-  `log/<slug>.jsonl` to exist. Missing ⇒ one problem per slug, naming the bootstrap command.
+  `log/<slug>.jsonl` to exist. ~~Missing ⇒ one problem per slug, naming the bootstrap
+  command.~~ **CORRECTED to match the shipped code**: missing logs are reported as one
+  AGGREGATE problem naming a count (never the slugs — see the count-not-list rule two
+  bullets below, which this must also follow), not one problem per slug.
   Unparseable registry ⇒ one problem, distinct message.
 - `REMEDY` `:288–289` — replace `chmod -R g+w %(root)s/log`, which rebuilds the vulnerability,
   with the setgid form. The pre-flight prints this text when it refuses, so a remedy that is
@@ -263,8 +266,10 @@ on darwin despite `applies()`.
   content, not just mtime — an idempotency test that only checks existence would pass a
   truncation);
 - refusal when `log/` is absent;
-- refusal when the created file lands with the wrong gid — forced by clearing setgid on the
-  fixture directory, which is the D4 hazard as an executable test rather than a note.
+- refusal when the created file lands with the wrong gid — ~~forced by clearing setgid on
+  the fixture directory~~ **CORRECTED to match the shipped test**: forced by passing an
+  `expected_gid` this process cannot produce (`os.getgid() + 4242`), needing no root —
+  the D4 hazard as an executable test rather than a note.
 
 ### 6.3 Unit — `changeset_lib.test.py` / `apply-changeset.test.py`
 
