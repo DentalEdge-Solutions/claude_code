@@ -356,14 +356,22 @@ deploy actually uses, where the store's files already exist when the operator
 runs `chgrp -R` over the whole tree. The unrealistic order was the original
 one, not this one.
 
-Two changes to the Step 3 script, both ordering:
+Three changes to the Step 3 script, all mechanical (ordering, plus one added
+print — no logic, threshold, or expectation changed):
 
 1. In `build()`, create and `chmod` `clients.json` *before* the `chgrp -R`.
 2. In the second block, where `clients.json` is overwritten with the `slug-1`
    registration (which happens *after* `build()`'s `chgrp -R` already ran),
    add an explicit `chgrp 10000` on that rewritten file.
+3. Immediately after the `registered, no log` summary line, `printf '%s\n'
+   "$out"` so the refusal text the block prints below is actually emitted by
+   the command shown, rather than being captured into `$out` and only
+   grep-counted. (A prior version of this section printed that text without
+   this line present in the shown command — an undisclosed splice, flagged in
+   review. This version's command and output now match exactly.)
 
-Command (verbatim, corrected):
+Command (verbatim, corrected — this is the exact command that produced the
+raw output immediately below, with nothing added or removed after the run):
 
 ```bash
 cd /Users/ericksicard/Projects/claude_code
@@ -395,6 +403,7 @@ chmod 0640 "$root/registry/clients.json"
 out=$(python3 /bin-ro/preflight-governance-access.py --root "$root" 2>&1); rc=$?
 printf "registered, no log -> exit %s (names bootstrap-logs: %s)\n" \
   "$rc" "$(printf %s "$out" | grep -c bootstrap-logs)"
+printf "%s\n" "$out"
 python3 /bin-ro/migrate-governance.py --bootstrap-logs --governance-root "$root" --apply
 out=$(python3 /bin-ro/preflight-governance-access.py --root "$root" 2>&1); rc=$?
 printf "after bootstrap -> exit %s\n" "$rc"
@@ -403,22 +412,25 @@ rm -rf "$root"
 '
 ```
 
-Raw output (verbatim, exactly as produced by the corrected command above):
+Raw output (verbatim, exactly as produced by the command immediately above —
+re-run for this fix round, so the temp path below is a fresh `mktemp -d` and
+differs from any path shown elsewhere in this document; that is expected and
+is not hand-edited to match):
 
 ```
 empty registry, log/ 0770 -> exit 0
 empty registry, log/ 2750 -> exit 0
 registered, no log -> exit 2 (names bootstrap-logs: 2)
 preflight-governance-access: the ads-mutator executor (uid 10000) cannot use the governance store. Refusing BEFORE any mutation, because this same condition reached mid-apply is an exit-3 failure after a live account change:
-  - /tmp/tmp.mMlRrkwnrZ/log: 1 registered client(s) have no pre-created audit log. The executor cannot create one (log/ is host-owned 2750 by design), so this surfaces mid-apply as exit 3 after a live account change. Fix with: migrate-governance.py --bootstrap-logs --apply
+  - /tmp/tmp.mlYlWSvJny/log: 1 registered client(s) have no pre-created audit log. The executor cannot create one (log/ is host-owned 2750 by design), so this surfaces mid-apply as exit 3 after a live account change. Fix with: migrate-governance.py --bootstrap-logs --apply
 
 Fix by OWNERSHIP, not by widening the mode. Either run the store under a group the
 executor's UID belongs to:
 
-    sudo chgrp -R 10000 /tmp/tmp.mMlRrkwnrZ
-    sudo chmod -R g+rX /tmp/tmp.mMlRrkwnrZ
-    sudo chmod g+s /tmp/tmp.mMlRrkwnrZ/log
-    sudo find /tmp/tmp.mMlRrkwnrZ/log -type f -name '*.jsonl' -exec chmod 0660 {} +
+    sudo chgrp -R 10000 /tmp/tmp.mlYlWSvJny
+    sudo chmod -R g+rX /tmp/tmp.mlYlWSvJny
+    sudo chmod g+s /tmp/tmp.mlYlWSvJny/log
+    sudo find /tmp/tmp.mlYlWSvJny/log -type f -name '*.jsonl' -exec chmod 0660 {} +
 
 log/ gets NO group write: write on a directory is what grants unlink, and a deleted
 audit log costs reversibility (both --undo and the daily caps read through it), not
@@ -431,7 +443,7 @@ with:
 
 or give the store to the executor's UID outright:
 
-    sudo chown -R 10000:10000 /tmp/tmp.mMlRrkwnrZ && sudo chmod -R 700 /tmp/tmp.mMlRrkwnrZ
+    sudo chown -R 10000:10000 /tmp/tmp.mlYlWSvJny && sudo chmod -R 700 /tmp/tmp.mlYlWSvJny
 
 Do NOT `chmod 777`. The store is the one place Hermes cannot reach; making it
 world-writable hands it to every process on the host and removes the isolation this
@@ -444,7 +456,7 @@ whole tier is built on.
 }
 after bootstrap -> exit 0
 total 0
--rw-rw---- 1 0 10000 0 Sep  5 14:21 slug-1.jsonl
+-rw-rw---- 1 0 10000 0 Sep  5 14:29 slug-1.jsonl
 ```
 
 ### Matrix as measured (attempt 2)
