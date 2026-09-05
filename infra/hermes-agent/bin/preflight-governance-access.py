@@ -389,9 +389,13 @@ with:
 
     migrate-governance.py --bootstrap-logs --apply
 
-or give the store to the executor's UID outright:
+or give the store to the executor's UID outright. POSIX selects the owner class before
+the group class, so a log/ directory owned by the executor is writable by it no matter
+how tight the mode looks, and write on a directory is what grants unlink — so the
+sequence must restore log/ to a non-executor owner afterward:
 
     sudo chown -R %(uid)d:%(gid)d %(root)s && sudo chmod -R 700 %(root)s
+    sudo chown root:%(gid)d %(root)s/log && sudo chmod 2750 %(root)s/log
 
 Do NOT `chmod 777`. The store is the one place Hermes cannot reach; making it
 world-writable hands it to every process on the host and removes the isolation this

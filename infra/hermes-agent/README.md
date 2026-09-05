@@ -916,10 +916,14 @@ infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs --apply
 `seen/` is not mounted into the executor at all and needs no access for uid 10000.
 Widening it would hand the governed party the replay-protection state again.
 
-or outright ownership:
+or outright ownership. POSIX selects the owner class before the group class, so a
+`log/` directory owned by the executor is writable by it no matter how tight the mode
+looks, and write on a directory is what grants `unlink` — so the sequence must restore
+`log/` to a non-executor owner afterward:
 
 ```bash
 sudo chown -R 10000:10000 "$HERMES_GOVERNANCE_DIR" && sudo chmod -R 700 "$HERMES_GOVERNANCE_DIR"
+sudo chown root:10000 "$HERMES_GOVERNANCE_DIR"/log && sudo chmod 2750 "$HERMES_GOVERNANCE_DIR"/log
 ```
 
 **Never `chmod 777`.** The store is the one tree Hermes cannot reach; making it
