@@ -1421,11 +1421,20 @@ docker run --rm --user 0:0 -v "$PWD/infra/hermes-agent/bin":/bin-ro:ro \
 set -u
 build() {
   root=$(mktemp -d); mkdir -p "$root/log" "$root/approvals" "$root/control" "$root/registry"
+  # CORRECTED 2026-09-04 during execution. clients.json is written BEFORE the recursive
+  # chgrp, which is the order the README's deploy actually uses (the store's files already
+  # exist when the operator runs chgrp -R). The original ordering chgrp'd first and wrote
+  # the file after, so the new file inherited the creating process's gid (0, running as
+  # root) and registry/ has no setgid to correct it — leaving clients.json unreadable to
+  # uid 10000 and the pre-flight refusing for a reason unrelated to what this probe tests.
+  # That is the SAME setgid-inheritance hazard the wave exists to close for log/ (spec D4),
+  # reproduced by my own fixture in a different directory. It is easy to hit, which is the
+  # argument for D4's verify-what-you-created rule rather than a README line.
+  printf "{\"clients\": {}}" > "$root/registry/clients.json"
+  chmod 0640 "$root/registry/clients.json"
   chmod 0750 "$root"; chgrp -R 10000 "$root"
   for d in approvals control registry; do chmod 0750 "$root/$d"; done
   chmod "$1" "$root/log"
-  printf "{\"clients\": {}}" > "$root/registry/clients.json"
-  chmod 0640 "$root/registry/clients.json"
   echo "$root"
 }
 for mode in 0770 2750; do
@@ -1439,6 +1448,7 @@ done
 # The D2 refusal, and then the positive control that the guard still ADMITS.
 root=$(build 2750)
 printf "{\"clients\": {\"slug-1\": {\"status\": \"active\"}}}" > "$root/registry/clients.json"
+chgrp 10000 "$root/registry/clients.json"   # rewritten AFTER build()'s chgrp -R, so redo it
 chmod 0640 "$root/registry/clients.json"
 out=$(python3 /bin-ro/preflight-governance-access.py --root "$root" 2>&1); rc=$?
 printf "registered, no log -> exit %s (names bootstrap-logs: %s)\n" \
