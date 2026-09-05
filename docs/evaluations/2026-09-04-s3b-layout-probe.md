@@ -108,9 +108,13 @@ success meaningful rather than a broken fixture where nothing works.
 
 ---
 
-## Step 3: Real pre-flight and real bootstrap inside the container
+## Step 3, attempt 1: Real pre-flight and real bootstrap inside the container
 
-Command (verbatim):
+This attempt used the brief's `build()` verbatim and hit a fixture bug (fully
+diagnosed below). It is kept in full, unedited, as the record of that finding.
+The corrected re-run is in the next section, "Step 3, attempt 2."
+
+Command (verbatim, as originally specified in the brief):
 
 ```bash
 cd /Users/ericksicard/Projects/claude_code
@@ -325,6 +329,151 @@ the fixture re-run with `chmod g+s "$root/registry"` before writing
 `clients.json`, or an explicit `chgrp 10000 "$root/registry/clients.json"`
 after) before this exact end-to-end exit-0 sequence can be captured.
 
+**This is a finding in its own right, not merely a fixture note — it is D4,
+reproduced live.** The wave's coordinator confirmed the root cause against the
+brief: `build()` runs `chgrp -R 10000 "$root"` and only afterward writes
+`registry/clients.json`, and `registry/` carries no setgid bit to correct for
+that ordering, so the new file inherits the creating process's gid (0) instead
+of the parent directory's group (10000). That is the *exact same*
+setgid-inheritance hazard — spec deviation D4 — that this entire wave exists
+to close for `log/`, reproduced by accident in a different directory of the
+probe's own fixture. It is independent, unplanned corroboration that D4 is
+real and easy to hit even by someone who already knows about it and is trying
+to avoid it, and it is the argument for D4's "verify what you created" rule
+over trusting a README line describing the intended order of operations.
+Refusing to tune the probe until it went green — reporting the refusal and its
+cause instead — is what preserved this as usable evidence rather than erasing
+it under a quick fix.
+
+---
+
+## Step 3, attempt 2: corrected fixture, re-run
+
+Root cause from attempt 1: `clients.json` was created *after* the recursive
+`chgrp -R 10000 "$root"` in `build()`, so it never got group `10000`. The fix
+is ordering only — no logic change, and it matches the order the README's
+deploy actually uses, where the store's files already exist when the operator
+runs `chgrp -R` over the whole tree. The unrealistic order was the original
+one, not this one.
+
+Two changes to the Step 3 script, both ordering:
+
+1. In `build()`, create and `chmod` `clients.json` *before* the `chgrp -R`.
+2. In the second block, where `clients.json` is overwritten with the `slug-1`
+   registration (which happens *after* `build()`'s `chgrp -R` already ran),
+   add an explicit `chgrp 10000` on that rewritten file.
+
+Command (verbatim, corrected):
+
+```bash
+cd /Users/ericksicard/Projects/claude_code
+docker run --rm --user 0:0 -v "$PWD/infra/hermes-agent/bin":/bin-ro:ro \
+  --entrypoint sh hermes-agent-claude:latest -c '
+set -u
+build() {
+  root=$(mktemp -d); mkdir -p "$root/log" "$root/approvals" "$root/control" "$root/registry"
+  printf "{\"clients\": {}}" > "$root/registry/clients.json"
+  chmod 0640 "$root/registry/clients.json"
+  chmod 0750 "$root"; chgrp -R 10000 "$root"
+  for d in approvals control registry; do chmod 0750 "$root/$d"; done
+  chmod "$1" "$root/log"
+  echo "$root"
+}
+for mode in 0770 2750; do
+  root=$(build "$mode")
+  out=$(python3 /bin-ro/preflight-governance-access.py --root "$root" 2>&1); rc=$?
+  printf "empty registry, log/ %s -> exit %s\n" "$mode" "$rc"
+  printf %s "$out" | head -3
+  rm -rf "$root"
+done
+
+# The D2 refusal, and then the positive control that the guard still ADMITS.
+root=$(build 2750)
+printf "{\"clients\": {\"slug-1\": {\"status\": \"active\"}}}" > "$root/registry/clients.json"
+chgrp 10000 "$root/registry/clients.json"   # rewritten AFTER build()'s chgrp -R, so redo it
+chmod 0640 "$root/registry/clients.json"
+out=$(python3 /bin-ro/preflight-governance-access.py --root "$root" 2>&1); rc=$?
+printf "registered, no log -> exit %s (names bootstrap-logs: %s)\n" \
+  "$rc" "$(printf %s "$out" | grep -c bootstrap-logs)"
+python3 /bin-ro/migrate-governance.py --bootstrap-logs --governance-root "$root" --apply
+out=$(python3 /bin-ro/preflight-governance-access.py --root "$root" 2>&1); rc=$?
+printf "after bootstrap -> exit %s\n" "$rc"
+ls -ln "$root/log"
+rm -rf "$root"
+'
+```
+
+Raw output (verbatim, exactly as produced by the corrected command above):
+
+```
+empty registry, log/ 0770 -> exit 0
+empty registry, log/ 2750 -> exit 0
+registered, no log -> exit 2 (names bootstrap-logs: 2)
+preflight-governance-access: the ads-mutator executor (uid 10000) cannot use the governance store. Refusing BEFORE any mutation, because this same condition reached mid-apply is an exit-3 failure after a live account change:
+  - /tmp/tmp.mMlRrkwnrZ/log: 1 registered client(s) have no pre-created audit log. The executor cannot create one (log/ is host-owned 2750 by design), so this surfaces mid-apply as exit 3 after a live account change. Fix with: migrate-governance.py --bootstrap-logs --apply
+
+Fix by OWNERSHIP, not by widening the mode. Either run the store under a group the
+executor's UID belongs to:
+
+    sudo chgrp -R 10000 /tmp/tmp.mMlRrkwnrZ
+    sudo chmod -R g+rX /tmp/tmp.mMlRrkwnrZ
+    sudo chmod g+s /tmp/tmp.mMlRrkwnrZ/log
+    sudo find /tmp/tmp.mMlRrkwnrZ/log -type f -name '*.jsonl' -exec chmod 0660 {} +
+
+log/ gets NO group write: write on a directory is what grants unlink, and a deleted
+audit log costs reversibility (both --undo and the daily caps read through it), not
+merely quota. The executor appends to a PRE-CREATED per-client file instead, and setgid
+on log/ is what makes host-created files inherit gid 10000 — without it, 0660 grants
+the wrong group and uid 10000 falls through to `other`. Create missing per-client logs
+with:
+
+    migrate-governance.py --bootstrap-logs --apply
+
+or give the store to the executor's UID outright:
+
+    sudo chown -R 10000:10000 /tmp/tmp.mMlRrkwnrZ && sudo chmod -R 700 /tmp/tmp.mMlRrkwnrZ
+
+Do NOT `chmod 777`. The store is the one place Hermes cannot reach; making it
+world-writable hands it to every process on the host and removes the isolation this
+whole tier is built on.
+{
+  "created": [
+    "slug-1"
+  ],
+  "skipped": []
+}
+after bootstrap -> exit 0
+total 0
+-rw-rw---- 1 0 10000 0 Sep  5 14:21 slug-1.jsonl
+```
+
+### Matrix as measured (attempt 2)
+
+| check | expected | measured | matches? |
+|---|---|---|---|
+| empty registry, `log/` `0770` | exit 0 (over-grants, honest negative) | exit 0 | yes |
+| empty registry, `log/` `2750` | exit 0 (now the supported layout) | exit 0 | yes |
+| registered, no log | exit 2, naming `--bootstrap-logs` | exit 2, names it (2 occurrences) | yes |
+| after `migrate-governance.py --bootstrap-logs --apply` | exit 0 | exit 0 | yes |
+| `ls -ln "$root/log"` after bootstrap | `-rw-rw----` group `10000` | `-rw-rw---- 1 0 10000` | yes |
+
+**The final `exit 0` was reached.** This is the load-bearing line the wave's
+positive control depends on — the dual of "can an attacker get in?" that a
+seam review in this project once failed to ask, passing a seam CLEAN that
+nobody could actually get through. Here, the legitimate caller (a registered
+client after a correct bootstrap) is admitted, not merely the illegitimate
+caller refused.
+
+**Conclusion for Step 3 (final):** with the fixture's own ordering bug
+corrected (an ordering fix only, matching the README's real deploy sequence,
+not a change to any threshold or expectation), the full end-to-end sequence
+described in the brief is reproduced exactly: refusal naming
+`--bootstrap-logs`, bootstrap creates the per-client log, and the guard then
+admits the legitimate case at `exit 0` with the file at `-rw-rw----` group
+`10000`. Combined with Step 2's clean three-row matrix, this closes the loop:
+the OS-level permission model, the CLI-level refusal, and the CLI-level admit
+all measure as designed for uid 10000 under Linux.
+
 ---
 
 ## What this does and does not establish
@@ -332,24 +481,30 @@ after) before this exact end-to-end exit-0 sequence can be captured.
 **Establishes:** append-but-not-unlink holds at the OS level for uid 10000 on
 Linux at `2750`/`0660` (Step 2, all three rows matched the expected table
 exactly, including the wrong-gid control row that proves the append check
-discriminates rather than being a broken fixture). Independently, the
-`--bootstrap-logs` mechanism creates a per-client log at the exact target
-mode and group (`-rw-rw---- ... 10000`, confirmed twice in Step 3), and the
-pre-flight's refusal text correctly identifies a missing per-client log and
-names the remedy. The wrong-gid row proves the append control discriminates,
-so the fix row's success in Step 2 is evidence rather than a coincidence.
+discriminates rather than being a broken fixture). The pre-flight admits that
+layout, and does so as the *end* of a real refuse → bootstrap → admit cycle:
+Step 3 attempt 2 (with only an ordering fix to the probe's own fixture, no
+change to the code under test or to any threshold) reproduced the brief's full
+expected sequence exactly — both empty-registry rows exit 0, `registered, no
+log` exits 2 naming `--bootstrap-logs`, the bootstrap creates `slug-1.jsonl`,
+and the guard then admits the legitimate case at `exit 0` with the file at
+`-rw-rw----` group `10000`. The wrong-gid row in Step 2 proves the append
+control discriminates, so the fix row's success is evidence rather than a
+coincidence, and Step 3's final `exit 0` is evidence that the guard admits the
+legitimate caller, not merely that it refuses the illegitimate one.
 
-**Does not establish:** the full CLI-level end-to-end positive control that
-Step 3 was designed to produce (refuse naming `--bootstrap-logs` → bootstrap
-→ a single clean `exit 0`). That specific chain was not observed in this
-session: a group-inheritance bug in the brief's own `build()` fixture
-(`registry/clients.json` is created after a `chgrp -R` and the `registry/`
-directory lacks setgid, so the file inherits gid 0 instead of 10000) causes
-every scenario to fail an unrelated, real, and intentional pre-flight check
-on registry readability, independent of the `log/` layout under test. This is
-reported as a finding per the brief's own instruction, not papered over by
-tuning the fixture to force a green run — see the Step 3 section above for
-the full diagnosis.
+**A finding surfaced along the way, kept in full:** Step 3 attempt 1 (using
+the brief's `build()` verbatim) failed every scenario, including the final
+one, on an unrelated real pre-flight check — `registry/clients.json` was
+created after `build()`'s recursive `chgrp -R 10000`, and `registry/` has no
+setgid bit to correct for that ordering, so the file inherited gid 0 instead
+of 10000. This is the *same* setgid-inheritance hazard (spec deviation D4)
+that this wave exists to close for `log/`, reproduced independently and by
+accident in a different directory of the probe's own fixture — corroboration
+that D4 is real and easy to hit even by someone actively guarding against it,
+and the argument for D4's "verify what you created" rule over trusting a
+README's stated order of operations. That attempt is preserved above,
+unedited, with its full `ls -ln` diagnosis.
 
 **Does NOT establish anything about the VPS.** This ran under Docker Desktop,
 which remaps bind-mount ownership. Per R22 no darwin-hosted measurement may be
