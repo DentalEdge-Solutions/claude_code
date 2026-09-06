@@ -310,6 +310,16 @@ looks like a fix and is a broken fixture:
 | `2750`, file `0660` gid 10000 | **must succeed** | must be denied | the fix |
 | `2750`, file `0660` **wrong gid** | must fail | denied | D4's hazard, proving the control discriminates |
 
+> **Build the probe's store INSIDE the container, or in a named volume — never in a
+> bind mount.** Measured 2026-09-06 while closing the pre-flight's owner-write gap: macOS
+> Docker Desktop does not preserve `chown`'d ownership across a bind mount, so a probe whose
+> store is bind-mounted reports ownership that is not what it set. Every `chown`-dependent
+> row then measures nothing, and — because the executor appears to own everything — an
+> unsafe layout can read as safe. `mktemp -d` inside the container (what the probes above
+> use) or a named volume both give real uid/gid semantics. The module's own docstring warns
+> that Docker Desktop "remaps ownership"; this is the operational form of that warning, and
+> it is the trap to avoid when re-running this probe for Phase B.
+
 Ancestor directories must be traversable or append fails for an irrelevant reason — that
 invalidated two of three probe attempts last time, and only the append control caught it.
 
