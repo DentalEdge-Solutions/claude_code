@@ -39,6 +39,7 @@ P = _load("propose_changeset_e2e", "propose-changeset.py")
 A = _load("approve_changeset_e2e", "approve-changeset.py")
 B = _load("hermes_broker_e2e", "hermes-broker.py")
 import spool_lib as S
+import migrate_governance_shim as M
 
 APPLY = os.path.join(HERE, "apply-changeset.py")
 
@@ -145,6 +146,23 @@ class Base(unittest.TestCase):
         os.makedirs(os.path.dirname(switch))
         with open(switch, "w") as f:
             f.write("enabled\n")
+
+        # S3-b Task 4: iter_log_records now raises on a missing log, and log/ is
+        # host-owned 2750 in production so the executor can no longer create its own.
+        # Give acme-dental a pre-created log through the real deploy path
+        # (migrate-governance.py --bootstrap-logs) rather than hand-writing one — same
+        # pattern as apply-changeset.test.py's Base.setUp. bootstrap_logs reads the
+        # registry from the CANONICAL governance-store path (registry/clients.json),
+        # distinct from self.clients (_registry/clients.json, handed explicitly to
+        # propose()/approve() below).
+        reg_dir = os.path.join(self.tmp, "registry")
+        os.makedirs(reg_dir)
+        with open(os.path.join(reg_dir, "clients.json"), "w") as f:
+            json.dump({"clients": {"acme-dental": {
+                "project": "claude_google_ads", "customer_id": "1234567890",
+                "status": "active"}}}, f)
+        os.makedirs(os.path.join(self.tmp, "log"), mode=0o2750)
+        M.bootstrap_logs(self.tmp, dry_run=False, expected_gid=os.getgid())
 
         self.vault = os.path.join(self.tmp, "acme-dental")
 

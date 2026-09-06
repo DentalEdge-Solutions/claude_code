@@ -19,13 +19,13 @@ locally is a check operators learn to bypass.
 The remedy is ownership, never `chmod 777`: making the store world-readable hands it
 back to every process on the host and deletes the isolation the store exists for.
 """
-import argparse, os, stat, sys
+import argparse, json, os, stat, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib                      # SLUG_RE, shared not restated
 
-EXECUTOR_UID = 10000            # Dockerfile: USER hermes
-EXECUTOR_GID = 10000
+EXECUTOR_UID = governance_lib.EXECUTOR_UID
+EXECUTOR_GID = governance_lib.EXECUTOR_GID
 
 READ_ONLY_DIRS = ("approvals", "control", "registry")
 
@@ -41,6 +41,15 @@ READ_ONLY_DIRS = ("approvals", "control", "registry")
 # Nothing checks seen/ now, and that is correct: this script predicts what the EXECUTOR's
 # uid can do, and the executor has no business with seen/. The broker writes it as the
 # host user, whose access is not in question here.
+#
+# M4: despite the name, this is now checked READ-ONLY at the directory level (S3-b:
+# _check_dir is always called with need_write=False for every name in here — see
+# _check_dir's own docstring). The name predates that change and still means "the
+# directories the executor writes something INTO" (append_log opens a FILE here with
+# mode "a"; the file-level check below is where write is actually required) — it is
+# no longer "the directories the executor needs directory-level write on", which
+# would be the S3-b hazard this whole wave closes. Kept as-is rather than renamed:
+# docker-compose.yml references READ_WRITE_DIRS by this exact name in its own comments.
 READ_WRITE_DIRS = ("log",)
 
 # Fixed-name read-only files directly under the store root's directories. The kill
@@ -77,6 +86,13 @@ def _describe(path, st, uid, bits, want):
 
 
 def _check_dir(path, uid, gid, need_write):
+    """M3/M4: `need_write=True` has no caller at all as of S3-b, production or test —
+    every call site below (and every test) passes `need_write=False`, since log/
+    moved from "the executor needs write on the directory" to "the executor needs
+    write on the FILE, read+traverse on the directory" (directory write is what
+    grants unlink). Kept as a parameter rather than dropped, for symmetry with
+    `_check_file`, which DOES still have a real `need_write=True` caller (the
+    per-file check on log/<slug>.jsonl)."""
     try:
         st = os.stat(path)
     except OSError as e:
@@ -91,6 +107,44 @@ def _check_dir(path, uid, gid, need_write):
     if ok:
         return None
     return _describe(path, st, uid, bits, want)
+
+
+def _check_no_write(path, uid, gid):
+    """Sibling to `_check_dir`, checking the opposite direction: not that the executor
+    CAN read+traverse this directory, but that it CANNOT write it. Write on a
+    directory is what grants unlink — a log/ the executor can write is a log/ it can
+    delete, and both the --undo path and the daily caps read through the log that
+    would delete, so the cost is reversibility, not merely quota.
+
+    Deliberately expressed as the single POSIX invariant `_perm_bits(st, uid, gid) &
+    0o2`, not an enumeration of owner/group/other cases: the security property is "no
+    write, by whichever class applies", and `_perm_bits` (:68-76) already implements
+    exactly the class selection this needs — owner else group else other, exactly one
+    class. That one invariant is what catches the owner-class hazard by itself (the
+    `chown -R <uid>:<gid> <root> && chmod -R 700 <root>` layout the deploy docs used to
+    offer made log/ OWNER-owned by the executor; POSIX selects the owner class first,
+    so 700 grants rwx on the directory and therefore unlink, however tight the mode
+    looks), the group-write case (a store still deployed at the pre-S3-b 0770 layout),
+    and world-write — all through the same check, with no case list to keep in sync.
+
+    `os.stat` failing here is not a NEW fault to report: the read+traverse check in
+    check()'s READ_WRITE_DIRS loop already reports an unreachable log/, and reporting
+    it a second time here would double-count one fault as two, exactly the failure
+    Ruling 9 already had to fix once for the registry check. So an unstatable
+    directory returns None here, silently, and leaves the reporting to that check."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if _perm_bits(st, uid, gid) & 0o2:
+        return ("%s: mode %04o owner %d:%d grants uid %d write on the DIRECTORY, which "
+                "is what grants unlink — the executor could delete this audit log "
+                "outright. A deleted log costs reversibility, not merely quota: both "
+                "`--undo` and the daily caps read through it. Fix with: "
+                "chown root:%d %s && chmod 2750 %s"
+                % (path, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, uid, gid,
+                   path, path))
+    return None
 
 
 def _check_file(path, uid, gid, need_write):
@@ -243,6 +297,100 @@ def _check_approvals(root, uid, gid):
     return problems
 
 
+def _check_registered_logs(root):
+    """Every REGISTERED client must have a pre-created audit log (S3-b).
+
+    log/ is host-owned 2750, so the executor cannot create log/<slug>.jsonl — append_log
+    opens it with mode "a", which creates, and that now fails with EACCES. Catching it
+    only in iter_log_records surfaces it MID-APPLY, and R19 exists precisely so a store
+    the executor cannot use is refused before any mutation is attempted instead:
+    mid-apply is exit 3 after a live account change, while a pre-flight refusal costs
+    one idempotent command. (This runs per-request, in run-ads-mutate.sh, which the
+    broker spawns fresh for each apply — hermes-broker.py never invokes this script
+    itself. "Refused before any mutation" is the safety property; it is not a
+    broker-startup check.)
+
+    This is NOT R19b's over-checking. Every false refusal in that lineage — the
+    .approval.lock sidecar, a rotated log, an operator's backup — was this gate demanding
+    access to a file the executor never opens, from a requirement list written from
+    memory. This requirement is the inverse: log/<slug>.jsonl for a registered slug is
+    the one file the executor certainly opens, and it is DERIVED from the same
+    clients.json vault_lib.resolve already gates on, never from a listing of log/. Files
+    in log/ that no registered slug names stay ignored, exactly as before.
+
+    A MISSING registry is not a fault — _check_file already treats it as the normal
+    resting state of a fresh store, and turning that into a refusal is the cry-wolf
+    failure. Nor is a registry UNREADABLE BY THE CHECKING PROCESS ITSELF: that fault is
+    already reported by the registry/ directory and clients.json file checks above (see
+    Ruling 9 below), and reporting it a second time here would double-count one fault as
+    two. An UNPARSEABLE one is: no client resolves through it, so "zero registered
+    clients" would be a silent pass over a store that cannot work at all.
+
+    The message carries a COUNT, never the slugs. Client slugs are client-private, this
+    text goes to stderr, and the systemd journal captures stderr under Phase B —
+    vault_lib.resolve_dormant_pilot refuses to name candidates for the same reason.
+    """
+    reg = governance_lib.clients_registry_path(root)
+    try:
+        with open(reg, encoding="utf-8") as f:
+            data = json.load(f)
+    # Ruling 9. Missing OR unreadable-by-this-process, and NEITHER is this check's to
+    # report. Absence is the normal resting state of a fresh store — _check_file
+    # already treats it that way. Unreadability is ALREADY reported by the registry/
+    # directory check and the clients.json file check above, so reporting it again
+    # counts one fault twice: measured at 6 problems for a store with 5 faults, which
+    # broke test_owner_class_wins_even_when_group_and_other_are_wider's exact count.
+    # That is R19b's over-checking failure on a new path.
+    #
+    # This is also the one place in this module that does REAL I/O rather than
+    # simulating access for a hypothetical (uid, gid) via _perm_bits. Every sibling
+    # check predicts whether uid 10000 WOULD have access; only this one needs the
+    # checking process itself to read a file. Returning [] keeps that asymmetry out of
+    # the results.
+    #
+    # Residual, stated rather than hidden: a registry the EXECUTOR can read but the
+    # CHECKER cannot silently skips this check. That is a "cannot verify", not a pass,
+    # and Task 4's iter_log_records raise is the backstop that still catches a missing
+    # log mid-apply. This check is the early warning, not the only guard.
+    except OSError:
+        return []
+    except ValueError as e:
+        return ["%s: malformed client registry (%s) — refusing, because a registry that "
+                "will not parse resolves no client, and reading it as 'zero registered "
+                "clients' would pass a store that cannot work" % (reg, e)]
+    # data.get("clients", {}) — WITH the default, matching vault_lib.load_registry:49
+    # exactly. An ABSENT "clients" key means zero registered clients, which is how
+    # load_registry already reads it; only a PRESENT but non-object "clients" is a fault.
+    # Dropping the default here would return None for a registry of "{}" and refuse it —
+    # breaking the very controls this check is supposed to leave untouched, since
+    # _configure_full_correct_store writes exactly that.
+    clients = data.get("clients", {}) if isinstance(data, dict) else None
+    if not isinstance(clients, dict):
+        return ["%s: registry 'clients' must be a JSON object" % reg]
+
+    missing = 0
+    for slug in clients:
+        if not isinstance(slug, str) or not governance_lib.SLUG_RE.fullmatch(slug):
+            # vault_lib.resolve would refuse it; not this gate's call. NOTE: this
+            # SILENTLY SKIPS an invalid slug rather than raising, unlike
+            # migrate_governance_shim.bootstrap_logs's identical filter, which RAISES.
+            # Both are defensible — this is a read-only refusal gate that must not
+            # itself fail loudly on a registry an operator is free to hand-edit
+            # incorrectly, while bootstrap_logs is a mutating tool where silently
+            # skipping a bad registration would be the exact ambiguity it exists to
+            # remove — but nothing else says they differ, so it is stated here.
+            continue
+        if not os.path.isfile(governance_lib.log_path(slug, root)):
+            missing += 1
+    if not missing:
+        return []
+    return ["%s/log: %d registered client(s) have no pre-created audit log. The executor "
+            "cannot create one (log/ is host-owned %04o by design), so this surfaces "
+            "mid-apply as exit 3 after a live account change. Fix with: "
+            "migrate-governance.py --bootstrap-logs --apply"
+            % (root, missing, governance_lib.LOG_DIR_MODE)]
+
+
 def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
     """Return a list of human-readable problems; empty means the executor can work."""
     if not applies(platform):
@@ -255,8 +403,29 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
         p = _check_dir(os.path.join(root, name), uid, gid, need_write=False)
         if p:
             problems.append(p)
+    # S3-b: read+traverse on the DIRECTORY, never write. Directory write is what grants
+    # unlink, so a log/ the executor can write is a log/ it can delete — and both the
+    # undo path and the caps path read through iter_log_records, so a deleted log costs
+    # REVERSIBILITY, not merely quota. What the executor actually needs here is r-x:
+    # append_log opens log/<slug>.jsonl with mode "a" (the FILE-level check below covers
+    # that) and then fsyncs the log/ DIRECTORY fd via os.open(dirname, O_RDONLY), which
+    # is why read is required and traverse alone would not be enough.
     for name in READ_WRITE_DIRS:
-        p = _check_dir(os.path.join(root, name), uid, gid, need_write=True)
+        p = _check_dir(os.path.join(root, name), uid, gid, need_write=False)
+        if p:
+            problems.append(p)
+
+    # S3-b closeout: the executor must have read+traverse (checked above) and must NOT
+    # have write, by ANY class — owner, group, or other. This is the actual security
+    # property the "no group write" comment above only half-enforced: it stopped the
+    # group-write case (a store deployed at the old 0770 layout) but said nothing
+    # about a log/ the executor OWNS outright, which is exactly what
+    # `chown -R <uid>:<gid> <root> && chmod -R 700 <root>` (an alternative the deploy
+    # docs offered, fixed in cdb9237) produces — POSIX selects the owner class first,
+    # so 700 grants the executor rwx on log/ and therefore unlink. See
+    # _check_no_write's docstring for why this is one invariant, not a case list.
+    for name in READ_WRITE_DIRS:
+        p = _check_no_write(os.path.join(root, name), uid, gid)
         if p:
             problems.append(p)
 
@@ -277,6 +446,7 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
             problems.append(p)
 
     problems.extend(_check_approvals(root, uid, gid))
+    problems.extend(_check_registered_logs(root))
 
     return problems
 
@@ -286,11 +456,26 @@ Fix by OWNERSHIP, not by widening the mode. Either run the store under a group t
 executor's UID belongs to:
 
     sudo chgrp -R %(gid)d %(root)s
-    sudo chmod -R g+rX %(root)s && sudo chmod -R g+w %(root)s/log
+    sudo chmod -R g+rX %(root)s
+    sudo chmod 2750 %(root)s/log
+    sudo find %(root)s/log -type f -name '*.jsonl' -exec chmod 0660 {} +
 
-or give the store to the executor's UID outright:
+log/ gets NO group write: write on a directory is what grants unlink, and a deleted
+audit log costs reversibility (both --undo and the daily caps read through it), not
+merely quota. The executor appends to a PRE-CREATED per-client file instead, and setgid
+on log/ is what makes host-created files inherit gid %(gid)d — without it, 0660 grants
+the wrong group and uid %(uid)d falls through to `other`. Create missing per-client logs
+with:
+
+    migrate-governance.py --bootstrap-logs --apply
+
+or give the store to the executor's UID outright. POSIX selects the owner class before
+the group class, so a log/ directory owned by the executor is writable by it no matter
+how tight the mode looks, and write on a directory is what grants unlink — so the
+sequence must restore log/ to a non-executor owner afterward:
 
     sudo chown -R %(uid)d:%(gid)d %(root)s && sudo chmod -R 700 %(root)s
+    sudo chown root:%(gid)d %(root)s/log && sudo chmod 2750 %(root)s/log
 
 Do NOT `chmod 777`. The store is the one place Hermes cannot reach; making it
 world-writable hands it to every process on the host and removes the isolation this
