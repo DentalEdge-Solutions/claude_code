@@ -109,6 +109,44 @@ def _check_dir(path, uid, gid, need_write):
     return _describe(path, st, uid, bits, want)
 
 
+def _check_no_write(path, uid, gid):
+    """Sibling to `_check_dir`, checking the opposite direction: not that the executor
+    CAN read+traverse this directory, but that it CANNOT write it. Write on a
+    directory is what grants unlink — a log/ the executor can write is a log/ it can
+    delete, and both the --undo path and the daily caps read through the log that
+    would delete, so the cost is reversibility, not merely quota.
+
+    Deliberately expressed as the single POSIX invariant `_perm_bits(st, uid, gid) &
+    0o2`, not an enumeration of owner/group/other cases: the security property is "no
+    write, by whichever class applies", and `_perm_bits` (:68-76) already implements
+    exactly the class selection this needs — owner else group else other, exactly one
+    class. That one invariant is what catches the owner-class hazard by itself (the
+    `chown -R <uid>:<gid> <root> && chmod -R 700 <root>` layout the deploy docs used to
+    offer made log/ OWNER-owned by the executor; POSIX selects the owner class first,
+    so 700 grants rwx on the directory and therefore unlink, however tight the mode
+    looks), the group-write case (a store still deployed at the pre-S3-b 0770 layout),
+    and world-write — all through the same check, with no case list to keep in sync.
+
+    `os.stat` failing here is not a NEW fault to report: the read+traverse check in
+    check()'s READ_WRITE_DIRS loop already reports an unreachable log/, and reporting
+    it a second time here would double-count one fault as two, exactly the failure
+    Ruling 9 already had to fix once for the registry check. So an unstatable
+    directory returns None here, silently, and leaves the reporting to that check."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if _perm_bits(st, uid, gid) & 0o2:
+        return ("%s: mode %04o owner %d:%d grants uid %d write on the DIRECTORY, which "
+                "is what grants unlink — the executor could delete this audit log "
+                "outright. A deleted log costs reversibility, not merely quota: both "
+                "`--undo` and the daily caps read through it. Fix with: "
+                "chown root:%d %s && chmod 2750 %s"
+                % (path, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, uid, gid,
+                   path, path))
+    return None
+
+
 def _check_file(path, uid, gid, need_write):
     """A file that does not exist is not a problem — absence is the normal resting
     state (no kill switch yet, no log yet, no applies yet). Only an EXISTING file with
@@ -374,6 +412,20 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
     # is why read is required and traverse alone would not be enough.
     for name in READ_WRITE_DIRS:
         p = _check_dir(os.path.join(root, name), uid, gid, need_write=False)
+        if p:
+            problems.append(p)
+
+    # S3-b closeout: the executor must have read+traverse (checked above) and must NOT
+    # have write, by ANY class — owner, group, or other. This is the actual security
+    # property the "no group write" comment above only half-enforced: it stopped the
+    # group-write case (a store deployed at the old 0770 layout) but said nothing
+    # about a log/ the executor OWNS outright, which is exactly what
+    # `chown -R <uid>:<gid> <root> && chmod -R 700 <root>` (an alternative the deploy
+    # docs offered, fixed in cdb9237) produces — POSIX selects the owner class first,
+    # so 700 grants the executor rwx on log/ and therefore unlink. See
+    # _check_no_write's docstring for why this is one invariant, not a case list.
+    for name in READ_WRITE_DIRS:
+        p = _check_no_write(os.path.join(root, name), uid, gid)
         if p:
             problems.append(p)
 

@@ -67,9 +67,30 @@ class TestLinuxSemantics(Base):
 
     def test_control_same_store_same_mode_but_the_owning_uid_passes(self):
         """CONTROL. Without this the refusal above proves only that the function can
-        return something — it must ACCEPT the identical layout when the UID matches."""
+        return something — it must ACCEPT the identical layout when the UID matches,
+        PROVIDED log/ is correctly carved out. `os.chown` is unavailable to this test
+        without root, so the carve-out here is expressed as a mode change on log/
+        alone: the owner class must have no write bit, which is the mode-only
+        approximation of the real remedy's `chown root:<gid> log && chmod 2750 log`
+        (real ownership does the rest on an actual host). Without this carve-out the
+        store is exactly the S3-b hazard — see the paired negative below."""
         self._chmod_all(0o700)
+        for name in PF.READ_WRITE_DIRS:
+            os.chmod(os.path.join(self.root, name), 0o500)   # owner: r-x, no w
         self.assertEqual(PF.check(self.root, self.uid, self.gid, platform="linux"), [])
+
+    def test_owner_owned_log_dir_left_un_carved_is_refused(self):
+        """PAIRED NEGATIVE for the control above — the pair is the point. A store may
+        still be executor-owned at 700, but if log/ itself is left un-carved (still
+        700, so still owner-writable), the gate must now refuse it: this is exactly
+        the hazard the deploy docs' `chown -R <uid>:<gid> <root> && chmod -R 700
+        <root>` alternative produced (fixed in cdb9237) — POSIX selects the owner
+        class first, so 700 grants the owning executor rwx on log/ and therefore
+        unlink, letting it delete its own audit log."""
+        self._chmod_all(0o700)
+        problems = PF.check(self.root, self.uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(any("log" in p and "unlink" in p for p in problems))
 
     def test_group_readable_store_with_a_matching_gid_passes(self):
         """The documented remedy: keep the store off `other`, grant the executor's
@@ -83,19 +104,25 @@ class TestLinuxSemantics(Base):
             os.chmod(os.path.join(self.root, name), 0o2750)
         self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
 
-    def test_group_writable_log_dir_still_passes_because_it_over_grants(self):
-        """HONEST NEGATIVE RESULT, recorded rather than hidden. This gate checks that
-        the executor CAN work, not that it is minimally privileged, so the old 0770
-        layout still returns zero problems — the pre-flight is NOT what stops an
-        operator re-widening log/. The deploy documentation and REMEDY text are, and
-        Task 5's container probe is what measures the difference. Asserting a refusal
-        here would be asserting a guarantee this script does not make."""
+    def test_group_writable_log_dir_is_now_refused(self):
+        """S3-b closeout. This used to be an HONEST NEGATIVE RESULT: the gate checked
+        that the executor CAN work, not that it is minimally privileged, so the old
+        0770 layout returned zero problems and the pre-flight was NOT what stopped an
+        operator re-widening log/ — only the deploy documentation and REMEDY text were.
+
+        That is no longer true. The gate now enforces the same no-executor-write
+        property the deploy docs describe: directory write is what grants unlink, and
+        a deleted audit log costs reversibility (both `--undo` and the daily caps read
+        through it), not merely quota. A 0770 log/ with a matching gid grants the
+        executor group-write, so it is refused now, not merely discouraged in prose."""
         os.chmod(self.root, 0o750)
         for name in PF.READ_ONLY_DIRS:
             os.chmod(os.path.join(self.root, name), 0o750)
         for name in PF.READ_WRITE_DIRS:
             os.chmod(os.path.join(self.root, name), 0o770)
-        self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+        problems = PF.check(self.root, self.other_uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1)
+        self.assertTrue(any("log" in p and "unlink" in p for p in problems))
 
     def test_world_readable_store_passes_the_dirs_but_flags_an_unwritable_log_file(self):
         """S3-b moved the write requirement from the DIRECTORY to the FILE. 0o755

@@ -181,6 +181,15 @@ so `log/` needs **read** as well as traverse — `r-x`, which is what `_check_di
 already requires. The pre-flight inversion is therefore exactly correct for the real call, not
 merely weaker.
 
+**Closeout (post-ship finding).** The pre-flight originally only asserted the positive half of
+this table — that the executor CAN read+traverse `log/`. It said nothing about the negative
+half, so an operator-owned `700` layout (an alternative the deploy docs briefly offered, fixed
+in `cdb9237`) still passed: POSIX selects the owner class first, so `700` grants the owning
+executor `rwx` on `log/` and therefore `unlink`. `preflight-governance-access.py` now also
+checks `_perm_bits(st, uid, gid) & 0o2` on `log/` and refuses if set, by owner, group, or other
+— the gate **enforces** the no-executor-write property this table documents, rather than only
+documenting it.
+
 ## 5. Change spec
 
 ### 5.1 `preflight-governance-access.py`
