@@ -607,8 +607,10 @@ def append_log(slug, rec):
 # its entrypoint ever read or wrote the seen-set; append_log is its only governance
 # write. And "cannot repudiate" was never true of either file: write access to a
 # DIRECTORY is what grants unlink, so an executor that could write log/ could always
-# delete log/<slug>.jsonl outright. It still can — see iter_log_records' docstring for
-# what that costs and why closing it is a two-part change parked for its own wave.
+# delete log/<slug>.jsonl outright. It no longer can: S3-b moved log/ to host-owned
+# 2750, so the executor holds append on a pre-created 0660 file and has neither create
+# nor unlink on the directory. Per R22 that is measured on Linux and UNMEASURED on the
+# VPS — Phase B owns the bind-mount semantics there.
 
 def append_seen(slug, request_id, now):
     """Record an accepted request_id, fsynced before returning.
@@ -902,44 +904,23 @@ def iter_log_records(slug):
     counter must not read as 'under the cap', and an unreadable undo list must not
     read as 'nothing to undo'.
 
-    A MISSING LOG IS THE ONE EXCEPTION, AND IT IS NOT COVERED (S3-b, ruling R22).
-    This docstring used to state the rule without that carve-out, and the code
-    immediately below it returns nothing when the file is absent — so a missing
-    counter reads as exactly the 'under the cap' this text forbids, and a missing
-    undo list as exactly the 'nothing to undo'. The text named the precise failure
-    the code implements. Measured, not reasoned: deleting log/<slug>.jsonl takes
-    day_counts from exhausted back to zero, and destroys the reversibility record
-    --undo reads through this same generator.
-
-    It is not merely theoretical for the GOVERNED party either. log/ must stay
-    executor-writable — append_log is fsync'd per action — and on Docker Desktop for
-    macOS the bind mount remaps ownership so uid 10000 can unlink there. The same
-    modes on a Linux VPS would deny uid 10000 even traverse, so the exploit's REACH
-    is platform-conditional and the VPS behaviour is UNMEASURED; do not read a darwin
-    measurement as covering it either way.
-
-    Why this is still a `return` and not a raise: closing it means an
-    append-but-not-unlink layout (host-owned log/ the executor cannot create or
-    unlink in, holding a pre-created per-client file it can append to) plus making a
-    missing log for a REGISTERED client fail closed. Both halves are needed together,
-    and both were measured as out of scope for one fix wave:
-
-      * preflight-governance-access.py demands read+WRITE+traverse on log/, so the
-        very layout the fix creates is refused by the pre-flight (measured: 1 problem,
-        exit 2) — the mutation rail blocked at startup, which is R19's over-checking
-        failure again and worse than the finding.
-      * raising here breaks the FIRST apply for any client, not just fixtures:
-        day_counts reads this log before any log exists (measured: 30 suite tests,
-        including the plain happy path, go red). It is only safe once every registered
-        client is guaranteed a pre-created log — and there is no programmatic
-        client-registration hook to guarantee it: clients.json is hand-edited, and
-        migrate-governance.py only carries logs that ALREADY exist in a vault.
-
-    Until both land together, treat a missing log as UNVERIFIED rather than as zero.
+    CLOSED BY S3-b. A missing log now RAISES, like every other failure mode here. That
+    is only safe because log/ is host-owned 2750 — the executor appends to its
+    pre-created file but can neither create nor unlink one — and because
+    `migrate-governance.py --bootstrap-logs` guarantees every REGISTERED client a log.
+    Both halves were required: the raise alone breaks the first apply for every client
+    (R24(b)), and the permission change alone was refused by
+    preflight-governance-access.py (R24(a)).
     """
     p = log_path(slug)
     if not os.path.exists(p):
-        return                              # NOT fail-closed — see the docstring above
+        raise ValueError(
+            f"missing audit log at {p} — fail-closed. Every registered client is "
+            f"guaranteed a pre-created log by `migrate-governance.py --bootstrap-logs "
+            f"--apply`, so an absent one is either an unbootstrapped registration or a "
+            f"DELETED reversibility record. Neither may read as 'no usage yet': that "
+            f"would take the daily caps from exhausted back to zero and the undo list "
+            f"from populated to empty.")
     try:
         f = open(p, encoding="utf-8")
     except OSError as e:

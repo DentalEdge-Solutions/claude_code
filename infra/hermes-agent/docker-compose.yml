@@ -94,6 +94,14 @@ services:
       # log/ is the ONLY governance directory this container writes: append_log in
       # apply-changeset.py, fsync'd per action, is the reversibility record --undo
       # later reads. It must stay writable.
+      # S3-b: this mount stays rw and that is CORRECT — what changed is the HOST mode.
+      # log/ is 2750 host-owned, so the container's rw mount grants append to the
+      # pre-created 0660 per-client file: no create (log/ itself denies write), no
+      # unlink (same reason). It is NOT append-only, though: 0660 on the file itself
+      # still permits the executor to open it "w" or otherwise rewrite/truncate its
+      # contents — that residual is untouched by this wave (see the design doc's
+      # "Explicitly not this wave"). Do not "fix" this to :ro — append_log would fail
+      # mid-apply, which is exit 3 after a live account change.
       - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log
       # NO seen/ MOUNT. The seen-set (replay protection) is written and read entirely
       # host-side, by the broker — MEASURED, not assumed: every caller of append_seen,

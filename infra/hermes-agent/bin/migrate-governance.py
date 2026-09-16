@@ -11,13 +11,20 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--vault-root", default=None)
     ap.add_argument("--governance-root", default=None)
+    ap.add_argument("--bootstrap-logs", action="store_true",
+                    help="pre-create a log for every REGISTERED client instead of "
+                         "migrating; idempotent, and required after any hand-edit to "
+                         "clients.json")
     ap.add_argument("--apply", action="store_true",
-                    help="actually copy; without it this is a dry run")
+                    help="actually write; without it this is a dry run")
     args = ap.parse_args(argv)
+    gov = args.governance_root or governance_lib.governance_root()
     try:
-        res = M.migrate(args.vault_root or vault_lib.vault_root(),
-                        args.governance_root or governance_lib.governance_root(),
-                        dry_run=not args.apply)
+        if args.bootstrap_logs:
+            res = M.bootstrap_logs(gov, dry_run=not args.apply)
+        else:
+            res = M.migrate(args.vault_root or vault_lib.vault_root(), gov,
+                            dry_run=not args.apply)
     except (OSError, RuntimeError) as e:
         print("migrate-governance: %s" % e, file=sys.stderr)
         return 2

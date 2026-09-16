@@ -3,7 +3,9 @@
 
 Everything the mutation guards TRUST lives here, and nothing Hermes can write does.
 The gateway container does not mount this tree at all. The one-shot executor mounts
-approvals/, control/ and registry/ READ-ONLY and log/ + seen/ read-write.
+approvals/, control/ and registry/ READ-ONLY and log/ read-write (append, not unlink —
+see preflight-governance-access.py). seen/ is NOT mounted into the executor at all
+(S3-a) — the broker writes it host-side, and the executor has no business with it.
 
 This module is deliberately the bottom of the dependency graph — it imports nothing
 from bin/ — so it can own the shared identifier regexes instead of leaving duplicates
@@ -18,6 +20,16 @@ DEFAULT_ROOT = "/opt/governance"
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 CHANGESET_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$")
+
+# The one-shot executor's identity and the audit-log layout it requires. ONE definition,
+# shared, so preflight-governance-access.py and migrate_governance_shim.py cannot drift —
+# the rule 6645879 applied to REQUEST_ID_RE, for the same reason.
+EXECUTOR_UID = 10000            # Dockerfile: USER hermes
+EXECUTOR_GID = 10000
+# log/ is setgid and NOT group-writable: directory write is what grants unlink, and
+# setgid is what makes host-created log files inherit EXECUTOR_GID.
+LOG_DIR_MODE = 0o2750
+LOG_FILE_MODE = 0o660
 
 # One definition, shared, so the two cannot drift (vault_lib.py's rule, applied here
 # too). This is the STRICT lowercase-only class — the pattern spool_lib enforces on

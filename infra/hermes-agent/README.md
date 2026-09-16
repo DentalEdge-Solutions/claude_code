@@ -895,16 +895,35 @@ Give the store an ownership the executor's UID can use — either group access:
 ```bash
 sudo chgrp -R 10000 "$HERMES_GOVERNANCE_DIR"
 sudo chmod -R g+rX "$HERMES_GOVERNANCE_DIR"
-sudo chmod -R g+w  "$HERMES_GOVERNANCE_DIR"/log
+sudo chmod 2750 "$HERMES_GOVERNANCE_DIR"/log
+sudo find "$HERMES_GOVERNANCE_DIR"/log -type f -name '*.jsonl' -exec chmod 0660 {} +
 ```
 
-`log/` only — `seen/` is not mounted into the executor and needs no access for uid
-10000. Widening it would hand the governed party the replay-protection state again.
+`log/` gets **no group write**. Write on a directory is what grants `unlink`, and
+both the undo path and the daily caps read through `iter_log_records`, so an
+executor that can delete `log/<slug>.jsonl` destroys the reversibility record — not
+merely a quota. It appends to a **pre-created** per-client file instead; `setgid` on
+`log/` is what makes those files inherit gid 10000, without which `0660` grants
+the operator's own group and uid 10000 falls through to `other`.
 
-or outright ownership:
+Create the per-client logs — required for every registered client, and idempotent:
+
+```bash
+infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs            # dry run
+infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs --apply
+```
+
+`seen/` is not mounted into the executor at all and needs no access for uid 10000.
+Widening it would hand the governed party the replay-protection state again.
+
+or outright ownership. POSIX selects the owner class before the group class, so a
+`log/` directory owned by the executor is writable by it no matter how tight the mode
+looks, and write on a directory is what grants `unlink` — so the sequence must restore
+`log/` to a non-executor owner afterward:
 
 ```bash
 sudo chown -R 10000:10000 "$HERMES_GOVERNANCE_DIR" && sudo chmod -R 700 "$HERMES_GOVERNANCE_DIR"
+sudo chown root:10000 "$HERMES_GOVERNANCE_DIR"/log && sudo chmod 2750 "$HERMES_GOVERNANCE_DIR"/log
 ```
 
 **Never `chmod 777`.** The store is the one tree Hermes cannot reach; making it

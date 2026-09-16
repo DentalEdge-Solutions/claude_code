@@ -458,8 +458,14 @@ class TestLog(unittest.TestCase):
         rec.update(kw)
         return rec
 
-    def test_empty_log_counts_zero(self):
-        self.assertEqual(C.day_counts(self.slug, "2026-08-12"), {"applies": 0, "actions": 0})
+    def test_missing_log_refuses_rather_than_counting_zero(self):
+        """S3-b Task 4: this test used to be test_empty_log_counts_zero and asserted
+        that a log with no file at all counted as zero. That is exactly the fail-open
+        iter_log_records now closes — a missing log must never read as "no usage
+        yet", so day_counts must raise instead of returning a zero count."""
+        with self.assertRaises(ValueError) as ctx:
+            C.day_counts(self.slug, "2026-08-12")
+        self.assertIn("missing audit log", str(ctx.exception))
 
     def test_counts_actions_and_distinct_applies(self):
         C.append_log(self.slug, self._line(action_index=0))
