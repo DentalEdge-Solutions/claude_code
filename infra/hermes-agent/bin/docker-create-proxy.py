@@ -50,6 +50,19 @@ Phase B). Adding an endpoint is a re-measurement, never a guess.
     guess.
 
 DENY BY DEFAULT. Anything not matched below is refused.
+
+PLUMBING ASSUMPTION, load-bearing for `_handle`'s lock-step design: Task 1's measurement
+found the real Compose invocation uses THREE SEPARATE CONNECTIONS to the socket — `wait`
+on one, `attach` on a second, `start` on a third. `_handle` below sends a request, then
+blocks reading its response, then loops for the next request on the SAME connection; that
+is only correct because each of those three arrives on its own connection and therefore
+gets its own thread from `ThreadingUnixStreamServer`. If a future Docker Compose ever
+multiplexed those onto one connection, lock-step `_handle` would deadlock — e.g. blocking
+to read the response to `wait` (which the daemon does not send until the container is
+removed) while `start` sits unsent behind it. This is a property of the Compose CLI, not
+of this proxy, and it is Step 5's end-to-end control — a real `docker compose run` against
+the real daemon — that would catch such a change, not the unit tests, which use a fake
+upstream and cannot observe the real client's connection behavior.
 """
 import argparse, json, os, re, socket, socketserver, sys, threading
 
@@ -99,19 +112,26 @@ ALLOWED_CMD_FLAGS = {
 PINNED_IMAGE = None
 PINNED_BINDS = frozenset()
 PINNED_GOVERNANCE_ROOT = None
+PINNED_NETWORK = None
 
 
-def configure(image, binds, governance_root):
+def configure(image, binds, governance_root, network):
     """Set the pinned values at startup. `binds` is an iterable of (src, dst, mode).
 
     Taken as flags rather than derived from docker-compose.yml because YAML is not
     stdlib and this file may not grow a dependency. proxy-policy-sync.test.py is what
     keeps the two in agreement.
+
+    `network` pins HostConfig.NetworkMode to an allow-list (the exact Compose network
+    name), not a denylist. The prior denylist (`startswith("host")`) does not catch
+    NetworkMode="container:<id>", which joins another container's network namespace —
+    it was the only denylist left in a file whose whole point is allow-lists.
     """
-    global PINNED_IMAGE, PINNED_BINDS, PINNED_GOVERNANCE_ROOT
+    global PINNED_IMAGE, PINNED_BINDS, PINNED_GOVERNANCE_ROOT, PINNED_NETWORK
     PINNED_IMAGE = image
     PINNED_BINDS = frozenset("%s:%s:%s" % (s, d, m) for s, d, m in binds)
     PINNED_GOVERNANCE_ROOT = governance_root
+    PINNED_NETWORK = network
 
 
 def _path_only(path):
@@ -188,9 +208,6 @@ def decide(method, path, body):
     for k in FORBIDDEN_HOSTCONFIG:
         if hc.get(k):
             return False, "create refused: HostConfig.%s is not permitted" % k
-    for mode_key in ("NetworkMode", "PidMode", "IpcMode"):
-        if str(hc.get(mode_key, "")).startswith("host"):
-            return False, "create refused: HostConfig.%s=host" % mode_key
 
     binds = hc.get("Binds") or []
     if not isinstance(binds, list):
@@ -202,6 +219,16 @@ def decide(method, path, body):
         return False, ("create refused: bind set does not match the pinned set "
                        "(unexpected: %s; missing: %s)" % (extra or "none", missing or "none"))
 
+    # NetworkMode is an ALLOW-LIST (exact match against the pinned Compose network),
+    # not a denylist — see configure()'s docstring for why. PidMode/IpcMode keep the
+    # startswith("host") denylist because Task 1 measured no pinned value for either.
+    if str(hc.get("NetworkMode", "")) != PINNED_NETWORK:
+        return False, ("create refused: HostConfig.NetworkMode=%r is not the pinned "
+                       "network %r" % (hc.get("NetworkMode"), PINNED_NETWORK))
+    for mode_key in ("PidMode", "IpcMode"):
+        if str(hc.get(mode_key, "")).startswith("host"):
+            return False, "create refused: HostConfig.%s=host" % mode_key
+
     for entry in spec.get("Env") or []:
         name, _, value = str(entry).partition("=")
         if name == "HERMES_GOVERNANCE_ROOT" and value != PINNED_GOVERNANCE_ROOT:
@@ -209,3 +236,212 @@ def decide(method, path, body):
                            "root %r" % (value, PINNED_GOVERNANCE_ROOT))
 
     return True, "allowed"
+
+
+MAX_BODY = 1024 * 1024
+
+
+def _read_until_headers(sock, buf):
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return None, buf
+        buf += chunk
+        if len(buf) > MAX_BODY:
+            return None, buf
+    head, rest = buf.split(b"\r\n\r\n", 1)
+    return head, rest
+
+
+def _refuse(conn, reason):
+    payload = json.dumps({"message": reason}).encode("utf-8")
+    conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
+                 b"Content-Length: " + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+
+
+def _relay_chunked(conn, up, buf):
+    """Forward a Transfer-Encoding: chunked response byte-for-byte while parsing the
+    chunk framing ourselves, so we know exactly when the body ends.
+
+    MEASURED against the real daemon while building this: relaying raw bytes until
+    `up.recv()` returns empty (i.e. treating connection-close as end-of-body) hangs
+    forever, because dockerd keeps the connection open afterward under HTTP
+    keep-alive — `curl --unix-socket /var/run/docker.sock
+    'http://localhost/v1.55/containers/json?all=1'` returns `Transfer-Encoding:
+    chunked` with no `Content-Length` and does not close the socket. `docker compose
+    run` hung on exactly this call (GET .../containers/json) during Step 5's
+    end-to-end proof until this was fixed.
+    """
+    while True:
+        while b"\r\n" not in buf:
+            d = up.recv(65536)
+            if not d:
+                return
+            buf += d
+            if len(buf) > MAX_BODY:
+                return
+        line_end = buf.index(b"\r\n") + 2
+        size = int(buf[:line_end].split(b";", 1)[0], 16)
+        if size == 0:
+            # last-chunk: "0\r\n" followed by an (often empty) trailer section
+            # terminated by a blank line, NOT by chunk-data + CRLF.
+            while b"\r\n\r\n" not in buf:
+                d = up.recv(65536)
+                if not d:
+                    conn.sendall(buf)
+                    return
+                buf += d
+                if len(buf) > MAX_BODY:
+                    conn.sendall(buf)
+                    return
+            end = buf.find(b"\r\n\r\n") + 4
+            conn.sendall(buf[:end])
+            return
+        needed = line_end + size + 2   # chunk-size line + chunk-data + trailing CRLF
+        while len(buf) < needed:
+            d = up.recv(65536)
+            if not d:
+                conn.sendall(buf)
+                return
+            buf += d
+        conn.sendall(buf[:needed])
+        buf = buf[needed:]
+
+
+def _handle(conn, upstream_path):
+    up = None
+    buf = b""
+    try:
+        while True:
+            head, rest = _read_until_headers(conn, buf)
+            if head is None:
+                return
+            line = head.split(b"\r\n")[0].decode("latin1")
+            parts = line.split(" ")
+            if len(parts) < 2:
+                _refuse(conn, "malformed request line")
+                return
+            method, path = parts[0], parts[1]
+            clen, chunked = 0, False
+            for h in head.split(b"\r\n")[1:]:
+                lo = h.lower()
+                if lo.startswith(b"content-length:"):
+                    clen = int(h.split(b":", 1)[1].strip() or b"0")
+                if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
+                    chunked = True
+            is_create = "/containers/create" in path
+            if is_create and (chunked or clen == 0):
+                _refuse(conn, "create with no Content-Length cannot be inspected")
+                print("DENY %s %s (uninspectable body)" % (method, path), file=sys.stderr)
+                return
+            if clen > MAX_BODY:
+                _refuse(conn, "body exceeds %d bytes" % MAX_BODY)
+                return
+            while len(rest) < clen:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                rest += chunk
+            body, buf = rest[:clen], rest[clen:]
+
+            ok, reason = decide(method, path, body)
+            print("%s %s %s (%s)" % ("ALLOW" if ok else "DENY", method, path, reason),
+                  file=sys.stderr)
+            if not ok:
+                _refuse(conn, reason)
+                return
+
+            if up is None:
+                up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                up.connect(upstream_path)
+            up.sendall(head + b"\r\n\r\n" + body)
+
+            if "/attach" in path:
+                def pump(a, b):
+                    try:
+                        while True:
+                            d = a.recv(65536)
+                            if not d:
+                                break
+                            b.sendall(d)
+                    except OSError:
+                        pass
+                threading.Thread(target=pump, args=(conn, up), daemon=True).start()
+                pump(up, conn)
+                return
+
+            rhead, rrest = _read_until_headers(up, b"")
+            if rhead is None:
+                return
+            rclen, rchunk = 0, False
+            for h in rhead.split(b"\r\n")[1:]:
+                lo = h.lower()
+                if lo.startswith(b"content-length:"):
+                    rclen = int(h.split(b":", 1)[1].strip() or b"0")
+                if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
+                    rchunk = True
+            conn.sendall(rhead + b"\r\n\r\n")
+            if rchunk:
+                _relay_chunked(conn, up, rrest)
+                return
+            while len(rrest) < rclen:
+                d = up.recv(65536)
+                if not d:
+                    break
+                rrest += d
+            conn.sendall(rrest[:rclen])
+    except OSError:
+        return
+    finally:
+        if up is not None:
+            try:
+                up.close()
+            except OSError:
+                pass
+
+
+def serve(listen, upstream):
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            _handle(self.request, upstream)
+
+    class Server(socketserver.ThreadingUnixStreamServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    if os.path.exists(listen):
+        os.remove(listen)
+    srv = Server(listen, Handler)
+    os.chmod(listen, 0o660)
+    srv.serve_forever()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--listen", required=True)
+    ap.add_argument("--upstream", default="/var/run/docker.sock")
+    ap.add_argument("--image", required=True)
+    ap.add_argument("--governance-root", required=True)
+    ap.add_argument("--network", required=True,
+                    help="the exact HostConfig.NetworkMode value Compose issues, "
+                         "e.g. hermes-agent_default")
+    ap.add_argument("--allow-bind", action="append", default=[],
+                    metavar="SRC:DST:MODE", required=True,
+                    help="repeatable; the exact bind set the executor may request")
+    args = ap.parse_args(argv)
+    binds = []
+    for raw in args.allow_bind:
+        bits = raw.split(":")
+        if len(bits) != 3 or bits[2] not in ("ro", "rw"):
+            print("docker-create-proxy: --allow-bind must be SRC:DST:ro|rw, got %r" % raw,
+                  file=sys.stderr)
+            return 2
+        binds.append(tuple(bits))
+    configure(image=args.image, binds=binds, governance_root=args.governance_root,
+              network=args.network)
+    serve(args.listen, args.upstream)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

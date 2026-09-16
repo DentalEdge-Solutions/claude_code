@@ -42,7 +42,7 @@ def _create_body(**over):
                 "--request", "00000000-0000-0000-0000-000000000000"],
         "Env": ["HERMES_GOVERNANCE_ROOT=/opt/governance",
                 "GOOGLE_ADS_DEVELOPER_TOKEN=x"],
-        "HostConfig": {"Binds": _binds_payload()},
+        "HostConfig": {"Binds": _binds_payload(), "NetworkMode": "hermes-agent_default"},
     }
     body.update(over)
     return json.dumps(body).encode("utf-8")
@@ -51,7 +51,7 @@ def _create_body(**over):
 class Base(unittest.TestCase):
     def setUp(self):
         PX.configure(image="hermes-agent-claude", binds=BINDS,
-                     governance_root="/opt/governance")
+                     governance_root="/opt/governance", network="hermes-agent_default")
 
     def allow(self, body=None, path="/v1.55/containers/create", method="POST"):
         return PX.decide(method, path, body if body is not None else _create_body())
@@ -212,6 +212,31 @@ class TestHostConfigAndEnv(Base):
         ok, _ = self.allow(_create_body(HostConfig=hc))
         self.assertFalse(ok)
 
+    def test_network_mode_container_join_is_refused(self):
+        """The gap the old denylist left open: startswith("host") never catches
+        NetworkMode="container:<id>", which joins another container's network
+        namespace. NetworkMode is now an allow-list, not a denylist."""
+        hc = {"Binds": _binds_payload(), "NetworkMode": "container:abc123"}
+        ok, why = self.allow(_create_body(HostConfig=hc))
+        self.assertFalse(ok)
+        self.assertIn("NetworkMode", why)
+
+    def test_network_mode_host_is_refused_by_the_allow_list(self):
+        """Same outcome as test_host_network_is_refused, but proves it now holds
+        because "host" fails the allow-list match, not because of a startswith
+        denylist that no longer exists for NetworkMode."""
+        hc = {"Binds": _binds_payload(), "NetworkMode": "host"}
+        ok, why = self.allow(_create_body(HostConfig=hc))
+        self.assertFalse(ok)
+        self.assertIn("NetworkMode", why)
+
+    def test_the_pinned_network_is_allowed(self):
+        """POSITIVE CONTROL. Without this, a proxy that refuses every NetworkMode
+        would also pass every refusal test above."""
+        hc = {"Binds": _binds_payload(), "NetworkMode": "hermes-agent_default"}
+        ok, why = self.allow(_create_body(HostConfig=hc))
+        self.assertTrue(ok, why)
+
     def test_a_redirected_governance_root_is_refused(self):
         """Left free, an attacker repoints the root at a fake store built inside
         the one writable mount."""
@@ -238,6 +263,86 @@ class TestBodyHandling(Base):
     def test_a_non_object_body_is_refused(self):
         ok, _ = self.allow(b"[]")
         self.assertFalse(ok)
+
+
+class TestPlumbing(unittest.TestCase):
+    """The socket half. These use a fake upstream so no Docker daemon is needed."""
+
+    def setUp(self):
+        import tempfile, threading, socket as _s
+        PX.configure(image="hermes-agent-claude", binds=BINDS,
+                     governance_root="/opt/governance", network="hermes-agent_default")
+        # AF_UNIX paths cap near 104 bytes — /tmp, never a long temp path.
+        self.up_path = "/tmp/pxup-%d.sock" % os.getpid()
+        self.li_path = "/tmp/pxli-%d.sock" % os.getpid()
+        for p in (self.up_path, self.li_path):
+            if os.path.exists(p):
+                os.remove(p)
+        self.upstream_saw = []
+        srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        srv.bind(self.up_path)
+        srv.listen(8)
+
+        def fake_upstream():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                data = conn.recv(65536)
+                self.upstream_saw.append(data.split(b"\r\n")[0].decode("latin1"))
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                conn.close()
+
+        threading.Thread(target=fake_upstream, daemon=True).start()
+        self.addCleanup(srv.close)
+        for p in (self.up_path, self.li_path):
+            self.addCleanup(lambda q=p: os.path.exists(q) and os.remove(q))
+
+    def test_a_second_request_on_the_same_connection_is_also_inspected(self):
+        """THE keep-alive bypass. A proxy that inspects the first request and then
+        splices lets an attacker send a benign HEAD /_ping and then anything at all
+        on the same connection. Measured while planning this: a first-request-only
+        pass-through saw 3 of 14 real calls and looked like it had worked."""
+        import threading, socket as _s
+        t = threading.Thread(target=PX.serve,
+                             kwargs=dict(listen=self.li_path, upstream=self.up_path),
+                             daemon=True)
+        t.start()
+        for _ in range(50):
+            if os.path.exists(self.li_path):
+                break
+            import time; time.sleep(0.05)
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(b"HEAD /_ping HTTP/1.1\r\nHost: d\r\n\r\n")
+        c.recv(65536)
+        c.sendall(b"POST /v1.55/build HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n")
+        resp = c.recv(65536)
+        c.close()
+        self.assertIn(b"403", resp,
+                      "second request on the connection was not inspected")
+        self.assertNotIn("POST /v1.55/build HTTP/1.1", self.upstream_saw,
+                         "a refused request reached the upstream socket")
+
+    def test_a_create_with_no_content_length_is_refused(self):
+        """A chunked body cannot be inspected before forwarding, and forwarding an
+        uninspected create is the one thing this file exists to prevent."""
+        import threading, socket as _s, time
+        threading.Thread(target=PX.serve,
+                         kwargs=dict(listen=self.li_path, upstream=self.up_path),
+                         daemon=True).start()
+        for _ in range(50):
+            if os.path.exists(self.li_path):
+                break
+            time.sleep(0.05)
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
+                  b"Transfer-Encoding: chunked\r\n\r\n")
+        resp = c.recv(65536)
+        c.close()
+        self.assertIn(b"403", resp)
 
 
 if __name__ == "__main__":
