@@ -1,7 +1,17 @@
-import importlib.util, json, os, sys, unittest
+import importlib.util, itertools, json, os, sys, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+# Monotonic, so every TestPlumbing test gets its OWN socket paths rather than sharing
+# one pid-based pair across the whole process. MEASURED (fix round 1, Finding review):
+# with a shared pid-based path, a PREVIOUS test's still-running `serve_forever()`
+# daemon thread occasionally intercepts a LATER test's connection after the path is
+# unlinked and rebound — reproduced directly by looping just the two original
+# brief-verbatim TestPlumbing tests (~1/20 failures), and it surfaces at roughly 1/3 in
+# a single ordinary run once a third and fourth socket-based test are added. Unique
+# paths per test remove the shared resource the race depends on.
+_SOCK_SEQ = itertools.count()
 
 
 def _load(name, filename):
@@ -272,9 +282,11 @@ class TestPlumbing(unittest.TestCase):
         import tempfile, threading, socket as _s
         PX.configure(image="hermes-agent-claude", binds=BINDS,
                      governance_root="/opt/governance", network="hermes-agent_default")
-        # AF_UNIX paths cap near 104 bytes — /tmp, never a long temp path.
-        self.up_path = "/tmp/pxup-%d.sock" % os.getpid()
-        self.li_path = "/tmp/pxli-%d.sock" % os.getpid()
+        # AF_UNIX paths cap near 104 bytes — /tmp, never a long temp path. Unique per
+        # TEST, not just per process — see _SOCK_SEQ's comment above for why.
+        n = next(_SOCK_SEQ)
+        self.up_path = "/tmp/pxup-%d-%d.sock" % (os.getpid(), n)
+        self.li_path = "/tmp/pxli-%d-%d.sock" % (os.getpid(), n)
         for p in (self.up_path, self.li_path):
             if os.path.exists(p):
                 os.remove(p)
@@ -343,6 +355,72 @@ class TestPlumbing(unittest.TestCase):
         resp = c.recv(65536)
         c.close()
         self.assertIn(b"403", resp)
+
+    def test_a_create_with_neither_header_is_refused(self):
+        """Same refusal, but with NEITHER Content-Length NOR Transfer-Encoding present
+        (clen defaults to 0). Code inspection says `clen == 0` already handles this,
+        but it was untested — this covers the absent-headers case distinctly from the
+        chunked case above."""
+        import threading, socket as _s, time
+        threading.Thread(target=PX.serve,
+                         kwargs=dict(listen=self.li_path, upstream=self.up_path),
+                         daemon=True).start()
+        for _ in range(50):
+            if os.path.exists(self.li_path):
+                break
+            time.sleep(0.05)
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n\r\n")
+        resp = c.recv(65536)
+        c.close()
+        self.assertIn(b"403", resp)
+
+    def test_a_malformed_chunk_size_line_closes_the_connection_cleanly(self):
+        """Finding 2, fix round 1: a malformed (non-hex) chunk-size line from the
+        upstream must not produce an unhandled traceback. Every other failure path in
+        this file closes the connection and logs; this one now does too. Uses its own
+        upstream fixture (not the shared fake_upstream from setUp) because it needs to
+        answer with a specific malformed chunked response, not the fixed one."""
+        import threading, socket as _s, time
+        bad_up_path = "/tmp/pxbadup-%d-%d.sock" % (os.getpid(), next(_SOCK_SEQ))
+        if os.path.exists(bad_up_path):
+            os.remove(bad_up_path)
+        srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        srv.bind(bad_up_path)
+        srv.listen(1)
+
+        def bad_upstream():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                         b"NOTHEX\r\n")
+            conn.close()
+
+        threading.Thread(target=bad_upstream, daemon=True).start()
+        self.addCleanup(srv.close)
+        self.addCleanup(lambda: os.path.exists(bad_up_path) and os.remove(bad_up_path))
+
+        threading.Thread(target=PX.serve,
+                         kwargs=dict(listen=self.li_path, upstream=bad_up_path),
+                         daemon=True).start()
+        for _ in range(50):
+            if os.path.exists(self.li_path):
+                break
+            time.sleep(0.05)
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(b"GET /v1.55/version HTTP/1.1\r\nHost: d\r\n\r\n")
+        resp = c.recv(65536)
+        self.assertIn(b"200 OK", resp)
+        # The proxy must close cleanly (a plain EOF) after the malformed chunk-size
+        # line, not hang and not crash with an unhandled traceback.
+        more = c.recv(65536)
+        self.assertEqual(more, b"", "connection did not close cleanly")
+        c.close()
 
 
 if __name__ == "__main__":

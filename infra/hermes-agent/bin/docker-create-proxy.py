@@ -51,18 +51,34 @@ Phase B). Adding an endpoint is a re-measurement, never a guess.
 
 DENY BY DEFAULT. Anything not matched below is refused.
 
-PLUMBING ASSUMPTION, load-bearing for `_handle`'s lock-step design: Task 1's measurement
-found the real Compose invocation uses THREE SEPARATE CONNECTIONS to the socket — `wait`
-on one, `attach` on a second, `start` on a third. `_handle` below sends a request, then
-blocks reading its response, then loops for the next request on the SAME connection; that
-is only correct because each of those three arrives on its own connection and therefore
-gets its own thread from `ThreadingUnixStreamServer`. If a future Docker Compose ever
-multiplexed those onto one connection, lock-step `_handle` would deadlock — e.g. blocking
-to read the response to `wait` (which the daemon does not send until the container is
-removed) while `start` sits unsent behind it. This is a property of the Compose CLI, not
-of this proxy, and it is Step 5's end-to-end control — a real `docker compose run` against
-the real daemon — that would catch such a change, not the unit tests, which use a fake
-upstream and cannot observe the real client's connection behavior.
+THREE SOCKET-PLUMBING TRAPS, each measured against the real daemon and each costly to
+find. Function docstrings below carry the detail; this is the index.
+
+    1. HTTP KEEP-ALIVE: the Docker CLI sends MANY requests on ONE connection. Get this
+       wrong and inspect only the first request, then splice — an attacker sends a
+       benign HEAD /_ping first and then anything at all on the same connection,
+       bypassing the policy entirely. Measured while planning: a first-request-only
+       pass-through logged 3 of 14 real calls and looked like it had worked. This is
+       why `_handle` LOOPS per connection instead of forwarding-then-splicing.
+
+    2. `POST .../wait?condition=removed` DOES NOT RETURN until the container is
+       removed. Get this wrong and assume request/response pairs are independent, and
+       a lock-step per-connection handler would deadlock if a future Compose ever
+       multiplexed `wait`, `attach`, and `start` onto one connection — Task 1 measured
+       the real invocation uses THREE SEPARATE CONNECTIONS for exactly
+       these three calls, each getting its own thread from `ThreadingUnixStreamServer`.
+       This is a property of the Compose CLI, not of this proxy; it is Step 5's
+       end-to-end control against the real daemon that would catch a future Compose
+       that multiplexes them, not the unit tests, which use a fake upstream and cannot
+       observe the real client's connection behavior.
+
+    3. dockerd KEEPS THE CONNECTION OPEN after a `Transfer-Encoding: chunked` response
+       (HTTP keep-alive applies to the upstream socket too). Get this wrong and relay a
+       chunked body by reading until the upstream closes, and it hangs forever — dockerd
+       never closes. Measured directly: `curl --unix-socket /var/run/docker.sock
+       'http://localhost/v1.55/containers/json?all=1'` returns `Transfer-Encoding:
+       chunked` with no `Content-Length` and no connection close. This is why
+       `_relay_chunked` parses the chunk framing itself to find the real end of the body.
 """
 import argparse, json, os, re, socket, socketserver, sys, threading
 
@@ -281,7 +297,16 @@ def _relay_chunked(conn, up, buf):
             if len(buf) > MAX_BODY:
                 return
         line_end = buf.index(b"\r\n") + 2
-        size = int(buf[:line_end].split(b";", 1)[0], 16)
+        try:
+            size = int(buf[:line_end].split(b";", 1)[0], 16)
+        except ValueError:
+            # A malformed chunk-size line from dockerd would be a serious anomaly, not
+            # an attacker input (this stream comes from the trusted upstream) — but
+            # every other path in this file fails closed and logged rather than with
+            # an unhandled traceback, so this one does too.
+            print("upstream sent a malformed chunk-size line: %r" % buf[:line_end],
+                  file=sys.stderr)
+            return
         if size == 0:
             # last-chunk: "0\r\n" followed by an (often empty) trailer section
             # terminated by a blank line, NOT by chunk-data + CRLF.
@@ -304,6 +329,14 @@ def _relay_chunked(conn, up, buf):
                 conn.sendall(buf)
                 return
             buf += d
+            if len(buf) > MAX_BODY:
+                # Cap the buffered response the same way the request side is capped
+                # (see `_handle`'s `clen > MAX_BODY` check). Headers are already sent
+                # to the client by the time we get here, so a 403 is not available —
+                # close the connection instead, same as the malformed-header case above.
+                print("upstream chunk exceeds %d bytes; closing" % MAX_BODY,
+                      file=sys.stderr)
+                return
         conn.sendall(buf[:needed])
         buf = buf[needed:]
 
@@ -329,6 +362,11 @@ def _handle(conn, upstream_path):
                     clen = int(h.split(b":", 1)[1].strip() or b"0")
                 if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
                     chunked = True
+            # Substring, not the regex fullmatch the rest of the file uses — deliberately
+            # over-inclusive relative to decide()'s ALLOWED patterns, never under. A path
+            # this misses would fall through to decide() unrefused-for-uninspectability
+            # only to be refused there instead (or matched and inspected normally), so
+            # there is no bypass; it can only refuse a few extra non-create paths early.
             is_create = "/containers/create" in path
             if is_create and (chunked or clen == 0):
                 _refuse(conn, "create with no Content-Length cannot be inspected")
@@ -380,16 +418,36 @@ def _handle(conn, upstream_path):
                     rclen = int(h.split(b":", 1)[1].strip() or b"0")
                 if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
                     rchunk = True
-            conn.sendall(rhead + b"\r\n\r\n")
             if rchunk:
+                # Headers must go out before the body here: the body's total length
+                # isn't known up front (that's the whole point of chunked encoding),
+                # so there is nothing to buffer and combine with them.
+                conn.sendall(rhead + b"\r\n\r\n")
                 _relay_chunked(conn, up, rrest)
                 return
+            # Buffer the FULL body before sending anything, then send headers + body
+            # in ONE write. MEASURED: sending headers immediately and the body in a
+            # later, separate sendall() lets a client that reads once per response see
+            # only the headers on this request and the stray body bytes on its NEXT
+            # recv() — reproduced directly with a client that reads once per response
+            # (a real HTTP client that reads exactly Content-Length bytes is not
+            # confused by this, but there is no reason to split a response we already
+            # hold in full).
             while len(rrest) < rclen:
                 d = up.recv(65536)
                 if not d:
                     break
                 rrest += d
-            conn.sendall(rrest[:rclen])
+                if len(rrest) > MAX_BODY:
+                    # Same cap as the request side and _relay_chunked. Nothing has
+                    # been sent to the client yet in this path (unlike the chunked
+                    # case above), but a 403 still isn't the right shape for "the
+                    # upstream's own response was too large" — close instead, and log
+                    # it like the other decisions.
+                    print("DENY %s %s (upstream response exceeds %d bytes; closing)"
+                          % (method, path, MAX_BODY), file=sys.stderr)
+                    return
+            conn.sendall(rhead + b"\r\n\r\n" + rrest[:rclen])
     except OSError:
         return
     finally:
