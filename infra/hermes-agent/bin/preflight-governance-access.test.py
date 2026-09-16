@@ -522,7 +522,17 @@ class TestCli(Base):
         return rc, err.getvalue()
 
     def test_cli_exits_zero_when_the_store_is_usable(self):
+        """CAUTION, and the reason this test broke in CI and not locally: main() calls
+        the real applies(), so OFF LINUX this returns 0 before check() ever runs and the
+        test passes VACUOUSLY. On Linux it executes for real — which is why a store left
+        owner-writable on log/ passed here on darwin and failed on the runner.
+
+        _chmod_all(0o700) leaves log/ owner-writable by self.uid, and directory write is
+        what grants unlink, so the gate now refuses it. Carve log/ out exactly as
+        test_control_same_store_same_mode_but_the_owning_uid_passes does: a legitimate
+        executor-owned store keeps log/ non-writable by the executor."""
         self._chmod_all(0o700)
+        os.chmod(os.path.join(self.root, "log"), 0o500)
         rc, _ = self._main(["--root", self.root, "--uid", str(self.uid),
                             "--gid", str(self.gid)])
         self.assertEqual(rc, 0)
