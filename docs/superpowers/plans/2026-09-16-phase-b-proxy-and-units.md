@@ -1189,6 +1189,7 @@ ExecStart=/opt/hermes-agent/bin/docker-create-proxy.py \
     --upstream /var/run/docker.sock \
     --image hermes-agent-claude \
     --governance-root /opt/governance \
+    --network hermes-agent_default \
     --allow-bind /var/lib/hermes/governance/approvals:/opt/governance/approvals:ro \
     --allow-bind /var/lib/hermes/governance/control:/opt/governance/control:ro \
     --allow-bind /var/lib/hermes/governance/registry:/opt/governance/registry:ro \
@@ -1258,6 +1259,12 @@ MemoryMax=256M
 WantedBy=multi-user.target
 ```
 
+> **`--network` is REQUIRED** (added 2026-09-16 by Ruling 9, which folded the NetworkMode
+> allow-list into Task 3). `main()` declares it `required=True`, so a unit whose `ExecStart`
+> omits it fails to start with argparse exit 2 — on the VPS, at boot. The value must equal the
+> Compose network Task 1 measured. `units.test.py` below asserts it is present for exactly
+> this reason.
+
 - [ ] **Step 3: Write the unit-content test**
 
 Create `infra/hermes-agent/deploy/units.test.py`:
@@ -1318,6 +1325,12 @@ class TestUnits(unittest.TestCase):
         four spurious 'cannot stat' problems instead of naming --bootstrap-logs."""
         self.assertRegex(unit("hermes-broker.service"),
                          r"SupplementaryGroups=.*\bhermes\b")
+
+    def test_the_proxy_unit_supplies_the_required_network_flag(self):
+        """--network is required=True in main(). A unit that omits it fails to start with
+        argparse exit 2 — at boot, on the VPS. Ruling 9 added the flag in Task 3 and this
+        assertion is what keeps Task 5's unit in step with it."""
+        self.assertRegex(unit("hermes-docker-proxy.service"), r"--network \S+")
 
     def test_the_proxy_has_no_log_only_bypass(self):
         """A proxy with a bypass flag is not a proxy."""
