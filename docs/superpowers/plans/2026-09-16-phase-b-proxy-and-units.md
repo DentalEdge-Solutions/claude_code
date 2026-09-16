@@ -958,15 +958,34 @@ PROXY=$!
 sleep 1
 echo "--- NEGATIVE: an unpinned image must be refused ---"
 DOCKER_HOST=unix:///tmp/pxe2e.sock docker run --rm alpine true 2>&1 | tail -2
-echo "--- POSITIVE CONTROL: the real rail must still work ---"
+echo "--- POSITIVE CONTROL: a real-shaped create must be ALLOWED ---"
+# CORRECTED 2026-09-16 before dispatch. This used `--help`, which produces
+# Cmd: ["--help"] — and _check_cmd correctly REFUSES that, so the "positive control"
+# would have failed against a correct policy. The danger is not the failure: it is that
+# the obvious way to make it pass is to weaken the Cmd check, destroying the sharpest
+# property in this wave. Use a real-shaped Cmd, and assert on what the proxy DECIDED
+# rather than on the rail's exit code — apply-changeset will still refuse downstream for
+# want of an approval, which is correct and not what this control measures.
 DOCKER_HOST=unix:///tmp/pxe2e.sock timeout 90 docker compose -f docker-compose.yml \
-    run --rm --no-deps -T ads-mutator --help >/dev/null 2>&1
-echo "real rail exit: $?"
+    run --rm --no-deps -T ads-mutator \
+      --client acme-dental \
+      --changeset 20260101-000000-deadbeef \
+      --request 00000000-0000-0000-0000-000000000000 >/dev/null 2>&1
+echo "rail exit (non-zero is EXPECTED — no such approval): $?"
 kill $PROXY 2>/dev/null
+echo "--- the load-bearing line: was the create ALLOWED? ---"
+grep -E '^ALLOW POST .*/containers/create' /tmp/pxe2e.log || echo "NOT ALLOWED — investigate"
 grep -cE '^(ALLOW|DENY)' /tmp/pxe2e.log
 ```
 
-Expected: the `alpine` run **refused**; the real rail **exit 0**. **The positive control is load-bearing** — a proxy that refuses everything passes the negative and breaks the rail, which is the shape of a seam this project once passed as clean because nobody asked whether the authorised caller could get through.
+Expected: the `alpine` run **refused**; and an `ALLOW POST …/containers/create` line in the
+proxy log. **The positive control is load-bearing** — a proxy that refuses everything passes
+the negative and breaks the rail, which is the shape of a seam this project once passed as
+clean because nobody asked whether the authorised caller could get through.
+
+**If the create is DENIED, do NOT relax the policy to make this pass.** Read the `DENY`
+reason and reconcile `ALLOWED`/`PINNED_BINDS` against it — the bind paths in the `--allow-bind`
+flags above must match what Compose actually resolves on this machine. Report any change.
 
 If the real rail fails, read `/tmp/pxe2e.log` for the `DENY` line and reconcile `ALLOWED`/`PINNED_BINDS` against it. **Report any endpoint you had to add.**
 
