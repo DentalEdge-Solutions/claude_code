@@ -20,16 +20,21 @@ class TestUnits(unittest.TestCase):
     suite is NOT picked up by that runner. Run it explicitly:
     `python3 infra/hermes-agent/deploy/units.test.py`. The units live in deploy/;
     moving this file to bin/ to satisfy a discovery glob would split it from the
-    files it tests for no real gain.
+    files it tests for no real gain. CI therefore invokes it as its own step rather
+    than relying on discovery — see .github/workflows/ci.yml.
     """
 
     def test_the_broker_is_not_in_the_docker_group(self):
         """The entire point of the proxy. A broker in the docker group has host root
         and every other guarantee in this tier is decoration."""
         body = unit("hermes-broker.service")
-        for line in body.splitlines():
+        for raw in body.splitlines():
+            # .strip() because systemd honours a leading-whitespace directive but a bare
+            # startswith() would skip it — and skipping, here, is a silent PASS on the one
+            # regression this file exists to catch. MEASURED 2026-09-17.
+            line = raw.strip()
             if line.startswith(("Group=", "SupplementaryGroups=")):
-                self.assertNotIn("docker", line, line)
+                self.assertNotIn("docker", line, raw)
 
     def test_only_the_proxy_touches_the_real_socket(self):
         self.assertIn("/var/run/docker.sock", unit("hermes-docker-proxy.service"))
@@ -40,9 +45,19 @@ class TestUnits(unittest.TestCase):
                       unit("hermes-broker.service"))
 
     def test_the_preflight_runs_before_the_broker_starts(self):
-        body = unit("hermes-broker.service")
-        self.assertIn("ExecStartPre", body)
-        self.assertIn("preflight-governance-access.py", body)
+        """Line-based, not a raw substring check, for the same reason
+        test_the_broker_is_not_in_the_docker_group is. MEASURED 2026-09-17: with
+        `assertIn("ExecStartPre", body)`, prefixing the directive with `#` — which is
+        how a pre-flight actually gets disabled mid-debug and left that way — still
+        satisfied the assertion, while systemd reads the line as a comment and never
+        runs the gate. Deleting the lines was caught; commenting them out was not."""
+        directives = [l.strip() for l in unit("hermes-broker.service").splitlines()
+                      if l.strip().startswith("ExecStartPre=")]
+        self.assertTrue(directives, "no live ExecStartPre= directive (commented out?)")
+        self.assertTrue(
+            any("preflight-governance-access.py" in l for l in directives),
+            "ExecStartPre= runs something, but not the governance pre-flight: %r"
+            % directives)
 
     def test_both_users_share_the_rail_group_so_the_socket_is_reachable(self):
         """MEASURED 2026-09-16: without a shared group on the runtime directory and
@@ -64,12 +79,13 @@ class TestUnits(unittest.TestCase):
         through the supplementary path and must not slip past unnoticed.
         """
         body = unit("hermes-docker-proxy.service")
-        for line in body.splitlines():
+        for raw in body.splitlines():
+            line = raw.strip()   # see the note in test_the_broker_is_not_in_the_docker_group
             if line.startswith("Group="):
-                self.assertNotEqual(line.strip(), "Group=hermes-broker", line)
+                self.assertNotEqual(line, "Group=hermes-broker", raw)
             elif line.startswith("SupplementaryGroups="):
                 groups = line.split("=", 1)[1].split()
-                self.assertNotIn("hermes-broker", groups, line)
+                self.assertNotIn("hermes-broker", groups, raw)
 
     def test_the_broker_can_read_the_governance_store(self):
         """The pre-flight READS clients.json. A broker outside gid 10000 refuses with four
@@ -80,7 +96,8 @@ class TestUnits(unittest.TestCase):
         'hermes' inside 'hermes-rail' (the hyphen is a word boundary), so it matches a unit
         that has dropped the real gid-10000 group — exactly the regression this guards."""
         groups = []
-        for line in unit("hermes-broker.service").splitlines():
+        for raw in unit("hermes-broker.service").splitlines():
+            line = raw.strip()   # see test_the_broker_is_not_in_the_docker_group
             if line.startswith("SupplementaryGroups="):
                 groups.extend(line.split("=", 1)[1].split())
         self.assertIn("hermes", groups)
