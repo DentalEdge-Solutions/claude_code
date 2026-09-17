@@ -355,11 +355,27 @@ def _handle(conn, upstream_path):
                 _refuse(conn, "malformed request line")
                 return
             method, path = parts[0], parts[1]
-            clen, has_te = 0, False
+            clen, has_te, bad_clen = 0, False, False
             for h in head.split(b"\r\n")[1:]:
                 lo = h.lower()
                 if lo.startswith(b"content-length:"):
-                    clen = int(h.split(b":", 1)[1].strip() or b"0")
+                    # DIGITS ONLY. RFC 9110 defines Content-Length as 1*DIGIT, but
+                    # Python's int() also accepts "-5", "+5", "1_0" and an empty value
+                    # (via the old `or b"0"`), and Go's ParseUint — which is what
+                    # dockerd uses — accepts none of them. Every one of those is this
+                    # proxy and its upstream disagreeing about where the request ends,
+                    # which is the same shape as the CL.TE Critical documented below.
+                    # MEASURED 2026-09-17: `Content-Length: 7_7` parsed here as 77 and
+                    # carried a smuggled create's bytes through to the upstream socket;
+                    # `Content-Length: -5` made the framing below do
+                    # `rest[:-5], rest[-5:]`, silently handing the last five body bytes
+                    # to the next loop iteration as a request line; and a non-numeric
+                    # value raised ValueError out of _handle (which catches only
+                    # OSError) as an unhandled traceback. Refuse instead of guessing.
+                    if not h.split(b":", 1)[1].strip().isdigit():
+                        bad_clen = True
+                    else:
+                        clen = int(h.split(b":", 1)[1].strip())
                 if lo.startswith(b"transfer-encoding:"):
                     has_te = True
             # CL.TE / TE.CL REQUEST SMUGGLING. This proxy frames every request by
@@ -386,6 +402,15 @@ def _handle(conn, upstream_path):
                 _refuse(conn, "Transfer-Encoding is not permitted on requests")
                 print("DENY %s %s (Transfer-Encoding present; CL.TE smuggling risk)"
                       % (method, path), file=sys.stderr)
+                return
+            if bad_clen:
+                # Close, do not continue the loop: without a usable length there is no
+                # way to know where this body ends, so there is no safe place to resume
+                # reading. The offending value is deliberately NOT logged — it is
+                # attacker-controlled bytes headed for the journal.
+                _refuse(conn, "malformed Content-Length")
+                print("DENY %s %s (malformed Content-Length)" % (method, path),
+                      file=sys.stderr)
                 return
             # Substring, not the regex fullmatch the rest of the file uses — deliberately
             # over-inclusive relative to decide()'s ALLOWED patterns, never under. A path
@@ -444,7 +469,17 @@ def _handle(conn, upstream_path):
             for h in rhead.split(b"\r\n")[1:]:
                 lo = h.lower()
                 if lo.startswith(b"content-length:"):
-                    rclen = int(h.split(b":", 1)[1].strip() or b"0")
+                    raw = h.split(b":", 1)[1].strip()
+                    if not raw.isdigit():
+                        # Same rule as the request side. This stream comes from the
+                        # trusted upstream, so a malformed length is an anomaly rather
+                        # than an attack — but a 403 is not the right shape for "the
+                        # upstream's own response was malformed", so close and log, the
+                        # way the oversized-response path just below does.
+                        print("upstream sent a malformed Content-Length: %r; closing"
+                              % raw, file=sys.stderr)
+                        return
+                    rclen = int(raw)
                 if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
                     rchunk = True
             if rchunk:

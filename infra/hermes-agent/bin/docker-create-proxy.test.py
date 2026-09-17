@@ -547,6 +547,65 @@ class TestPlumbing(unittest.TestCase):
                 for line in self.upstream_saw),
             "an ordinary allowed request never reached the upstream: %r" % self.upstream_saw)
 
+    def _send(self, req):
+        """Send one raw request, return what the client got back (b"" if the proxy
+        closed without answering)."""
+        import socket as _s
+        self._start_proxy()
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(req)
+        c.settimeout(2)
+        try:
+            resp = c.recv(65536)
+        except OSError:
+            resp = b""
+        c.close()
+        return resp
+
+    def test_a_malformed_content_length_is_refused_not_crashed(self):
+        """F4. `clen = int(...)` raised ValueError on a non-numeric Content-Length and
+        _handle catches only OSError, so it escaped to socketserver as an unhandled
+        traceback. It failed CLOSED — nothing was forwarded — but this file's own
+        convention (see _relay_chunked) is that every path fails closed AND LOGGED
+        rather than with a traceback, and any client on the proxy socket could fill
+        the journal with them. A 403 is the observable difference: before, the client
+        got nothing at all."""
+        resp = self._send(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+                          b"HTTP/1.1\r\nHost: d\r\nContent-Length: abc\r\n\r\n")
+        self.assertIn(b"403", resp)
+        self.assertIn(b"Content-Length", resp)
+        self.assertFalse(any(b"/containers/create" in b for b in self.upstream_raw))
+
+    def test_a_negative_content_length_is_refused(self):
+        """MEASURED: Python's int() accepts "-5", and the framing below then does
+        `body, buf = rest[:-5], rest[-5:]` — silently treating the last five bytes of
+        the body as the start of the NEXT request. decide() sees a truncated body and
+        the tail is re-parsed as a request line. Go rejects a negative Content-Length
+        outright, so this is the proxy disagreeing with its own upstream about where a
+        request ends, which is the exact shape of the Critical this file already closed."""
+        resp = self._send(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+                          b"HTTP/1.1\r\nHost: d\r\nContent-Length: -5\r\n\r\nXXXXX")
+        self.assertIn(b"403", resp)
+
+    def test_a_content_length_only_python_accepts_is_refused(self):
+        """Python's int() accepts underscore separators, so `Content-Length: 7_7`
+        parsed as 77 while Go's ParseUint rejects it — the proxy would frame 77 bytes
+        as the body while dockerd 400s or frames differently. MEASURED during the
+        341ed1e re-review: this form carried a smuggled create's bytes through to the
+        upstream socket. Digits only, which is what RFC 9110 says a Content-Length
+        is."""
+        smuggled = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
+                    b"Content-Length: 2\r\n\r\n{}")
+        tail = b"0\r\n\r\n" + smuggled
+        resp = self._send(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+                          b"HTTP/1.1\r\nHost: d\r\nContent-Length: 7_7\r\n\r\n" + tail)
+        self.assertIn(b"403", resp)
+        self.assertFalse(
+            any(b"/containers/create" in b for b in self.upstream_raw),
+            "a Content-Length only Python accepts carried a create to the upstream: %r"
+            % self.upstream_raw)
+
     def test_a_request_after_a_chunked_response_cannot_smuggle_past_decide(self):
         """Same hazard class as the CL.TE fix above, on the RESPONSE side: real
         traffic (see docs/evaluations/2026-09-16-phase-b-endpoint-measurement.md)
