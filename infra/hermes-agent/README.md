@@ -807,9 +807,16 @@ live mutation:
 5. **Approve per action** — `approve-changeset.py` with `--expect-sha256`, which binds the approval to
    the exact reviewed bytes.
 
-> **Not deployable to the VPS as of 2026-08-31.** Phase B (the body-inspecting Docker socket proxy
-> and the systemd units) is not built, and without it the broker's Docker access on a VPS is host
-> root. See `docs/evaluations/2026-08-30-hermes-phase-a-deployment-readiness.md`.
+> **Phase B is built; deployment to a VPS is unproven.** The body-inspecting Docker socket
+> proxy and the two systemd units exist (`infra/hermes-agent/deploy/`) — the reason this
+> note used to give, that Phase B was missing and the broker's Docker access on a VPS was
+> therefore host root, no longer holds. But `units.test.py` only asserts that the unit
+> *files* say the right thing; it does not exercise `ProtectSystem=strict`,
+> `NoNewPrivileges`, `RestrictAddressFamilies`, or systemd boot ordering, and the proxy's
+> endpoint allow-list was measured under Docker Desktop on darwin — per R22 that says
+> nothing about Linux Docker. Nothing in this repo has run on a real VPS. Follow "VPS
+> deploy sequence" below for the procedure, and treat a first run of it as exactly that —
+> a first deployment to verify, not a repeat of something already known to work.
 
 ## Governance store
 
