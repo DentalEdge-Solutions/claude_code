@@ -1,0 +1,50 @@
+[Unit]
+Description=Hermes Docker API allow-list proxy (pins container creation to one image)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# This unit is the ONLY component in the group that touches the real Docker socket.
+# It runs as a user in the docker group; the broker deliberately is not.
+User=hermes-docker-proxy
+SupplementaryGroups=docker
+# The shared group is what lets the broker CONNECT to the socket below. MEASURED:
+# with the directory and socket owned by the proxy's own group, the broker gets
+# EACCES and the rail is dead on first boot.
+#
+# Deliberately NOT Group=hermes-broker, which would also work: that would give this
+# proxy read access to .env.gaw — the write credential it has no business seeing.
+# hermes-rail carries no other rights, which is the point.
+Group=hermes-rail
+RuntimeDirectory=hermes
+RuntimeDirectoryMode=0750
+# --network is REQUIRED (added 2026-09-16 by Ruling 9, which folded the NetworkMode
+# allow-list into Task 3). main() declares it required=True, so an ExecStart that
+# omits it fails to start with argparse exit 2 — on the VPS, at boot. The value must
+# equal the Compose network Task 1 measured. units.test.py asserts it is present.
+ExecStart=/opt/hermes-agent/bin/docker-create-proxy.py \
+    --listen /run/hermes/docker-proxy.sock \
+    --upstream /var/run/docker.sock \
+    --image hermes-agent-claude \
+    --governance-root /opt/governance \
+    --network hermes-agent_default \
+    --allow-bind /var/lib/hermes/governance/approvals:/opt/governance/approvals:ro \
+    --allow-bind /var/lib/hermes/governance/control:/opt/governance/control:ro \
+    --allow-bind /var/lib/hermes/governance/registry:/opt/governance/registry:ro \
+    --allow-bind /var/lib/hermes/governance/log:/opt/governance/log:rw \
+    --allow-bind /opt/projects/claude-google-ads:/projects/claude_google_ads:ro \
+    --allow-bind /opt/hermes-agent/registry:/opt/registry:ro \
+    --allow-bind /opt/hermes-agent/bin:/opt/cc-bin:ro
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

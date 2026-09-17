@@ -99,6 +99,13 @@ jobs:
       # image, which runs as 10000. Every other suite runs fully.
       - name: Hermes bin suites
         run: infra/hermes-agent/bin/run-bin-tests.sh
+      # run-bin-tests.sh globs bin/ only, so the systemd unit suite lives outside its
+      # discovery BY DESIGN — the units live beside their test in deploy/. Invoke it
+      # explicitly, or it runs only when a human remembers to. It asserts what the unit
+      # FILES SAY; it does not exercise ProtectSystem=strict, NoNewPrivileges,
+      # RestrictAddressFamilies or boot ordering, which stay unproven until the VPS.
+      - name: Systemd unit suite
+        run: python3 infra/hermes-agent/deploy/units.test.py
 
   static-scan-skills:
     name: Static scan all skills

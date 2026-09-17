@@ -1,0 +1,41 @@
+[Unit]
+Description=Hermes mutation request broker (drains the spool, invokes the governed rail)
+After=hermes-docker-proxy.service
+Requires=hermes-docker-proxy.service
+
+[Service]
+Type=simple
+# Its own user. .env.gaw and the governance store are readable ONLY by this user, so
+# even the deploy user's shell cannot read the write credential (spec §16.2).
+User=hermes-broker
+Group=hermes-broker
+# hermes-rail: connect to the proxy socket. hermes (gid 10000): read the governance
+# store — required, because ExecStartPre's pre-flight READS clients.json, and a broker
+# outside gid 10000 refuses with four spurious "cannot stat" problems instead of the
+# real finding (MEASURED 2026-09-16).
+SupplementaryGroups=hermes-rail hermes
+WorkingDirectory=/opt/hermes-agent
+# NOT in the docker group. Docker access is exclusively through the proxy socket.
+Environment=DOCKER_HOST=unix:///run/hermes/docker-proxy.sock
+Environment=HERMES_GOVERNANCE_DIR=/var/lib/hermes/governance
+Environment=HERMES_GOVERNANCE_ROOT=/var/lib/hermes/governance
+Environment=HERMES_SPOOL_ROOT=/opt/hermes-agent/data/spool
+# Refuses at BOOT rather than mid-apply, where the failure is exit 3 after a live
+# account change. Since S3-b this also refuses when a registered client has no
+# pre-created log — so --bootstrap-logs MUST have been run before this unit is
+# enabled, or Restart=on-failure turns it into a five-second restart loop.
+ExecStartPre=/usr/bin/python3 /opt/hermes-agent/bin/preflight-governance-access.py \
+    --root /var/lib/hermes/governance
+ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/hermes-broker.py --watch --interval 5
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes/governance /opt/hermes-agent/data/spool
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
