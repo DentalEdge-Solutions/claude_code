@@ -816,7 +816,9 @@ live mutation:
 > endpoint allow-list was measured under Docker Desktop on darwin — per R22 that says
 > nothing about Linux Docker. Nothing in this repo has run on a real VPS. Follow "VPS
 > deploy sequence" below for the procedure, and treat a first run of it as exactly that —
-> a first deployment to verify, not a repeat of something already known to work.
+> a first deployment to verify, not a repeat of something already known to work. See
+> `docs/evaluations/2026-08-30-hermes-phase-a-deployment-readiness.md` for the superseded
+> readiness evaluation this note used to rest on.
 
 ## Governance store
 
@@ -964,6 +966,7 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
    ```bash
    sudo groupadd -f hermes-rail
    sudo groupadd -f hermes-broker
+   getent group hermes >/dev/null || sudo groupadd -g 10000 hermes
    sudo useradd  --system --no-create-home --shell /usr/sbin/nologin \
      -g hermes-rail -G docker hermes-docker-proxy
    sudo useradd  --system --no-create-home --shell /usr/sbin/nologin \
@@ -987,9 +990,11 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
      host, matching the executor's in-container `USER hermes` (`Dockerfile`, uid/gid
      10000; see "Ownership on a Linux host" above). `ExecStartPre` in
      `hermes-broker.service` runs the pre-flight, which reads `registry/clients.json`
-     under that gid. If the group named `hermes`/gid `10000` does not yet exist on this
-     host, create it first: `sudo groupadd -g 10000 hermes` (skip if the governance
-     store's `chgrp -R 10000` step already implies it exists).
+     under that gid. The block above creates the group only if no group named `hermes`
+     exists yet; it is a no-op otherwise. If gid `10000` is already bound to a
+     **different** name on this host, do not create a second name for the same gid —
+     reconcile that deliberately (rename the existing group or point the broker at the
+     name already in use) before continuing.
 
    `infra/hermes-agent/deploy/units.test.py` asserts the group wiring the unit files
    expect (`hermes-rail` on both units, `hermes` and `hermes-rail` as the broker's
