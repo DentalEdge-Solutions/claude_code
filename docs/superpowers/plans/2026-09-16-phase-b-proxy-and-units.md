@@ -724,9 +724,18 @@ class TestPlumbing(unittest.TestCase):
         self.assertNotIn("POST /v1.55/build HTTP/1.1", self.upstream_saw,
                          "a refused request reached the upstream socket")
 
-    def test_a_create_with_no_content_length_is_refused(self):
+    def test_a_create_with_a_chunked_body_is_refused(self):
         """A chunked body cannot be inspected before forwarding, and forwarding an
         uninspected create is the one thing this file exists to prevent."""
+        # CORRECTED 2026-09-17, by the scoped re-review of 341ed1e. Named
+        # test_a_create_with_no_content_length_is_refused when this plan was written.
+        # The request below carries `Transfer-Encoding: chunked`, so since 341ed1e it
+        # is refused by the blanket Transfer-Encoding check and never reaches the
+        # `clen == 0` guard the old name described. Renamed, and given an assertion on
+        # the refusal REASON: a 403-only assertion cannot tell the two layers apart.
+        # MEASURED: with `if is_create and clen == 0:` replaced by `if False:`, the
+        # 403-only version of the sibling neither-header test still passed, because
+        # decide() refuses the empty body anyway. Assert the reason, not just the code.
         import threading, socket as _s, time
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=self.up_path),

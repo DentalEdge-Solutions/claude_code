@@ -291,6 +291,15 @@ class TestPlumbing(unittest.TestCase):
             if os.path.exists(p):
                 os.remove(p)
         self.upstream_saw = []
+        # The FULL bytes of each upstream receive, not just the first request line.
+        # `upstream_saw` records `data.split(b"\r\n")[0]`, which cannot see a request
+        # smuggled into the SAME sendall() as the allowed one it rides behind — and a
+        # smuggled request is, by construction, always in that same sendall(). MEASURED:
+        # against the pre-341ed1e proxy, `any("create" in line for line in upstream_saw)`
+        # is False while the create is sitting in the received bytes verbatim, so the
+        # non-receipt assertion — the one that actually proves the bypass is closed —
+        # passed against the very code it was written to catch. Assert on these bytes.
+        self.upstream_raw = []
         srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         srv.bind(self.up_path)
         srv.listen(8)
@@ -302,6 +311,7 @@ class TestPlumbing(unittest.TestCase):
                 except OSError:
                     return
                 data = conn.recv(65536)
+                self.upstream_raw.append(data)
                 self.upstream_saw.append(data.split(b"\r\n")[0].decode("latin1"))
                 conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
                 conn.close()
@@ -337,9 +347,15 @@ class TestPlumbing(unittest.TestCase):
         self.assertNotIn("POST /v1.55/build HTTP/1.1", self.upstream_saw,
                          "a refused request reached the upstream socket")
 
-    def test_a_create_with_no_content_length_is_refused(self):
+    def test_a_create_with_a_chunked_body_is_refused(self):
         """A chunked body cannot be inspected before forwarding, and forwarding an
-        uninspected create is the one thing this file exists to prevent."""
+        uninspected create is the one thing this file exists to prevent.
+
+        Since 341ed1e this is refused by the blanket Transfer-Encoding check, not by
+        the `clen == 0` guard it was originally written against — the request carries
+        `Transfer-Encoding: chunked`, so it never reaches that line. Renamed and
+        reason-asserted to say so; the no-headers-at-all case the old name implied is
+        covered distinctly by test_a_create_with_neither_header_is_refused below."""
         import threading, socket as _s, time
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=self.up_path),
@@ -355,12 +371,20 @@ class TestPlumbing(unittest.TestCase):
         resp = c.recv(65536)
         c.close()
         self.assertIn(b"403", resp)
+        self.assertIn(b"Transfer-Encoding is not permitted", resp,
+                      "refused, but not by the Transfer-Encoding check this now exercises")
 
     def test_a_create_with_neither_header_is_refused(self):
         """Same refusal, but with NEITHER Content-Length NOR Transfer-Encoding present
         (clen defaults to 0). Code inspection says `clen == 0` already handles this,
         but it was untested — this covers the absent-headers case distinctly from the
-        chunked case above."""
+        chunked case above.
+
+        The REASON assertion is what makes this test discriminating. MEASURED: with
+        `if is_create and clen == 0:` replaced by `if False:`, a 403-only assertion
+        still passes, because decide() refuses the empty body anyway as `unparseable
+        create body`. Defence in depth holds either way, but a 403-only test cannot
+        tell the two layers apart and so proves nothing about the guard it names."""
         import threading, socket as _s, time
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=self.up_path),
@@ -375,6 +399,8 @@ class TestPlumbing(unittest.TestCase):
         resp = c.recv(65536)
         c.close()
         self.assertIn(b"403", resp)
+        self.assertIn(b"cannot be inspected", resp,
+                      "refused by decide() rather than by the clen == 0 guard")
 
     def test_a_malformed_chunk_size_line_closes_the_connection_cleanly(self):
         """Finding 2, fix round 1: a malformed (non-hex) chunk-size line from the
@@ -459,8 +485,8 @@ class TestPlumbing(unittest.TestCase):
         c.close()
         self.assertIn(b"403", resp)
         self.assertFalse(
-            any("create" in line for line in self.upstream_saw),
-            "smuggled create reached the upstream socket: %r" % self.upstream_saw)
+            any(b"/containers/create" in b for b in self.upstream_raw),
+            "smuggled create reached the upstream socket: %r" % self.upstream_raw)
 
     def test_a_cl_te_smuggled_create_behind_a_plain_get_is_refused(self):
         """Same hazard on a GET, to show the bug was never specific to POST
@@ -481,8 +507,8 @@ class TestPlumbing(unittest.TestCase):
         c.close()
         self.assertIn(b"403", resp)
         self.assertFalse(
-            any("create" in line for line in self.upstream_saw),
-            "smuggled create reached the upstream socket: %r" % self.upstream_saw)
+            any(b"/containers/create" in b for b in self.upstream_raw),
+            "smuggled create reached the upstream socket: %r" % self.upstream_raw)
 
     def test_transfer_encoding_alone_on_an_allowed_endpoint_is_refused(self):
         """Transfer-Encoding with no Content-Length at all, on a non-create
@@ -498,7 +524,7 @@ class TestPlumbing(unittest.TestCase):
         resp = c.recv(65536)
         c.close()
         self.assertIn(b"403", resp)
-        self.assertFalse(any("create" in line for line in self.upstream_saw))
+        self.assertFalse(any(b"/containers/create" in b for b in self.upstream_raw))
 
     def test_an_ordinary_allowed_request_with_only_content_length_still_reaches_upstream(self):
         """POSITIVE CONTROL. Without this, a proxy that refuses every request
