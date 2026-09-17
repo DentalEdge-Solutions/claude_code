@@ -57,17 +57,34 @@ class TestUnits(unittest.TestCase):
         names "Group=hermes-broker" verbatim (to say why it was NOT chosen), which
         a plain assertNotIn would trip on. Check the actual directive line instead,
         the same way test_the_broker_is_not_in_the_docker_group does.
+
+        Checks BOTH Group= and SupplementaryGroups=: the proxy unit only sets
+        SupplementaryGroups=docker today, so there is no live gap, but a future
+        SupplementaryGroups=hermes-broker would grant the same .env.gaw read access
+        through the supplementary path and must not slip past unnoticed.
         """
         body = unit("hermes-docker-proxy.service")
         for line in body.splitlines():
             if line.startswith("Group="):
                 self.assertNotEqual(line.strip(), "Group=hermes-broker", line)
+            elif line.startswith("SupplementaryGroups="):
+                groups = line.split("=", 1)[1].split()
+                self.assertNotIn("hermes-broker", groups, line)
 
     def test_the_broker_can_read_the_governance_store(self):
-        """The pre-flight READS clients.json. A broker outside gid 10000 refuses with
-        four spurious 'cannot stat' problems instead of naming --bootstrap-logs."""
-        self.assertRegex(unit("hermes-broker.service"),
-                         r"SupplementaryGroups=.*\bhermes\b")
+        """The pre-flight READS clients.json. A broker outside gid 10000 refuses with four
+        spurious 'cannot stat' problems instead of naming --bootstrap-logs.
+
+        Membership is checked by SPLITTING the directive, not by regex. The obvious
+        r"SupplementaryGroups=.*\bhermes\b" is ILLUSORY: \bhermes\b is satisfied by the
+        'hermes' inside 'hermes-rail' (the hyphen is a word boundary), so it matches a unit
+        that has dropped the real gid-10000 group — exactly the regression this guards."""
+        groups = []
+        for line in unit("hermes-broker.service").splitlines():
+            if line.startswith("SupplementaryGroups="):
+                groups.extend(line.split("=", 1)[1].split())
+        self.assertIn("hermes", groups)
+        self.assertIn("hermes-rail", groups)
 
     def test_the_proxy_unit_supplies_the_required_network_flag(self):
         """--network is required=True in main(). A unit that omits it fails to start with
