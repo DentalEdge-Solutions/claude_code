@@ -945,6 +945,105 @@ python3 infra/hermes-agent/bin/migrate-governance.py \
   --governance-root "$HERMES_GOVERNANCE_DIR"        # dry run; add --apply to execute
 ```
 
+## VPS deploy sequence
+
+The order below is load-bearing — it was measured, not guessed (2026-09-16). Skipping
+or reordering a step produces failures that look like a hang rather than a clean error.
+This section covers the two units from Task 5 (`infra/hermes-agent/deploy/`); it reads
+together with "Ownership on a Linux host" above, which it does not duplicate.
+
+1. **Create the users and groups.**
+
+   ```bash
+   sudo groupadd -f hermes-rail
+   sudo groupadd -f hermes-broker
+   sudo useradd  --system --no-create-home --shell /usr/sbin/nologin \
+     -g hermes-rail -G docker hermes-docker-proxy
+   sudo useradd  --system --no-create-home --shell /usr/sbin/nologin \
+     -g hermes-broker hermes-broker
+   sudo usermod  -aG hermes-rail hermes-broker
+   sudo usermod  -aG hermes hermes-broker
+   ```
+
+   (`hermes-broker`'s own group is created explicitly rather than relied on as a
+   `useradd` side effect, since not every distro defaults to a private per-user group.)
+
+   - `hermes-docker-proxy` — the only user in the `docker` group. This is the unit that
+     touches the real Docker socket (`hermes-docker-proxy.service`: `SupplementaryGroups=docker`).
+   - `hermes-broker` — deliberately **not** in `docker` (`hermes-broker.service` carries
+     no `docker` group anywhere).
+   - `hermes-rail` — shared by both units so the broker can reach the proxy's socket.
+     MEASURED with a live listener: without this shared group the broker gets
+     `[Errno 13] Permission denied` connecting to the proxy socket and the rail is dead
+     on first boot.
+   - `hermes-broker` must **also** be in gid `10000` — the group named `hermes` on this
+     host, matching the executor's in-container `USER hermes` (`Dockerfile`, uid/gid
+     10000; see "Ownership on a Linux host" above). `ExecStartPre` in
+     `hermes-broker.service` runs the pre-flight, which reads `registry/clients.json`
+     under that gid. If the group named `hermes`/gid `10000` does not yet exist on this
+     host, create it first: `sudo groupadd -g 10000 hermes` (skip if the governance
+     store's `chgrp -R 10000` step already implies it exists).
+
+   `infra/hermes-agent/deploy/units.test.py` asserts the group wiring the unit files
+   expect (`hermes-rail` on both units, `hermes` and `hermes-rail` as the broker's
+   supplementary groups, `docker` absent from the broker) — it does not and cannot
+   assert that these groups exist on any given host; that is this step's job.
+
+2. **Lay out the governance store** — the ownership block already documented above:
+   `chgrp -R 10000`, `chmod -R g+rX`, `chmod 2750 log`, and
+   `find log -type f -name '*.jsonl' -exec chmod 0660 {} +`. Do this before bootstrapping
+   logs in the next step, since bootstrap writes into `log/`.
+
+3. **Bootstrap the logs — before enabling any unit:**
+
+   ```bash
+   infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs --apply
+   ```
+
+   > **Run `--bootstrap-logs` BEFORE enabling the broker.** Since S3-b the pre-flight refuses
+   > when a registered client has no pre-created log, and the broker runs it as `ExecStartPre`.
+   > With `Restart=on-failure` and `RestartSec=5`, an unbootstrapped store does not fail once —
+   > the unit **restart-loops every five seconds**. `journalctl -u hermes-broker` will show the
+   > refusal naming `migrate-governance.py --bootstrap-logs --apply`.
+
+4. **Install the units, then enable the proxy before the broker** (the broker
+   `Requires=`/`After=` the proxy, but enabling in this order makes the dependency
+   explicit rather than relying on the unit graph alone):
+
+   ```bash
+   sudo cp infra/hermes-agent/deploy/hermes-docker-proxy.service /etc/systemd/system/
+   sudo cp infra/hermes-agent/deploy/hermes-broker.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now hermes-docker-proxy
+   sudo systemctl enable --now hermes-broker
+   ```
+
+5. **Verify** — none of the following has been checked on any real VPS by this wave;
+   run each one and read the actual output before trusting the deploy:
+
+   ```bash
+   systemctl status hermes-docker-proxy hermes-broker
+   id hermes-broker                      # must NOT list "docker"
+   journalctl -u hermes-broker -n 50 --no-pager   # confirm no restart loop
+   sudo -u hermes-broker curl --unix-socket /run/hermes/docker-proxy.sock http://localhost/version
+   ```
+
+   A restart loop at 5-second intervals in `systemctl status hermes-broker` almost
+   always means step 3 was skipped — go back and run `--bootstrap-logs --apply`, then
+   `systemctl reset-failed hermes-broker` before re-enabling.
+
+> **The endpoint allow-list is re-measured on the VPS, not inherited.** Per R22 the darwin
+> measurement says nothing about Linux Docker. Re-run Task 1's measurement on the target
+> before trusting the proxy there.
+
+`hermes-docker-proxy.service`'s `ExecStart` (`infra/hermes-agent/deploy/hermes-docker-proxy.service`)
+pins `--network` to the exact Compose network Task 1 measured, and lists the
+`--allow-bind` mounts and `--image`/`--governance-root` flags `docker-create-proxy.py`'s
+`main()` declares (`--listen`, `--upstream`, `--image`, `--governance-root`, `--network`,
+`--allow-bind`, all verified against the script as of this task). If the Compose network
+name or any bind path changes, the unit file — not this document — is the place to
+change it; this section only orders the steps, it does not re-derive the flag values.
+
 ## Mount masking — keeping credential files out of the container view
 
 The project mounts are `:ro`, which stops Hermes *writing* them. It never stopped
