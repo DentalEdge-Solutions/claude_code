@@ -290,3 +290,32 @@ This removes the dependency on dockerd's strictness instead of documenting it. C
   it.
 - Prove each new guard by making it fail. Three assertions in this wave passed for reasons
   unrelated to their claims, and reading found none of them.
+
+## 8. Carry alongside: the end-to-end check F4 still owes
+
+`65df9b1` made the proxy refuse **more** than it used to — a `Content-Length` that is not
+`1*DIGIT` is now rejected, including an empty value that the old `or b"0"` fallback silently
+coerced to `0`. Everything this wave has learned says to treat "the proxy now refuses more" as a
+claim about the production rail that has to be tested, not assumed.
+
+**What was verified on darwin:** the unit-level positive control
+(`test_an_ordinary_allowed_request_with_only_content_length_still_reaches_upstream`) passes — an
+ordinary request is still ALLOWED and still reaches the upstream — and Go's
+`http.Request.Write`, which is what the Docker CLI and compose use, cannot emit any of the
+refused forms.
+
+**What was NOT verified, and why:** no end-to-end run of the real rail through the proxy. Docker
+was not running on the dev machine. The 2026-09-16 endpoint measurement cannot settle it either
+— it records method, path, connection and call counts, **not header blocks**, so it has nothing
+to say about what `Content-Length` forms real traffic emits. That is an absence of evidence, not
+evidence of absence.
+
+**On the VPS**, alongside the endpoint re-measurement, run the real rail end to end through the
+proxy (the shape of the implementation plan's Step 5) and confirm an ordinary mutation path is
+still ALLOWED, in the proxy's own log, from end to end.
+
+**If a real request is refused with `malformed Content-Length`: that is the finding.** Do not
+widen the parse to make it pass. Identify which client emitted it and what it emitted first — a
+legitimate client emitting a non-digit `Content-Length` would itself be worth understanding, and
+the reflex to relax a check until the rail works is the same reflex that would have weakened the
+`Cmd` policy when Task 3's positive control failed (`f80c939`).
