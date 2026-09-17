@@ -422,6 +422,193 @@ class TestPlumbing(unittest.TestCase):
         self.assertEqual(more, b"", "connection did not close cleanly")
         c.close()
 
+    def _start_proxy(self):
+        import threading, time
+        threading.Thread(target=PX.serve,
+                         kwargs=dict(listen=self.li_path, upstream=self.up_path),
+                         daemon=True).start()
+        for _ in range(50):
+            if os.path.exists(self.li_path):
+                break
+            time.sleep(0.05)
+
+    def test_a_cl_te_smuggled_create_is_refused_and_never_reaches_upstream(self):
+        """THE CRITICAL: CL.TE request smuggling. `_handle` used to frame every
+        request by Content-Length alone, but forward Transfer-Encoding verbatim
+        to dockerd (a Go net/http server) for every allowed endpoint except
+        /containers/create. dockerd frames by Transfer-Encoding when both
+        headers are present, so an empty chunked body terminates the FIRST
+        request for dockerd while the rest of the declared Content-Length body
+        — an entirely uninspected second request — gets parsed and executed as
+        its own call. Both assertions matter: the 403 alone does not prove the
+        smuggled create was never sent to decide()/upstream — the upstream
+        non-receipt assertion is what actually proves the bypass is closed."""
+        import socket as _s
+        self._start_proxy()
+        smuggled = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
+                    b"Content-Length: 2\r\n\r\n{}")
+        chunked_terminator = b"0\r\n\r\n"
+        tail = chunked_terminator + smuggled
+        req = (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+               b"Host: d\r\nTransfer-Encoding: chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(req)
+        resp = c.recv(65536)
+        c.close()
+        self.assertIn(b"403", resp)
+        self.assertFalse(
+            any("create" in line for line in self.upstream_saw),
+            "smuggled create reached the upstream socket: %r" % self.upstream_saw)
+
+    def test_a_cl_te_smuggled_create_behind_a_plain_get_is_refused(self):
+        """Same hazard on a GET, to show the bug was never specific to POST
+        bodies — any allowed endpoint carrying both headers was exploitable."""
+        import socket as _s
+        self._start_proxy()
+        smuggled = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
+                    b"Content-Length: 2\r\n\r\n{}")
+        chunked_terminator = b"0\r\n\r\n"
+        tail = chunked_terminator + smuggled
+        req = (b"GET /v1.55/version HTTP/1.1\r\nHost: d\r\n"
+               b"Transfer-Encoding: chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(req)
+        resp = c.recv(65536)
+        c.close()
+        self.assertIn(b"403", resp)
+        self.assertFalse(
+            any("create" in line for line in self.upstream_saw),
+            "smuggled create reached the upstream socket: %r" % self.upstream_saw)
+
+    def test_transfer_encoding_alone_on_an_allowed_endpoint_is_refused(self):
+        """Transfer-Encoding with no Content-Length at all, on a non-create
+        allowed path, must also be refused — the hazard is the header's mere
+        presence on a request, not just the CL+TE combination."""
+        import socket as _s
+        self._start_proxy()
+        req = (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+               b"Host: d\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(req)
+        resp = c.recv(65536)
+        c.close()
+        self.assertIn(b"403", resp)
+        self.assertFalse(any("create" in line for line in self.upstream_saw))
+
+    def test_an_ordinary_allowed_request_with_only_content_length_still_reaches_upstream(self):
+        """POSITIVE CONTROL. Without this, a proxy that refuses every request
+        carrying ANY body-framing header would also pass the three refusals
+        above while silently breaking the production rail — this is the
+        failure mode this project has already shipped once (Task 12's seam
+        S4)."""
+        import socket as _s
+        self._start_proxy()
+        req = (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+               b"Host: d\r\nContent-Length: 0\r\n\r\n")
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(req)
+        resp = c.recv(65536)
+        c.close()
+        self.assertNotIn(b"403", resp)
+        self.assertTrue(
+            any(line.startswith("POST /v1.55/containers/deadbeef/wait")
+                for line in self.upstream_saw),
+            "an ordinary allowed request never reached the upstream: %r" % self.upstream_saw)
+
+    def test_a_request_after_a_chunked_response_cannot_smuggle_past_decide(self):
+        """Same hazard class as the CL.TE fix above, on the RESPONSE side: real
+        traffic (see docs/evaluations/2026-09-16-phase-b-endpoint-measurement.md)
+        has `GET /containers/json` return `Transfer-Encoding: chunked` and a
+        `wait` follow on what the real Docker client treats as one logical
+        session. This test found that `_handle` does NOT keep the proxy-side
+        connection open after relaying a chunked response: the `return`
+        immediately after `_relay_chunked(...)` in `_handle` unconditionally
+        ends the per-connection loop, for both the well-formed case here and
+        the malformed-chunk case already covered by
+        test_a_malformed_chunk_size_line_closes_the_connection_cleanly above.
+        A second request the client attempts on that same connection is
+        therefore never decided — the connection is already gone, so the
+        client's write fails outright (broken pipe) rather than the request
+        being read, framed, or forwarded. This differs from the task brief's
+        assumption that this path is exercised keep-alive-style in production;
+        it is NOT a smuggling bypass (confirmed below: nothing from the
+        never-sent second request reaches the fake upstream — there is no
+        uninspected forwarding, only a closed connection), but it is a
+        functional gap in connection reuse across a chunked response, left
+        unchanged here as it is outside this wave's single assigned Critical
+        (CL.TE request smuggling) and changing `_handle`'s control flow for it
+        deserves its own review. See the final fix report's Concerns section."""
+        import threading, socket as _s, time
+        chunked_up_path = "/tmp/pxchunkup-%d-%d.sock" % (os.getpid(), next(_SOCK_SEQ))
+        if os.path.exists(chunked_up_path):
+            os.remove(chunked_up_path)
+        srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        srv.bind(chunked_up_path)
+        srv.listen(1)
+        upstream_saw = []
+
+        def chunked_upstream():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        b"5\r\nhello\r\n0\r\n\r\n")
+            # If _handle ever loops back for a second request, it would open a
+            # fresh forward to this same accepted upstream connection; record
+            # whatever (if anything) arrives so the assertion below can prove
+            # a never-decided request did not slip through as a second send.
+            try:
+                more = conn.recv(65536)
+                if more:
+                    upstream_saw.append(more.split(b"\r\n")[0].decode("latin1"))
+            except OSError:
+                pass
+            conn.close()
+
+        threading.Thread(target=chunked_upstream, daemon=True).start()
+        self.addCleanup(srv.close)
+        self.addCleanup(lambda: os.path.exists(chunked_up_path) and os.remove(chunked_up_path))
+
+        threading.Thread(target=PX.serve,
+                         kwargs=dict(listen=self.li_path, upstream=chunked_up_path),
+                         daemon=True).start()
+        for _ in range(50):
+            if os.path.exists(self.li_path):
+                break
+            time.sleep(0.05)
+
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(b"GET /v1.55/containers/json HTTP/1.1\r\nHost: d\r\n\r\n")
+        c.settimeout(2)
+        first = b""
+        while not first.endswith(b"0\r\n\r\n"):
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            first += chunk
+        self.assertIn(b"chunked", first.lower())
+        self.assertTrue(first.endswith(b"0\r\n\r\n"), "did not receive the full chunked body")
+
+        with self.assertRaises(OSError):
+            for _ in range(50):
+                c.sendall(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+                         b"HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n")
+                time.sleep(0.02)
+        c.close()
+        self.assertFalse(
+            any("wait" in line for line in upstream_saw),
+            "a request the proxy never decided still reached the upstream: %r"
+            % upstream_saw)
+
 
 if __name__ == "__main__":
     unittest.main()

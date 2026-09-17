@@ -355,20 +355,49 @@ def _handle(conn, upstream_path):
                 _refuse(conn, "malformed request line")
                 return
             method, path = parts[0], parts[1]
-            clen, chunked = 0, False
+            clen, has_te = 0, False
             for h in head.split(b"\r\n")[1:]:
                 lo = h.lower()
                 if lo.startswith(b"content-length:"):
                     clen = int(h.split(b":", 1)[1].strip() or b"0")
-                if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
-                    chunked = True
+                if lo.startswith(b"transfer-encoding:"):
+                    has_te = True
+            # CL.TE / TE.CL REQUEST SMUGGLING. This proxy frames every request by
+            # Content-Length alone (`while len(rest) < clen` below); dockerd is Go
+            # net/http, which frames by Transfer-Encoding when BOTH headers are
+            # present on a request. A request that carries Transfer-Encoding at
+            # all — alone, or alongside Content-Length — is therefore ambiguous:
+            # this proxy would read exactly `clen` bytes as "the body" and treat
+            # anything past that as the start of the NEXT request on the
+            # connection, while dockerd treats (say) an empty chunked body as
+            # ending THIS request and parses the remainder as a wholly separate,
+            # uninspected second request. MEASURED against the real `_handle`
+            # before this fix: an allowed `POST .../wait` carrying both headers,
+            # with an empty chunked body followed by a smuggled `POST
+            # /containers/create {Privileged: true, Binds: ["/:/host:rw"]}` in the
+            # declared Content-Length tail, produced exactly one logged decision
+            # (`ALLOW POST .../wait`) — `decide()` was never called for the
+            # create, and dockerd executed it as a second request on the same
+            # connection. Refuse unconditionally, for every path (not just
+            # `/containers/create`), before any framing or forwarding, and close
+            # the connection rather than trying to keep reading a stream we can
+            # no longer unambiguously frame.
+            if has_te:
+                _refuse(conn, "Transfer-Encoding is not permitted on requests")
+                print("DENY %s %s (Transfer-Encoding present; CL.TE smuggling risk)"
+                      % (method, path), file=sys.stderr)
+                return
             # Substring, not the regex fullmatch the rest of the file uses — deliberately
             # over-inclusive relative to decide()'s ALLOWED patterns, never under. A path
             # this misses would fall through to decide() unrefused-for-uninspectability
             # only to be refused there instead (or matched and inspected normally), so
             # there is no bypass; it can only refuse a few extra non-create paths early.
             is_create = "/containers/create" in path
-            if is_create and (chunked or clen == 0):
+            # A create can no longer reach here with Transfer-Encoding set (chunked
+            # or otherwise) — the `has_te` check above already refused it. What's
+            # left to catch is a create with NEITHER header, where `clen` defaults
+            # to 0: decide() cannot safely run against a body of unknown length.
+            if is_create and clen == 0:
                 _refuse(conn, "create with no Content-Length cannot be inspected")
                 print("DENY %s %s (uninspectable body)" % (method, path), file=sys.stderr)
                 return
