@@ -34,12 +34,12 @@ run on Linux. This session is where "built" becomes "measured" — or does not.
 - `.superpowers/sdd/2026-09-16-phase-b-proxy-and-units/progress.md` — the SDD ledger, 351 lines,
   18 numbered rulings, each with its cost-if-wrong.
 
-## STATE — measured 2026-09-17, re-verified unchanged 2026-09-18; re-measure before trusting it
+## STATE — measured 2026-09-18, re-measure before trusting it
 
 | | |
 |---|---|
-| Branch | `main` at `f8878e2`, `origin/main` identical (0/0). **This document's own merge moves `main` past `f8878e2` — that delta is expected, and is not drift.** |
-| Last merges | `#25` Phase B (`1ab18fc`) · `#26` strict Content-Length + F3 plan (`f8878e2`) |
+| Branch | `main` at `4069b26`, `origin/main` identical (0/0). **This document's own merge moves `main` past `4069b26` — that delta is expected, and is not drift.** |
+| Last merges | `#25` Phase B (`1ab18fc`) · `#26` strict Content-Length + F3 plan (`f8878e2`) · `#27` this handoff (`10c7ed2`) · `#28` socket-readiness race (`4069b26`) |
 | Tree | **5 tracked / 45 untracked**, all pre-existing operator state — none of it yours |
 | Kill switch | **ABSENT** — mutation disabled at rest. It stays that way this session. |
 | Suites | bin 27/27 · node 22/22 · `deploy/units.test.py` 11/11 · `docker-create-proxy.test.py` 40/40 |
@@ -127,6 +127,15 @@ widen the parse to make it pass. Identify which client emitted it and what it em
 - **F3 hardening**, if §4 finds a desync — or at normal priority if it does not. Refuse what
   cannot be parsed unambiguously instead of depending on dockerd being stricter than Python.
   §7 of the plan has the three rules and the constraint: **re-run the positive control.**
+  Fold in one more while you are in that file: `serve()` calls `os.chmod(listen, 0o660)` AFTER
+  `Server(listen, Handler)` has already bound, so the socket briefly carries umask-derived
+  permissions, and `hermes-docker-proxy.service` sets no `UMask`. **Not a hole** — the socket
+  lives under `RuntimeDirectory=hermes` at `RuntimeDirectoryMode=0750`, so nobody outside
+  `hermes-rail` can traverse to it whatever the socket's own mode is during that window. But the
+  containment currently comes from the directory rather than from the socket, and nothing says
+  so. Either add `UMask=0077` or write down why it is not needed; a future change to the
+  directory mode should not silently become a socket-permissions problem. Noticed 2026-09-18
+  while forcing the bind/listen race open — a second finding out of the same experiment.
 - **Audit-log truncation.** `0660` grants write, and write includes truncate, at the same
   reversibility cost `unlink` had. Pinning `Entrypoint` removed the arbitrary-code route but did
   not close it. The design's §1 names the audit trail as the secondary property worth defending
@@ -162,6 +171,10 @@ weirdness; it is known, not new.
 
 ## MEASUREMENT TRAPS — earned, and several of them the hard way
 
+- **A PR being green does not mean `main` is green.** `main` went red on `10c7ed2` — a
+  docs-only merge whose own PR run had passed minutes earlier. Check CI on the MERGE COMMIT,
+  every time. That a docs-only change could not possibly have broken the code is what
+  identified it as a latent flake rather than a regression, in about a minute.
 - **Local darwin runs FEWER tests than the Linux runner.** `applies()` gates real logic off and
   `main()` returns 0 before `check()` executes, so platform-gated tests pass **vacuously** off
   Linux. This cost ten days of a silently-red PR on S3-b. On the VPS you are finally on the
@@ -172,12 +185,21 @@ weirdness; it is known, not new.
   false pass on an unmutated file. Verify the mutation actually applied before believing any
   result.
 - **An inert mutation is itself a finding** — chase it, do not accept the green.
-- **A test can pass for a reason unrelated to its claim.** Five shipped in this project so far:
+- **A test can pass for a reason unrelated to its claim.** Six shipped in this project so far:
   an `assertIn("2", …)` satisfied by the `2` in mode `2750`; a `\bhermes\b` regex satisfied by
   the `hermes` inside `hermes-rail`; a non-receipt assertion that could not see a request
   smuggled into the same `sendall()`; a `clen == 0` guard whose test passed with the guard
   deleted; and an `assertIn("ExecStartPre", body)` satisfied by `#ExecStartPre=`. **Reading
   found none of them. Mutation found all five.** Prove a guard guards by making it fail.
+- **The sixth is a different shape, and worth its own line: a readiness check that was a
+  STAND-IN rather than the thing itself.** Every socket test here waited on
+  `os.path.exists(sock)`. `socketserver` binds — which creates the file — and only then calls
+  `listen()`, so that check passes during a window in which `connect()` raises `ECONNREFUSED`.
+  It turned `main` red on `10c7ed2`, a **docs-only** merge. Proven by stalling
+  `server_activate()` between bind and listen: the old check produced 12 errors out of 12
+  tests, the connect-poll none. Fixed in `#28`. **Ask what a check actually observes, not what
+  it is named after** — and note that 25 consecutive green runs were *not* evidence here, since
+  that is exactly what rarely losing a race looks like.
 - **An instrument that reports "safe" needs to be shown reporting "safe" when the target really
   is safe** — not just "unsafe" when it is unsafe. That is the half of a control that usually
   goes unchecked.
