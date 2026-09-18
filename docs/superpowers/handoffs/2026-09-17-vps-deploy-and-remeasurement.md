@@ -34,11 +34,11 @@ run on Linux. This session is where "built" becomes "measured" — or does not.
 - `.superpowers/sdd/2026-09-16-phase-b-proxy-and-units/progress.md` — the SDD ledger, 351 lines,
   18 numbered rulings, each with its cost-if-wrong.
 
-## STATE — measured 2026-09-17, re-measure before trusting it
+## STATE — measured 2026-09-17, re-verified unchanged 2026-09-18; re-measure before trusting it
 
 | | |
 |---|---|
-| Branch | `main` at `f8878e2`, `origin/main` identical (0/0) |
+| Branch | `main` at `f8878e2`, `origin/main` identical (0/0). **This document's own merge moves `main` past `f8878e2` — that delta is expected, and is not drift.** |
 | Last merges | `#25` Phase B (`1ab18fc`) · `#26` strict Content-Length + F3 plan (`f8878e2`) |
 | Tree | **5 tracked / 45 untracked**, all pre-existing operator state — none of it yours |
 | Kill switch | **ABSENT** — mutation disabled at rest. It stays that way this session. |
