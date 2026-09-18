@@ -68,7 +68,7 @@ class TestReservedNames(unittest.TestCase):
         for name in ("hermes", "hermes-broker", "hermes-docker-proxy", "hermes-rail"):
             rc, _, err = run(["--check"], {"DEPLOY_USER": name})
             self.assertNotEqual(rc, 0, "DEPLOY_USER=%s was accepted" % name)
-            self.assertIn("reserved", err.lower(), err)
+            self.assertIn("is reserved for the hermes tier", err.lower(), err)
 
     def test_the_refusal_names_the_remedy(self):
         """A refusal an operator cannot act on gets worked around at 2am."""
