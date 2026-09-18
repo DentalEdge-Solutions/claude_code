@@ -272,3 +272,87 @@ truncation), and any credential provisioning.
 - This machine is `arm64` and has no `~/.ssh`, no Docker daemon, and no VPS access.
 - `infra/hermes-agent/deploy/` contains three files: the two units and `units.test.py`. No
   provisioning or deploy script exists anywhere in the repo.
+
+## 11. The deploy flow this design assumes
+
+Added 2026-09-18 at the operator's request, who also stated that **regular project onboarding
+is near-term**. This section records the answer rather than leaving it in a conversation; it
+does not widen §8.
+
+### 11.1 Hermes itself — local-first, by canon
+
+Canon 2026-07-17: the VPS is a deploy target, not the dev workshop. The archived H3 design's
+D8 states the operational form — the git repo is the source of truth, and deploy is `git pull`
+on the box plus `docker compose build && up -d`. Everything in this deliverable obeys it:
+written and tested on the laptop, landed via PR, and only then run on the box.
+
+### 11.2 New operated projects — local-first by construction, not by policy
+
+Onboarding a project touches version-controlled files only, and there is **no runtime path to
+do it on the box**: `registry/projects.yaml` is mounted read-only (`docker-compose.yml`), and
+no `hermes project add` command exists.
+
+| What changes | File | Needed for |
+|---|---|---|
+| `workdir`, `scope`, `default_model`, `mask_paths` | `registry/projects.yaml` | every project |
+| the read-only mount (and any credential mask) | `docker-compose.yml` | every project |
+| `--allow-bind` entries | `hermes-docker-proxy.service` | **only** mutation-tier projects |
+
+So a new project is a PR, not a config action. That is a property of the repo's shape, not a
+rule anyone has to remember.
+
+### 11.3 What is guarded, and the two gaps onboarding will walk into
+
+**Guarded — the mutation tier.** `bin/proxy-policy-sync.test.py` asserts the proxy's policy
+matches `docker-compose.yml`: exactly 7 volumes in the `ads-mutator` block against the unit's
+7 `--allow-bind` flags, exactly one writable mount (`log/`), `seen/` absent, and the broker's
+argv flags equal to the proxy's `ALLOWED_CMD_FLAGS`. Drift fails CI on the laptop instead of
+denying the real rail on the VPS at runtime.
+
+**Gap 1 — that guard does not cover read-tier onboarding.** It parses the `ads-mutator` block
+only. A project added to the `hermes-agent` gateway service changes no count it checks, so
+read-tier onboarding has no coupling guard at all.
+
+**Gap 2 — the mask invariant is directional.**
+`bin/registry-invariants.test.py::test_every_declared_mask_has_a_mount` proves every
+**declared** `mask_paths` entry has a real mount on the right service, with three controls
+against vacuous passes. It does not prove the converse: a project that declares **no**
+`mask_paths` skips the loop body entirely and passes. `test_reader_finds_the_declarations`
+does not save it either — that check is global (`total > 0`) and is already satisfied by the
+two existing projects.
+
+**The consequence, stated plainly:** onboard a project whose repo carries a secret-bearing file
+and omit its `mask_paths` entry, and the credential is visible in the container view with every
+suite green. Each new project is therefore a **manual credential-exposure review**, and that
+review is currently the only thing standing between a new mount and a leaked secret.
+
+### 11.4 Two capabilities that do not exist
+
+- **`deploy.sh`.** The archived H3 plan specced git pull + build + health check; it was never
+  built and §8 scopes it out. Deploying today is manual: `git pull`, `sudo docker compose up -d
+  --build`, plus `systemctl daemon-reload` if a unit changed. Adequate for one box and
+  occasional deploys; thin once onboarding is routine.
+- **Write scope (P5).** `registry/projects.yaml` defers `write` to P5 and requires the operator
+  to refuse write-scope requests. Read and read-execute are what exist. The only write path
+  built is Increment 2's draft-PR delivery, which operates on a fresh clone via a bot PAT and
+  never through the mount. Work that produces code — web design, for instance — can land as
+  draft PRs today, but not as direct edits.
+
+### 11.5 What near-term onboarding reorders, and what it does not
+
+Recommended order for the waves after this one:
+
+1. **This wave** — provisioning and bring-up.
+2. **`deploy.sh` plus a `/opt/projects/<repo>` convention.** The convention generalizes §2.3:
+   compose currently mounts projects by bespoke relative paths, so every new repo is another
+   chance for the allow-list to disagree with what Compose sends.
+3. **An onboarding guard closing gap 2** — a project declaring no `mask_paths` should have to
+   say so explicitly rather than pass by omission.
+4. The handoff's §6 gates — F3 hardening, `UMask=0077`, audit-log truncation.
+5. P5 write scope.
+
+**This reordering does not move the §6 gates as gates.** They block *enabling mutation*, and
+that is unchanged. Read and read-execute onboarding does not enable mutation, which is why it
+can precede them. A **mutation-tier** project still sits behind them, and behind the §2.3
+finding. Onboarding being near-term is a reason to build the onboarding path early; it is not a
+reason to turn the kill switch on sooner.
