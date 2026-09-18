@@ -123,5 +123,88 @@ class TestArgumentHandling(unittest.TestCase):
         self.assertIn("unknown argument", err.lower(), err)
 
 
+import tempfile
+
+
+def os_release(version_id, name="Ubuntu"):
+    """Write a throwaway os-release fixture and return its path."""
+    fd, path = tempfile.mkstemp(prefix="os-release-", text=True)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write('NAME="%s"\nVERSION_ID="%s"\n' % (name, version_id))
+    return path
+
+
+class TestOsGate(unittest.TestCase):
+    """Every behaviour this script relies on is 24.04-specific: sshd_config.d
+    Include, socket-activated ssh, and the apt source. A silent partial success on
+    another release is worse than a refusal.
+
+    OS_RELEASE_FILE is injected so these run identically on darwin and on the CI
+    runner -- asserting against the runner's real OS would make the result depend
+    on where the suite happened to run.
+    """
+
+    def test_a_wrong_release_is_refused(self):
+        path = os_release("22.04")
+        try:
+            rc, _, err = run(["--check"], {"OS_RELEASE_FILE": path})
+            self.assertNotEqual(rc, 0)
+            self.assertIn("24.04", err)
+        finally:
+            os.unlink(path)
+
+    def test_a_non_ubuntu_distro_is_refused(self):
+        path = os_release("40", name="Fedora")
+        try:
+            rc, _, err = run(["--check"], {"OS_RELEASE_FILE": path})
+            self.assertNotEqual(rc, 0)
+            self.assertIn("ubuntu", err.lower())
+        finally:
+            os.unlink(path)
+
+    def test_force_os_bypasses_the_gate(self):
+        """The escape hatch has to work, or it will be removed at 2am."""
+        path = os_release("22.04")
+        try:
+            _, _, err = run(["--check", "--force-os"], {"OS_RELEASE_FILE": path})
+            self.assertNotIn("24.04", err)
+        finally:
+            os.unlink(path)
+
+    def test_the_supported_release_clears_the_gate(self):
+        """Control: the instrument must report 'safe' when the target IS safe."""
+        path = os_release("24.04")
+        try:
+            _, _, err = run(["--check"], {"OS_RELEASE_FILE": path})
+            self.assertNotIn("refusing", err.lower())
+        finally:
+            os.unlink(path)
+
+    def test_a_missing_os_release_is_refused(self):
+        rc, _, err = run(["--check"], {"OS_RELEASE_FILE": "/nonexistent/os-release"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("os-release", err.lower())
+
+
+class TestCheckModeIsNotVacuous(unittest.TestCase):
+    """A check run that measured nothing must refuse, not pass. check_all is a
+    stub in this task, so this is directly reachable now.
+
+    NOTE FOR A LATER TASK: when real checks land in Task 3 this test must be
+    updated -- it will otherwise fail for the right reason at the wrong time.
+
+    Mutation that proves it: delete the CHECKS guard from finish(); this fails.
+    """
+
+    def test_a_check_run_that_measured_nothing_refuses(self):
+        path = os_release("24.04")
+        try:
+            rc, _, err = run(["--check"], {"OS_RELEASE_FILE": path})
+            self.assertNotEqual(rc, 0)
+            self.assertIn("not a pass", err.lower(), err)
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()

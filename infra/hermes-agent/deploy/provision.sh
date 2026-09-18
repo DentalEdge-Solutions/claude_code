@@ -38,6 +38,13 @@ FORCE_OS=0
 die()  { printf 'provision: %s\n' "$*" >&2; exit 1; }
 note() { printf '[provision] %s\n' "$*"; }
 
+# CHECKS/FAILED back ok()/bad()/finish(): a --check run tallies every check it
+# performs so finish() can tell "zero drift" apart from "zero checks ran".
+CHECKS=0
+FAILED=0
+ok()   { printf '  OK    %s\n' "$*"; CHECKS=$((CHECKS + 1)); }
+bad()  { printf '  DRIFT %s\n' "$*" >&2; FAILED=$((FAILED + 1)); CHECKS=$((CHECKS + 1)); }
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)    MODE=check ;;
@@ -59,9 +66,50 @@ assert_deploy_user_not_reserved() {
   done
 }
 
+assert_supported_os() {
+  [ "$FORCE_OS" -eq 1 ] && return 0
+  [ -r "$OS_RELEASE_FILE" ] || die "cannot read ${OS_RELEASE_FILE} (os-release); pass --force-os to override"
+  local name version
+  name="$(. "$OS_RELEASE_FILE" >/dev/null 2>&1; printf '%s' "${NAME:-}")"
+  version="$(. "$OS_RELEASE_FILE" >/dev/null 2>&1; printf '%s' "${VERSION_ID:-}")"
+  case "$name" in
+    Ubuntu*) : ;;
+    *) die "refusing: this script targets Ubuntu, found '${name:-unknown}'; pass --force-os to override" ;;
+  esac
+  [ "$version" = "24.04" ] || \
+    die "refusing: this script targets Ubuntu 24.04, found '${version:-unknown}'; pass --force-os to override"
+}
+
+# apply_all and check_all are deliberately SEPARATE rather than one function
+# branching on MODE. --check must be an independent observer of the host: if it
+# shared code with apply it would tend to report what apply intended rather than
+# what the box is. The cost is a little duplication; the benefit is that a check
+# can contradict an apply, which is the only way it is worth running.
+apply_all() {
+  :
+}
+
+check_all() {
+  :
+}
+
+finish() {
+  if [ "$MODE" = check ]; then
+    # A check run that measured nothing is not a pass. Without this, an empty
+    # or accidentally-disabled check_all reports "all checks passed" -- the
+    # instrument claiming SAFE without having observed anything.
+    [ "$CHECKS" -gt 0 ] || die "no checks ran -- the check set is empty, which is not a pass"
+    [ "$FAILED" -eq 0 ] || { printf 'provision: %d check(s) failed\n' "$FAILED" >&2; exit 1; }
+    note "all checks passed (${CHECKS} checks)"
+  fi
+}
+
 main() {
   assert_deploy_user_not_reserved
+  assert_supported_os
   note "deploy user: ${DEPLOY_USER} (mode: ${MODE})"
+  if [ "$MODE" = check ]; then check_all; else apply_all; fi
+  finish
 }
 
 main "$@"
