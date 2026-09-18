@@ -49,8 +49,37 @@ class TestShellHygiene(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_it_is_strict(self):
-        """Mutation that proves it: delete the line; this fails."""
-        self.assertIn("set -euo pipefail", script_text())
+        """`set -euo pipefail` must be ACTIVE, not merely present. assertIn() is
+        satisfied by `# set -euo pipefail` exactly as well as by the real
+        directive -- the same false pass as this project's
+        assertIn("ExecStartPre", body) satisfied by `#ExecStartPre=`.
+
+        Mutation that proves it: comment the line out; this fails.
+        """
+        self.assertRegex(script_text(), r"(?m)^set -euo pipefail$")
+
+    def test_strictness_precedes_the_first_command(self):
+        """The constraint is positional. A directive set after the first command
+        leaves everything above it running unstrict.
+
+        Mutation that proves it: move the directive below RESERVED_NAMES; this fails.
+        """
+        strict_at = None
+        first_cmd_at = None
+        for i, raw in enumerate(script_text().splitlines()):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line == "set -euo pipefail":
+                strict_at = i
+                break
+            if first_cmd_at is None:
+                first_cmd_at = i
+        self.assertIsNotNone(strict_at, "no active `set -euo pipefail` found")
+        self.assertIsNone(
+            first_cmd_at,
+            "a command at line %d runs before `set -euo pipefail`"
+            % ((first_cmd_at or 0) + 1))
 
 
 class TestReservedNames(unittest.TestCase):

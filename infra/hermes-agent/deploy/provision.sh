@@ -26,10 +26,13 @@ RESERVED_NAMES=(hermes hermes-broker hermes-docker-proxy hermes-rail)
 DEPLOY_USER="${DEPLOY_USER:-hermesops}"
 SSH_PUBKEY="${SSH_PUBKEY:-}"
 # Injectable so the suite can point the OS gate at a fixture instead of the
-# runner's real release. Defaults to the real file on a real box.
+# runner's real release. Defaults to the real file on a real box. Unused by
+# Task 1: the OS gate that reads this lands in Task 2.
 OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 
 MODE=apply
+# Set by --force-os below; unused by Task 1 -- consumed by Task 2's OS gate,
+# which this flag lets an operator override.
 FORCE_OS=0
 
 die()  { printf 'provision: %s\n' "$*" >&2; exit 1; }
