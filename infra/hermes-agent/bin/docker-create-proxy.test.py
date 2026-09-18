@@ -1,4 +1,4 @@
-import importlib.util, itertools, json, os, sys, unittest
+import importlib.util, itertools, json, os, socket, sys, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -12,6 +12,33 @@ sys.path.insert(0, HERE)
 # a single ordinary run once a third and fourth socket-based test are added. Unique
 # paths per test remove the shared resource the race depends on.
 _SOCK_SEQ = itertools.count()
+
+
+def _await_accepting(path, timeout=5.0):
+    """Wait until the listener ACCEPTS, not merely until its socket file exists.
+
+    MEASURED 2026-09-18: `socketserver` binds — which creates the file — and only then
+    calls listen(), so `os.path.exists(path)` is True during a window in which connect()
+    raises ECONNREFUSED. Every socket test here waited on existence, so every one of them
+    carried the race; CI lost it on main, on the Ruling 18 test, after a DOCS-ONLY merge
+    that could not possibly have broken the code. Reproduced deliberately by stalling
+    server_activate() between bind and listen: the existence check passes and the connect
+    fails with exactly the CI error.
+
+    Polling by connecting is the fix, because it tests the property the caller actually
+    needs. The probe connection sends nothing, so it never reaches decide() and never
+    causes an upstream connect.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.connect(path)
+            probe.close()
+            return
+        except OSError:
+            time.sleep(0.02)
+    raise AssertionError("proxy never began accepting on %s within %ss" % (path, timeout))
 
 
 def _load(name, filename):
@@ -331,10 +358,7 @@ class TestPlumbing(unittest.TestCase):
                              kwargs=dict(listen=self.li_path, upstream=self.up_path),
                              daemon=True)
         t.start()
-        for _ in range(50):
-            if os.path.exists(self.li_path):
-                break
-            import time; time.sleep(0.05)
+        _await_accepting(self.li_path)
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         c.connect(self.li_path)
         c.sendall(b"HEAD /_ping HTTP/1.1\r\nHost: d\r\n\r\n")
@@ -360,10 +384,7 @@ class TestPlumbing(unittest.TestCase):
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=self.up_path),
                          daemon=True).start()
-        for _ in range(50):
-            if os.path.exists(self.li_path):
-                break
-            time.sleep(0.05)
+        _await_accepting(self.li_path)
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         c.connect(self.li_path)
         c.sendall(b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
@@ -389,10 +410,7 @@ class TestPlumbing(unittest.TestCase):
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=self.up_path),
                          daemon=True).start()
-        for _ in range(50):
-            if os.path.exists(self.li_path):
-                break
-            time.sleep(0.05)
+        _await_accepting(self.li_path)
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         c.connect(self.li_path)
         c.sendall(b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n\r\n")
@@ -433,10 +451,7 @@ class TestPlumbing(unittest.TestCase):
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=bad_up_path),
                          daemon=True).start()
-        for _ in range(50):
-            if os.path.exists(self.li_path):
-                break
-            time.sleep(0.05)
+        _await_accepting(self.li_path)
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         c.connect(self.li_path)
         c.sendall(b"GET /v1.55/version HTTP/1.1\r\nHost: d\r\n\r\n")
@@ -453,10 +468,7 @@ class TestPlumbing(unittest.TestCase):
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=self.up_path),
                          daemon=True).start()
-        for _ in range(50):
-            if os.path.exists(self.li_path):
-                break
-            time.sleep(0.05)
+        _await_accepting(self.li_path)
 
     def test_a_cl_te_smuggled_create_is_refused_and_never_reaches_upstream(self):
         """THE CRITICAL: CL.TE request smuggling. `_handle` used to frame every
@@ -665,10 +677,7 @@ class TestPlumbing(unittest.TestCase):
         threading.Thread(target=PX.serve,
                          kwargs=dict(listen=self.li_path, upstream=chunked_up_path),
                          daemon=True).start()
-        for _ in range(50):
-            if os.path.exists(self.li_path):
-                break
-            time.sleep(0.05)
+        _await_accepting(self.li_path)
 
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         c.connect(self.li_path)
