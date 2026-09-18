@@ -106,6 +106,8 @@ jobs:
       # RestrictAddressFamilies or boot ordering, which stay unproven until the VPS.
       - name: Systemd unit suite
         run: python3 infra/hermes-agent/deploy/units.test.py
+      - name: Provisioning script suite
+        run: python3 infra/hermes-agent/deploy/provision.test.py
 
   static-scan-skills:
     name: Static scan all skills
