@@ -20,6 +20,7 @@ to it, exactly as deploy/units.test.py is. CI invokes it as its own step.
 """
 import os
 import subprocess
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -123,9 +124,6 @@ class TestArgumentHandling(unittest.TestCase):
         self.assertIn("unknown argument", err.lower(), err)
 
 
-import tempfile
-
-
 def os_release(version_id, name="Ubuntu"):
     """Write a throwaway os-release fixture and return its path."""
     fd, path = tempfile.mkstemp(prefix="os-release-", text=True)
@@ -181,9 +179,50 @@ class TestOsGate(unittest.TestCase):
             os.unlink(path)
 
     def test_a_missing_os_release_is_refused(self):
-        rc, _, err = run(["--check"], {"OS_RELEASE_FILE": "/nonexistent/os-release"})
+        """The fixture path deliberately avoids the substring 'os-release' so this
+        pins the DIE MESSAGE, not the path it was handed.
+
+        Mutation that proves it: delete the '(os-release)' annotation from the
+        die message; this fails.
+        """
+        rc, _, err = run(["--check"], {"OS_RELEASE_FILE": "/nonexistent/foo"})
         self.assertNotEqual(rc, 0)
         self.assertIn("os-release", err.lower())
+
+    def test_an_empty_os_release_is_refused(self):
+        fd, path = tempfile.mkstemp(prefix="os-release-empty-", text=True)
+        os.close(fd)
+        try:
+            rc, _, err = run(["--check"], {"OS_RELEASE_FILE": path})
+            self.assertNotEqual(rc, 0)
+            self.assertIn("ubuntu", err.lower(), err)
+        finally:
+            os.unlink(path)
+
+    def test_a_hostile_os_release_is_not_executed(self):
+        """The gate must PARSE os-release, never source it. The path is
+        environment-overridable, so sourcing turns a safety gate into arbitrary
+        code execution as root. The failure mode for hostile content must be a
+        refusal or a clean parse -- never execution.
+
+        Mutation that proves it: restore the `. "$OS_RELEASE_FILE"` parsing; this fails.
+        """
+        marker = os.path.join(tempfile.gettempdir(),
+                              "provision-sourced-%d" % os.getpid())
+        if os.path.exists(marker):
+            os.unlink(marker)
+        fd, path = tempfile.mkstemp(prefix="os-release-hostile-", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write('NAME="Ubuntu"\nVERSION_ID="24.04"\nPWNED=$(touch %s)\n' % marker)
+        try:
+            run(["--check"], {"OS_RELEASE_FILE": path})
+            self.assertFalse(
+                os.path.exists(marker),
+                "os-release was SOURCED: the embedded command ran and created %s" % marker)
+        finally:
+            os.unlink(path)
+            if os.path.exists(marker):
+                os.unlink(marker)
 
 
 class TestCheckModeIsNotVacuous(unittest.TestCase):

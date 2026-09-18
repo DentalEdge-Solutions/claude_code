@@ -66,12 +66,20 @@ assert_deploy_user_not_reserved() {
   done
 }
 
+# PARSED, never sourced. os-release is documented as shell-sourceable, but this
+# path is environment-overridable for testability, and sourcing an
+# attacker-influenced file as root is arbitrary code execution rather than the
+# refusal a gate owes. awk reads the fields without a shell ever seeing them.
+os_release_field() {
+  awk -F= -v key="$1" '$1==key {v=$2; gsub(/^"|"$/,"",v); print v; exit}' "$OS_RELEASE_FILE"
+}
+
 assert_supported_os() {
   [ "$FORCE_OS" -eq 1 ] && return 0
   [ -r "$OS_RELEASE_FILE" ] || die "cannot read ${OS_RELEASE_FILE} (os-release); pass --force-os to override"
   local name version
-  name="$(. "$OS_RELEASE_FILE" >/dev/null 2>&1; printf '%s' "${NAME:-}")"
-  version="$(. "$OS_RELEASE_FILE" >/dev/null 2>&1; printf '%s' "${VERSION_ID:-}")"
+  name="$(os_release_field NAME)"
+  version="$(os_release_field VERSION_ID)"
   case "$name" in
     Ubuntu*) : ;;
     *) die "refusing: this script targets Ubuntu, found '${name:-unknown}'; pass --force-os to override" ;;
@@ -99,7 +107,7 @@ finish() {
     # or accidentally-disabled check_all reports "all checks passed" -- the
     # instrument claiming SAFE without having observed anything.
     [ "$CHECKS" -gt 0 ] || die "no checks ran -- the check set is empty, which is not a pass"
-    [ "$FAILED" -eq 0 ] || { printf 'provision: %d check(s) failed\n' "$FAILED" >&2; exit 1; }
+    [ "$FAILED" -eq 0 ] || die "${FAILED} check(s) failed"
     note "all checks passed (${CHECKS} checks)"
   fi
 }
