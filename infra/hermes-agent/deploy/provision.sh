@@ -88,17 +88,95 @@ assert_supported_os() {
     die "refusing: this script targets Ubuntu 24.04, found '${version:-unknown}'; pass --force-os to override"
 }
 
+SSHD_DROPIN=/etc/ssh/sshd_config.d/10-hermes-hardening.conf
+
+ensure_deploy_user() {
+  if id "$DEPLOY_USER" >/dev/null 2>&1; then
+    note "user ${DEPLOY_USER} already exists"
+  else
+    note "creating ${DEPLOY_USER}"
+    adduser --disabled-password --gecos "" "$DEPLOY_USER"
+  fi
+  # sudo, deliberately NOT docker. Both are root-equivalent -- the point is not
+  # that sudo is weaker but that it is logged, that the box grows one
+  # root-equivalent identity rather than two, and that an empty docker group
+  # keeps `getent group docker` a meaningful check on the real host.
+  usermod -aG sudo "$DEPLOY_USER"
+}
+
+ensure_authorized_key() {
+  [ -n "$SSH_PUBKEY" ] || die "set SSH_PUBKEY to the deploy user's public key"
+  local home akeys
+  home="$(getent passwd "$DEPLOY_USER" | cut -d: -f6)"
+  akeys="${home}/.ssh/authorized_keys"
+  install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "${home}/.ssh"
+  touch "$akeys"
+  # Append-if-absent. A truncating redirect would delete every other key on the
+  # box, including on a re-run of this script.
+  if grep -qxF "$SSH_PUBKEY" "$akeys"; then
+    note "authorized key already present"
+  else
+    printf '%s\n' "$SSH_PUBKEY" >> "$akeys"
+    note "authorized key appended"
+  fi
+  chmod 600 "$akeys"
+  chown "${DEPLOY_USER}:${DEPLOY_USER}" "$akeys"
+}
+
+ensure_sshd_hardening() {
+  install -d -m 755 /etc/ssh/sshd_config.d
+  # A drop-in, not sed against sshd_config: 24.04 ships the Include, and
+  # rewriting the same drop-in is naturally idempotent.
+  cat > "$SSHD_DROPIN" <<'DROPIN'
+# Managed by infra/hermes-agent/deploy/provision.sh. Edits will be overwritten.
+PasswordAuthentication no
+PermitRootLogin no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+DROPIN
+  chmod 644 "$SSHD_DROPIN"
+  # Validate BEFORE reloading. A bad drop-in that reaches a reload is how a fresh
+  # VPS is locked out; sshd -t is the difference between a refusal and a brick.
+  sshd -t || die "sshd rejected the configuration; ${SSHD_DROPIN} left in place, NOT reloaded"
+  # reload, never restart: the operator's live session is the recovery path while
+  # the new configuration is being proven.
+  systemctl reload ssh
+  note "sshd hardened and reloaded"
+}
+
+check_deploy_user() {
+  id "$DEPLOY_USER" >/dev/null 2>&1 && ok "user ${DEPLOY_USER} exists" \
+    || bad "user ${DEPLOY_USER} missing"
+  if id -nG "$DEPLOY_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    bad "${DEPLOY_USER} is in the docker group (unlogged path to host root)"
+  else
+    ok "${DEPLOY_USER} is not in the docker group"
+  fi
+}
+
+check_sshd_hardening() {
+  local out
+  out="$(sshd -T 2>/dev/null || true)"
+  printf '%s' "$out" | grep -qx 'passwordauthentication no' \
+    && ok "sshd: passwords refused" || bad "sshd: passwords still accepted"
+  printf '%s' "$out" | grep -qx 'permitrootlogin no' \
+    && ok "sshd: root login refused" || bad "sshd: root login still permitted"
+}
+
 # apply_all and check_all are deliberately SEPARATE rather than one function
 # branching on MODE. --check must be an independent observer of the host: if it
 # shared code with apply it would tend to report what apply intended rather than
 # what the box is. The cost is a little duplication; the benefit is that a check
 # can contradict an apply, which is the only way it is worth running.
 apply_all() {
-  :
+  ensure_deploy_user
+  ensure_authorized_key
+  ensure_sshd_hardening
 }
 
 check_all() {
-  :
+  check_deploy_user
+  check_sshd_hardening
 }
 
 finish() {

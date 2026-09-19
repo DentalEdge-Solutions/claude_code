@@ -19,6 +19,7 @@ Discovery note: run-bin-tests.sh globs bin/*.test.py, so this file is invisible
 to it, exactly as deploy/units.test.py is. CI invokes it as its own step.
 """
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -226,23 +227,149 @@ class TestOsGate(unittest.TestCase):
 
 
 class TestCheckModeIsNotVacuous(unittest.TestCase):
-    """A check run that measured nothing must refuse, not pass. check_all is a
-    stub in this task, so this is directly reachable now.
-
-    NOTE FOR A LATER TASK: when real checks land in Task 3 this test must be
-    updated -- it will otherwise fail for the right reason at the wrong time.
-
-    Mutation that proves it: delete the CHECKS guard from finish(); this fails.
-    """
+    """A check run that measured nothing must refuse, not pass."""
 
     def test_a_check_run_that_measured_nothing_refuses(self):
-        path = os_release("24.04")
+        """The zero-check guard. Now that check_all() performs real checks, the
+        only honest way to exercise the guard is against a copy of the script
+        whose check set has been emptied -- which is precisely the regression the
+        guard exists to catch: a check silently commented out.
+
+        Mutation that proves it: delete the CHECKS guard from finish(); this fails.
+        """
+        text = script_text()
+        neutered = re.sub(r"(?ms)^check_all\(\) \{.*?^\}",
+                          "check_all() {\n  :\n}", text)
+        # Prove the mutation actually applied. A substitution that silently did
+        # nothing would leave this test passing against the UNMUTATED script.
+        self.assertNotEqual(neutered, text, "could not neuter check_all -- regex is stale")
+        fd, path = tempfile.mkstemp(prefix="provision-nochecks-", suffix=".sh", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(neutered)
+        osr = os_release("24.04")
         try:
-            rc, _, err = run(["--check"], {"OS_RELEASE_FILE": path})
-            self.assertNotEqual(rc, 0)
-            self.assertIn("not a pass", err.lower(), err)
+            p = subprocess.run(["bash", path, "--check"], capture_output=True, text=True,
+                               env=dict(os.environ, OS_RELEASE_FILE=osr))
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("not a pass", p.stderr.lower(), p.stderr)
         finally:
             os.unlink(path)
+            os.unlink(osr)
+
+
+def line_index(needle, text=None):
+    """Index of the first CODE line containing needle, or -1. Comment lines are
+    skipped: an explanatory comment mentioning the needle (e.g. a remark like
+    "sshd -t is the difference between a refusal and a brick" sitting next to
+    the real invocation) would otherwise satisfy an ordering check without
+    ever moving when the real line does -- the same false-pass class this
+    suite's own docstring warns about, just relocated into this helper rather
+    than into the test that calls it.
+    """
+    lines = (text if text is not None else script_text()).splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("#"):
+            continue
+        if needle in line:
+            return i
+    return -1
+
+
+class TestSshHardening(unittest.TestCase):
+    """These are TEXT assertions: exercising sshd needs a root Ubuntu host. They
+    prove the script says the right thing, not that a box ends up hardened.
+    `--check` on a real host is what observes that (BRING-UP.md phase 1).
+    """
+
+    def test_validation_precedes_every_reload(self):
+        """The anti-lockout gate. Ordering, not presence: `sshd -t` appearing
+        anywhere in the file would satisfy a substring check while sitting AFTER
+        the reload, which is the same bug as an ExecStartPre that never runs.
+
+        Mutation that proves it: move the `sshd -t` line below the reload; this
+        fails while a substring check would not.
+        """
+        validate = line_index("sshd -t")
+        self.assertNotEqual(validate, -1, "no sshd -t validation found")
+        text = script_text().splitlines()
+        reloads = [i for i, l in enumerate(text)
+                   if "systemctl" in l and "reload" in l and "ssh" in l]
+        self.assertTrue(reloads, "no ssh reload found")
+        for r in reloads:
+            self.assertLess(validate, r,
+                            "sshd -t (line %d) must precede the reload on line %d"
+                            % (validate + 1, r + 1))
+
+    def test_it_reloads_rather_than_restarts(self):
+        """restart drops the operator's live session -- the one recovery path open
+        while the new config is being proven."""
+        for line in script_text().splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            if "systemctl" in s and "ssh" in s:
+                self.assertNotIn("restart", s, s)
+
+    def test_hardening_uses_a_dropin_not_sed(self):
+        """24.04 ships `Include /etc/ssh/sshd_config.d/*.conf`. Rewriting the main
+        file with sed is neither idempotent nor reviewable."""
+        text = script_text()
+        self.assertIn("/etc/ssh/sshd_config.d/", text)
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            self.assertNotIn("sed -i", s, "sed -i against sshd_config: %s" % s)
+
+    def test_the_dropin_sets_the_four_directives(self):
+        text = script_text()
+        for directive in ("PasswordAuthentication no",
+                          "PermitRootLogin no",
+                          "KbdInteractiveAuthentication no",
+                          "PubkeyAuthentication yes"):
+            self.assertIn(directive, text)
+
+
+class TestAuthorizedKeys(unittest.TestCase):
+    def test_the_key_is_appended_never_truncated(self):
+        """`>` destroys every other key on the box, including on a re-run.
+
+        Mutation that proves it: change the append to `> "$akeys"`; this fails.
+
+        Filters on the variable name `akeys`, not the literal string
+        "authorized_keys": the implementation names the path once
+        (`akeys="${home}/.ssh/authorized_keys"`) and every subsequent write
+        addresses it as `$akeys`, so a filter on the literal string would only
+        ever inspect that one assignment line -- never the write itself --
+        making the assertion pass no matter what the write does.
+        """
+        for line in script_text().splitlines():
+            s = line.strip()
+            if s.startswith("#") or "akeys" not in s:
+                continue
+            self.assertNotIn("> ", s.replace(">> ", ""),
+                             "truncating redirect onto authorized_keys: %s" % s)
+
+    def test_it_checks_before_appending(self):
+        """Idempotency: a re-run must not add a second copy of the same key."""
+        self.assertIn("grep -qxF", script_text())
+
+
+class TestDeployUserGroups(unittest.TestCase):
+    def test_the_deploy_user_never_joins_the_docker_group(self):
+        """Operator decision 2026-09-18. docker-group membership is an unlogged
+        path to host root; keeping it empty also makes `getent group docker` a
+        meaningful check on the real box, so units.test.py's 'the broker is not in
+        docker' invariant becomes true of the HOST and not only of the unit files.
+
+        Mutation that proves it: add `usermod -aG docker "$DEPLOY_USER"`; this fails.
+        """
+        for line in script_text().splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            if "usermod" in s or "adduser" in s or "gpasswd" in s:
+                self.assertNotIn("docker", s, s)
 
 
 if __name__ == "__main__":
