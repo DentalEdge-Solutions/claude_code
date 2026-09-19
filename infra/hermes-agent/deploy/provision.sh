@@ -219,20 +219,86 @@ check_sshd_hardening() {
   done <<< "$SSHD_DIRECTIVES"
 }
 
+ensure_base_packages() {
+  note "installing base packages"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl git gnupg ufw fail2ban unattended-upgrades
+}
+
+ensure_firewall() {
+  # Converge, never reset. `ufw --force reset` would drop every rule mid-run --
+  # on a re-run that is a window with no firewall on an internet-facing box.
+  # Each command below is individually idempotent.
+  ufw default deny incoming
+  ufw default allow outgoing
+  # Allowed BEFORE enable: a default-deny firewall enabled first locks the
+  # operator out of the box they are provisioning.
+  ufw allow OpenSSH
+  ufw --force enable
+  note "firewall active: inbound SSH only"
+}
+
+ensure_fail2ban() {
+  systemctl enable --now fail2ban
+  note "fail2ban enabled"
+}
+
+ensure_unattended_upgrades() {
+  dpkg-reconfigure -f noninteractive unattended-upgrades
+  systemctl enable --now unattended-upgrades
+  note "unattended security upgrades enabled"
+}
+
+check_firewall() {
+  if ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ok "firewall active"
+  else
+    bad "firewall inactive"
+  fi
+  # Anything beyond SSH on an inbound allow list is a finding: no app port is
+  # opened in this design, and the dashboard is reached over an SSH tunnel.
+  #
+  # The port field ($1) is matched IN FULL against `^(22|OpenSSH)$` (after
+  # stripping an optional `/tcp` or `/udp` suffix), not merely checked for
+  # containing "22" or "OpenSSH" anywhere in the line. A substring filter
+  # (`!/22|OpenSSH/` against the whole line) would be satisfied by a rule on
+  # port 8022 or 2222 -- both contain "22" as a substring -- silently hiding
+  # an unexpected inbound rule. Under-reporting a security finding is the
+  # wrong direction to fail in, so this is over-reporting on purpose: a
+  # false "unexpected rule" is a nuisance; a hidden one is an open box.
+  local extra
+  extra="$(ufw status 2>/dev/null | awk '/ALLOW IN/ { port=$1; sub(/\/(tcp|udp)$/,"",port); if (port !~ /^(22|OpenSSH)$/) print }' || true)"
+  [ -z "$extra" ] && ok "no inbound rule beyond SSH" \
+    || bad "unexpected inbound rule(s): ${extra}"
+}
+
+check_fail2ban() {
+  systemctl is-active --quiet fail2ban && ok "fail2ban running" \
+    || bad "fail2ban not running"
+}
+
 # apply_all and check_all are deliberately SEPARATE rather than one function
 # branching on MODE. --check must be an independent observer of the host: if it
 # shared code with apply it would tend to report what apply intended rather than
 # what the box is. The cost is a little duplication; the benefit is that a check
 # can contradict an apply, which is the only way it is worth running.
 apply_all() {
+  ensure_base_packages
   ensure_deploy_user
   ensure_authorized_key
   ensure_sshd_hardening
+  ensure_firewall
+  ensure_fail2ban
+  ensure_unattended_upgrades
 }
 
 check_all() {
   check_deploy_user
   check_sshd_hardening
+  check_firewall
+  check_fail2ban
 }
 
 finish() {

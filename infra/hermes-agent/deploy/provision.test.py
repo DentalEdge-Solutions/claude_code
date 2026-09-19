@@ -134,6 +134,125 @@ def os_release(version_id, name="Ubuntu"):
     return path
 
 
+def mockbin(**scripts):
+    """Create a directory of mock executables for PATH injection, one per
+    keyword argument. Each value is the complete script body (shebang
+    included), written verbatim and chmod 0o755.
+
+    Extracted from a mock-PATH harness that used to live inline inside a
+    single test (TestCheckModeVerdictIsTrustworthy); every behavioural test
+    in this file that needs to fake `id`, `sshd`, `systemctl` or `ufw` now
+    goes through this one implementation instead of copy-pasting
+    tempfile.mkdtemp/chmod/PATH-prepend boilerplate per test.
+
+    Caller owns cleanup (shutil.rmtree(mockdir)) -- see run_check_all() for
+    the common case that does this for you.
+    """
+    mockdir = tempfile.mkdtemp(prefix="provision-mockbin-")
+    for name, body in scripts.items():
+        path = os.path.join(mockdir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(path, 0o755)
+    return mockdir
+
+
+def mock_env(mockdir, os_release_path, extra=None):
+    """The env dict for a `--check` run against mocked PATH binaries and an
+    injected OS_RELEASE_FILE fixture. Strips the caller's real DEPLOY_USER/
+    SSH_PUBKEY so the reserved-name and pubkey gates never fire, and
+    prepends mockdir onto PATH so the mocked binaries shadow the real ones.
+    """
+    e = dict(os.environ)
+    e.pop("DEPLOY_USER", None)
+    e.pop("SSH_PUBKEY", None)
+    e["OS_RELEASE_FILE"] = os_release_path
+    e["PATH"] = mockdir + os.pathsep + e["PATH"]
+    if extra:
+        e.update(extra)
+    return e
+
+
+# Mock bodies that make their respective check_* pass cleanly, so a test that
+# is only interested in ONE check's behaviour can hold every other check
+# steady at "OK" -- the same isolation TestCheckModeVerdictIsTrustworthy's
+# docstring describes: an unrelated failure would keep FAILED above zero on
+# its own and mask the thing under test.
+ID_MOCK_ALL_GOOD = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "-nG" ]; then echo "hermesops sudo"; exit 0; fi\n'
+    "exit 0\n"
+)
+
+SSHD_MOCK_ALL_GOOD = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "-T" ]; then\n'
+    "  echo 'passwordauthentication no'\n"
+    "  echo 'permitrootlogin no'\n"
+    "  echo 'kbdinteractiveauthentication no'\n"
+    "  echo 'pubkeyauthentication yes'\n"
+    "  exit 0\n"
+    "fi\n"
+    "exit 0\n"
+)
+
+SYSTEMCTL_MOCK_ALL_GOOD = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "is-active" ]; then exit 0; fi\n'
+    "exit 0\n"
+)
+
+
+def ufw_mock(status_body):
+    """A `ufw` mock whose `ufw status` prints status_body verbatim. The
+    heredoc delimiter is quoted so the body is never subject to shell
+    expansion."""
+    return (
+        "#!/bin/sh\n"
+        'if [ "$1" = "status" ]; then\n'
+        "cat <<'UFWEOF'\n"
+        + status_body.rstrip("\n") + "\n"
+        "UFWEOF\n"
+        "exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+UFW_CLEAN_STATUS = (
+    "Status: active\n"
+    "\n"
+    "To                         Action      From\n"
+    "--                         ------      ----\n"
+    "OpenSSH                    ALLOW IN    Anywhere\n"
+    "22/tcp                     ALLOW IN    Anywhere\n"
+)
+
+
+def run_check_all(ufw_status):
+    """Run `--check` with id/sshd/systemctl mocked to PASS and `ufw` mocked
+    to report ufw_status for `ufw status`. Returns (returncode, stdout,
+    stderr). Owns and cleans up its own mockdir and OS_RELEASE_FILE fixture,
+    so any drift the caller observes is attributable to the ufw state it
+    passed in, not to an unrelated check or a leaked fixture.
+    """
+    mockdir = mockbin(
+        id=ID_MOCK_ALL_GOOD,
+        sshd=SSHD_MOCK_ALL_GOOD,
+        systemctl=SYSTEMCTL_MOCK_ALL_GOOD,
+        ufw=ufw_mock(ufw_status),
+    )
+    osr = os_release("24.04")
+    try:
+        env = mock_env(mockdir, osr)
+        p = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True,
+                           text=True, env=env)
+        return p.returncode, p.stdout, p.stderr
+    finally:
+        os.unlink(osr)
+        shutil.rmtree(mockdir)
+
+
 class TestOsGate(unittest.TestCase):
     """Every behaviour this script relies on is 24.04-specific: sshd_config.d
     Include, socket-activated ssh, and the apt source. A silent partial success on
@@ -554,10 +673,49 @@ class TestDeployUserGroups(unittest.TestCase):
                          "check_deploy_user does not verify the deploy user holds sudo")
 
 
+class TestFirewall(unittest.TestCase):
+    """Textual: exercising ufw needs a root Ubuntu host. These prove
+    ensure_firewall says the right thing; TestCheckFirewallBehavioural below
+    proves check_firewall's VERDICT is trustworthy.
+    """
+
+    def test_it_never_resets_the_firewall(self):
+        """`ufw --force reset` drops every rule mid-run. On a re-run that is a
+        window with no firewall, on a box reachable from the internet.
+
+        Mutation that proves it: add `ufw --force reset`; this fails.
+        """
+        for line in script_text().splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            if "ufw" in s:
+                self.assertNotIn("reset", s, s)
+
+    def test_ssh_is_allowed_before_the_firewall_is_enabled(self):
+        """Ordering: enabling a default-deny firewall before allowing SSH locks the
+        operator out of the box they are provisioning.
+
+        Mutation that proves it: move the `ufw allow OpenSSH` line below
+        `ufw --force enable`; this fails.
+        """
+        allow = line_index("ufw allow OpenSSH")
+        enable = line_index("ufw --force enable")
+        self.assertNotEqual(allow, -1, "no `ufw allow OpenSSH` found")
+        self.assertNotEqual(enable, -1, "no `ufw --force enable` found")
+        self.assertLess(allow, enable,
+                        "OpenSSH must be allowed (line %d) before enable (line %d)"
+                        % (allow + 1, enable + 1))
+
+    def test_the_default_policy_is_deny_incoming(self):
+        self.assertIn("ufw default deny incoming", script_text())
+
+
 class TestCheckModeVerdictIsTrustworthy(unittest.TestCase):
-    """The only test in this suite that runs --check end to end against a
-    mocked host and observes its VERDICT, rather than parsing the script's
-    text. Every other check_* assertion in this file is textual.
+    """Runs --check end to end against a mocked host and observes its
+    VERDICT, rather than parsing the script's text. Every check_* assertion
+    in this file outside this class and TestCheckFirewallBehavioural is
+    textual.
 
     History: mutation (k) during this task's fix rounds showed why that gap
     matters. Piping into `while read` (instead of `<<<`) in
@@ -567,51 +725,41 @@ class TestCheckModeVerdictIsTrustworthy(unittest.TestCase):
     result on a host where every sshd directive is out of compliance: four
     real DRIFT lines print, immediately followed by "all checks passed", exit
     0 -- a silent false pass in --check, which is the one mechanism this
-    entire script exists to provide. None of this file's other 31 tests would
+    entire script exists to provide. None of this file's other tests would
     notice, because the pipe and the `<<<` version produce IDENTICAL script
     text; only running the check and reading its verdict distinguishes them.
 
-    Mocks `id` to make check_deploy_user PASS (user exists, in sudo, not in
-    docker) and `sshd -T` to print NOTHING (every directive then reports
-    drift), so the failure is isolated to the sshd loop. That isolation is the
-    point: if check_deploy_user also failed, its main-shell bad() would keep
-    FAILED above zero on its own, masking a lost sshd-loop failure and making
-    this test pass for the wrong reason.
+    Uses ID_MOCK_ALL_GOOD (user exists, in sudo, not in docker),
+    SYSTEMCTL_MOCK_ALL_GOOD and a clean ufw_mock() so check_deploy_user,
+    check_fail2ban and check_firewall all PASS, and mocks `sshd -T` to print
+    NOTHING (every directive then reports drift) so the failure is isolated
+    to the sshd loop. That isolation is the point: if any other check also
+    failed, its main-shell bad() would keep FAILED above zero on its own,
+    masking a lost sshd-loop failure and making this test pass for the wrong
+    reason.
 
-    This does NOT prove a real host ends up hardened -- ufw, fail2ban and
-    unattended-upgrades are outside this task's scope, and even sshd's real
-    state is never touched. It proves the narrower, load-bearing claim: --check
-    cannot report success while a check reported drift.
+    This does NOT prove a real host ends up hardened -- even sshd's real
+    state is never touched. It proves the narrower, load-bearing claim:
+    --check cannot report success while a check reported drift.
 
     Mutation that proves it: change `<<<` to a pipe in check_sshd_hardening;
     this test fails while the rest of the suite stays green.
     """
 
     def test_check_cannot_report_success_while_a_check_reports_drift(self):
-        mockdir = tempfile.mkdtemp(prefix="provision-mockbin-")
+        mockdir = mockbin(
+            id=ID_MOCK_ALL_GOOD,
+            sshd="#!/bin/sh\n"
+                 'if [ "$1" = "-T" ]; then exit 0; fi\n'
+                 "exit 0\n",
+            systemctl=SYSTEMCTL_MOCK_ALL_GOOD,
+            ufw=ufw_mock(UFW_CLEAN_STATUS),
+        )
         osr = os_release("24.04")
         try:
-            id_mock = os.path.join(mockdir, "id")
-            with open(id_mock, "w", encoding="utf-8") as f:
-                f.write("#!/bin/sh\n"
-                        'if [ "$1" = "-nG" ]; then echo "hermesops sudo"; exit 0; fi\n'
-                        "exit 0\n")
-            os.chmod(id_mock, 0o755)
-
-            sshd_mock = os.path.join(mockdir, "sshd")
-            with open(sshd_mock, "w", encoding="utf-8") as f:
-                f.write("#!/bin/sh\n"
-                        'if [ "$1" = "-T" ]; then exit 0; fi\n'
-                        "exit 0\n")
-            os.chmod(sshd_mock, 0o755)
-
-            e = dict(os.environ)
-            e.pop("DEPLOY_USER", None)
-            e.pop("SSH_PUBKEY", None)
-            e["OS_RELEASE_FILE"] = osr
-            e["PATH"] = mockdir + os.pathsep + e["PATH"]
+            env = mock_env(mockdir, osr)
             p = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True,
-                               text=True, env=e)
+                               text=True, env=env)
             combined = (p.stdout + p.stderr).lower()
 
             self.assertNotEqual(
@@ -625,6 +773,109 @@ class TestCheckModeVerdictIsTrustworthy(unittest.TestCase):
         finally:
             os.unlink(osr)
             shutil.rmtree(mockdir)
+
+
+class TestCheckFirewallBehavioural(unittest.TestCase):
+    """check_firewall gets BEHAVIOURAL coverage, not only text assertions
+    (Ruling 17): every defect found in Tasks 1-3 was in something that
+    VERIFIES, never in the acting code, and check_sshd_hardening's
+    subshell bug (see TestCheckModeVerdictIsTrustworthy) shipped past a
+    31-test suite made entirely of textual check_* assertions.
+
+    Each test here runs `--check` through run_check_all(), which mocks
+    id/sshd/systemctl to PASS so check_deploy_user, check_sshd_hardening and
+    check_fail2ban stay green -- any drift observed is attributable to the
+    `ufw status` text passed in, not to an unrelated check.
+    """
+
+    def test_reports_drift_for_an_unexpected_inbound_rule(self):
+        """A rule beyond SSH is a finding: no app port is opened in this
+        design, and the dashboard is reached over an SSH tunnel.
+
+        Mutation that proves it: delete the `extra` block from
+        check_firewall (or replace it with an unconditional ok()); this
+        fails.
+        """
+        rc, out, err = run_check_all(
+            "Status: active\n\n"
+            "To                         Action      From\n"
+            "--                         ------      ----\n"
+            "OpenSSH                    ALLOW IN    Anywhere\n"
+            "9999/tcp                   ALLOW IN    Anywhere\n"
+        )
+        combined = (out + err).lower()
+        self.assertNotEqual(rc, 0,
+                            "unexpected inbound rule was not flagged:\n%s" % combined)
+        self.assertIn("unexpected inbound rule", combined, combined)
+        self.assertIn("9999", combined, combined)
+
+    def test_does_not_report_drift_for_a_clean_firewall(self):
+        """Positive control -- the half of a check that usually goes
+        unchecked. Without this, a check_firewall that flagged EVERY inbound
+        rule (including OpenSSH/22 itself) would pass the test above just as
+        well as a correct one; only this test would catch it.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS)
+        combined = (out + err).lower()
+        self.assertEqual(rc, 0, "a clean firewall was reported as drift:\n%s" % combined)
+        self.assertNotIn("unexpected inbound rule", combined, combined)
+        self.assertNotIn("firewall inactive", combined, combined)
+
+    def test_ruling_4_regression_port_8022_is_not_hidden(self):
+        """Ruling 4: the brief's original filter was
+        `awk '/ALLOW IN/ && !/22|OpenSSH/ {print}'`, which excludes any LINE
+        containing the substring "22" ANYWHERE -- and "8022" ends in "22", so
+        a rule on port 8022 would be silently hidden by that filter. The
+        anchored filter actually in provision.sh matches the port FIELD in
+        full against `^(22|OpenSSH)$` (after stripping an optional `/tcp` or
+        `/udp` suffix), which "8022" does not satisfy, so it is reported.
+
+        Mutation that proves it: restore the original unanchored filter
+        (`!/22|OpenSSH/` against the whole line); this fails, while
+        test_does_not_report_drift_for_a_clean_firewall stays green -- proof
+        that the anchoring, not merely re-flagging everything, is what fixes
+        this.
+        """
+        rc, out, err = run_check_all(
+            "Status: active\n\n"
+            "To                         Action      From\n"
+            "--                         ------      ----\n"
+            "OpenSSH                    ALLOW IN    Anywhere\n"
+            "8022/tcp                   ALLOW IN    Anywhere\n"
+        )
+        combined = (out + err).lower()
+        self.assertNotEqual(rc, 0, "port 8022 was silently hidden:\n%s" % combined)
+        self.assertIn("8022", combined, combined)
+
+
+class TestApplyAllWiring(unittest.TestCase):
+    """apply_all cannot be run outside root Ubuntu, so this is a text
+    assertion -- but a targeted one: it checks that every ensure_* function
+    this task adds is actually CALLED from apply_all, in the dependency
+    order the brief requires (base packages before anything that needs
+    them; deploy-user/ssh/firewall/fail2ban/unattended-upgrades after).
+    A function defined but never wired in is invisible to every other test
+    in this file, textual or behavioural.
+
+    Mutation that proves it: delete any one of the four `ensure_*` calls
+    added by this task from apply_all's body; this fails.
+    """
+
+    def test_apply_all_calls_every_new_ensure_step_in_order(self):
+        text = script_text()
+        m = re.search(r"(?ms)^apply_all\(\) \{.*?^\}", text)
+        self.assertIsNotNone(m, "apply_all not found -- regex is stale")
+        body = m.group(0)
+        steps = ["ensure_base_packages", "ensure_deploy_user",
+                 "ensure_authorized_key", "ensure_sshd_hardening",
+                 "ensure_firewall", "ensure_fail2ban",
+                 "ensure_unattended_upgrades"]
+        positions = [body.find(s) for s in steps]
+        for step, pos in zip(steps, positions):
+            self.assertNotEqual(pos, -1, "%s is not called from apply_all" % step)
+        self.assertEqual(positions, sorted(positions),
+                         "apply_all calls its ensure_* steps out of order: %s"
+                         % list(zip(steps, positions)))
 
 
 if __name__ == "__main__":
