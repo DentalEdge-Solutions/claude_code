@@ -322,12 +322,35 @@ class TestSshHardening(unittest.TestCase):
             self.assertNotIn("sed -i", s, "sed -i against sshd_config: %s" % s)
 
     def test_the_dropin_sets_the_four_directives(self):
-        text = script_text()
+        """Filters comment lines first, like every other test in this class --
+        an unfiltered assertIn would be satisfied by the directive appearing
+        in an explanatory comment as readily as in the drop-in heredoc itself.
+        """
+        lines = [l.strip() for l in script_text().splitlines()
+                 if not l.strip().startswith("#")]
+        text = "\n".join(lines)
         for directive in ("PasswordAuthentication no",
                           "PermitRootLogin no",
                           "KbdInteractiveAuthentication no",
                           "PubkeyAuthentication yes"):
             self.assertIn(directive, text)
+
+    def test_check_verifies_every_directive_the_dropin_applies(self):
+        """A --check that verifies a SUBSET of what apply establishes is an
+        instrument reporting SAFE about state it never observed. This asserts
+        parity rather than a fixed list, so adding a directive to the drop-in
+        without checking it fails here.
+
+        Mutation that proves it: delete one grep from check_sshd_hardening;
+        this fails.
+        """
+        text = script_text()
+        applied = set(re.findall(r"(?m)^([A-Za-z]+) (?:yes|no)$", text))
+        checked = set(re.findall(r"grep -qx '([a-z]+) (?:yes|no)'", text))
+        self.assertTrue(applied, "no drop-in directives found -- regex is stale")
+        self.assertEqual({d.lower() for d in applied}, checked,
+                         "check_sshd_hardening verifies a different set than the "
+                         "drop-in applies: applied=%s checked=%s" % (sorted(applied), sorted(checked)))
 
 
 class TestAuthorizedKeys(unittest.TestCase):
@@ -342,17 +365,41 @@ class TestAuthorizedKeys(unittest.TestCase):
         addresses it as `$akeys`, so a filter on the literal string would only
         ever inspect that one assignment line -- never the write itself --
         making the assertion pass no matter what the write does.
+
+        The assertion itself is a regex, not `assertNotIn("> ", s.replace(">>
+        ", ""))`: that string-replace approach is whitespace-sensitive and
+        misses a truncating redirect written without a space, e.g.
+        `>"$akeys"`. `(?<!>)>\\s*"?\\$akeys` matches a bare `>` (not part of
+        `>>`) immediately before `$akeys`, with or without a space or an
+        opening quote in between.
         """
         for line in script_text().splitlines():
             s = line.strip()
             if s.startswith("#") or "akeys" not in s:
                 continue
-            self.assertNotIn("> ", s.replace(">> ", ""),
-                             "truncating redirect onto authorized_keys: %s" % s)
+            self.assertNotRegex(s, r'(?<!>)>\s*"?\$akeys',
+                                "truncating redirect onto authorized_keys: %s" % s)
 
     def test_it_checks_before_appending(self):
         """Idempotency: a re-run must not add a second copy of the same key."""
         self.assertIn("grep -qxF", script_text())
+
+    def test_a_malformed_ssh_pubkey_is_refused(self):
+        """ensure_sshd_hardening disables password login immediately after this
+        function runs; a malformed SSH_PUBKEY written to authorized_keys as-is
+        would authenticate nothing, leaving the operator with no way back in.
+        TEXT assertion: reaching ensure_authorized_key at all needs a root host.
+
+        Mutation that proves it: remove the SSH_PUBKEY case guard; this fails.
+        """
+        text = script_text()
+        m = re.search(r"(?ms)^ensure_authorized_key\(\) \{.*?^\}", text)
+        self.assertIsNotNone(m, "ensure_authorized_key not found -- regex is stale")
+        body = m.group(0)
+        self.assertIn('case "$SSH_PUBKEY" in', body,
+                     "ensure_authorized_key has no key-format guard")
+        self.assertRegex(body, r'\*\)\s*die ',
+                         "the SSH_PUBKEY case guard has no refusal arm")
 
 
 class TestDeployUserGroups(unittest.TestCase):
@@ -370,6 +417,22 @@ class TestDeployUserGroups(unittest.TestCase):
                 continue
             if "usermod" in s or "adduser" in s or "gpasswd" in s:
                 self.assertNotIn("docker", s, s)
+
+    def test_check_deploy_user_verifies_the_sudo_grant(self):
+        """ensure_deploy_user actively grants sudo; the docker test above
+        asserts an ABSENCE, but a --check that never confirms sudo holds would
+        stay green on a host where `usermod -aG sudo` silently failed or was
+        later reverted, even though every subsequent deploy command needs it.
+
+        Mutation that proves it: delete the sudo check from check_deploy_user;
+        this fails.
+        """
+        text = script_text()
+        m = re.search(r"(?ms)^check_deploy_user\(\) \{.*?^\}", text)
+        self.assertIsNotNone(m, "check_deploy_user not found -- regex is stale")
+        body = m.group(0)
+        self.assertRegex(body, r"grep -qx sudo\b",
+                         "check_deploy_user does not verify the deploy user holds sudo")
 
 
 if __name__ == "__main__":

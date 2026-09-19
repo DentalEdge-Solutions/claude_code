@@ -106,6 +106,13 @@ ensure_deploy_user() {
 
 ensure_authorized_key() {
   [ -n "$SSH_PUBKEY" ] || die "set SSH_PUBKEY to the deploy user's public key"
+  # ensure_sshd_hardening (next) disables password login. A malformed key
+  # written here as-is would authenticate nothing, and the operator would have
+  # no way back in -- refuse now, while the box is still reachable by password.
+  case "$SSH_PUBKEY" in
+    ssh-*|ecdsa-*|sk-ssh-*|sk-ecdsa-*) : ;;
+    *) die "SSH_PUBKEY does not look like an OpenSSH public key (expected ssh-, ecdsa- or sk-); refusing rather than writing a key that cannot authenticate, because the next step disables password login" ;;
+  esac
   local home akeys
   home="$(getent passwd "$DEPLOY_USER" | cut -d: -f6)"
   akeys="${home}/.ssh/authorized_keys"
@@ -145,8 +152,16 @@ DROPIN
 }
 
 check_deploy_user() {
-  id "$DEPLOY_USER" >/dev/null 2>&1 && ok "user ${DEPLOY_USER} exists" \
-    || bad "user ${DEPLOY_USER} missing"
+  if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
+    bad "user ${DEPLOY_USER} missing"
+    return 0
+  fi
+  ok "user ${DEPLOY_USER} exists"
+  if id -nG "$DEPLOY_USER" 2>/dev/null | tr ' ' '\n' | grep -qx sudo; then
+    ok "${DEPLOY_USER} is in the sudo group"
+  else
+    bad "${DEPLOY_USER} is NOT in the sudo group"
+  fi
   if id -nG "$DEPLOY_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
     bad "${DEPLOY_USER} is in the docker group (unlogged path to host root)"
   else
@@ -161,6 +176,12 @@ check_sshd_hardening() {
     && ok "sshd: passwords refused" || bad "sshd: passwords still accepted"
   printf '%s' "$out" | grep -qx 'permitrootlogin no' \
     && ok "sshd: root login refused" || bad "sshd: root login still permitted"
+  printf '%s' "$out" | grep -qx 'kbdinteractiveauthentication no' \
+    && ok "sshd: keyboard-interactive refused" \
+    || bad "sshd: keyboard-interactive still accepted (PAM password path)"
+  printf '%s' "$out" | grep -qx 'pubkeyauthentication yes' \
+    && ok "sshd: pubkey auth enabled" \
+    || bad "sshd: pubkey auth NOT enabled (lockout risk)"
 }
 
 # apply_all and check_all are deliberately SEPARATE rather than one function
