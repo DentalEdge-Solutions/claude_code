@@ -335,31 +335,56 @@ class TestSshHardening(unittest.TestCase):
                           "PubkeyAuthentication yes"):
             self.assertIn(directive, text)
 
-    def test_check_verifies_every_directive_the_dropin_applies(self):
-        """A --check that verifies a SUBSET of what apply establishes is an
-        instrument reporting SAFE about state it never observed. This asserts
-        parity rather than a fixed list, so adding a directive to the drop-in
-        without checking it fails here.
+    def test_sshd_directives_is_exactly_the_expected_policy(self):
+        """A policy test, not a parity test: SSHD_DIRECTIVES is now the single
+        source of truth ensure_sshd_hardening applies and check_sshd_hardening
+        verifies, so there is nothing left to reconcile -- just a fixed
+        expectation of what that one list must say.
 
-        Both sets are derived from COMMENT-FILTERED text. The `applied` side's
-        `^`-anchored pattern already can't match inside a `#` comment, but the
-        `checked` side's `grep -qx '...'` pattern has no such anchor -- so
-        commenting out a check line (rather than deleting it) would otherwise
-        leave the substring in place, `checked` would still count it, and the
-        check would no longer run: a check counted but not performed, the same
-        unfiltered-comment false-pass class this file's other tests filter for.
+        (History: this used to be a parity test comparing two text-derived
+        sets, and was defeated three separate ways -- a deleted grep line, a
+        commented-out block, and a decoy substring in a trailing comment like
+        `true  # grep -qx '...'` that survived comment-filtering because the
+        LIVE line didn't start with `#`, while the regex still matched the
+        comment fragment on it. A text-derived parity test cannot tell "this
+        executes" from "this appears". Removing the duplication in provision.sh
+        -- one list, consumed by both sides -- makes that whole class of defeat
+        unconstructible rather than merely harder to fool.)
 
-        Mutation that proves it: delete one grep from check_sshd_hardening, OR
-        comment one out instead of deleting it; either fails.
+        Mutation that proves it: remove one directive from SSHD_DIRECTIVES;
+        this fails.
         """
-        code = "\n".join(l for l in script_text().splitlines()
-                         if not l.strip().startswith("#"))
-        applied = set(re.findall(r"(?m)^([A-Za-z]+) (?:yes|no)$", code))
-        checked = set(re.findall(r"grep -qx '([a-z]+) (?:yes|no)'", code))
-        self.assertTrue(applied, "no drop-in directives found -- regex is stale")
-        self.assertEqual({d.lower() for d in applied}, checked,
-                         "check_sshd_hardening verifies a different set than the "
-                         "drop-in applies: applied=%s checked=%s" % (sorted(applied), sorted(checked)))
+        m = re.search(r'(?m)^SSHD_DIRECTIVES="(.*?)"', script_text(), re.DOTALL)
+        self.assertIsNotNone(m, "SSHD_DIRECTIVES not found -- regex is stale")
+        lines = [l for l in m.group(1).splitlines() if l.strip()]
+        self.assertEqual(set(lines), {
+            "PasswordAuthentication no",
+            "PermitRootLogin no",
+            "KbdInteractiveAuthentication no",
+            "PubkeyAuthentication yes",
+        })
+
+    def test_check_sshd_hardening_reads_the_shared_list_not_literals(self):
+        """The single-source-of-truth test: check_sshd_hardening must consume
+        SSHD_DIRECTIVES rather than hardcode any directive name, or the two
+        sides could drift apart again -- silently, since a hardcoded literal
+        parses and runs just as well as a variable reference.
+
+        Mutation that proves it: hardcode one directive back into
+        check_sshd_hardening (e.g. `grep -qx 'permitrootlogin no'`) instead of
+        reading SSHD_DIRECTIVES; this fails.
+        """
+        text = script_text()
+        m = re.search(r"(?ms)^check_sshd_hardening\(\) \{.*?^\}", text)
+        self.assertIsNotNone(m, "check_sshd_hardening not found -- regex is stale")
+        body = m.group(0)
+        self.assertIn("$SSHD_DIRECTIVES", body,
+                     "check_sshd_hardening does not reference SSHD_DIRECTIVES")
+        for literal in ("passwordauthentication", "permitrootlogin",
+                        "kbdinteractiveauthentication", "pubkeyauthentication"):
+            self.assertNotIn(literal, body.lower(),
+                             "check_sshd_hardening hardcodes '%s' instead of "
+                             "reading it from SSHD_DIRECTIVES" % literal)
 
 
 class TestAuthorizedKeys(unittest.TestCase):
@@ -401,6 +426,17 @@ class TestSshPubkeyValidation(unittest.TestCase):
     moving validation out of ensure_authorized_key and into its own gate made
     it reachable in --check mode on any host, with no root and no Ubuntu
     required.
+
+    The four "refused" tests below pin a distinctive fragment of their own
+    die message, not the shared "SSH_PUBKEY" substring these tests used
+    earlier: the four die messages are already distinct, and a shared
+    substring cannot tell "refused for THIS reason" from "refused for any
+    reason" -- which matters because a guard mutated to reject everything
+    (see the positive control) would still satisfy a shared-substring check
+    on all four, masking exactly the kind of regression this file exists to
+    catch. The positive control's check stays broad on purpose: its job is to
+    detect ANY SSH_PUBKEY-related refusal of a well-formed key, regardless of
+    the wording a broken guard might use.
     """
 
     def test_an_unrecognised_key_type_is_refused(self):
@@ -411,7 +447,7 @@ class TestSshPubkeyValidation(unittest.TestCase):
         """
         rc, _, err = run(["--check"], {"SSH_PUBKEY": "not-a-key"})
         self.assertNotEqual(rc, 0)
-        self.assertIn("ssh_pubkey", err.lower(), err)
+        self.assertIn("not a recognised", err.lower(), err)
 
     def test_a_type_with_no_key_material_is_refused(self):
         """`ssh-rsa` alone with nothing after it -- the shape of a copy-paste
@@ -422,7 +458,7 @@ class TestSshPubkeyValidation(unittest.TestCase):
         """
         rc, _, err = run(["--check"], {"SSH_PUBKEY": "ssh-rsa"})
         self.assertNotEqual(rc, 0)
-        self.assertIn("ssh_pubkey", err.lower(), err)
+        self.assertIn("no key material", err.lower(), err)
 
     def test_a_truncated_key_body_is_refused(self):
         """The single most likely real failure: a base64 body clipped
@@ -437,7 +473,7 @@ class TestSshPubkeyValidation(unittest.TestCase):
         """
         rc, _, err = run(["--check"], {"SSH_PUBKEY": "ssh-ed25519 AAAAshort"})
         self.assertNotEqual(rc, 0)
-        self.assertIn("ssh_pubkey", err.lower(), err)
+        self.assertIn("looks truncated", err.lower(), err)
 
     def test_a_multiline_value_is_refused(self):
         """A trailing `*` in a shell case pattern spans newlines: without an
@@ -454,14 +490,16 @@ class TestSshPubkeyValidation(unittest.TestCase):
         key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI%s\nextra-garbage-line" % body
         rc, _, err = run(["--check"], {"SSH_PUBKEY": key})
         self.assertNotEqual(rc, 0)
-        self.assertIn("ssh_pubkey", err.lower(), err)
+        self.assertIn("contains a newline", err.lower(), err)
 
     def test_a_wellformed_key_is_not_refused(self):
         """Positive control. Without this, a guard that rejects EVERYTHING
-        would still pass every test above -- none of them would catch a guard
-        that refuses valid input too, since they only ever supply invalid
-        input. Synthetic key, not a real one: 68 characters is the shortest
-        genuine ed25519 body, so this also exercises the length boundary.
+        would still look correct by every test above's ORIGINAL design (a
+        shared "was SOMETHING refused" check) -- none of them would catch a
+        guard that refuses valid input too, since they only ever supply
+        invalid input. Synthetic key, not a real one: 68 characters is the
+        shortest genuine ed25519 body, so this also exercises the length
+        boundary.
 
         Checks for the general absence of any SSH_PUBKEY-related refusal
         (not one specific phrase), so it catches a guard that rejects
@@ -469,9 +507,12 @@ class TestSshPubkeyValidation(unittest.TestCase):
 
         Mutation that proves it: make assert_ssh_pubkey_wellformed `die`
         unconditionally right after the `[ -n "$SSH_PUBKEY" ] || return 0`
-        line; this fails, and must be the only test in this class that does,
-        since the other four already expect SOME refusal and a
-        reject-everything guard still refuses their (genuinely invalid) input.
+        line; this fails. Since the other four tests in this class now pin
+        their OWN reason-specific fragment (not a shared substring), an
+        unconditional die legitimately fails them too -- that is the correct
+        signal, not over-sensitivity: an unconditional die really does destroy
+        the per-case behaviour those four exist to describe, and a suite that
+        reports that fact is right to.
         """
         key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 43 + " test@example"
         rc, _, err = run(["--check"], {"SSH_PUBKEY": key})

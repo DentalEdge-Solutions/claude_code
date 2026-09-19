@@ -76,12 +76,18 @@ assert_ssh_pubkey_wellformed() {
 "*) die "SSH_PUBKEY contains a newline; expected a single-line OpenSSH public key" ;;
   esac
   # Intentional word splitting: an OpenSSH public key is <type> <base64> [comment].
+  # set -f around it: $SSH_PUBKEY is unquoted here on purpose to split it, but
+  # unquoted expansion also pathname-expands *, ? and [...] against $PWD --
+  # disable globbing for the split so a key containing those characters can't
+  # have filenames substituted into it.
+  set -f
   # shellcheck disable=SC2086
   set -- $SSH_PUBKEY
+  set +f
   local type="${1:-}" body="${2:-}"
   case "$type" in
     ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) : ;;
-    *) die "SSH_PUBKEY type '${type:-<empty>}' is not a recognised OpenSSH key type" ;;
+    *) die "SSH_PUBKEY type '${type:-<empty>}' is not a recognised OpenSSH key type; options or a command= prefix (as in authorized_keys) are not supported here -- expected a bare '<type> <base64> [comment]' key" ;;
   esac
   [ -n "$body" ] || die "SSH_PUBKEY has a type but no key material -- a truncated key would be written and then password login disabled, locking you out"
   case "$body" in
@@ -113,6 +119,18 @@ assert_supported_os() {
 }
 
 SSHD_DROPIN=/etc/ssh/sshd_config.d/10-hermes-hardening.conf
+
+# The sshd policy, declared ONCE and consumed by both ensure_ and check_.
+# A previous design duplicated this list between the drop-in heredoc and the
+# verification greps, and a test tried to police the duplication by parsing the
+# script's own text. That test was defeated three separate ways (a deleted line,
+# a commented-out block, a decoy substring in a trailing comment). Removing the
+# duplication makes "applied but never verified" unconstructible instead of merely
+# detectable.
+SSHD_DIRECTIVES="PasswordAuthentication no
+PermitRootLogin no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes"
 
 ensure_deploy_user() {
   if id "$DEPLOY_USER" >/dev/null 2>&1; then
@@ -150,14 +168,11 @@ ensure_authorized_key() {
 ensure_sshd_hardening() {
   install -d -m 755 /etc/ssh/sshd_config.d
   # A drop-in, not sed against sshd_config: 24.04 ships the Include, and
-  # rewriting the same drop-in is naturally idempotent.
-  cat > "$SSHD_DROPIN" <<'DROPIN'
-# Managed by infra/hermes-agent/deploy/provision.sh. Edits will be overwritten.
-PasswordAuthentication no
-PermitRootLogin no
-KbdInteractiveAuthentication no
-PubkeyAuthentication yes
-DROPIN
+  # rewriting the same drop-in is naturally idempotent. Generated from
+  # SSHD_DIRECTIVES rather than a literal heredoc so the applied policy and the
+  # verified policy (check_sshd_hardening) can never drift apart.
+  { printf '%s\n' "# Managed by infra/hermes-agent/deploy/provision.sh. Edits will be overwritten."
+    printf '%s\n' "$SSHD_DIRECTIVES"; } > "$SSHD_DROPIN"
   chmod 644 "$SSHD_DROPIN"
   # Validate BEFORE reloading. A bad drop-in that reaches a reload is how a fresh
   # VPS is locked out; sshd -t is the difference between a refusal and a brick.
@@ -187,18 +202,21 @@ check_deploy_user() {
 }
 
 check_sshd_hardening() {
-  local out
+  local out want key val
   out="$(sshd -T 2>/dev/null || true)"
-  printf '%s' "$out" | grep -qx 'passwordauthentication no' \
-    && ok "sshd: passwords refused" || bad "sshd: passwords still accepted"
-  printf '%s' "$out" | grep -qx 'permitrootlogin no' \
-    && ok "sshd: root login refused" || bad "sshd: root login still permitted"
-  printf '%s' "$out" | grep -qx 'kbdinteractiveauthentication no' \
-    && ok "sshd: keyboard-interactive refused" \
-    || bad "sshd: keyboard-interactive still accepted (PAM password path)"
-  printf '%s' "$out" | grep -qx 'pubkeyauthentication yes' \
-    && ok "sshd: pubkey auth enabled" \
-    || bad "sshd: pubkey auth NOT enabled (lockout risk)"
+  # `<<<` not a pipe: a `while read` on the right-hand side of a pipe runs in a
+  # SUBSHELL, and every ok()/bad() increment to CHECKS and FAILED would be lost
+  # when it exited -- the check would report nothing and finish() would see zero.
+  while IFS= read -r want; do
+    [ -n "$want" ] || continue
+    key="${want%% *}"
+    val="${want#* }"
+    if printf '%s' "$out" | grep -qx "$(printf '%s %s' "$key" "$val" | tr 'A-Z' 'a-z')"; then
+      ok "sshd: ${key} ${val}"
+    else
+      bad "sshd: ${key} is NOT ${val} on this host"
+    fi
+  done <<< "$SSHD_DIRECTIVES"
 }
 
 # apply_all and check_all are deliberately SEPARATE rather than one function
