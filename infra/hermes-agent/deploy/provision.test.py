@@ -349,12 +349,98 @@ UFW_ALLOW_INCOMING_DEFAULT_STATUS = (
 )
 
 
-def run_check_all(ufw_status, extra_env=None):
-    """Run `--check` with id/sshd/systemctl mocked to PASS and `ufw` mocked
-    to report ufw_status for `ufw status verbose`. Returns (returncode,
-    stdout, stderr). Owns and cleans up its own mockdir and OS_RELEASE_FILE
-    fixture, so any drift the caller observes is attributable to the ufw
-    state it passed in, not to an unrelated check or a leaked fixture.
+# check_docker mocks. Real getent formats, per getent(1)/group(5)/passwd(5):
+#   group:  name:passwd:GID:member1,member2,...
+#   passwd: name:passwd:UID:GID:gecos:home:shell
+#
+# GETENT_MOCK_EMPTY_GROUP is the default for run_check_all(): docker group
+# exists (gid 998) with no supplementary members and no passwd entry using
+# that gid as its primary -- the correct state BEFORE README.md:957 step 1
+# runs, and the positive control for "an empty docker group is not drift".
+GETENT_MOCK_EMPTY_GROUP = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "group" ] && [ "$2" = "docker" ]; then\n'
+    '  echo "docker:x:998:"\n'
+    "  exit 0\n"
+    "fi\n"
+    'if [ "$1" = "passwd" ]; then\n'
+    "cat <<'EOF'\n"
+    "root:x:0:0:root:/root:/bin/bash\n"
+    "hermesops:x:1000:1000:,,,:/home/hermesops:/bin/bash\n"
+    "EOF\n"
+    "  exit 0\n"
+    "fi\n"
+    "exit 1\n"
+)
+
+# An unexpected SUPPLEMENTARY member ("alice" in field 4 of `getent group
+# docker`) -- the case the brief's original single-source code already
+# caught.
+GETENT_MOCK_SUPPLEMENTARY_DRIFT = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "group" ] && [ "$2" = "docker" ]; then\n'
+    '  echo "docker:x:998:alice"\n'
+    "  exit 0\n"
+    "fi\n"
+    'if [ "$1" = "passwd" ]; then\n'
+    "cat <<'EOF'\n"
+    "root:x:0:0:root:/root:/bin/bash\n"
+    "hermesops:x:1000:1000:,,,:/home/hermesops:/bin/bash\n"
+    "alice:x:1001:1001:,,,:/home/alice:/bin/bash\n"
+    "EOF\n"
+    "  exit 0\n"
+    "fi\n"
+    "exit 1\n"
+)
+
+# Ruling 19's regression fixture: `getent group docker` field 4 is EMPTY (no
+# supplementary members), but "bob" in `getent passwd` has gid 998 as his
+# PRIMARY group -- full Docker access, invisible to field 4 alone.
+GETENT_MOCK_PRIMARY_GID_DRIFT = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "group" ] && [ "$2" = "docker" ]; then\n'
+    '  echo "docker:x:998:"\n'
+    "  exit 0\n"
+    "fi\n"
+    'if [ "$1" = "passwd" ]; then\n'
+    "cat <<'EOF'\n"
+    "root:x:0:0:root:/root:/bin/bash\n"
+    "hermesops:x:1000:1000:,,,:/home/hermesops:/bin/bash\n"
+    "bob:x:1002:998:,,,:/home/bob:/bin/bash\n"
+    "EOF\n"
+    "  exit 0\n"
+    "fi\n"
+    "exit 1\n"
+)
+
+# Ruling 20's positive control: hermes-docker-proxy alone in the docker group
+# (the state README.md:957 step 1 creates) must not be reported as drift.
+GETENT_MOCK_PROXY_ONLY = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "group" ] && [ "$2" = "docker" ]; then\n'
+    '  echo "docker:x:998:hermes-docker-proxy"\n'
+    "  exit 0\n"
+    "fi\n"
+    'if [ "$1" = "passwd" ]; then\n'
+    "cat <<'EOF'\n"
+    "root:x:0:0:root:/root:/bin/bash\n"
+    "hermesops:x:1000:1000:,,,:/home/hermesops:/bin/bash\n"
+    "hermes-docker-proxy:x:997:997:,,,:/home/hermes-docker-proxy:/usr/sbin/nologin\n"
+    "EOF\n"
+    "  exit 0\n"
+    "fi\n"
+    "exit 1\n"
+)
+
+
+def run_check_all(ufw_status, extra_env=None, getent_body=None):
+    """Run `--check` with id/sshd/systemctl mocked to PASS, `ufw` mocked to
+    report ufw_status for `ufw status verbose`, and `getent` mocked to report
+    an empty docker group (GETENT_MOCK_EMPTY_GROUP) unless getent_body is
+    given. Returns (returncode, stdout, stderr). Owns and cleans up its own
+    mockdir and OS_RELEASE_FILE fixture, so any drift the caller observes is
+    attributable to the ufw/getent state it passed in, not to an unrelated
+    check or a leaked fixture.
 
     extra_env, when given, is merged into the CHILD's environment on top of
     the mocked PATH/OS_RELEASE_FILE -- used to simulate a hostile parent
@@ -366,6 +452,7 @@ def run_check_all(ufw_status, extra_env=None):
         sshd=SSHD_MOCK_ALL_GOOD,
         systemctl=SYSTEMCTL_MOCK_ALL_GOOD,
         ufw=ufw_mock(ufw_status),
+        getent=getent_body or GETENT_MOCK_EMPTY_GROUP,
     )
     osr = os_release("24.04")
     try:
@@ -1060,6 +1147,137 @@ class TestCheckFirewallBehavioural(unittest.TestCase):
         self.assertIn("9999", combined, combined)
 
 
+class TestDockerInstall(unittest.TestCase):
+    def test_nothing_is_piped_into_a_shell(self):
+        """`curl ... | sh` executes an unreviewed remote script as root. This
+        project pins its base image by digest and re-audits on every upgrade; a
+        piped root installer in the provisioning path contradicts that for no gain.
+
+        Mutation that proves it: add `curl -fsSL https://get.docker.com | sh`;
+        this fails.
+        """
+        for line in script_text().splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            self.assertNotRegex(s, r"\|\s*(sudo\s+)?(ba)?sh\b",
+                                "pipe-to-shell: %s" % s)
+
+    def test_docker_comes_from_the_apt_repository(self):
+        text = script_text()
+        self.assertIn("download.docker.com", text)
+        self.assertIn("docker-ce", text)
+        self.assertIn("docker-compose-plugin", text)
+
+    def test_the_repository_key_lands_in_a_keyring(self):
+        """An apt source without a signed-by keyring trusts the key for every
+        repository on the box."""
+        text = script_text()
+        self.assertIn("/etc/apt/keyrings/docker.asc", text)
+        self.assertIn("signed-by=", text)
+
+    def test_the_docker_group_is_left_empty_of_humans(self):
+        """Task 3 asserts the deploy user never joins it. This asserts the script
+        never adds ANY user to docker -- the proxy unit's SupplementaryGroups is
+        the only membership this design has, and systemd grants that, not this
+        script."""
+        for line in script_text().splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            if "docker" in s and ("usermod" in s or "gpasswd" in s or "adduser" in s):
+                self.fail("script adds a user to the docker group: %s" % s)
+
+
+class TestCheckDockerBehavioural(unittest.TestCase):
+    """check_docker gets BEHAVIOURAL coverage, not text assertions (Ruling
+    17): every defect found in Tasks 1-4 was in something that VERIFIES,
+    never in the acting code -- see TestCheckModeVerdictIsTrustworthy and
+    TestCheckFirewallBehavioural's docstrings for the two prior instances.
+
+    Ruling 19's defect: the brief's original check was a single source,
+    `getent group docker | cut -d: -f4`, which lists only SUPPLEMENTARY
+    group members. A user whose PRIMARY gid equals docker's gid has full
+    Docker access -- host root -- and never appears in that field, so the
+    brief's check would report "no direct members" on exactly the host it
+    exists to catch. check_docker now enumerates both `getent group docker`
+    field 4 AND every `getent passwd` entry whose gid matches, and unions
+    them.
+
+    Ruling 20's invariant: the check does not require an EMPTY group, it
+    requires no member other than hermes-docker-proxy, which
+    README.md:957 step 1 (run AFTER this script) legitimately adds.
+
+    Mock fidelity: the getent fixtures above (GETENT_MOCK_*) reproduce
+    getent's real formats -- see the module comment above
+    GETENT_MOCK_EMPTY_GROUP for the citation.
+    """
+
+    def test_reports_drift_for_an_unexpected_supplementary_member(self):
+        """The case the brief's original single-source code already caught.
+
+        Mutation that proves it: delete the offender-detection block from
+        check_docker (or replace it with an unconditional ok()); this fails.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS,
+                                     getent_body=GETENT_MOCK_SUPPLEMENTARY_DRIFT)
+        combined = (out + err).lower()
+        self.assertNotEqual(
+            rc, 0,
+            "supplementary docker-group member was not flagged:\n%s" % combined)
+        self.assertIn("unexpected member", combined, combined)
+        self.assertIn("alice", combined, combined)
+
+    def test_reports_drift_for_an_unexpected_primary_gid_member(self):
+        """Ruling 19's regression test. `getent group docker` field 4 is
+        EMPTY in this fixture -- under the brief's original single-source
+        `getent group docker | cut -d: -f4`, this would report "no direct
+        members" having missed "bob", whose PRIMARY gid is docker's gid and
+        who therefore has full, unlogged Docker access.
+
+        Mutation that proves it: replace the two-source enumeration in
+        check_docker with the brief's original `getent group docker | cut
+        -d: -f4`; this fails. This is this task's most important mutation.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS,
+                                     getent_body=GETENT_MOCK_PRIMARY_GID_DRIFT)
+        combined = (out + err).lower()
+        self.assertNotEqual(
+            rc, 0,
+            "primary-gid docker member was not flagged:\n%s" % combined)
+        self.assertIn("unexpected member", combined, combined)
+        self.assertIn("bob", combined, combined)
+
+    def test_hermes_docker_proxy_alone_does_not_produce_drift(self):
+        """Ruling 20's positive control. README.md:957 step 1 runs AFTER
+        this script and puts exactly hermes-docker-proxy in the docker
+        group -- an operator re-running --check after that step must not
+        get a false alarm from a bare "no members" rule.
+
+        Mutation that proves it: remove the hermes-docker-proxy allowance
+        (reject on any member, including the proxy); this fails.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS,
+                                     getent_body=GETENT_MOCK_PROXY_ONLY)
+        combined = (out + err).lower()
+        self.assertEqual(
+            rc, 0,
+            "hermes-docker-proxy alone was reported as drift:\n%s" % combined)
+        self.assertNotIn("unexpected member", combined, combined)
+
+    def test_an_empty_docker_group_does_not_produce_drift(self):
+        """Positive control: provision.sh runs BEFORE README.md:957 step 1,
+        so an empty docker group is the correct state at provision time.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS,
+                                     getent_body=GETENT_MOCK_EMPTY_GROUP)
+        combined = (out + err).lower()
+        self.assertEqual(
+            rc, 0,
+            "an empty docker group was reported as drift:\n%s" % combined)
+        self.assertNotIn("unexpected member", combined, combined)
+
+
 class TestApplyAllWiring(unittest.TestCase):
     """apply_all cannot be run outside root Ubuntu, so this is a text
     assertion -- but a targeted one: it checks that every ensure_* function
@@ -1081,7 +1299,7 @@ class TestApplyAllWiring(unittest.TestCase):
         steps = ["ensure_base_packages", "ensure_deploy_user",
                  "ensure_authorized_key", "ensure_sshd_hardening",
                  "ensure_firewall", "ensure_fail2ban",
-                 "ensure_unattended_upgrades"]
+                 "ensure_unattended_upgrades", "ensure_docker"]
         positions = [body.find(s) for s in steps]
         for step, pos in zip(steps, positions):
             self.assertNotEqual(pos, -1, "%s is not called from apply_all" % step)

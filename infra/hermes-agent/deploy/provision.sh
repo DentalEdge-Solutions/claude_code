@@ -323,6 +323,79 @@ check_fail2ban() {
     || bad "fail2ban not running"
 }
 
+ensure_docker() {
+  # Docker's own apt repository, never `curl https://get.docker.com | sh`: that
+  # executes an unreviewed remote script as root, in a project that pins its base
+  # image by digest and re-runs a security audit on every upgrade.
+  install -m 0755 -d /etc/apt/keyrings
+  if [ ! -s /etc/apt/keyrings/docker.asc ]; then
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  fi
+  chmod a+r /etc/apt/keyrings/docker.asc
+  # signed-by scopes the key to THIS repository; without it the key is trusted
+  # for every repository configured on the box.
+  local arch codename
+  arch="$(dpkg --print-architecture)"
+  codename="$(. "$OS_RELEASE_FILE" >/dev/null 2>&1; printf '%s' "${VERSION_CODENAME:-noble}")"
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
+    "$arch" "$codename" > /etc/apt/sources.list.d/docker.list
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker
+  # NOTE: no user is added to the docker group here, deliberately. The proxy unit
+  # grants it via SupplementaryGroups=docker to hermes-docker-proxy and nothing
+  # else; deploy commands use sudo.
+  note "docker installed: $(docker --version)"
+}
+
+check_docker() {
+  systemctl is-active --quiet docker && ok "docker running" || bad "docker not running"
+
+  # hermes-docker-proxy is the only user this design ever puts in the docker
+  # group (README.md:957 step 1, which runs AFTER this script). Found here by
+  # pattern-matching RESERVED_NAMES rather than typing the name a second
+  # time, so the two lists cannot drift apart (Ruling 20).
+  local n proxy_name
+  proxy_name=""
+  for n in "${RESERVED_NAMES[@]}"; do
+    case "$n" in *docker-proxy*) proxy_name="$n" ;; esac
+  done
+
+  # Field 4 of `getent group` lists only SUPPLEMENTARY members. A user whose
+  # PRIMARY gid is docker's gid has full Docker access -- host root -- and
+  # NEVER appears there (confirmed during Task 4's format sweep against
+  # multiple sources). Both sources are enumerated and unioned; the brief's
+  # original single-source `getent group docker | cut -d: -f4` would miss
+  # exactly this case (Ruling 19). Formats, per getent(1)/group(5)/passwd(5):
+  #   group:  name:passwd:GID:member1,member2,...
+  #   passwd: name:passwd:UID:GID:gecos:home:shell
+  local group_line gid supplementary primary_members all_members offenders
+  group_line="$(getent group docker 2>/dev/null || true)"
+  gid="$(printf '%s' "$group_line" | cut -d: -f3)"
+  supplementary="$(printf '%s' "$group_line" | cut -d: -f4)"
+
+  primary_members=""
+  if [ -n "$gid" ]; then
+    primary_members="$(getent passwd 2>/dev/null \
+      | awk -F: -v gid="$gid" '$4 == gid { print $1 }' || true)"
+  fi
+
+  all_members="$(printf '%s\n%s\n' "$(printf '%s' "$supplementary" | tr ',' '\n')" "$primary_members" \
+    | sed '/^$/d' | sort -u || true)"
+
+  # Allow exactly hermes-docker-proxy (Ruling 20): provision.sh runs BEFORE
+  # README.md:957 step 1, so an empty group is correct at provision time, but
+  # an operator re-running --check AFTER that step must not get a false alarm
+  # from a bare "no members" rule -- a check that cries wolf gets ignored.
+  offenders="$(printf '%s\n' "$all_members" | sed '/^$/d' | grep -vx -- "$proxy_name" || true)"
+  if [ -z "$offenders" ]; then
+    ok "docker group has no members beyond ${proxy_name:-hermes-docker-proxy}"
+  else
+    bad "docker group has unexpected member(s): $(printf '%s' "$offenders" | tr '\n' ' ')"
+  fi
+}
+
 # apply_all and check_all are deliberately SEPARATE rather than one function
 # branching on MODE. --check must be an independent observer of the host: if it
 # shared code with apply it would tend to report what apply intended rather than
@@ -336,6 +409,7 @@ apply_all() {
   ensure_firewall
   ensure_fail2ban
   ensure_unattended_upgrades
+  ensure_docker
 }
 
 check_all() {
@@ -343,6 +417,7 @@ check_all() {
   check_sshd_hardening
   check_firewall
   check_fail2ban
+  check_docker
 }
 
 finish() {
