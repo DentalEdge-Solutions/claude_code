@@ -20,6 +20,7 @@ to it, exactly as deploy/units.test.py is. CI invokes it as its own step.
 """
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -551,6 +552,79 @@ class TestDeployUserGroups(unittest.TestCase):
         body = m.group(0)
         self.assertRegex(body, r"grep -qx sudo\b",
                          "check_deploy_user does not verify the deploy user holds sudo")
+
+
+class TestCheckModeVerdictIsTrustworthy(unittest.TestCase):
+    """The only test in this suite that runs --check end to end against a
+    mocked host and observes its VERDICT, rather than parsing the script's
+    text. Every other check_* assertion in this file is textual.
+
+    History: mutation (k) during this task's fix rounds showed why that gap
+    matters. Piping into `while read` (instead of `<<<`) in
+    check_sshd_hardening runs the loop in a SUBSHELL, so its ok()/bad() calls
+    still PRINT (stdout is inherited through the pipe) but their increments to
+    CHECKS and FAILED are silently lost when the subshell exits. The measured
+    result on a host where every sshd directive is out of compliance: four
+    real DRIFT lines print, immediately followed by "all checks passed", exit
+    0 -- a silent false pass in --check, which is the one mechanism this
+    entire script exists to provide. None of this file's other 31 tests would
+    notice, because the pipe and the `<<<` version produce IDENTICAL script
+    text; only running the check and reading its verdict distinguishes them.
+
+    Mocks `id` to make check_deploy_user PASS (user exists, in sudo, not in
+    docker) and `sshd -T` to print NOTHING (every directive then reports
+    drift), so the failure is isolated to the sshd loop. That isolation is the
+    point: if check_deploy_user also failed, its main-shell bad() would keep
+    FAILED above zero on its own, masking a lost sshd-loop failure and making
+    this test pass for the wrong reason.
+
+    This does NOT prove a real host ends up hardened -- ufw, fail2ban and
+    unattended-upgrades are outside this task's scope, and even sshd's real
+    state is never touched. It proves the narrower, load-bearing claim: --check
+    cannot report success while a check reported drift.
+
+    Mutation that proves it: change `<<<` to a pipe in check_sshd_hardening;
+    this test fails while the rest of the suite stays green.
+    """
+
+    def test_check_cannot_report_success_while_a_check_reports_drift(self):
+        mockdir = tempfile.mkdtemp(prefix="provision-mockbin-")
+        osr = os_release("24.04")
+        try:
+            id_mock = os.path.join(mockdir, "id")
+            with open(id_mock, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\n"
+                        'if [ "$1" = "-nG" ]; then echo "hermesops sudo"; exit 0; fi\n'
+                        "exit 0\n")
+            os.chmod(id_mock, 0o755)
+
+            sshd_mock = os.path.join(mockdir, "sshd")
+            with open(sshd_mock, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\n"
+                        'if [ "$1" = "-T" ]; then exit 0; fi\n'
+                        "exit 0\n")
+            os.chmod(sshd_mock, 0o755)
+
+            e = dict(os.environ)
+            e.pop("DEPLOY_USER", None)
+            e.pop("SSH_PUBKEY", None)
+            e["OS_RELEASE_FILE"] = osr
+            e["PATH"] = mockdir + os.pathsep + e["PATH"]
+            p = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True,
+                               text=True, env=e)
+            combined = (p.stdout + p.stderr).lower()
+
+            self.assertNotEqual(
+                p.returncode, 0,
+                "--check exited 0 despite mocked sshd reporting every directive "
+                "out of compliance:\nSTDOUT:\n%s\nSTDERR:\n%s" % (p.stdout, p.stderr))
+            self.assertNotIn("all checks passed", combined,
+                             "--check claimed success alongside drift:\n%s" % combined)
+            self.assertIn("failed", combined,
+                         "--check's failure summary is missing:\n%s" % combined)
+        finally:
+            os.unlink(osr)
+            shutil.rmtree(mockdir)
 
 
 if __name__ == "__main__":
