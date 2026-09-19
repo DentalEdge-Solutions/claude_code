@@ -218,8 +218,12 @@ check_sshd_hardening() {
   local out want key val
   out="$(sshd -T 2>/dev/null || true)"
   # `<<<` not a pipe: a `while read` on the right-hand side of a pipe runs in a
-  # SUBSHELL, and every ok()/bad() increment to CHECKS and FAILED would be lost
-  # when it exited -- the check would report nothing and finish() would see zero.
+  # SUBSHELL, so every ok()/bad() increment inside the loop is lost when it exits.
+  # MEASURED, and the consequence is worse than "the check reports nothing":
+  # check_deploy_user has already pushed CHECKS above zero, so finish()'s
+  # zero-check guard never fires. What is lost is the FAILED increments -- the run
+  # prints its DRIFT lines and then says "all checks passed", exit 0. A silent
+  # false pass in the one mechanism this script exists to provide.
   while IFS= read -r want; do
     [ -n "$want" ] || continue
     key="${want%% *}"
