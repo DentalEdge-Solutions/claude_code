@@ -341,12 +341,21 @@ class TestSshHardening(unittest.TestCase):
         parity rather than a fixed list, so adding a directive to the drop-in
         without checking it fails here.
 
-        Mutation that proves it: delete one grep from check_sshd_hardening;
-        this fails.
+        Both sets are derived from COMMENT-FILTERED text. The `applied` side's
+        `^`-anchored pattern already can't match inside a `#` comment, but the
+        `checked` side's `grep -qx '...'` pattern has no such anchor -- so
+        commenting out a check line (rather than deleting it) would otherwise
+        leave the substring in place, `checked` would still count it, and the
+        check would no longer run: a check counted but not performed, the same
+        unfiltered-comment false-pass class this file's other tests filter for.
+
+        Mutation that proves it: delete one grep from check_sshd_hardening, OR
+        comment one out instead of deleting it; either fails.
         """
-        text = script_text()
-        applied = set(re.findall(r"(?m)^([A-Za-z]+) (?:yes|no)$", text))
-        checked = set(re.findall(r"grep -qx '([a-z]+) (?:yes|no)'", text))
+        code = "\n".join(l for l in script_text().splitlines()
+                         if not l.strip().startswith("#"))
+        applied = set(re.findall(r"(?m)^([A-Za-z]+) (?:yes|no)$", code))
+        checked = set(re.findall(r"grep -qx '([a-z]+) (?:yes|no)'", code))
         self.assertTrue(applied, "no drop-in directives found -- regex is stale")
         self.assertEqual({d.lower() for d in applied}, checked,
                          "check_sshd_hardening verifies a different set than the "
@@ -384,22 +393,90 @@ class TestAuthorizedKeys(unittest.TestCase):
         """Idempotency: a re-run must not add a second copy of the same key."""
         self.assertIn("grep -qxF", script_text())
 
-    def test_a_malformed_ssh_pubkey_is_refused(self):
-        """ensure_sshd_hardening disables password login immediately after this
-        function runs; a malformed SSH_PUBKEY written to authorized_keys as-is
-        would authenticate nothing, leaving the operator with no way back in.
-        TEXT assertion: reaching ensure_authorized_key at all needs a root host.
 
-        Mutation that proves it: remove the SSH_PUBKEY case guard; this fails.
+class TestSshPubkeyValidation(unittest.TestCase):
+    """assert_ssh_pubkey_wellformed runs from main(), right after the
+    reserved-name guard and before the OS gate, whenever SSH_PUBKEY is set.
+    Unlike most of this file's SSH-related assertions, these are BEHAVIOURAL:
+    moving validation out of ensure_authorized_key and into its own gate made
+    it reachable in --check mode on any host, with no root and no Ubuntu
+    required.
+    """
+
+    def test_an_unrecognised_key_type_is_refused(self):
+        """A string that isn't OpenSSH key syntax at all.
+
+        Mutation that proves it: delete the key-type `case` block (or its
+        default `die` arm) from assert_ssh_pubkey_wellformed; this fails.
         """
-        text = script_text()
-        m = re.search(r"(?ms)^ensure_authorized_key\(\) \{.*?^\}", text)
-        self.assertIsNotNone(m, "ensure_authorized_key not found -- regex is stale")
-        body = m.group(0)
-        self.assertIn('case "$SSH_PUBKEY" in', body,
-                     "ensure_authorized_key has no key-format guard")
-        self.assertRegex(body, r'\*\)\s*die ',
-                         "the SSH_PUBKEY case guard has no refusal arm")
+        rc, _, err = run(["--check"], {"SSH_PUBKEY": "not-a-key"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ssh_pubkey", err.lower(), err)
+
+    def test_a_type_with_no_key_material_is_refused(self):
+        """`ssh-rsa` alone with nothing after it -- the shape of a copy-paste
+        that grabbed only the first word.
+
+        Mutation that proves it: delete the `[ -n "$body" ] || die ...` line
+        from assert_ssh_pubkey_wellformed; this fails.
+        """
+        rc, _, err = run(["--check"], {"SSH_PUBKEY": "ssh-rsa"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ssh_pubkey", err.lower(), err)
+
+    def test_a_truncated_key_body_is_refused(self):
+        """The single most likely real failure: a base64 body clipped
+        mid-paste. A valid type with a short, all-alphabetic body would clear
+        the type check, the non-empty check, and the base64-charset check --
+        only the length floor catches it.
+
+        Mutation that proves it: delete the length-floor check
+        (`[ "${#body}" -ge 68 ] || die ...`) from assert_ssh_pubkey_wellformed;
+        with nothing else to catch this input, the function returns
+        successfully and this fails.
+        """
+        rc, _, err = run(["--check"], {"SSH_PUBKEY": "ssh-ed25519 AAAAshort"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ssh_pubkey", err.lower(), err)
+
+    def test_a_multiline_value_is_refused(self):
+        """A trailing `*` in a shell case pattern spans newlines: without an
+        explicit newline check, `set -- $SSH_PUBKEY` word-splits on the
+        embedded newline and silently drops everything after line one, so a
+        key with a valid-looking first line and garbage after it would pass
+        every remaining check.
+
+        Mutation that proves it: delete the newline-detecting `case` arm from
+        assert_ssh_pubkey_wellformed; word-splitting then absorbs the injected
+        line as if it were never there, and this fails.
+        """
+        body = "A" * 43
+        key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI%s\nextra-garbage-line" % body
+        rc, _, err = run(["--check"], {"SSH_PUBKEY": key})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ssh_pubkey", err.lower(), err)
+
+    def test_a_wellformed_key_is_not_refused(self):
+        """Positive control. Without this, a guard that rejects EVERYTHING
+        would still pass every test above -- none of them would catch a guard
+        that refuses valid input too, since they only ever supply invalid
+        input. Synthetic key, not a real one: 68 characters is the shortest
+        genuine ed25519 body, so this also exercises the length boundary.
+
+        Checks for the general absence of any SSH_PUBKEY-related refusal
+        (not one specific phrase), so it catches a guard that rejects
+        everything under whatever wording that rejection uses.
+
+        Mutation that proves it: make assert_ssh_pubkey_wellformed `die`
+        unconditionally right after the `[ -n "$SSH_PUBKEY" ] || return 0`
+        line; this fails, and must be the only test in this class that does,
+        since the other four already expect SOME refusal and a
+        reject-everything guard still refuses their (genuinely invalid) input.
+        """
+        key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 43 + " test@example"
+        rc, _, err = run(["--check"], {"SSH_PUBKEY": key})
+        self.assertNotIn("ssh_pubkey", err.lower(),
+                         "a well-formed key was refused: %s" % err)
 
 
 class TestDeployUserGroups(unittest.TestCase):

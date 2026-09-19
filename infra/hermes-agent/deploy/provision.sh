@@ -66,6 +66,30 @@ assert_deploy_user_not_reserved() {
   done
 }
 
+# Validated here rather than at the point of use: a bad key must be refused
+# BEFORE any host mutation, not midway through apply. Runs in both modes when
+# set, which also makes it reachable from the suite.
+assert_ssh_pubkey_wellformed() {
+  [ -n "$SSH_PUBKEY" ] || return 0
+  case "$SSH_PUBKEY" in
+    *"
+"*) die "SSH_PUBKEY contains a newline; expected a single-line OpenSSH public key" ;;
+  esac
+  # Intentional word splitting: an OpenSSH public key is <type> <base64> [comment].
+  # shellcheck disable=SC2086
+  set -- $SSH_PUBKEY
+  local type="${1:-}" body="${2:-}"
+  case "$type" in
+    ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) : ;;
+    *) die "SSH_PUBKEY type '${type:-<empty>}' is not a recognised OpenSSH key type" ;;
+  esac
+  [ -n "$body" ] || die "SSH_PUBKEY has a type but no key material -- a truncated key would be written and then password login disabled, locking you out"
+  case "$body" in
+    *[!A-Za-z0-9+/=]*) die "SSH_PUBKEY key material contains characters that are not base64" ;;
+  esac
+  [ "${#body}" -ge 68 ] || die "SSH_PUBKEY key material is only ${#body} characters; the shortest real OpenSSH key body (ed25519) is 68 -- this looks truncated, and writing it would disable password login behind a key that cannot authenticate"
+}
+
 # PARSED, never sourced. os-release is documented as shell-sourceable, but this
 # path is environment-overridable for testability, and sourcing an
 # attacker-influenced file as root is arbitrary code execution rather than the
@@ -106,13 +130,6 @@ ensure_deploy_user() {
 
 ensure_authorized_key() {
   [ -n "$SSH_PUBKEY" ] || die "set SSH_PUBKEY to the deploy user's public key"
-  # ensure_sshd_hardening (next) disables password login. A malformed key
-  # written here as-is would authenticate nothing, and the operator would have
-  # no way back in -- refuse now, while the box is still reachable by password.
-  case "$SSH_PUBKEY" in
-    ssh-*|ecdsa-*|sk-ssh-*|sk-ecdsa-*) : ;;
-    *) die "SSH_PUBKEY does not look like an OpenSSH public key (expected ssh-, ecdsa- or sk-); refusing rather than writing a key that cannot authenticate, because the next step disables password login" ;;
-  esac
   local home akeys
   home="$(getent passwd "$DEPLOY_USER" | cut -d: -f6)"
   akeys="${home}/.ssh/authorized_keys"
@@ -213,6 +230,7 @@ finish() {
 
 main() {
   assert_deploy_user_not_reserved
+  assert_ssh_pubkey_wellformed
   assert_supported_os
   note "deploy user: ${DEPLOY_USER} (mode: ${MODE})"
   if [ "$MODE" = check ]; then check_all; else apply_all; fi
