@@ -75,18 +75,21 @@ You should see:
   OK    user hermesops exists
   OK    hermesops is in the sudo group
   OK    hermesops is not in the docker group
-  OK    sshd: passwordauthentication no
-  OK    sshd: permitrootlogin no
-  OK    sshd: kbdinteractiveauthentication no
-  OK    sshd: pubkeyauthentication yes
+  OK    sshd: PasswordAuthentication no
+  OK    sshd: PermitRootLogin no
+  OK    sshd: KbdInteractiveAuthentication no
+  OK    sshd: PubkeyAuthentication yes
   OK    firewall active
   OK    default incoming policy is deny
   OK    no inbound rule beyond SSH
   OK    fail2ban running
   OK    docker running
   OK    docker group has no members beyond hermes-docker-proxy
-[provision] all checks passed (12 checks)
+[provision] all checks passed (13 checks)
 ```
+
+(The check count is what the script reports, so do not "correct" it from a manual count — if
+you want to verify, run the script against mocks rather than counting by eye.)
 
 ### Step 1d: Lockout protocol (SSH hardening is dangerous)
 
@@ -145,9 +148,7 @@ sudo mkdir -p /opt/hermes-agent
 sudo mkdir -p /var/lib/hermes
 
 # Clone the repos to /opt/projects
-cd /opt/projects
-sudo git clone <url-to-claude_code-repo> claude_code
-sudo git clone <url-to-claude-google-ads-repo> claude-google-ads
+sudo bash -c 'cd /opt/projects && git clone <url-to-claude_code-repo> claude_code && git clone <url-to-claude-google-ads-repo> claude-google-ads'
 
 # Set up /opt/hermes-agent
 # You can either copy the repo's infra/hermes-agent or symlink it.
@@ -171,14 +172,24 @@ bind-source comparison is the **open question phase 5 measures** — do not assu
 
 ## Phase 3: `.env`
 
-Copy the example to `.env`:
+Phase 2 created `/opt/hermes-agent` and `/opt/projects/...` under `sudo`, so these directories
+are root-owned. That is correct: `sudo docker compose` reads the files as root, and deploy
+commands run under `sudo` (the deploy user is deliberately not in the `docker` group).
+
+Copy the example to `.env` and set permissions:
 
 ```bash
-cd /opt/hermes-agent
-cp .env.example .env
+sudo cp /opt/hermes-agent/.env.example /opt/hermes-agent/.env
+sudo chmod 600 /opt/hermes-agent/.env
 ```
 
-Edit `.env` and set:
+Edit the file (using `sudoedit` or `sudo nano`, for example):
+
+```bash
+sudoedit /opt/hermes-agent/.env
+```
+
+Set these values:
 
 ```bash
 ANTHROPIC_API_KEY=dummy-key-this-wave
@@ -196,8 +207,7 @@ Two prohibitions:
 ## Phase 4: Build and Start
 
 ```bash
-cd /opt/hermes-agent
-sudo docker compose up -d --build
+sudo bash -c 'cd /opt/hermes-agent && docker compose up -d --build'
 ```
 
 Then run the README "First run" smoke checks (README.md:957, step 5 onwards):
