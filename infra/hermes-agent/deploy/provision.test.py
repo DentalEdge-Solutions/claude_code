@@ -232,29 +232,94 @@ UFW_PLAIN_STATUS_FALLBACK = (
 )
 
 
-def ufw_mock(verbose_status_body, plain_status_body=UFW_PLAIN_STATUS_FALLBACK):
-    """A `ufw` mock. `ufw status verbose` prints verbose_status_body
-    verbatim; any other `ufw status` invocation (i.e. without a literal
-    `verbose` second argument, matching a regression to plain `ufw status`)
-    prints plain_status_body instead -- by default a fixed, realistic plain
-    rendering with no `Default:`/`Logging:` lines and no `IN` direction
-    suffix, per ufw's own source (see the module comment above). Both
-    heredoc delimiters are quoted so neither body is ever subject to shell
-    expansion.
+# Fix Round 2 finding: ufw's status strings are gettext-wrapped, so every
+# string this file's fixtures and provision.sh's check_firewall match against
+# ("Status: active", "Default:", "ALLOW IN") is locale-dependent. Under a
+# translated locale those strings become different text, the ALLOW IN filter
+# stops matching, and check_firewall reports "no inbound rule beyond SSH"
+# having measured nothing -- the same silent no-op Fix Round 1 closed for
+# plain-vs-verbose output, reached this time through locale instead of
+# verbosity. provision.sh now pins `export LC_ALL=C` near its top, before
+# anything parses program output. This mock models gettext by inspecting
+# $LC_ALL and switching to an illustrative translated rendering whenever it
+# is anything other than C/C.UTF-8/POSIX (empty/unset counts as C, matching
+# ufw's own fallback). The French wording below is illustrative only, NOT a
+# transcription of any real locale file -- the property under test is that
+# the script PINS the locale, not that any particular translation is
+# accurate. See test_locale_is_pinned_even_under_a_hostile_parent_environment
+# and mutation (q) in task-4-report.md.
+UFW_TRANSLATED_VERBOSE_STATUS_ILLUSTRATIVE = (
+    "Statut : actif\n"
+    "Journalisation : activee (faible)\n"
+    "Defaut : refuser (entrant), autoriser (sortant), desactive (route)\n"
+    "Nouveaux profils : ignorer\n"
+    "\n"
+    "Vers                       Action                Depuis\n"
+    "--                         ------                ------\n"
+    "OpenSSH                    AUTORISER ENTRANT      N'importe ou\n"
+    "22/tcp                     AUTORISER ENTRANT      N'importe ou\n"
+)
+
+UFW_TRANSLATED_PLAIN_STATUS_ILLUSTRATIVE = (
+    "Statut : actif\n"
+    "\n"
+    "Vers                       Action       Depuis\n"
+    "--                         ------       ------\n"
+    "OpenSSH                    AUTORISER    N'importe ou\n"
+    "22/tcp                     AUTORISER    N'importe ou\n"
+)
+
+
+def ufw_mock(verbose_status_body, plain_status_body=UFW_PLAIN_STATUS_FALLBACK,
+             translated_verbose_status_body=UFW_TRANSLATED_VERBOSE_STATUS_ILLUSTRATIVE,
+             translated_plain_status_body=UFW_TRANSLATED_PLAIN_STATUS_ILLUSTRATIVE):
+    """A `ufw` mock, locale-aware. Inspects $LC_ALL exactly the way it will
+    be invoked by provision.sh's (mocked) child-process environment:
+
+    - $LC_ALL is C, C.UTF-8, POSIX, or unset/empty -> "pinned" -> English:
+      `ufw status verbose` prints verbose_status_body; plain `ufw status`
+      prints plain_status_body (by default UFW_PLAIN_STATUS_FALLBACK, a
+      fixed realistic plain rendering with no `Default:`/`Logging:` lines
+      and no `IN` direction suffix, per ufw's own source -- see the Fix
+      Round 1 comment above UFW_PLAIN_STATUS_FALLBACK).
+    - anything else -> "hostile" -> the illustrative translated bodies,
+      regardless of which verbose/plain body the caller supplied -- this
+      mock is modelling "the strings change under gettext", not
+      reproducing a specific locale's exact rendering of a specific rule
+      set.
+
+    All four heredoc delimiters are quoted so none of the four bodies are
+    ever subject to shell expansion.
     """
     return (
         "#!/bin/sh\n"
+        'locale_ok=0\n'
+        'case "$LC_ALL" in\n'
+        '  ""|C|C.UTF-8|POSIX) locale_ok=1 ;;\n'
+        'esac\n'
         'if [ "$1" = "status" ] && [ "$2" = "verbose" ]; then\n'
+        '  if [ "$locale_ok" = "1" ]; then\n'
         "cat <<'UFWEOF'\n"
         + verbose_status_body.rstrip("\n") + "\n"
         "UFWEOF\n"
-        "exit 0\n"
+        "  else\n"
+        "cat <<'UFWFREOF'\n"
+        + translated_verbose_status_body.rstrip("\n") + "\n"
+        "UFWFREOF\n"
+        "  fi\n"
+        "  exit 0\n"
         "fi\n"
         'if [ "$1" = "status" ]; then\n'
+        '  if [ "$locale_ok" = "1" ]; then\n'
         "cat <<'UFWPLAINEOF'\n"
         + plain_status_body.rstrip("\n") + "\n"
         "UFWPLAINEOF\n"
-        "exit 0\n"
+        "  else\n"
+        "cat <<'UFWPLAINFREOF'\n"
+        + translated_plain_status_body.rstrip("\n") + "\n"
+        "UFWPLAINFREOF\n"
+        "  fi\n"
+        "  exit 0\n"
         "fi\n"
         "exit 0\n"
     )
@@ -284,12 +349,17 @@ UFW_ALLOW_INCOMING_DEFAULT_STATUS = (
 )
 
 
-def run_check_all(ufw_status):
+def run_check_all(ufw_status, extra_env=None):
     """Run `--check` with id/sshd/systemctl mocked to PASS and `ufw` mocked
-    to report ufw_status for `ufw status`. Returns (returncode, stdout,
-    stderr). Owns and cleans up its own mockdir and OS_RELEASE_FILE fixture,
-    so any drift the caller observes is attributable to the ufw state it
-    passed in, not to an unrelated check or a leaked fixture.
+    to report ufw_status for `ufw status verbose`. Returns (returncode,
+    stdout, stderr). Owns and cleans up its own mockdir and OS_RELEASE_FILE
+    fixture, so any drift the caller observes is attributable to the ufw
+    state it passed in, not to an unrelated check or a leaked fixture.
+
+    extra_env, when given, is merged into the CHILD's environment on top of
+    the mocked PATH/OS_RELEASE_FILE -- used to simulate a hostile parent
+    environment (e.g. a translated LC_ALL) that provision.sh's own
+    `export LC_ALL=C` must override rather than inherit.
     """
     mockdir = mockbin(
         id=ID_MOCK_ALL_GOOD,
@@ -299,7 +369,7 @@ def run_check_all(ufw_status):
     )
     osr = os_release("24.04")
     try:
-        env = mock_env(mockdir, osr)
+        env = mock_env(mockdir, osr, extra=extra_env)
         p = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True,
                            text=True, env=env)
         return p.returncode, p.stdout, p.stderr
@@ -945,6 +1015,49 @@ class TestCheckFirewallBehavioural(unittest.TestCase):
         self.assertNotEqual(rc, 0,
                             "an allow-incoming default policy was not flagged:\n%s" % combined)
         self.assertIn("default incoming policy is not deny", combined, combined)
+
+    def test_locale_is_pinned_even_under_a_hostile_parent_environment(self):
+        """Fix Round 2: ufw's status strings are gettext-wrapped, so
+        "Status: active", "Default:" and "ALLOW IN" are all locale-dependent.
+        Under a translated locale the ALLOW IN filter would stop matching and
+        this check would report "no inbound rule beyond SSH" having measured
+        nothing -- the same silent no-op Fix Round 1 closed for
+        plain-vs-verbose ufw output, reached this time through locale
+        instead of verbosity.
+
+        Runs with a hostile LC_ALL (fr_FR.UTF-8) already set in the PARENT
+        environment -- what a deploy operator's own translated shell would
+        hand the script -- against a ufw fixture that mocks translated
+        output under any locale other than C/C.UTF-8/POSIX (see ufw_mock()
+        and the module comment above UFW_TRANSLATED_VERBOSE_STATUS_ILLUSTRATIVE).
+        If provision.sh pins `LC_ALL=C` before it runs `ufw`, the mock still
+        receives C and returns English, and drift on the unexpected rule is
+        still detected -- proving the script OVERRIDES the inherited value
+        rather than inheriting it. If it does not, the mock returns the
+        (non-matching) translated text and the drift silently disappears.
+
+        Mutation that proves it: delete the `export LC_ALL=C` line near the
+        top of provision.sh; this fails.
+        """
+        rc, out, err = run_check_all(
+            "Status: active\n"
+            "Logging: on (low)\n"
+            "Default: deny (incoming), allow (outgoing), disabled (routed)\n"
+            "New profiles: skip\n"
+            "\n"
+            "To                         Action      From\n"
+            "--                         ------      ----\n"
+            "OpenSSH                    ALLOW IN    Anywhere\n"
+            "9999/tcp                   ALLOW IN    Anywhere\n",
+            extra_env={"LC_ALL": "fr_FR.UTF-8"},
+        )
+        combined = (out + err).lower()
+        self.assertNotEqual(
+            rc, 0,
+            "drift was not detected under a hostile parent LC_ALL "
+            "(the script is inheriting the locale instead of pinning it):\n%s" % combined)
+        self.assertIn("unexpected inbound rule", combined, combined)
+        self.assertIn("9999", combined, combined)
 
 
 class TestApplyAllWiring(unittest.TestCase):

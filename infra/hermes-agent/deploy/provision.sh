@@ -18,6 +18,19 @@
 # Runbook: infra/hermes-agent/deploy/BRING-UP.md
 set -euo pipefail
 
+# This script parses the OUTPUT of other programs -- `ufw status verbose`,
+# `sshd -T`, `id -nG` -- rather than their structured data. ufw's status
+# strings are gettext-wrapped, so under a translated locale "Status: active",
+# "Default:" and "ALLOW IN" would silently become different text. The failure
+# mode is not a visible error: a filter that stops matching returns an empty
+# result, and a check built on "empty means clean" (check_firewall's `extra`)
+# reports SAFE having measured nothing -- the same silent no-op Fix Round 1
+# closed for plain-vs-verbose ufw output, reached this time through locale
+# instead of verbosity. Pinned globally, once, rather than per call: later
+# checks parsing more program output (Task 5's check_docker) would otherwise
+# have to remember to pin it themselves.
+export LC_ALL=C
+
 # Names owned by the Hermes tier (README.md:957 step 1). See the spec's 2.1: a
 # deploy user named `hermes` silently costs gid 10000 and breaks the executor's
 # read of the governance store. Refuse rather than document.
