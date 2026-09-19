@@ -956,6 +956,11 @@ python3 infra/hermes-agent/bin/migrate-governance.py \
 
 ## VPS deploy sequence
 
+> **Provisioning a box first?** `deploy/BRING-UP.md` covers phases 0–5 — buying and
+> hardening the host, the on-box layout these units require, `.env`, the compose
+> build, and the bind-path measurement — and hands off to step 1 below. The steps
+> here assume a host that already has Docker, both repos, and the governance store.
+
 The order below is load-bearing — it was measured, not guessed (2026-09-16). Skipping
 or reordering a step produces failures that look like a hang rather than a clean error.
 This section covers the two units from Task 5 (`infra/hermes-agent/deploy/`); it reads
