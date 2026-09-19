@@ -334,9 +334,16 @@ ensure_docker() {
   chmod a+r /etc/apt/keyrings/docker.asc
   # signed-by scopes the key to THIS repository; without it the key is trusted
   # for every repository configured on the box.
+  # Parsed with os_release_field, never sourced -- the same reasoning as
+  # assert_supported_os's os_release_field above: OS_RELEASE_FILE is
+  # environment-overridable, and sourcing an environment-overridable path as
+  # root is arbitrary code execution, not a refusal. Fix round 1 found this
+  # identical `. "$OS_RELEASE_FILE"` pattern still live here after Task 2's
+  # fix closed only the assert_supported_os call site.
   local arch codename
   arch="$(dpkg --print-architecture)"
-  codename="$(. "$OS_RELEASE_FILE" >/dev/null 2>&1; printf '%s' "${VERSION_CODENAME:-noble}")"
+  codename="$(os_release_field VERSION_CODENAME)"
+  [ -n "$codename" ] || codename=noble
   printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
     "$arch" "$codename" > /etc/apt/sources.list.d/docker.list
   apt-get update -y
@@ -388,7 +395,7 @@ check_docker() {
   # README.md:957 step 1, so an empty group is correct at provision time, but
   # an operator re-running --check AFTER that step must not get a false alarm
   # from a bare "no members" rule -- a check that cries wolf gets ignored.
-  offenders="$(printf '%s\n' "$all_members" | sed '/^$/d' | grep -vx -- "$proxy_name" || true)"
+  offenders="$(printf '%s\n' "$all_members" | grep -vx -- "$proxy_name" || true)"
   if [ -z "$offenders" ]; then
     ok "docker group has no members beyond ${proxy_name:-hermes-docker-proxy}"
   else

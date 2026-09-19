@@ -558,6 +558,36 @@ class TestOsGate(unittest.TestCase):
                 os.unlink(marker)
 
 
+class TestOsReleaseNeverSourced(unittest.TestCase):
+    """Fix round 1 for Task 5. A CLASS assertion, not a call-site one.
+
+    Task 2's fix for `assert_supported_os` closed ONE call site sourcing
+    `$OS_RELEASE_FILE`, and its regression test
+    (test_a_hostile_os_release_is_not_executed above) exercises `--check`
+    mode only -- so it stayed green while an identical
+    `. "$OS_RELEASE_FILE"` was live in ensure_docker, reachable in apply
+    mode as root, and never exercised by that test. `OS_RELEASE_FILE` is
+    environment-overridable; sourcing an env-overridable path as root is
+    arbitrary code execution, regardless of which function does it. This
+    asserts the pattern is absent from the WHOLE script, not just from the
+    one function a previous fix happened to touch -- the third time on this
+    branch a defect has survived on a path a test didn't cover.
+
+    Mutation that proves it: reintroduce `. "$OS_RELEASE_FILE"` ANYWHERE in
+    the script (ensure_docker, check_docker, or any other function); this
+    fails in every case.
+    """
+
+    def test_the_os_release_file_is_never_sourced(self):
+        code = "\n".join(l for l in script_text().splitlines()
+                         if not l.strip().startswith("#"))
+        self.assertNotRegex(
+            code, r'(?:^|[;\s(])(?:\.|source)\s+"?\$(?:\{)?OS_RELEASE_FILE',
+            "the script sources $OS_RELEASE_FILE somewhere -- an "
+            "environment-overridable path sourced as root is arbitrary code "
+            "execution; parse it with os_release_field instead")
+
+
 class TestCheckModeIsNotVacuous(unittest.TestCase):
     """A check run that measured nothing must refuse, not pass."""
 
