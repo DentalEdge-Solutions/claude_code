@@ -203,16 +203,57 @@ SYSTEMCTL_MOCK_ALL_GOOD = (
 )
 
 
-def ufw_mock(status_body):
-    """A `ufw` mock whose `ufw status` prints status_body verbatim. The
-    heredoc delimiter is quoted so the body is never subject to shell
-    expansion."""
+# Fix Round 1 finding: check_firewall must run `ufw status verbose`, never
+# plain `ufw status`. Verified against ufw's OWN source
+# (src/backend_iptables.py, get_status()):
+#
+#   if r.direction == "in" and not r.forward and not verbose and not show_count:
+#       dir_str = ""
+#
+# The per-rule direction suffix ("ALLOW IN" vs bare "ALLOW") is rendered
+# ONLY under verbose (or numbered, or a forward rule) output. Plain `ufw
+# status` also omits the `Logging:`/`Default:`/`New profiles:` header lines
+# entirely -- those exist only in verbose output too. The first version of
+# this mock baked "ALLOW IN" into ITS OWN plain-mode fixture without
+# checking any of this against ufw's real behaviour, so the mock and the
+# (at the time, broken) implementation shared the same false belief about
+# the outside world and agreed with each other while both were wrong ("no
+# inbound rule beyond SSH" printed on a real host no matter what was
+# actually open). This mock now distinguishes the two invocations for real,
+# so a regression back to plain `ufw status` is caught by mutation (n) in
+# task-4-report.md rather than silently continuing to pass.
+UFW_PLAIN_STATUS_FALLBACK = (
+    "Status: active\n"
+    "\n"
+    "To                         Action      From\n"
+    "--                         ------      ----\n"
+    "OpenSSH                    ALLOW       Anywhere\n"
+    "22/tcp                     ALLOW       Anywhere\n"
+)
+
+
+def ufw_mock(verbose_status_body, plain_status_body=UFW_PLAIN_STATUS_FALLBACK):
+    """A `ufw` mock. `ufw status verbose` prints verbose_status_body
+    verbatim; any other `ufw status` invocation (i.e. without a literal
+    `verbose` second argument, matching a regression to plain `ufw status`)
+    prints plain_status_body instead -- by default a fixed, realistic plain
+    rendering with no `Default:`/`Logging:` lines and no `IN` direction
+    suffix, per ufw's own source (see the module comment above). Both
+    heredoc delimiters are quoted so neither body is ever subject to shell
+    expansion.
+    """
     return (
         "#!/bin/sh\n"
-        'if [ "$1" = "status" ]; then\n'
+        'if [ "$1" = "status" ] && [ "$2" = "verbose" ]; then\n'
         "cat <<'UFWEOF'\n"
-        + status_body.rstrip("\n") + "\n"
+        + verbose_status_body.rstrip("\n") + "\n"
         "UFWEOF\n"
+        "exit 0\n"
+        "fi\n"
+        'if [ "$1" = "status" ]; then\n'
+        "cat <<'UFWPLAINEOF'\n"
+        + plain_status_body.rstrip("\n") + "\n"
+        "UFWPLAINEOF\n"
         "exit 0\n"
         "fi\n"
         "exit 0\n"
@@ -221,11 +262,25 @@ def ufw_mock(status_body):
 
 UFW_CLEAN_STATUS = (
     "Status: active\n"
+    "Logging: on (low)\n"
+    "Default: deny (incoming), allow (outgoing), disabled (routed)\n"
+    "New profiles: skip\n"
     "\n"
     "To                         Action      From\n"
     "--                         ------      ----\n"
     "OpenSSH                    ALLOW IN    Anywhere\n"
     "22/tcp                     ALLOW IN    Anywhere\n"
+)
+
+UFW_ALLOW_INCOMING_DEFAULT_STATUS = (
+    "Status: active\n"
+    "Logging: on (low)\n"
+    "Default: allow (incoming), allow (outgoing), disabled (routed)\n"
+    "New profiles: skip\n"
+    "\n"
+    "To                         Action      From\n"
+    "--                         ------      ----\n"
+    "OpenSSH                    ALLOW IN    Anywhere\n"
 )
 
 
@@ -782,10 +837,21 @@ class TestCheckFirewallBehavioural(unittest.TestCase):
     subshell bug (see TestCheckModeVerdictIsTrustworthy) shipped past a
     31-test suite made entirely of textual check_* assertions.
 
+    Fix Round 1 history: the first version of this class passed with mock
+    fixtures that baked "ALLOW IN" into a PLAIN `ufw status` response --
+    exactly the same unverified assumption check_firewall's first
+    implementation made about real ufw output. Both were wrong in the same
+    way, so they agreed with each other: the tests below would have stayed
+    green on an implementation that silently never detected anything, on a
+    real host, no matter what was open. Every fixture here now goes through
+    ufw_mock(), which is verbose-aware and verified against ufw's own
+    source (see the module-level comment above UFW_PLAIN_STATUS_FALLBACK) --
+    a behavioural test is only as good as its mock's fidelity to reality.
+
     Each test here runs `--check` through run_check_all(), which mocks
     id/sshd/systemctl to PASS so check_deploy_user, check_sshd_hardening and
     check_fail2ban stay green -- any drift observed is attributable to the
-    `ufw status` text passed in, not to an unrelated check.
+    `ufw status verbose` text passed in, not to an unrelated check.
     """
 
     def test_reports_drift_for_an_unexpected_inbound_rule(self):
@@ -797,7 +863,11 @@ class TestCheckFirewallBehavioural(unittest.TestCase):
         fails.
         """
         rc, out, err = run_check_all(
-            "Status: active\n\n"
+            "Status: active\n"
+            "Logging: on (low)\n"
+            "Default: deny (incoming), allow (outgoing), disabled (routed)\n"
+            "New profiles: skip\n"
+            "\n"
             "To                         Action      From\n"
             "--                         ------      ----\n"
             "OpenSSH                    ALLOW IN    Anywhere\n"
@@ -813,13 +883,17 @@ class TestCheckFirewallBehavioural(unittest.TestCase):
         """Positive control -- the half of a check that usually goes
         unchecked. Without this, a check_firewall that flagged EVERY inbound
         rule (including OpenSSH/22 itself) would pass the test above just as
-        well as a correct one; only this test would catch it.
+        well as a correct one; only this test would catch it. Also the
+        positive control for the default-policy check below: UFW_CLEAN_STATUS
+        carries `Default: deny (incoming), ...`, so this must stay green
+        alongside test_reports_drift_when_default_incoming_policy_is_not_deny.
         """
         rc, out, err = run_check_all(UFW_CLEAN_STATUS)
         combined = (out + err).lower()
         self.assertEqual(rc, 0, "a clean firewall was reported as drift:\n%s" % combined)
         self.assertNotIn("unexpected inbound rule", combined, combined)
         self.assertNotIn("firewall inactive", combined, combined)
+        self.assertNotIn("default incoming policy is not deny", combined, combined)
 
     def test_ruling_4_regression_port_8022_is_not_hidden(self):
         """Ruling 4: the brief's original filter was
@@ -837,7 +911,11 @@ class TestCheckFirewallBehavioural(unittest.TestCase):
         this.
         """
         rc, out, err = run_check_all(
-            "Status: active\n\n"
+            "Status: active\n"
+            "Logging: on (low)\n"
+            "Default: deny (incoming), allow (outgoing), disabled (routed)\n"
+            "New profiles: skip\n"
+            "\n"
             "To                         Action      From\n"
             "--                         ------      ----\n"
             "OpenSSH                    ALLOW IN    Anywhere\n"
@@ -846,6 +924,27 @@ class TestCheckFirewallBehavioural(unittest.TestCase):
         combined = (out + err).lower()
         self.assertNotEqual(rc, 0, "port 8022 was silently hidden:\n%s" % combined)
         self.assertIn("8022", combined, combined)
+
+    def test_reports_drift_when_default_incoming_policy_is_not_deny(self):
+        """Fix Round 1: ensure_firewall SETS `ufw default deny incoming`, but
+        until now nothing verified it HOLDS. A box whose default incoming
+        policy had been flipped to allow (by an operator, another tool, or a
+        `ufw reset`-adjacent mistake) would otherwise pass check_firewall
+        cleanly as long as no unexpected explicit rule happened to be
+        present -- exactly the gap UFW_ALLOW_INCOMING_DEFAULT_STATUS
+        reproduces: no unexpected rule, only the default policy flipped.
+
+        Positive control: test_does_not_report_drift_for_a_clean_firewall,
+        which carries `Default: deny (incoming)` and must stay green.
+
+        Mutation that proves it: delete the default-policy `case` block from
+        check_firewall; this fails.
+        """
+        rc, out, err = run_check_all(UFW_ALLOW_INCOMING_DEFAULT_STATUS)
+        combined = (out + err).lower()
+        self.assertNotEqual(rc, 0,
+                            "an allow-incoming default policy was not flagged:\n%s" % combined)
+        self.assertIn("default incoming policy is not deny", combined, combined)
 
 
 class TestApplyAllWiring(unittest.TestCase):

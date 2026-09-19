@@ -252,11 +252,38 @@ ensure_unattended_upgrades() {
 }
 
 check_firewall() {
-  if ufw status 2>/dev/null | grep -q '^Status: active'; then
+  # `ufw status verbose`, never plain `ufw status` -- verified against ufw's
+  # own src/backend_iptables.py, whose get_status() has:
+  #   if r.direction == "in" and not r.forward and not verbose and not show_count:
+  #       dir_str = ""
+  # Plain (non-verbose) `ufw status` therefore blanks the direction suffix
+  # for an ordinary inbound rule: it renders as bare "ALLOW", not "ALLOW IN".
+  # An anchored `ALLOW IN` filter against PLAIN output matches nothing at
+  # all, so `extra` below would be unconditionally empty and this check
+  # would report "no inbound rule beyond SSH" no matter what is actually
+  # open -- a silent no-op on the one safety property this task exists to
+  # add. Verbose reliably renders the direction for every rule, and also
+  # prints the `Default:` policy line the check below needs.
+  local status
+  status="$(ufw status verbose 2>/dev/null || true)"
+
+  if printf '%s\n' "$status" | grep -q '^Status: active'; then
     ok "firewall active"
   else
     bad "firewall inactive"
   fi
+
+  # The default incoming policy is its own finding: ensure_firewall SETS it,
+  # but nothing else here verifies it HOLDS, and a box whose default
+  # incoming policy had been flipped to allow would otherwise pass this
+  # check cleanly as long as no explicit rule happened to be present.
+  local default_line
+  default_line="$(printf '%s\n' "$status" | grep '^Default:' || true)"
+  case "$default_line" in
+    *"deny (incoming)"*) ok "default incoming policy is deny" ;;
+    *) bad "default incoming policy is not deny: ${default_line:-no Default: line found}" ;;
+  esac
+
   # Anything beyond SSH on an inbound allow list is a finding: no app port is
   # opened in this design, and the dashboard is reached over an SSH tunnel.
   #
@@ -268,8 +295,12 @@ check_firewall() {
   # an unexpected inbound rule. Under-reporting a security finding is the
   # wrong direction to fail in, so this is over-reporting on purpose: a
   # false "unexpected rule" is a nuisance; a hidden one is an open box.
+  #
+  # `ALLOW IN`, not bare `ALLOW`, is correct BECAUSE this is verbose output:
+  # verbose also renders outbound rules as `ALLOW OUT`, so dropping the `IN`
+  # requirement would misreport an outbound rule as inbound drift.
   local extra
-  extra="$(ufw status 2>/dev/null | awk '/ALLOW IN/ { port=$1; sub(/\/(tcp|udp)$/,"",port); if (port !~ /^(22|OpenSSH)$/) print }' || true)"
+  extra="$(printf '%s\n' "$status" | awk '/ALLOW IN/ { port=$1; sub(/\/(tcp|udp)$/,"",port); if (port !~ /^(22|OpenSSH)$/) print }' || true)"
   [ -z "$extra" ] && ok "no inbound rule beyond SSH" \
     || bad "unexpected inbound rule(s): ${extra}"
 }
