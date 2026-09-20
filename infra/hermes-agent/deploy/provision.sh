@@ -196,18 +196,51 @@ ensure_sshd_hardening() {
   note "sshd hardened and reloaded"
 }
 
+in_group() { id -nG "$DEPLOY_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$1"; }
+
+check_authorized_key() {
+  local home akeys mode owner
+  home="$(getent passwd "$DEPLOY_USER" 2>/dev/null | cut -d: -f6)"
+  if [ -z "$home" ]; then
+    bad "authorized_keys: cannot resolve ${DEPLOY_USER}'s home directory"
+    return 0
+  fi
+  akeys="${home}/.ssh/authorized_keys"
+  # Password auth is disabled by ensure_sshd_hardening, so this file is the
+  # ONLY way in. A --check that does not look at it can report "all checks
+  # passed" to an operator who is about to close their console session.
+  if [ -s "$akeys" ]; then
+    ok "authorized_keys present and non-empty"
+  else
+    bad "authorized_keys missing or empty at ${akeys} -- password auth is off, so key access is the only way in"
+    return 0
+  fi
+  mode="$(stat -c %a "$akeys" 2>/dev/null || true)"
+  [ "$mode" = "600" ] && ok "authorized_keys mode is 600" \
+    || bad "authorized_keys mode is ${mode:-unknown}, expected 600"
+  owner="$(stat -c %U "$akeys" 2>/dev/null || true)"
+  [ "$owner" = "$DEPLOY_USER" ] && ok "authorized_keys owned by ${DEPLOY_USER}" \
+    || bad "authorized_keys owned by ${owner:-unknown}, expected ${DEPLOY_USER}"
+}
+
+check_unattended_upgrades() {
+  systemctl is-enabled --quiet unattended-upgrades 2>/dev/null \
+    && ok "unattended security upgrades enabled" \
+    || bad "unattended security upgrades NOT enabled"
+}
+
 check_deploy_user() {
   if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
     bad "user ${DEPLOY_USER} missing"
     return 0
   fi
   ok "user ${DEPLOY_USER} exists"
-  if id -nG "$DEPLOY_USER" 2>/dev/null | tr ' ' '\n' | grep -qx sudo; then
+  if in_group sudo; then
     ok "${DEPLOY_USER} is in the sudo group"
   else
     bad "${DEPLOY_USER} is NOT in the sudo group"
   fi
-  if id -nG "$DEPLOY_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+  if in_group docker; then
     bad "${DEPLOY_USER} is in the docker group (unlogged path to host root)"
   else
     ok "${DEPLOY_USER} is not in the docker group"
@@ -425,6 +458,8 @@ apply_all() {
 
 check_all() {
   check_deploy_user
+  check_authorized_key
+  check_unattended_upgrades
   check_sshd_hardening
   check_firewall
   check_fail2ban

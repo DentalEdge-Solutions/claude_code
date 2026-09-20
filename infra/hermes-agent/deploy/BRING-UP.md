@@ -75,6 +75,10 @@ You should see:
   OK    user hermesops exists
   OK    hermesops is in the sudo group
   OK    hermesops is not in the docker group
+  OK    authorized_keys present and non-empty
+  OK    authorized_keys mode is 600
+  OK    authorized_keys owned by hermesops
+  OK    unattended security upgrades enabled
   OK    sshd: PasswordAuthentication no
   OK    sshd: PermitRootLogin no
   OK    sshd: KbdInteractiveAuthentication no
@@ -85,7 +89,7 @@ You should see:
   OK    fail2ban running
   OK    docker running
   OK    docker group has no members beyond hermes-docker-proxy
-[provision] all checks passed (13 checks)
+[provision] all checks passed (17 checks)
 ```
 
 (The check count is what the script reports, so do not "correct" it from a manual count — if
