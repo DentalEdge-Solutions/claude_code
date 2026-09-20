@@ -47,19 +47,55 @@ dashboard with no second gate.
 
 Tailscale is therefore an **additional** layer, not a replacement one.
 
+**Measured 2026-09-19 against the pinned image, and it goes further than the
+principle:** `hermes dashboard --help` reports `--insecure` as *"DEPRECATED /
+NO-OP. Formerly bypassed auth on a non-loopback bind. As of the June 2026
+hardening it no longer disables authentication."* So the guide's step 5 does not
+do what it claims on this version, and its step 8 cannot work either — see §4.
+
 ## 4. Proposed shape
 
-1. The compose port-map stays exactly as it is: `127.0.0.1:9119:9119`. No bind to
-   the Tailscale interface, no public bind.
-2. `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` stay **mandatory**. The
-   dashboard is never started with auth disabled.
-3. Tailscale proxies the loopback service onto the tailnet — `tailscale serve`
-   appears to be the right mechanism, but see §6: this is unverified.
-4. Tailnet ACLs restrict which devices may reach the node, so device scope is
-   explicit rather than "anything signed into the account".
+**Corrected 2026-09-19.** The first draft of this section proposed keeping the
+loopback bind *and* keeping `HERMES_DASHBOARD_BASIC_AUTH_*` mandatory, as two
+complementary gates. **That was wrong**, and measurement is what corrected it:
+they are not two layers, they are two mutually exclusive **modes**, selected by
+the bind address.
 
-Net effect: two independent gates (tailnet membership, then dashboard auth) where
-today there is one (SSH key), and where the guide would leave one (tailnet only).
+`hermes_cli/web_server.py:19173` — `app.state.auth_required = should_require_auth(host)`:
+
+| Bind | `auth_required` | Mechanism |
+|---|---|---|
+| `127.0.0.1` | False | `X-Hermes-Session-Token` / legacy `Bearer` — the session token |
+| non-loopback | True | cookie/OAuth gate; the session token is **not injected and not checked**, and the bind is refused without an auth provider |
+
+Basic auth *is* the gate, and the gate exists only on a non-loopback bind. On a
+loopback bind the gate is off by construction and the session token is the
+mechanism. The source states it directly (`:365-375`): *"Two auth schemes protect
+the dashboard, exactly one active per bind."*
+
+So the shape is:
+
+1. The compose port-map stays `127.0.0.1:9119:9119` — unchanged, and now for a
+   measured reason rather than a stylistic one.
+2. Tailscale terminates **at loopback**: `tailscale serve` proxying to
+   `127.0.0.1:9119`, never a bind to the tailnet IP. Binding to the tailnet
+   address would flip `auth_required` to True, which is exactly what breaks the
+   Desktop app's URL-plus-token model — and is what the source guide does.
+3. Authentication on that path is the **session token**
+   (`HERMES_DASHBOARD_SESSION_TOKEN`), not basic auth.
+4. Tailnet ACLs restrict which devices may reach the node, scoped deliberately
+   rather than left at "anything signed into the account".
+5. `HERMES_DASHBOARD_BASIC_AUTH_*` in `.env.example` is not wrong, but applies
+   **only** to the non-loopback path, which this design does not take. It should
+   carry a clarifying comment saying so.
+
+**What the defence actually is, stated honestly.** Still two gates — tailnet
+membership, then the session token — but not the two the first draft named. The
+credential is a session token rather than a password, and per `:281` it is
+ephemeral: absent `HERMES_DASHBOARD_SESSION_TOKEN` in the environment it is
+regenerated on every server start, so it must be pinned in `.env` for a stable
+remote client. The tailnet ACL is therefore load-bearing rather than decorative,
+which is the operational cost of this shape and should be weighed when deciding.
 
 ## 5. What this does NOT change
 
@@ -81,7 +117,8 @@ rendering `ALLOW` vs `ALLOW IN`, which made a security check a silent no-op).
 
 | Question | Why it blocks | Status |
 |---|---|---|
-| Does the Hermes Desktop app accept **basic auth**, or does it require a bearer `HERMES_DASHBOARD_SESSION_TOKEN`? | If it cannot do basic auth, §4.2 and the app are incompatible and the choice is a token-based auth provider — **not** `--insecure`. | UNVERIFIED |
+| Does the Hermes Desktop app accept basic auth, or require a session token? | Decides the whole shape. | **SERVER SIDE ANSWERED 2026-09-19** — the two modes are mutually exclusive and chosen by bind address (§4). On a loopback bind, the session token is the only mechanism; basic auth is unreachable. |
+| Does the Desktop app in fact send `X-Hermes-Session-Token` over a tunnel to a loopback-bound dashboard? | The server side is now constrained, but the client has not been observed. | UNVERIFIED — needs the app driven by a human; it is a native GUI. |
 | Does `tailscale serve` proxy a loopback port to the tailnet with the semantics assumed in §4.3? | The whole shape depends on it. | UNVERIFIED |
 | Does `check_firewall` report drift when Tailscale is present? | `provision.sh` treats any inbound rule beyond SSH as drift. Tailscale may add interface state that reads as drift, producing a false alarm on every `--check`. | UNVERIFIED |
 | Does the `ufw` default-deny posture interfere with tailnet traffic? | If it does, the remedy must not be widening the inbound allow-list. | UNVERIFIED |
@@ -120,3 +157,10 @@ no business on a network).
   `.env.example:21-30` keeps the dashboard off unless `HERMES_DASHBOARD` is set and
   documents that a non-loopback bind requires an auth provider.
 - Tailscale appears nowhere in the tree today except those two references.
+- Auth mechanics measured 2026-09-19 by reading the pinned image
+  (`hermes-agent-claude`, derived from the digest-pinned base), not by inference:
+  `hermes dashboard --help` for the `--insecure` no-op; `web_server.py:19173`
+  for `auth_required = should_require_auth(host)`; `:358-380` for the two
+  mutually exclusive schemes; `:587` for *"the legacy `_SESSION_TOKEN` path is
+  loopback-only"*; `:281` for the regenerate-per-start behaviour. The running
+  stack was not started and `.env` was not read.
