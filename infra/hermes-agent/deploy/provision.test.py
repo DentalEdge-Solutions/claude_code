@@ -215,6 +215,41 @@ STAT_MOCK_AUTHORIZED_KEYS_GOOD = (
     "exit 1\n"
 )
 
+STAT_MOCK_AUTHORIZED_KEYS_BAD_MODE = (
+    "#!/bin/sh\n"
+    'case "$2" in\n'
+    '  "%a")\n'
+    '    if [ -n "$3" ]; then echo 644; exit 0; fi ;;\n'
+    '  "%U")\n'
+    '    if [ -n "$3" ]; then echo hermesops; exit 0; fi ;;\n'
+    'esac\n'
+    "exit 1\n"
+)
+
+STAT_MOCK_AUTHORIZED_KEYS_WRONG_OWNER = (
+    "#!/bin/sh\n"
+    'case "$2" in\n'
+    '  "%a")\n'
+    '    if [ -n "$3" ]; then echo 600; exit 0; fi ;;\n'
+    '  "%U")\n'
+    '    if [ -n "$3" ]; then echo root; exit 0; fi ;;\n'
+    'esac\n'
+    "exit 1\n"
+)
+
+def systemctl_mock_upgrades_disabled():
+    """Systemctl mock where is-enabled unattended-upgrades fails; other checks pass."""
+    return (
+        "#!/bin/sh\n"
+        'if [ "$1" = "is-enabled" ] && grep -q unattended-upgrades <<< "$@"; then\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [ "$1" = "is-enabled" ]; then exit 0; fi\n'
+        'if [ "$1" = "is-active" ]; then exit 0; fi\n'
+        'if [ "$1" = "reload" ]; then exit 0; fi\n'
+        "exit 0\n"
+    )
+
 
 # Fix Round 1 finding: check_firewall must run `ufw status verbose`, never
 # plain `ufw status`. Verified against ufw's OWN source
@@ -370,6 +405,28 @@ UFW_ALLOW_INCOMING_DEFAULT_STATUS = (
 # exists (gid 998) with no supplementary members and no passwd entry using
 # that gid as its primary -- the correct state BEFORE README.md:957 step 1
 # runs, and the positive control for "an empty docker group is not drift".
+def getent_mock_no_authorized_keys(home_dir):
+    """Getent mock where authorized_keys does not exist."""
+    return (
+        "#!/bin/sh\n"
+        'if [ "$1" = "group" ] && [ "$2" = "docker" ]; then\n'
+        '  echo "docker:x:998:"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "passwd" ]; then\n'
+        '  if [ -z "$2" ]; then\n'
+        "cat <<'EOF'\n"
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "hermesops:x:1000:1000:,,,:%s:/bin/bash\n"
+        "EOF\n"
+        "  else\n"
+        '    [ "$2" = "hermesops" ] && echo "hermesops:x:1000:1000:,,,:%s:/bin/bash"\n'
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n" % (home_dir, home_dir)
+    )
+
 def getent_mock_with_home(home_dir):
     """Create a getent mock that returns the specified home directory."""
     return (
@@ -456,7 +513,7 @@ GETENT_MOCK_PROXY_ONLY = (
 )
 
 
-def run_check_all(ufw_status, extra_env=None, getent_body=None):
+def run_check_all(ufw_status, extra_env=None, getent_body=None, systemctl_mock=None, stat_mock=None):
     """Run `--check` with id/sshd/systemctl mocked to PASS, `ufw` mocked to
     report ufw_status for `ufw status verbose`, and `getent` mocked to report
     an empty docker group (GETENT_MOCK_EMPTY_GROUP) unless getent_body is
@@ -469,6 +526,8 @@ def run_check_all(ufw_status, extra_env=None, getent_body=None):
     the mocked PATH/OS_RELEASE_FILE -- used to simulate a hostile parent
     environment (e.g. a translated LC_ALL) that provision.sh's own
     `export LC_ALL=C` must override rather than inherit.
+
+    systemctl_mock and stat_mock override the default mocks if provided.
     """
     homedir = tempfile.mkdtemp(prefix="hermesops-home-")
     ssh_dir = os.path.join(homedir, ".ssh")
@@ -481,10 +540,10 @@ def run_check_all(ufw_status, extra_env=None, getent_body=None):
     mockdir = mockbin(
         id=ID_MOCK_ALL_GOOD,
         sshd=SSHD_MOCK_ALL_GOOD,
-        systemctl=SYSTEMCTL_MOCK_ALL_GOOD,
+        systemctl=systemctl_mock if systemctl_mock else SYSTEMCTL_MOCK_ALL_GOOD,
         ufw=ufw_mock(ufw_status),
         getent=getent_mock_with_home(homedir) if getent_body is None else getent_body,
-        stat=STAT_MOCK_AUTHORIZED_KEYS_GOOD,
+        stat=stat_mock if stat_mock else STAT_MOCK_AUTHORIZED_KEYS_GOOD,
     )
     osr = os_release("24.04")
     try:
@@ -1348,17 +1407,82 @@ class TestCheckDockerBehavioural(unittest.TestCase):
 
 class TestAuthorizedKeyAndUpgradesChecks(unittest.TestCase):
     def test_authorized_key_check_is_wired_into_check_all(self):
-        """The check must be present and produce OK on a good system."""
+        """Positive control: three authorized_keys properties must all appear on clean system.
+
+        Mutation (aa) makes [ -s "$akeys" ] always succeed → this test must FAIL.
+        """
         rc, out, err = run_check_all(UFW_CLEAN_STATUS)
         combined = (out + err).lower()
         self.assertIn("authorized_keys present and non-empty", combined, combined)
         self.assertIn("authorized_keys mode is 600", combined, combined)
+        self.assertIn("authorized_keys owned by hermesops", combined, combined)
+
+    def test_authorized_keys_missing_or_empty_reports_drift(self):
+        """Drift when authorized_keys is missing or empty. Only check_authorized_key should fail.
+
+        Mutation (aa) makes [ -s "$akeys" ] always succeed → this test must FAIL.
+        """
+        homedir = tempfile.mkdtemp(prefix="hermesops-no-akeys-")
+        ssh_dir = os.path.join(homedir, ".ssh")
+        os.makedirs(ssh_dir, mode=0o700)
+        # DO NOT create authorized_keys - simulating missing file
+
+        mockdir = mockbin(
+            id=ID_MOCK_ALL_GOOD,
+            sshd=SSHD_MOCK_ALL_GOOD,
+            systemctl=SYSTEMCTL_MOCK_ALL_GOOD,
+            ufw=ufw_mock(UFW_CLEAN_STATUS),
+            getent=getent_mock_no_authorized_keys(homedir),
+            stat=STAT_MOCK_AUTHORIZED_KEYS_GOOD,
+        )
+        osr = os_release("24.04")
+        try:
+            env = mock_env(mockdir, osr)
+            p = subprocess.run(["bash", SCRIPT, "--check"], capture_output=True,
+                               text=True, env=env)
+            combined = p.stdout + p.stderr
+            self.assertNotEqual(p.returncode, 0, "missing authorized_keys was not flagged")
+            self.assertIn("authorized_keys missing or empty", combined, combined)
+        finally:
+            os.unlink(osr)
+            shutil.rmtree(mockdir)
+            shutil.rmtree(homedir)
+
+    def test_authorized_keys_wrong_mode_reports_drift(self):
+        """Drift when authorized_keys mode is not 600. Only check_authorized_key should fail.
+
+        Mutation (x) makes mode comparison always succeed → this test must FAIL.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS, stat_mock=STAT_MOCK_AUTHORIZED_KEYS_BAD_MODE)
+        combined = out + err
+        self.assertNotEqual(rc, 0, "wrong authorized_keys mode was not flagged")
+        self.assertIn("authorized_keys mode is 644, expected 600", combined, combined)
+
+    def test_authorized_keys_wrong_owner_reports_drift(self):
+        """Drift when authorized_keys owner is not DEPLOY_USER. Only check_authorized_key should fail.
+
+        Mutation (y) makes owner comparison always succeed → this test must FAIL.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS, stat_mock=STAT_MOCK_AUTHORIZED_KEYS_WRONG_OWNER)
+        combined = out + err
+        self.assertNotEqual(rc, 0, "wrong authorized_keys owner was not flagged")
+        self.assertIn("authorized_keys owned by root, expected hermesops", combined, combined)
 
     def test_unattended_upgrades_check_is_wired_into_check_all(self):
-        """The check must be present and produce OK on a good system."""
+        """Positive control: unattended-upgrades enabled check must pass on clean system."""
         rc, out, err = run_check_all(UFW_CLEAN_STATUS)
         combined = (out + err).lower()
         self.assertIn("unattended security upgrades enabled", combined, combined)
+
+    def test_unattended_upgrades_disabled_reports_drift(self):
+        """Drift when unattended-upgrades is not enabled. Only check_unattended_upgrades should fail.
+
+        Mutation (z) deletes check_unattended_upgrades from check_all → this test must FAIL.
+        """
+        rc, out, err = run_check_all(UFW_CLEAN_STATUS, systemctl_mock=systemctl_mock_upgrades_disabled())
+        combined = out + err
+        self.assertNotEqual(rc, 0, "disabled unattended-upgrades was not flagged")
+        self.assertIn("unattended security upgrades NOT enabled", combined, combined)
 
 
 class TestApplyAllWiring(unittest.TestCase):
