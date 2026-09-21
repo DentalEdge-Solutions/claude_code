@@ -1,4 +1,5 @@
 import contextlib, importlib.util, io, os, shutil, sys, tempfile, unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -91,6 +92,18 @@ class TestCli(Base):
         rc, _, err = self.run_cli("--check", factory=refuse)
         self.assertEqual(rc, 2)
         self.assertIn("1234", err)
+
+    def test_an_os_error_with_a_rollback_note_surfaces_the_note(self):
+        def raise_with_note(*a, **kw):
+            e = PermissionError(1, "Operation not permitted")
+            e.add_note("rollback could not remove: /x; remove by hand")
+            raise e
+        with patch.object(CLI.H, "apply", side_effect=raise_with_note):
+            rc, _, err = self.run_cli("--apply", geteuid=lambda: 0)
+        self.assertEqual(rc, 2)
+        self.assertIn("Operation not permitted", err)
+        self.assertIn("rollback could not remove", err)
+        self.assertNotIn("Traceback", err)
 
 
 if __name__ == "__main__":

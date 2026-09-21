@@ -58,6 +58,8 @@ def main(argv=None, resolver_factory=None, ancestor_uids=(0,), ancestor_top="/",
         return EXIT_REFUSED if any(s.action == "mismatch" for s in steps) else EXIT_OK
     except (H.LayoutError, OSError) as e:
         print("init-host-layout: %s" % e, file=sys.stderr)
+        for note in getattr(e, "__notes__", ()):
+            print("init-host-layout: %s" % note, file=sys.stderr)
         return EXIT_REFUSED
 
 
