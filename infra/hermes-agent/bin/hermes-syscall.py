@@ -54,6 +54,7 @@ def submit(client, changeset, root=None):
     path = os.path.join(d, "%s.json" % request_id)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".%s." % request_id, suffix=".tmp")
     try:
+        os.fchmod(fd, S.SPOOL_FILE_MODE)       # F10a: the broker is another user
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(req, f, sort_keys=True)
             f.flush()

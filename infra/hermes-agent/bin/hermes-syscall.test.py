@@ -1,4 +1,4 @@
-import contextlib, errno, importlib.util, io, json, os, sys, tempfile, unittest
+import contextlib, errno, importlib.util, io, json, os, stat, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -320,6 +320,23 @@ class TestResult(Base):
         for word in ("retry", "try again", "temporar", "transient"):
             self.assertNotIn(word, low)
         self.assertIn("result_unreadable", out)
+
+
+class TestRequestFileMode(Base):
+    """F10a, the other direction: a 0600 request written by the gateway could not be
+    opened by hermes-broker, so every request was refused and discarded."""
+
+    def test_a_request_lands_0640_whatever_the_umask(self):
+        for umask in (0o000, 0o077):
+            old = os.umask(umask)
+            try:
+                rc, out, _ = self.run_cli(["apply", "--client", "pilot-1",
+                                           "--changeset", "20260824-101500-abcdef01"])
+            finally:
+                os.umask(old)
+            self.assertEqual(rc, 0)
+            p = S.request_path(out.strip(), self.root)
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o640, oct(umask))
 
 
 if __name__ == "__main__":
