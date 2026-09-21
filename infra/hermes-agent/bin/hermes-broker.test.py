@@ -1,4 +1,5 @@
-import datetime, importlib.util, json, os, subprocess, sys, tempfile, unittest
+import contextlib, datetime, importlib.util, io, json, os, stat, subprocess, sys, tempfile, unittest, uuid
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -610,6 +611,83 @@ class TestPoisonedSpoolEntries(Base):
         # forever as new work.
         out2 = self.drain(RecordingRunner())              # must not raise
         self.assertNotIn(poison_name, os.listdir(d))
+
+
+class TestQuarantineIsVerified(Base):
+    """F10b and R1. The gateway can write requests/, so it can plant '.quarantine' first
+    (as a symlink, or as a directory it owns) and have the broker move entries through
+    it. The broker must verify the directory before using it. Empty planted directories
+    are rmdir'ed instead (R1: a non-root broker cannot move a gateway-owned directory to
+    another parent on Linux, so quarantine is not always available)."""
+
+    POISON = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.json"
+
+    def plant(self, empty):
+        d = S.requests_dir(self.spool)
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, self.POISON)
+        os.mkdir(p)
+        if not empty:
+            with open(os.path.join(p, "x"), "w") as f:
+                f.write("x")
+        return d, p
+
+    def other_request(self):
+        rid = str(uuid.uuid4())
+        C.append_seen(SLUG, rid, NOW)          # a replay: refused without a runner call
+        self.file_request(request_id=rid)
+        return rid
+
+    def drain_stderr(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.drain(RecordingRunner())          # must not raise
+        return err.getvalue()
+
+    def test_an_empty_planted_directory_is_removed_without_quarantine(self):
+        d, p = self.plant(empty=True)
+        self.drain_stderr()
+        self.assertFalse(os.path.exists(p))
+        self.assertFalse(os.path.exists(os.path.join(d, ".quarantine")))
+
+    def test_control_a_non_empty_directory_goes_to_a_trusted_quarantine(self):
+        d, p = self.plant(empty=False)
+        other = self.other_request()
+        self.drain_stderr()
+        self.assertFalse(os.path.exists(p))
+        q = os.path.join(d, ".quarantine")
+        self.assertEqual(len(os.listdir(q)), 1)
+        self.assertEqual(stat.S_IMODE(os.lstat(q).st_mode) & 0o022, 0)
+        self.assertEqual(self.result_for(other)["classification"], "refused_replay")
+
+    def test_a_symlinked_quarantine_is_refused_and_nothing_moves_through_it(self):
+        d, p = self.plant(empty=False)
+        elsewhere = tempfile.mkdtemp()
+        os.symlink(elsewhere, os.path.join(d, ".quarantine"))
+        other = self.other_request()
+        err = self.drain_stderr()
+        self.assertTrue(os.path.isdir(p))
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertIn(".quarantine", err)
+        self.assertEqual(self.result_for(other)["classification"], "refused_replay")
+
+    def test_a_group_writable_quarantine_is_refused(self):
+        d, p = self.plant(empty=False)
+        q = os.path.join(d, ".quarantine")
+        os.mkdir(q)
+        os.chmod(q, 0o770)
+        err = self.drain_stderr()
+        self.assertTrue(os.path.isdir(p))
+        self.assertEqual(os.listdir(q), [])
+        self.assertIn("writable", err)
+
+    def test_a_quarantine_owned_by_another_uid_is_refused(self):
+        d, p = self.plant(empty=False)
+        os.mkdir(os.path.join(d, ".quarantine"), 0o700)
+        with mock.patch.object(B.os, "geteuid", return_value=os.geteuid() + 4242):
+            err = self.drain_stderr()
+        self.assertTrue(os.path.isdir(p))
+        self.assertIn("owned by uid", err)
 
 
 class TestExecution(Base):
