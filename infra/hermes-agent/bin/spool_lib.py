@@ -205,8 +205,8 @@ def write_result(request_id, payload, root=None):
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".%s." % request_id, suffix=".tmp")
     try:
-        os.fchmod(fd, SPOOL_FILE_MODE)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), SPOOL_FILE_MODE)
             json.dump(payload, f, indent=2, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())
