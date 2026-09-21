@@ -203,14 +203,17 @@ def check(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/"
 
 
 def _remove(path):
+    """Best-effort removal used only during rollback. Returns True on success, False if
+    the path could not be removed — the caller must surface a False, never swallow it."""
     try:
         st = os.lstat(path)
         if stat.S_ISDIR(st.st_mode):
             os.rmdir(path)
         else:
             os.unlink(path)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _write_all(fd, data):
@@ -228,7 +231,11 @@ def apply(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/"
     created with mkdir/O_EXCL, then opened with O_NOFOLLOW, and fchown'ed and fchmod'ed
     on that fd, so neither a planted symlink nor the umask can redirect or weaken it.
     Each entry is re-inspected after it is created. On ANY failure, everything created by
-    this call is removed, children first, and the exception propagates."""
+    this call is removed, children first, and the exception propagates. Anything that
+    could not be removed (for example another process wrote into a directory this call
+    created) is named on the re-raised exception — via add_note on 3.11+, or appended to
+    its args otherwise — so a failed rollback is never silent; the exception's own type
+    is always preserved."""
     if geteuid() != 0:
         raise LayoutError("--apply must run as root: it creates entries owned by users "
                           "other than the caller. Nothing was created.")
@@ -267,8 +274,14 @@ def apply(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/"
             state, detail = _inspect(e, s.path, resolver)
             if state != "ok":
                 raise LayoutError("%s did not land as specified: %s" % (s.path, detail))
-    except BaseException:
-        for p in reversed(created):
-            _remove(p)
+    except BaseException as exc:
+        unremoved = [p for p in reversed(created) if not _remove(p)]
+        if unremoved:
+            note = ("rollback could not remove: %s; remove by hand"
+                    % ", ".join(unremoved))
+            if hasattr(exc, "add_note"):
+                exc.add_note(note)
+            else:
+                exc.args = exc.args + (note,)
         raise
     return created

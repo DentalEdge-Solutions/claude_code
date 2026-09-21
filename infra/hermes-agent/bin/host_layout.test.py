@@ -1,4 +1,5 @@
 import os, shutil, stat, sys, tempfile, unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -351,6 +352,33 @@ class TestApply(Base):
                        groups={"hermes": foreign, "hermes-broker": self.gid})
         with self.assertRaises(OSError):
             self.apply(resolver=r)
+        self.assertEqual(os.listdir(self.base), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root may chown to any gid")
+    def test_a_deeper_failure_removes_everything_in_order(self):
+        """The shallow rollback test above only ever creates ONE entry (the store root),
+        so it cannot tell reversed(created) apart from created — removing a lone entry
+        needs no order. Here 'hermes-broker' resolves to a foreign gid instead, so
+        'hermes' stays valid: the store root, approvals and control are created (all
+        grouped 'hermes') before the failure lands on control/.locks (grouped
+        'hermes-broker'). Rollback must remove control/.locks before control before
+        approvals before the store root, or a non-empty rmdir silently no-ops (per
+        _remove) and leaves a directory behind."""
+        foreign = max(os.getgroups() + [self.gid]) + 4242
+        r = H.Resolver(users={"root": self.uid, "hermes-broker": self.uid},
+                       groups={"hermes": self.gid, "hermes-broker": foreign})
+        with self.assertRaises(OSError):
+            self.apply(resolver=r)
+        self.assertEqual(os.listdir(self.base), [])
+
+    def test_a_post_create_mismatch_is_rolled_back_and_reported(self):
+        """Firing control for the '... did not land as specified' branch: fchmod becomes
+        a no-op, so the freshly mkdir'ed store root keeps mode 0700 instead of the
+        table's 0750, and the re-inspect right after creation must catch it."""
+        with patch.object(H.os, "fchmod", lambda fd, mode: None):
+            with self.assertRaises(H.LayoutError) as cm:
+                self.apply()
+        self.assertIn("did not land as specified", str(cm.exception))
         self.assertEqual(os.listdir(self.base), [])
 
     def test_an_existing_registry_is_never_rewritten(self):
