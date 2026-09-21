@@ -1,6 +1,7 @@
 # F10 — Governance store and spool layout for a fresh Linux host (design)
 
-> **Status:** design approved in brainstorming, 2026-09-21. Implementation plan follows via
+> **Status:** design approved in brainstorming, 2026-09-21; amended after spec review the same day
+> (R1 gateway-created directories, R2 F12's second case, R3 mismatch lines name the expected state). Implementation plan follows via
 > `superpowers:writing-plans`.
 > **Handoff:** `docs/superpowers/handoffs/2026-09-21-f10-governance-store-and-spool-layout.md`
 > **Finding:** F10 in `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`
@@ -126,6 +127,14 @@ The single layout table (§3.2 + §3.3) and the logic over it. Imports `governan
   wrong uid / wrong gid / mode not exactly equal (so a missing setgid or sticky bit is caught).
   Plus every ancestor of both roots up to `/`: must be root-owned and not group- or
   world-writable.
+
+  **Every mismatch line names the expected state (review amendment R3).** The tool never
+  repairs, so a refusal is only useful if it says what "correct" is. A mismatch line carries
+  the path, what was found, and the expected `owner:group mode` — for example
+  `registry/clients.json: owner root:root mode 0644, expected root:hermes 0640`. A mismatch
+  can happen in normal operation: an editor that replaces `clients.json` recreates it with the
+  editor's owner and umask. The README documents editing the registry in place with
+  `install -o root -g hermes -m 0640 <edited copy> registry/clients.json`.
 - **`plan(...)`**: per entry, `create` / `ok` / `mismatch: <reason>`. The dry-run output.
 - **`apply(...)`**: refuses unless `euid == 0`. Runs `check` first; if **any existing** entry
   mismatches, or any ancestor fails, refuses before creating anything. Then, parent-first, for
@@ -160,6 +169,19 @@ os.geteuid()`, and no group/other write. Otherwise print the reason to stderr, l
 place and return — the existing "could not remove or quarantine" path. `_discard` still never
 raises; the drain survives.
 
+**Gateway-created directories (review amendment R1).** On Linux, moving a directory to a
+different parent requires write permission on the directory itself (it updates `..`). The
+gateway creates any directory it plants in `requests/`, so it chooses the mode, and a `0700`
+directory cannot be quarantined by a non-root broker. `_discard` therefore tries
+`os.rmdir(path)` after `unlink` fails and before quarantine: in the sticky `requests/` the
+broker, as directory owner, may remove an **empty** gateway directory. A **non-empty**
+gateway directory it cannot write stays in place.
+
+**Stated residual:** such a directory is re-scanned, re-rejected and logged to stderr on every
+drain pass (every 5 s under `--watch`). The drain survives it and every other request in the
+same pass is still processed. Removing it needs the operator (root). The "FIX ROUND 2" part of
+the `_discard` docstring is corrected to say this, instead of claiming the stall is closed.
+
 ### 4.5 Pre-flight (`preflight-governance-access.py`)
 
 - If the root cannot be `stat`ed or entered, report exactly one line and return: `ENOENT` →
@@ -189,13 +211,15 @@ Every check has a firing control: a test running it against a bad layout and sho
 - `host_layout.check`, resolver mapped to the test process's own uid/gid. Firing controls:
   missing entry; wrong mode, including a missing setgid bit and a missing sticky bit; wrong owner
   (resolver maps the name to another uid); wrong group; symlink in place of a directory;
-  group-writable ancestor; world-writable ancestor. The correct layout returns `[]`.
+  group-writable ancestor; world-writable ancestor. The correct layout returns `[]`. Each
+  mismatch line contains the expected `owner:group mode` (R3).
 - `apply`: refuses when not root. With one existing mismatched entry, refuses and creates
   nothing (tree snapshot before/after). Dry run creates nothing.
 - File modes: `submit` and `write_result` produce `0640` under umask `0000` and `0077`. The plan
   records a mutation check: removing the `fchmod` turns the test red.
 - `_discard`: a planted symlink `.quarantine` and a group-writable `.quarantine` are refused; the
-  entry stays; the drain continues and processes the other entries.
+  entry stays; the drain continues and processes the other entries. An empty UUID-named
+  directory is removed by `rmdir` without touching `.quarantine` (R1).
 - Pre-flight: missing root yields exactly one "missing" line; `chmod 000` root (non-root process)
   yields exactly one "cannot enter" line. The existing suite passes unchanged.
 
@@ -217,6 +241,11 @@ Every check has a firing control: a test running it against a bad layout and sho
   `results/` group-writable, `.quarantine` not pre-created) the attack **succeeds** and
   `init-host-layout.py --check` reports the fault.
 - **Quarantine ownership:** a `.quarantine` created by uid 10000 is refused by the broker.
+- **Planted directories (R1):** uid 10000 plants two UUID-named directories in `requests/`, one
+  empty and one non-empty at `0700`, beside a valid request. One `--once` pass as
+  `hermes-broker` must: remove the empty one (`rmdir`), leave the non-empty one in place with a
+  stderr line, and still write a result for the valid request. A second pass must behave the
+  same way (the residual repeats, and nothing gets stuck).
 - **Gates as `hermes-broker`:** `init-host-layout.py --check` and the pre-flight both exit `0` on
   a fresh store with `{}` — the state the bring-up never reached. The pre-flight against a
   missing root prints one "missing" line.
@@ -241,7 +270,9 @@ commit.
 - **README "Ownership on a Linux host":** rewritten around the §3.2 table and
   `init-host-layout.py` (dry run → `--apply` → `--check`). The group-access `chgrp`/`chmod`
   recipe and the "outright ownership" recipe are both removed. The S3-b reasoning for `log/`
-  stays, as does `--bootstrap-logs`, plus a paragraph on the §3.2 residual.
+  stays, as does `--bootstrap-logs`, plus a paragraph on the §3.2 residual. It also shows
+  how to edit `registry/clients.json` without drifting its owner or mode (`install -o root -g
+  hermes -m 0640`, §4.1).
 - **README "Spool layout":** host path, §3.3 table, and why the spool is not under `data/`
   (F10b). Fix `result --request` to `result --request-id` (the CLI flag).
 - **README "VPS deploy sequence" step 2:** `sudo rmdir` the empty store; set `HERMES_SPOOL_DIR`
@@ -263,6 +294,15 @@ Run as root, it leaves root-owned `0600` lock files and `reserve_approval` fails
 apply. Run as `hermes-broker`, it cannot read `data/vaults`. Separately, approval and snapshot
 files are written with plain `open()`, so they are group-readable only because of the umask. The
 handoff's §6 `UMask=0077` gate would make every approval unreadable to the executor.
+
+**Second case (review amendment R2).** `run-ads-mutate.sh` runs as `hermes-broker`, inside the
+broker unit's sandbox (it is a child of the broker), and after every apply it calls
+`persist-run-record.py`, which writes the run record into `data/vaults/<slug>/`
+(`VAULT_ROOT` from `hostenv.sh`). That cannot work either: `data/` is `700` uid 10000, and
+`data/vaults` is not in `ReadWritePaths`, so it is read-only to the broker under
+`ProtectSystem=strict` anyway. The failure is reached only after an accepted apply, and
+`run-ads-mutate.sh` reports it with its "RUN RECORD NOT PERSISTED" banner while keeping the
+executor's exit status. F12's fix must cover both host-side tools that touch `data/vaults`.
 
 **F12 gates creating the kill switch.** It does not gate Phase 6: installing the units and
 running the pre-flight approves nothing, and mutation stays disabled. F10's `approvals/`
