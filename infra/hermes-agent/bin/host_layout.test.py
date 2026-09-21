@@ -255,5 +255,116 @@ class TestSystemResolver(unittest.TestCase):
         self.assertIn("hermes-broker", str(cm.exception))
 
 
+def snapshot(base):
+    """Every path under base with its mode — to prove a refusal created nothing."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        for n in sorted(dirnames + filenames):
+            p = os.path.join(dirpath, n)
+            out.append((os.path.relpath(p, base), stat.S_IMODE(os.lstat(p).st_mode)))
+    return sorted(out)
+
+
+AS_ROOT = lambda: 0      # apply() checks euid; Tier 1 fakes it and maps names to itself
+
+
+class TestPlan(Base):
+    def test_dry_run_on_an_empty_host_creates_nothing(self):
+        before = snapshot(self.base)
+        steps = H.plan(self.store, self.spool, **self.kw())
+        self.assertEqual(snapshot(self.base), before)
+        self.assertEqual([s.action for s in steps], ["create"] * len(H.LAYOUT))
+        self.assertEqual(sum(1 for s in steps if not s.implied), 2)   # the two roots
+
+    def test_plan_reports_ok_for_a_correct_layout(self):
+        make_layout(self.store, self.spool)
+        self.assertEqual({s.action for s in H.plan(self.store, self.spool, **self.kw())},
+                         {"ok"})
+
+    def test_relative_roots_are_refused(self):
+        with self.assertRaises(H.LayoutError):
+            H.plan("governance", self.spool, **self.kw())
+
+
+class TestApply(Base):
+    def apply(self, **over):
+        over.setdefault("geteuid", AS_ROOT)
+        geteuid = over.pop("geteuid")
+        return H.apply(self.store, self.spool, geteuid=geteuid, **self.kw(**over))
+
+    def test_refuses_when_not_root_and_creates_nothing(self):
+        before = snapshot(self.base)
+        with self.assertRaises(H.LayoutError) as cm:
+            self.apply(geteuid=lambda: 1000)
+        self.assertIn("root", str(cm.exception))
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_builds_a_layout_that_check_accepts_whatever_the_umask(self):
+        old = os.umask(0o077)
+        try:
+            created = self.apply()
+        finally:
+            os.umask(old)
+        self.assertEqual(len(created), len(H.LAYOUT))
+        self.assertEqual(self.check(), [])
+
+    def test_a_second_apply_creates_nothing(self):
+        self.apply()
+        self.assertEqual(self.apply(), [])
+
+    def test_the_bring_up_store_is_refused_and_nothing_is_created(self):
+        """Spec §3.4: the VPS store is an empty dir at 700 root:root. No adopt-if-empty."""
+        os.mkdir(self.store)
+        os.chmod(self.store, 0o700)
+        before = snapshot(self.base)
+        with self.assertRaises(H.LayoutError) as cm:
+            self.apply()
+        msg = str(cm.exception)
+        self.assertIn(self.store, msg)
+        self.assertIn("expected root:hermes 0750", msg)
+        self.assertIn("never repairs", msg)
+        self.assertEqual(snapshot(self.base), before)     # the spool was NOT created either
+
+    def test_an_unsafe_ancestor_is_refused_and_nothing_is_created(self):
+        mid = os.path.join(self.base, "mid")
+        os.mkdir(mid)
+        os.chmod(mid, 0o777)
+        self.set_roots(mid)
+        with self.assertRaises(H.LayoutError):
+            self.apply()
+        self.assertEqual(os.listdir(mid), [])
+
+    def test_a_missing_user_is_refused_before_anything_is_created(self):
+        r = H.Resolver(users={"root": self.uid},
+                       groups={"hermes": self.gid, "hermes-broker": self.gid})
+        with self.assertRaises(H.LayoutError) as cm:
+            self.apply(resolver=r)
+        self.assertIn("hermes-broker", str(cm.exception))
+        self.assertEqual(os.listdir(self.base), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root may chown to any gid")
+    def test_a_failure_part_way_removes_everything_this_call_created(self):
+        """Firing control for the rollback: map 'hermes' to a gid this process is not in,
+        so the very first fchown fails with EPERM after the store root was mkdir'ed."""
+        foreign = max(os.getgroups() + [self.gid]) + 4242
+        r = H.Resolver(users={"root": self.uid, "hermes-broker": self.uid},
+                       groups={"hermes": foreign, "hermes-broker": self.gid})
+        with self.assertRaises(OSError):
+            self.apply(resolver=r)
+        self.assertEqual(os.listdir(self.base), [])
+
+    def test_an_existing_registry_is_never_rewritten(self):
+        self.apply()
+        reg = os.path.join(self.store, "registry", "clients.json")
+        os.chmod(reg, 0o600)
+        with open(reg, "w") as f:
+            f.write('{"clients": {"slug-1": {}}}\n')
+        os.chmod(reg, 0o640)
+        shutil.rmtree(os.path.join(self.store, "seen"))
+        self.assertEqual(self.apply(), [os.path.join(self.store, "seen")])
+        with open(reg) as f:
+            self.assertEqual(f.read(), '{"clients": {"slug-1": {}}}\n')
+
+
 if __name__ == "__main__":
     unittest.main()

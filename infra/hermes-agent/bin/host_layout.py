@@ -200,3 +200,75 @@ def check(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/"
     return ["%s: %s" % (s.path, s.detail)
             for s in plan(store_root, spool_root, resolver, ancestor_uids, ancestor_top)
             if s.action == "mismatch" or (s.action == "create" and not s.implied)]
+
+
+def _remove(path):
+    try:
+        st = os.lstat(path)
+        if stat.S_ISDIR(st.st_mode):
+            os.rmdir(path)
+        else:
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def apply(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/",
+          geteuid=os.geteuid):
+    """Create every MISSING entry, parent-first. Returns the paths created.
+
+    Refuses — before creating anything — when not root, when any ancestor is unsafe, when
+    any EXISTING entry mismatches, or when any name does not resolve. Each entry is
+    created with mkdir/O_EXCL, then opened with O_NOFOLLOW, and fchown'ed and fchmod'ed
+    on that fd, so neither a planted symlink nor the umask can redirect or weaken it.
+    Each entry is re-inspected after it is created. On ANY failure, everything created by
+    this call is removed, children first, and the exception propagates."""
+    if geteuid() != 0:
+        raise LayoutError("--apply must run as root: it creates entries owned by users "
+                          "other than the caller. Nothing was created.")
+    steps = plan(store_root, spool_root, resolver, ancestor_uids, ancestor_top)
+    bad = ["%s: %s" % (s.path, s.detail) for s in steps if s.action == "mismatch"]
+    if bad:
+        raise LayoutError(
+            "refusing to create anything: these existing paths do not match the layout, "
+            "and this tool never repairs. Set each to the expected state by hand (or, for "
+            "an EMPTY directory left by an earlier bring-up, `sudo rmdir` it), then "
+            "re-run:\n  - " + "\n  - ".join(bad))
+    todo = [s for s in steps if s.action == "create"]
+    ids = {s.path: (resolver.uid(s.entry.owner), resolver.gid(s.entry.group))
+           for s in todo}                       # every name resolves before any mkdir
+    created = []
+    try:
+        for s in todo:
+            e, (uid, gid) = s.entry, ids[s.path]
+            if e.kind == DIR:
+                os.mkdir(s.path, 0o700)
+                created.append(s.path)
+                fd = os.open(s.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            else:
+                fd = os.open(s.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600)
+                created.append(s.path)
+            try:
+                if e.kind == FILE:
+                    _write_all(fd, e.content)
+                os.fchown(fd, uid, gid)
+                os.fchmod(fd, e.mode)           # after fchown, which can clear setgid
+                if e.kind == FILE:
+                    os.fsync(fd)
+            finally:
+                os.close(fd)
+            state, detail = _inspect(e, s.path, resolver)
+            if state != "ok":
+                raise LayoutError("%s did not land as specified: %s" % (s.path, detail))
+    except BaseException:
+        for p in reversed(created):
+            _remove(p)
+        raise
+    return created
