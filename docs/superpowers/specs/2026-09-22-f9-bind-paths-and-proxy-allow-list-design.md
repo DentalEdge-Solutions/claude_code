@@ -58,6 +58,9 @@ stated: Compose aborts on the unreadable file even when every variable is alread
 
 ### 3.1 Q1 — F9 does not block Phase 6
 
+(Numbering in this section is BRING-UP's as of 2026-09-22, where Phase 6 is Hand Off, meaning unit
+installation. §3.6 renumbers Hand Off to Phase 5.)
+
 Phase 6 installs and verifies the two units (README "VPS deploy sequence" steps 3–5). None of it
 creates a container: the proxy's `serve()` (`docker-create-proxy.py:525-538`) only listens; the
 broker's `ExecStartPre`s (`init-host-layout.py --check`, `preflight-governance-access.py`) make
