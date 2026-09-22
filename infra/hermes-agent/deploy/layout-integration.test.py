@@ -138,10 +138,20 @@ class Layout(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r
 
-    def assert_check_names(self, needle):
+    def assert_check_names(self, needle, path=None):
+        """needle must appear in --check's stderr. With `path`, pin it to ONE line that
+        also names that path — several entries in the layout table share an
+        owner:group mode (e.g. results/ and approvals/ are both hermes-broker:hermes
+        2750), so a bare substring match can be right for the wrong reason."""
         r = self.layout_tool("--check")
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn(needle, r.stderr)
+        if path is None:
+            self.assertIn(needle, r.stderr)
+        else:
+            lines = r.stderr.splitlines()
+            self.assertTrue(any(path in l and needle in l for l in lines),
+                            "no stderr line names both %r and %r:\n%s"
+                            % (path, needle, r.stderr))
 
 
 class TestGates(Layout):
@@ -170,7 +180,7 @@ class TestGates(Layout):
 
     def test_a_layout_under_tmp_is_refused_and_nothing_is_created(self):
         """Firing control for the ancestor check: /tmp is world-writable."""
-        tmp = tempfile.mkdtemp()
+        tmp = tempfile.mkdtemp(dir="/tmp")
         self.addCleanup(shutil.rmtree, tmp, True)
         r = run(["python3", self.py("init-host-layout.py"), "--apply",
                  "--store-root", os.path.join(tmp, "g"),
@@ -247,13 +257,31 @@ class TestAttackProbes(Layout):
     def test_control_a_group_writable_results_lets_the_gateway_forge(self):
         os.chmod(self.path("results"), 0o2770)
         self.assertTrue(self.gw_create(self.path("results", "%s.json" % uuid.uuid4())))
-        self.assert_check_names("expected hermes-broker:hermes 2750")
+        self.assert_check_names("expected hermes-broker:hermes 2750", self.path("results"))
 
     def test_control_without_a_precreated_quarantine_the_gateway_claims_it(self):
         q = self.path("requests", ".quarantine")
         os.rmdir(q)
         self.assertTrue(self.gw_os("mkdir", q))
         self.assert_check_names(".quarantine")
+
+    def test_control_a_writable_spool_root_lets_the_gateway_rename_requests(self):
+        os.chmod(self.spool, 0o770)
+        self.assertTrue(self.gw_os("rename", self.path("requests"), self.path("r2")))
+        self.assert_check_names("expected root:hermes 0750", self.spool)
+
+    def test_control_a_group_readable_quarantine_lets_the_gateway_list_it(self):
+        q = self.path("requests", ".quarantine")
+        os.chmod(q, 0o750)
+        os.chown(q, -1, 10000)
+        self.assertTrue(self.gw_os("listdir", q))
+        self.assert_check_names(".quarantine")
+
+    def test_control_without_the_sticky_bit_the_gateway_removes_quarantine(self):
+        os.chmod(self.path("requests"), 0o2770)
+        q = self.path("requests", ".quarantine")
+        self.assertTrue(self.gw_os("rmdir", q))
+        self.assert_check_names("expected hermes-broker:hermes 3770")
 
 
 class TestQuarantineOwnership(Layout):
