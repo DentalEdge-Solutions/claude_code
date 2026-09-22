@@ -106,6 +106,7 @@ def unit_exec_args(unit_text):
     For /path/to/program --flags, returns ['--flags'].
     For /usr/bin/interpreter /path/to/script --flags, returns ['/path/to/script', '--flags'].
     The only caller needing flags is the proxy unit (docker-create-proxy.service).
+    allow_binds is unaffected because it selects by flag name.
     """
     for line in _directives(unit_text):
         if line.startswith("ExecStart="):
