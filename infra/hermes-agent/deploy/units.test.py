@@ -1,4 +1,4 @@
-import os, re, sys, unittest
+import os, re, subprocess, sys, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -220,6 +220,75 @@ class TestExecutorBindContract(unittest.TestCase):
                                        "HERMES_AGENT_DIR=/opt/elsewhere")
         self.assertNotEqual(drifted, self.example, "the control did not drift anything")
         self.assertNotRegex(drifted, r"(?m)^HERMES_AGENT_DIR=/opt/hermes-agent$")
+
+
+
+class TestExecStartProgramsAreExecutable(unittest.TestCase):
+    """F15, measured on the VPS 2026-09-22: hermes-docker-proxy.service execs
+    bin/docker-create-proxy.py DIRECTLY, but the file shipped 100644, so systemd could not
+    exec it at all — `status=203/EXEC`, the proxy dead, and the broker failing after it with
+    "Dependency failed". Nothing caught it: bind-agreement-integration.test.py starts the
+    proxy as `python3 <script>` and never needs the bit, and every other assertion in this
+    file reads the unit TEXT.
+
+    The rule this pins: if a unit's ExecStart/ExecStartPre runs a repo file directly (the
+    program token is the script itself, not an interpreter), that file must be 100755 IN GIT
+    — the working tree's mode is a local accident, git's index is what a fresh host clones.
+    A script invoked as `/usr/bin/python3 <script>` is exempt: the interpreter is the
+    program, and the script needs no bit.
+    """
+
+    AGENT_DIR = "/opt/hermes-agent"          # what the units execute from; == HERMES_AGENT_DIR
+
+    def git_mode(self, repo_rel):
+        """The file's mode in the git INDEX, e.g. '100644'. None when not tracked."""
+        repo_root = os.path.dirname(os.path.dirname(AGENT))   # AGENT is infra/hermes-agent
+        r = subprocess.run(["git", "ls-files", "-s", "--", repo_rel],
+                           cwd=repo_root, capture_output=True, text=True)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        return r.stdout.split()[0]
+
+    def directly_executed_programs(self):
+        """(unit, program path) for every Exec* line whose program is a repo file.
+
+        Scope: ExecStart/ExecStartPre/ExecStartPost, the lines that decide whether a unit
+        can START — which is what F15 broke. Add ExecStop/ExecStopPost/ExecReload here if a
+        unit ever execs a repo file from one of those.
+        """
+        out = []
+        for name in ("hermes-broker.service", "hermes-docker-proxy.service"):
+            for line in live_lines(re.sub(r"\\\n", " ", unit(name))):
+                m = re.match(r"ExecStart(?:Pre|Post)?=(\S+)", line)
+                if not m:
+                    continue
+                program = m.group(1)
+                if not program.startswith(self.AGENT_DIR + "/"):
+                    continue          # an interpreter (/usr/bin/python3): it is the program
+                rel = os.path.join("infra/hermes-agent",
+                                   program[len(self.AGENT_DIR) + 1:])
+                out.append((name, rel))
+        return out
+
+    def test_control_the_mode_lookup_distinguishes_executable_from_not(self):
+        """Without this, a lookup that silently returned None would pass everything."""
+        self.assertEqual(self.git_mode("infra/hermes-agent/bin/init-host-layout.py"), "100755")
+        self.assertEqual(self.git_mode("infra/hermes-agent/bin/governance_lib.py"), "100644")
+        self.assertIsNone(self.git_mode("infra/hermes-agent/bin/does-not-exist.py"))
+
+    def test_control_at_least_one_unit_execs_a_repo_file_directly(self):
+        """If the parser found nothing, the assertion below would pass vacuously."""
+        found = self.directly_executed_programs()
+        self.assertTrue(found, "no Exec* line runs a repo file directly — parser is broken")
+
+    def test_every_directly_executed_program_is_executable_in_git(self):
+        for unit_name, rel in self.directly_executed_programs():
+            mode = self.git_mode(rel)
+            self.assertIsNotNone(mode, "%s execs %s, which git does not track" % (unit_name, rel))
+            self.assertEqual(mode, "100755",
+                             "%s execs %s directly, but it is %s in git — systemd would fail "
+                             "with status=203/EXEC on a fresh host (F15). Fix with "
+                             "`git update-index --chmod=+x %s`." % (unit_name, rel, mode, rel))
 
 
 if __name__ == "__main__":

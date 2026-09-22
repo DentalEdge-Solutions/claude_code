@@ -18,8 +18,8 @@ dashboard basic-auth password. None of them appears in this document or in git.*
 | 2 Layout | done — runbook `mkdir`-then-`ln -s` bug avoided (F5); ads repo is a **placeholder** (F6) |
 | 3 `.env` | done — dummy key, `600 root:root`, checkout clean |
 | 4 Start | done — binds measured **before** `up` (F7); `data/` ownership fixed (F8); gateway running, `claude 2.1.278` |
-| 5 Bind paths | **fixed in the repo** (F9, PR #38); box confirmation pending (BRING-UP Phase 6) |
-| 6 Units | **not blocked** — README step 1 done and verified; F10 landed (PR #35); F9 does not gate unit installation |
+| 5 Bind paths | **fixed and CONFIRMED ON THE BOX** (F9, PR #38; BRING-UP Phase 6 run 2026-09-22) |
+| 6 Units | **installed and running on the box** (2026-09-22) — after F15; F10 applied to the box the same day |
 | 7 Dashboard | done — form login enforced, reachable only through an SSH tunnel |
 
 Host: Hostinger KVM 2, Ubuntu 24.04.4 LTS, x86_64, kernel 6.8.0. Docker 29.8.1, compose plugin
@@ -235,6 +235,43 @@ the kill switch is absent there, so nothing can be mutated. **Open:** a distinct
 code for "Compose failed before the container started", designed in its own PR (F9 spec §3.7,
 §5).
 
+### F15: the proxy unit execs a script that is not executable in git — fixed (PR #40)
+
+**Measured on the VPS, 2026-09-22**, installing the units for the first time (BRING-UP Phase 5).
+`hermes-docker-proxy.service` runs `ExecStart=/opt/hermes-agent/bin/docker-create-proxy.py …`
+directly, but the file shipped `100644`. systemd could not exec it:
+`Active: failed (Result: exit-code)`, `status=203/EXEC`, `Duration: 32ms`. The broker then
+failed behind it with "Dependency failed", because it `Requires=` the proxy. The units were
+otherwise correct: both `ExecStartPre` checks exited 0, and `id hermes-broker` showed
+`hermes-broker, hermes-rail, hermes` with no `docker`.
+
+**Why nothing caught it.** `bind-agreement-integration.test.py` starts the proxy as
+`python3 <script>`, so it never needs the bit; `units.test.py` asserted what the unit files
+SAY. Neither runs systemd. The same class as F9's own lesson: a check that never exercises
+the real invocation proves nothing about it.
+
+**Fix (PR #40).** `bin/docker-create-proxy.py` is `100755` in git, and
+`units.test.py::TestExecStartProgramsAreExecutable` now asserts that every `Exec*` program
+that is a repo file (i.e. run directly, not via `/usr/bin/python3`) is `100755` in the git
+INDEX — the working tree's mode is a local accident. It has two controls: one proving the
+mode lookup distinguishes `100755` from `100644` and an untracked path, and one proving the
+parser actually finds a directly-executed program (otherwise the assertion would pass
+vacuously). It failed against the pre-fix tree with `'100644' != '100755'`.
+
+**Operator note:** the 2026-09-22 box was unblocked by hand with
+`sudo chmod 0755 /opt/projects/claude_code/infra/hermes-agent/bin/docker-create-proxy.py`.
+After pulling PR #40 the working tree and git agree; no conflict.
+
+### F16: README step 3 omits `--governance-root`, so it targets the container path (recorded)
+
+`migrate-governance.py` resolves its root from `HERMES_GOVERNANCE_ROOT`, defaulting to the
+CONTAINER path `/opt/governance` (`governance_lib.governance_root`). README "VPS deploy
+sequence" step 3 and the step near README:992 both invoke `--bootstrap-logs` with no
+`--governance-root` and no env prefix, so on the host they do not address
+`/var/lib/hermes/governance`. Corrected in the README by PR #40; recorded here because the
+same omission pattern (host tool, container default) is worth checking in the other
+host-side tools.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -248,9 +285,9 @@ code for "Compose failed before the container started", designed in its own PR (
 
 ## Open items, in order
 
-1. BRING-UP Phase 6: confirm the bind agreement on the box, after README steps 2–5.
+1. F6: a deploy-key clone of the ads repo, after the security review (the box's ads repo is still a placeholder).
 2. F3: a `--check` for usable sudo, with a firing control.
 3. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
-4. F6: a deploy-key clone of the ads repo, after the security review.
-5. F12: host-side approval and run-record writes vs data/vaults. Gates the kill switch.
-6. F14: Compose failures reported as "nothing was mutated". Gates the kill switch.
+4. F12: host-side approval and run-record writes vs data/vaults. Gates the kill switch AND the rehearsal.
+5. F14: Compose failures reported as "nothing was mutated". Gates the kill switch.
+6. F16: audit the other host-side tools for container-path defaults (F16's pattern).

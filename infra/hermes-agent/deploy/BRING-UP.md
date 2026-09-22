@@ -389,6 +389,16 @@ Expected: `rc=2`, output containing `mutation is disabled`, and a journal line
 `slug-1` is also not a registered client (a fresh store's `registry/clients.json` is `{}`), so
 even a kill switch present would not reach an account.
 
+**RESULT, 2026-09-22 — PASSED on the box.** `rc=2`, output
+`apply-changeset: mutation is disabled (kill switch absent or unreadable) — this is the safe
+default`, and the proxy journal line
+`ALLOW POST /v1.55/containers/create?name=hermes-agent-ads-mutator-run-…`. Measured on Docker
+Engine 29.8.1, API v1.55 — a NEWER Compose/Engine than the CI runner that proved the
+`bind-agreement` job (28.0.4), and the bind strings matched the pinned set exactly. The real
+`hermes-agent-claude` image ran, not the CI stand-in. Two items leave the "unproven" list:
+the box's own Compose version, and the real image. Re-run this phase after any change to the
+compose sources, the broker unit's `Environment=`, or the proxy's `--allow-bind` set.
+
 **On anything else:** stop and record it. A `DENY … bind set does not match` means the box's
 Compose sends different strings than CI measured. Do not widen the allow-list. A refusal is a
 refusal, not a breach, and widening a policy to make bring-up pass is the reflex this runbook
