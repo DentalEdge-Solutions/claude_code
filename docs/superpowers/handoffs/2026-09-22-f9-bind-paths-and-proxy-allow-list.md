@@ -9,6 +9,16 @@ Pointing at the file keeps corrections versioned.
 
 ---
 
+> **Correction (2026-09-22, after the F9 session).** Two premises below were wrong. See the spec
+> `docs/superpowers/specs/2026-09-22-f9-bind-paths-and-proxy-allow-list-design.md`.
+> 1. "No container is created until an accepted apply, and that needs the kill switch." The
+>    kill switch is checked **inside** the container (`apply-changeset.py:94`). A container is
+>    created for any broker-accepted request that has a human approval (spec §3.1).
+> 2. "`hostenv.sh` fails to read `.env` as the broker, and the R4 guard refuses." The broker
+>    unit sets `HERMES_GOVERNANCE_DIR`, so `hostenv.sh` never reads `.env`. The real failure is
+>    Compose itself, which aborts on the unreadable file (spec §2, M4).
+> The measured F9 was also partly caused by how it was taken (spec §2, M6).
+
 **This is design work on the laptop. The VPS is not touched in this session.** The product is a
 landed PR: the bind sources Docker Compose sends for `ads-mutator` and the proxy's pinned set
 agree by construction. A test fails if they drift, and a Linux measurement shows they agree on a

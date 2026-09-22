@@ -64,6 +64,7 @@ RESULT = {"changeset_id": CID, "status": "ok", "applied": 1,
 FAKE_DOCKER = """#!/bin/sh
 # Stands in for the real `docker`. Emits what the executor would have printed and
 # exits with the status this test asked for. It NEVER creates a container.
+printf '%%s\n' "$@" > "$(dirname "$0")/docker.argv"
 cat <<'HERMES_FAKE_DOCKER_EOF'
 HERMES-RESULT-JSON %(payload)s
 HERMES_FAKE_DOCKER_EOF
@@ -139,6 +140,11 @@ class Base(unittest.TestCase):
         env = dict(os.environ)
         env["PATH"] = self.bin + os.pathsep + env["PATH"]
         env["HERMES_GOVERNANCE_DIR"] = self.gov
+        # F9: compose-only interpolation inputs. The wrapper never lets Compose read .env
+        # (--env-file /dev/null), so they must come from the environment, as on the VPS.
+        env["HERMES_AGENT_DIR"] = self.home
+        env["HERMES_ADS_REPO_DIR"] = os.path.join(self.tmp, "ads-repo")
+        env["HERMES_SPOOL_DIR"] = os.path.join(self.tmp, "spool")
         env.pop("VAULT_ROOT", None)          # hostenv.sh owns it; see the class docstring
         p = subprocess.run(
             ["/bin/sh", self.wrapper, "--client", SLUG, "--changeset", CID],
@@ -210,6 +216,20 @@ class TestPersistRefusalIsLoud(Base):
         would satisfy every assertion above while telling the operator nothing."""
         p = self._run(executor_rc=0)
         self.assertNotIn("CONTAINMENT REFUSAL", p.stderr)
+
+
+class TestComposeNeverReadsEnv(Base):
+    """F9 (spec §3.3): as hermes-broker, .env is 600 root:root and Compose aborts on it even
+    with every variable exported (spike M4). The wrapper must pass --env-file /dev/null.
+    Exercised for real, through Docker, by deploy/bind-agreement-integration.test.py."""
+
+    def test_the_wrapper_passes_env_file_dev_null_before_run(self):
+        p = self._run(executor_rc=0)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        argv = open(os.path.join(self.bin, "docker.argv")).read().splitlines()
+        self.assertEqual(argv[:3], ["compose", "--env-file", "/dev/null"], argv)
+        self.assertIn("run", argv)
+        self.assertLess(argv.index("--env-file"), argv.index("run"))
 
 
 if __name__ == "__main__":

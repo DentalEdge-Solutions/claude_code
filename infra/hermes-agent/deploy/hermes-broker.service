@@ -23,6 +23,15 @@ Environment=HERMES_GOVERNANCE_ROOT=/var/lib/hermes/governance
 # Outside data/ on purpose (F10b): data/ is owned by the gateway's uid, which could
 # rename the spool and leave a symlink into the governance store in its place.
 Environment=HERMES_SPOOL_ROOT=/var/lib/hermes/spool
+# F9: the executor's bind sources. run-ads-mutate.sh runs `docker compose --env-file /dev/null`
+# (this user cannot read .env, and must not), so Compose takes every variable from HERE. The
+# values must equal hermes-docker-proxy.service's --allow-bind sources exactly:
+# proxy-policy-sync.test.py and units.test.py assert it.
+Environment=HERMES_AGENT_DIR=/opt/hermes-agent
+Environment=HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads
+# Compose interpolates the WHOLE file, so the gateway's ${HERMES_SPOOL_DIR:?} must resolve even
+# for `run ads-mutator`, which never mounts the spool. Same path as HERMES_SPOOL_ROOT.
+Environment=HERMES_SPOOL_DIR=/var/lib/hermes/spool
 # Refuses at BOOT rather than mid-apply, where the failure is exit 3 after a live
 # account change. Since S3-b this also refuses when a registered client has no
 # pre-created log — so --bootstrap-logs MUST have been run before this unit is

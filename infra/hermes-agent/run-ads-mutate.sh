@@ -85,7 +85,12 @@ trap 'rm -f "$tmp_out"' EXIT INT TERM
 # `|| rc=$?` (not a bare command) so a non-zero exit here does not trip `set -e`
 # before rc is captured.
 rc=0
-docker compose -f "$here/docker-compose.yml" run --rm --no-deps \
+# F9: --env-file /dev/null — Compose must never open .env here. On the VPS this runs as
+# hermes-broker and .env is 600 root:root (it holds ANTHROPIC_API_KEY); Compose aborts on an
+# unreadable .env even when every variable is exported (spec 2026-09-22 §2, M4). The
+# interpolation inputs come from the environment instead: the broker unit on the VPS,
+# hostenv.sh (parsing .env as data) locally.
+docker compose --env-file /dev/null -f "$here/docker-compose.yml" run --rm --no-deps \
   -e GOOGLE_ADS_DEVELOPER_TOKEN -e GOOGLE_ADS_CLIENT_ID -e GOOGLE_ADS_CLIENT_SECRET \
   -e GOOGLE_ADS_REFRESH_TOKEN -e GOOGLE_ADS_LOGIN_CUSTOMER_ID -e GOOGLE_ADS_CUSTOMER_ID \
   -e GOOGLE_ADS_CREDENTIAL_ROLE \
