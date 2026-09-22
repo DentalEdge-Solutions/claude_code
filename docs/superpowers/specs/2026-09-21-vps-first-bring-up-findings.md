@@ -19,7 +19,7 @@ dashboard basic-auth password. None of them appears in this document or in git.*
 | 3 `.env` | done — dummy key, `600 root:root`, checkout clean |
 | 4 Start | done — binds measured **before** `up` (F7); `data/` ownership fixed (F8); gateway running, `claude 2.1.278` |
 | 5 Bind paths | **mismatch, open** (F9) — measured, not widened |
-| 6 Units | **parked** — README step 1 done and verified; step 2+ blocked on store/spool layout (F10) |
+| 6 Units | **parked** — README step 1 done and verified; the store/spool layout (F10) is fixed in PR #<N>; step 2+ still waits on F9 |
 | 7 Dashboard | done — form login enforced, reachable only through an SSH tunnel |
 
 Host: Hostinger KVM 2, Ubuntu 24.04.4 LTS, x86_64, kernel 6.8.0. Docker 29.8.1, compose plugin
@@ -143,8 +143,26 @@ suggested fix `chmod`s a `log/` that does not exist. Gaps:
   spool's Linux permissions are undocumented. It is the only channel between agent and broker,
   so this is a security design decision.
 
-**Open:** design and land the layout, with a test, before Phase 6 resumes. The units were not
-installed.
+**Fixed** in PR #<N> (design: `docs/superpowers/specs/2026-09-21-f10-governance-store-and-spool-layout-design.md`).
+Reading the code to design the layout found three more faults, fixed in the same PR:
+
+- **F10a — the spool could not work on Linux in either direction.** Both sides wrote `0600`
+  (`mkstemp`), so the broker could not read requests and the gateway could not read results.
+  Spool files are now `0640`, set on the fd.
+- **F10b — a spool under `data/` redirects the broker into the store.** The gateway owns `data/`,
+  so it could swap the spool, or a pre-planted `.quarantine`, for a symlink. The spool moved to
+  `/var/lib/hermes/spool` as its own bind mount, and the broker verifies `.quarantine` before use.
+- **The pre-flight cascade.** A missing or unenterable root is now one line naming
+  `init-host-layout.py`. A missing child says "missing".
+
+Stated residual: a non-empty directory the gateway plants in `requests/` stays in place and is
+logged on every drain (R1). Unproven until the VPS: the systemd sandbox with the new
+`ReadWritePaths`, the gateway's real identity in the image, and compose's `:?` against the real
+`.env`.
+
+**Effect on F9.** The spool is not mounted into `ads-mutator` and is not in the proxy allow-list,
+so F10 adds nothing there. The store's host path is unchanged. F9's design must not move the spool
+back under `data/`.
 
 ### F11: the dashboard login is a form, `/api/status` needs no credentials, and a length guard warned without stopping
 
@@ -165,6 +183,23 @@ installed.
 - The browser controls were run after the fix. A wrong password was refused, and the correct
   one signed in.
 
+### F12: approvals and run records are written by host-side tools that cannot reach `data/vaults` (recorded, not fixed)
+
+Found while designing F10. `approve-changeset.py` reads the change-set from `data/vaults/`
+(uid 10000, `700`) and writes `approvals/<slug>/` plus a `0600` lock file that the broker later
+reopens. Run as root, it leaves root-owned `0600` locks, and `reserve_approval` fails on the
+first apply. Run as `hermes-broker`, it cannot read `data/vaults`. Approval and snapshot files
+are written with plain `open()`, so they are group-readable only because of the umask; the
+2026-09-17 handoff's §6 `UMask=0077` would make every approval unreadable to the executor.
+
+Second case: `run-ads-mutate.sh` runs as `hermes-broker` inside the broker's sandbox, and after
+every apply it calls `persist-run-record.py`, which writes into `data/vaults/<slug>/`. `data/` is
+`700` uid 10000, and `data/vaults` is not in `ReadWritePaths`, so the write fails. The failure
+shows as the "RUN RECORD NOT PERSISTED" banner, with the executor's exit status kept.
+
+**Gates creating the kill switch, not Phase 6.** Installing the units approves nothing.
+F10's `approvals/` ownership (`hermes-broker:hermes 2750`) is compatible with any F12 fix.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -178,8 +213,8 @@ installed.
 
 ## Open items, in order
 
-1. F10: the store and spool layout (design, test, land). This unblocks Phase 6.
-2. F9: the allow-list and compose path design.
-3. F3: a `--check` for usable sudo, with a firing control.
-4. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
-5. F6: a deploy-key clone of the ads repo, after the security review.
+1. F9: the allow-list and compose path design. This unblocks Phase 6.
+2. F3: a `--check` for usable sudo, with a firing control.
+3. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
+4. F6: a deploy-key clone of the ads repo, after the security review.
+5. F12: host-side approval and run-record writes vs data/vaults. Gates the kill switch.

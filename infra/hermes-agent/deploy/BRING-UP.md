@@ -197,8 +197,9 @@ The systemd units at lines noted below dictate this layout. It is not free-choic
 |---|---|---|
 | `/opt/projects/claude_code` | this repo | so compose's `../../../claude-google-ads` resolves to `/opt/projects/claude-google-ads` |
 | `/opt/projects/claude-google-ads` | the ads repo | `hermes-docker-proxy.service:36` |
-| `/opt/hermes-agent` | `bin/`, `registry/`, `data/spool` | `hermes-broker.service:17,22,27,29`; `hermes-docker-proxy.service:26,37,38` |
-| `/var/lib/hermes/governance` | the governance store | `hermes-broker.service:20,21,28,36`; `hermes-docker-proxy.service:32-35` |
+| `/opt/hermes-agent` | `bin/`, `registry/` | `hermes-broker.service:18,33,35,37`; `hermes-docker-proxy.service:26,37,38` |
+| `/var/lib/hermes/governance` | the governance store | `hermes-broker.service:21,22,34,36,44`; `hermes-docker-proxy.service:32-35` |
+| `/var/lib/hermes/spool` | the request spool | `hermes-broker.service` (`HERMES_SPOOL_ROOT`, `ReadWritePaths`); `docker-compose.yml` (`HERMES_SPOOL_DIR`) |
 
 In a `hermesops@<host>` session:
 
@@ -207,11 +208,12 @@ sudo mkdir -p /opt/projects /var/lib/hermes
 # claude_code is public — no credential on the box for it
 sudo git clone https://github.com/DentalEdge-Solutions/claude_code.git /opt/projects/claude_code
 sudo ln -s /opt/projects/claude_code/infra/hermes-agent /opt/hermes-agent
-sudo install -d -m 700 /var/lib/hermes/governance
+sudo install -d -m 755 -o root -g root /var/lib/hermes
+# the store and the spool under it are created by README "VPS deploy sequence" step 2
 # verify
 sudo git -C /opt/projects/claude_code log -1 --oneline     # must equal origin/main
 readlink -f /opt/hermes-agent                               # /opt/projects/claude_code/infra/hermes-agent
-sudo stat -c '%a %U:%G %n' /var/lib/hermes/governance       # 700 root:root
+sudo stat -c '%a %U:%G %n' /var/lib/hermes                  # 755 root:root
 ```
 
 **Do not `mkdir /opt/hermes-agent` before the `ln -s`.** An earlier version of this runbook did.
@@ -385,26 +387,13 @@ is a design change landed by PR, not an allow-list edit on the box.
 
 ## Phase 6: Hand Off
 
-**Blocked as of 2026-09-21 — do not start until the layout below is designed and landed.**
-README step 1 (users and groups) was run and verified. Step 2 onwards assumes a governance
-store that already has content; on a fresh box nothing creates it:
+**Blocked on F9 only** (the bind paths vs the proxy allow-list — see
+`docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`). The store and spool layout
+(F10) is landed: README "VPS deploy sequence" step 2 creates both on a fresh box with
+`init-host-layout.py`, and the broker unit verifies them at every start. README step 1 (users
+and groups) was run and verified on 2026-09-21.
 
-- `approvals/`, `control/`, `registry/`, `log/`, `seen/` and `registry/clients.json` are only
-  ever created by `migrate()` from existing local vaults. The VPS has none.
-  `--bootstrap-logs` deliberately refuses a missing `log/` (`migrate_governance_shim.py:153`).
-- The store's **owner** is unspecified beyond "deploy/broker user" (README:894), but the
-  broker writes `seen/`, `approvals/` and `control/.locks/`.
-- `data/spool/` must exist for the broker unit's `ReadWritePaths=`, is written by uid 10000
-  and read, deleted and quarantined by `hermes-broker` — and `data/` is `700` uid 10000.
-  The spool is the only channel between agent and broker, so its permissions are a security
-  design decision, not a bring-up chmod.
-
-The pre-flight, run as `hermes-broker` against the empty store, refuses (exit 2) — correctly —
-but cannot distinguish "missing" from "unreadable", and its suggested fix `chmod`s a `log/`
-that does not exist yet.
-
-Once the bind paths match (or are reconciled) **and the store/spool layout is landed**, hand
-off to:
+Once the bind paths match (or are reconciled), hand off to:
 
 1. `README.md:957` steps 1–5 (create the Hermes users and groups, install the systemd units,
    run the preflight checks)
