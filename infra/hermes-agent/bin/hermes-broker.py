@@ -153,6 +153,14 @@ def _write_result(rid, spool, classification, status, exit_code, detail, now):
     }, spool)
 
 
+def _has_result(rid, spool):
+    """True when results/<rid>.json already exists. A result on disk is never
+    overwritten by a refusal: it may say a mutation landed, and a refusal says nothing
+    was mutated. spool_lib.write_result replaces unconditionally, so every refusal path
+    that can meet a reused request_id checks here first (F10 final review, I2)."""
+    return os.path.isfile(S.result_path(rid, spool))
+
+
 def _quarantine_problem(qdir):
     """None if qdir is safe to move entries into, else the reason it is not.
 
@@ -219,10 +227,12 @@ def _discard(path):
     STATED RESIDUAL (R1). On Linux the broker is not root, and moving a directory to a
     different parent needs write permission on that directory. A NON-EMPTY directory the
     gateway planted at, say, 0700 can therefore be neither removed nor quarantined: it
-    stays in requests/, is re-scanned, re-rejected (its refused_request result is
-    rewritten) and logged on every drain pass. The drain survives it and every other
-    request is still processed — deploy/layout-integration.test.py proves both on real
-    uids. Removing it needs root. The "permanent stall" FIX ROUND 2 closed is closed for
+    stays in requests/, is re-scanned, re-rejected and logged on every drain pass. Its
+    refused_request result is written once; later passes find it on disk and do not
+    rewrite it (I2), so a planted entry that reuses a completed request_id cannot turn
+    that result into a refusal either. The drain survives it and every other request is
+    still processed — deploy/layout-integration.test.py is written to prove both on real
+    uids (Linux CI). Removing it needs root. The "permanent stall" FIX ROUND 2 closed is closed for
     the drain; it is not closed for the log noise.
     """
     try:
@@ -348,7 +358,13 @@ def drain(spool=None, projects=None, runner=None, now=None):
         if S.REQUEST_ID_RE.fullmatch(rid):
             outcomes.append({"request_id": rid, "classification": "refused_request",
                              "detail": reason})
-            _write_result(rid, spool, "refused_request", "refused", 2, reason, now)
+            # I2: the gateway can plant an invalid request under the name of a request
+            # that already completed. Refuse it, discard it, but never overwrite.
+            if _has_result(rid, spool):
+                print("broker: request %s already has a result on disk; NOT "
+                      "overwriting it with a refused_request" % rid, file=sys.stderr)
+            else:
+                _write_result(rid, spool, "refused_request", "refused", 2, reason, now)
         _discard(os.path.join(S.requests_dir(spool), name))
 
     pending = collections.Counter(req["client"] for _, req in parsed)
@@ -420,7 +436,7 @@ def drain(spool=None, projects=None, runner=None, now=None):
             # ("refused_request" / exit_code=2, which asserts nothing was mutated).
             # spool_lib.write_result performs an unconditional os.replace with no
             # already-written guard of its own, so that check belongs here.
-            if os.path.isfile(S.result_path(rid, spool)):
+            if _has_result(rid, spool):
                 print("broker: request %s already has a result on disk; NOT "
                       "overwriting it with a refused_request derived from: %s"
                       % (rid, e), file=sys.stderr)
@@ -438,7 +454,14 @@ def _process(req, spool, projects, pending_count, runner, now):
 
     if C.seen_contains(slug, rid):
         detail = "request_id %s has already been accepted — replay refused" % rid
-        _write_result(rid, spool, "refused_replay", "refused", 2, detail, now)
+        # I2: a replayed id usually has a completed result on disk (accepted_applied,
+        # failed_after_mutation, ...). The replay is refused and its entry discarded by
+        # drain(), but that result is never overwritten with "refused, exit 2".
+        if _has_result(rid, spool):
+            print("broker: request %s already has a result on disk; NOT "
+                  "overwriting it with a refused_replay" % rid, file=sys.stderr)
+        else:
+            _write_result(rid, spool, "refused_replay", "refused", 2, detail, now)
         return {"request_id": rid, "classification": "refused_replay", "detail": detail}
 
     rec = vault_lib.resolve(slug)                       # unknown slug raises -> refusal

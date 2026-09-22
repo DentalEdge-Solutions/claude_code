@@ -143,9 +143,12 @@ class TestRefusalsNeverExecute(Base):
         C.write_approval(SLUG, CID, DIGEST, "operator", NOW, 24)   # fresh approval
         self.file_request(request_id=rid)      # same id, filed again
         r = RecordingRunner()
-        self.drain(r)
+        out = self.drain(r)
         self.assertEqual(r.calls, [])
-        self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
+        self.assertEqual([o["classification"] for o in out], ["refused_replay"])
+        # I2 (F10 final review): the replay is refused, but the first pass's completed
+        # result stays on disk. It is never overwritten with "refused, exit 2".
+        self.assertEqual(self.result_for(rid)["classification"], "accepted_applied")
 
     def test_replay_survives_deletion_of_the_whole_spool(self):
         # The property that justifies putting the seen-set in the governance store.
@@ -308,6 +311,74 @@ class TestRefusalsNeverExecute(Base):
         self.assertEqual(r.calls, [])
         self.assertTrue(os.path.isfile(tmp_path),
                          "a half-written temp artifact must be left untouched, not discarded")
+
+
+class TestACompletedResultIsNeverOverwritten(Base):
+    """F10 final review, I2. The gateway writes requests/ and can reuse any request_id
+    it has seen a result for. Two refusal paths used to write their result with an
+    unconditional replace, so a re-filed request could turn a completed
+    accepted_applied / failed_after_mutation result into "refused, exit 2", which
+    asserts nothing was mutated. Each test below fires one of those two paths against a
+    completed result and asserts the result survives. The request entry is still
+    discarded, and the runner is never called.
+    """
+
+    COMPLETED = {"status": "applied", "classification": "accepted_applied",
+                 "exit_code": 0, "detail": "the change-set was applied",
+                 "finished_at": "2026-08-24T10:15:00Z"}
+
+    def _complete(self, rid):
+        payload = dict(self.COMPLETED, request_id=rid)
+        S.write_result(rid, payload, self.spool)
+        with open(S.result_path(rid, self.spool), "rb") as f:
+            return f.read()
+
+    def _result_bytes(self, rid):
+        with open(S.result_path(rid, self.spool), "rb") as f:
+            return f.read()
+
+    def test_an_invalid_request_reusing_a_completed_id_does_not_overwrite_it(self):
+        rid = str(uuid.uuid4())
+        before = self._complete(rid)
+        self.file_request(request_id=rid, operator="root")     # extra key: rejected
+        r = RecordingRunner()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self._result_bytes(rid), before)
+        self.assertEqual([o["classification"] for o in out], ["refused_request"])
+        self.assertIn("already has a result on disk", err.getvalue())
+        self.assertNotIn("%s.json" % rid, os.listdir(S.requests_dir(self.spool)),
+                         "the request entry must still be discarded")
+
+    def test_a_replayed_valid_request_does_not_overwrite_a_completed_result(self):
+        rid = str(uuid.uuid4())
+        before = self._complete(rid)
+        C.append_seen(SLUG, rid, NOW)
+        self.file_request(request_id=rid)                       # valid, but a replay
+        r = RecordingRunner()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self._result_bytes(rid), before)
+        self.assertEqual([o["classification"] for o in out], ["refused_replay"])
+        self.assertIn("already has a result on disk", err.getvalue())
+        self.assertNotIn("%s.json" % rid, os.listdir(S.requests_dir(self.spool)),
+                         "the request entry must still be discarded")
+
+    def test_control_with_no_prior_result_both_refusals_are_still_written(self):
+        # Without this, a guard that skipped EVERY refusal write would pass both tests
+        # above. "A result on every outcome" (spec §12) still holds for a fresh id.
+        bad = self.file_request(operator="root")
+        seen = str(uuid.uuid4())
+        C.append_seen(SLUG, seen, NOW)
+        self.file_request(request_id=seen)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.drain(RecordingRunner())
+        self.assertEqual(self.result_for(bad)["classification"], "refused_request")
+        self.assertEqual(self.result_for(seen)["classification"], "refused_replay")
 
 
 class TestAcceptedTodayFailsClosed(Base):
