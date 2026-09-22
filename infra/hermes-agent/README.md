@@ -759,6 +759,24 @@ nor quarantined by a non-root broker, because moving a directory needs write on 
 place and is re-rejected and logged on every drain. Other requests are still served. Remove it as
 root.
 
+### Executor bind sources (F9)
+
+`ads-mutator` is the only container created through the allow-list proxy, and the proxy
+refuses any create whose bind set is not **exactly** the `--allow-bind` set in
+`deploy/hermes-docker-proxy.service`. So every `ads-mutator` source is an absolute path from a
+`:?`-guarded variable: `HERMES_GOVERNANCE_DIR`, `HERMES_AGENT_DIR`, `HERMES_ADS_REPO_DIR`.
+Compose sends an absolute source verbatim. A relative one (`./bin`) would be joined to a
+project directory whose spelling depends on how Compose was started, which is how F9 happened
+(spec `docs/superpowers/specs/2026-09-22-f9-bind-paths-and-proxy-allow-list-design.md` §2).
+
+On a VPS the broker runs the executor, and `hermes-broker.service` sets the values. They
+equal the proxy's pins, and `proxy-policy-sync.test.py` fails if they drift.
+`run-ads-mutate.sh` passes `--env-file /dev/null`, because `hermes-broker` cannot read `.env`
+and must not (it holds `ANTHROPIC_API_KEY`). `.env` still needs the same keys for the
+operator's own `docker compose` commands (step 2). On a laptop, `.env` supplies them and
+`hostenv.sh` passes them on. Any paths that point at this directory and at the ads repo
+checkout work.
+
 ### Client — `hermes-syscall`, in-container
 
 Identifier-only. It passes a client slug and a change-set id, never a customer id, never a
@@ -1005,10 +1023,11 @@ python3 infra/hermes-agent/bin/migrate-governance.py \
 
 ## VPS deploy sequence
 
-> **Provisioning a box first?** `deploy/BRING-UP.md` covers phases 0–5 — buying and
-> hardening the host, the on-box layout these units require, `.env`, the compose
-> build, and the bind-path measurement — and hands off to step 1 below. The steps
-> here assume a host that already has Docker, both repos, and the governance store.
+> **Provisioning a box first?** `deploy/BRING-UP.md` covers phases 0–4 — buying and
+> hardening the host, the on-box layout these units require, `.env`, and the compose
+> build — and Phase 5 hands off to step 1 below. Phase 6 then confirms the bind
+> agreement once these steps have run. The steps here assume a host that already has
+> Docker, both repos, and the governance store.
 
 The order below is load-bearing — it was measured, not guessed (2026-09-16). Skipping
 or reordering a step produces failures that look like a hang rather than a clean error.
@@ -1058,12 +1077,15 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
 2. **Lay out the governance store and the spool.** Everything below runs from
    `/opt/hermes-agent`.
 
-   **Make sure `.env` sets the spool.** A `.env` copied from `.env.example` already has
-   `HERMES_SPOOL_DIR=/var/lib/hermes/spool`; an older one does not. `.env` is root `600`, and
-   this line adds the key only when it is missing, without printing the file:
+   **Make sure `.env` sets the spool and the executor bind sources.** A `.env` copied from
+   `.env.example` already has all three; an older one does not. Compose interpolates the whole
+   file, so every `docker compose` command stops without them. `.env` is root `600`, and these
+   lines add each key only when it is missing, without printing the file:
 
    ```bash
-   sudo grep -q '^HERMES_SPOOL_DIR=' .env || echo 'HERMES_SPOOL_DIR=/var/lib/hermes/spool' | sudo tee -a .env >/dev/null
+   sudo grep -q '^HERMES_SPOOL_DIR=' .env    || echo 'HERMES_SPOOL_DIR=/var/lib/hermes/spool' | sudo tee -a .env >/dev/null
+   sudo grep -q '^HERMES_AGENT_DIR=' .env    || echo 'HERMES_AGENT_DIR=/opt/hermes-agent' | sudo tee -a .env >/dev/null
+   sudo grep -q '^HERMES_ADS_REPO_DIR=' .env || echo 'HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads' | sudo tee -a .env >/dev/null
    ```
 
    **Take the gateway down, and remove any directory Docker made in the tool's place.**
@@ -1097,10 +1119,11 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
 
    **The box from the first bring-up (2026-09-21)** needs the same steps, in this order. Its
    store exists as an **empty** `700 root:root` directory, its `.env` predates
-   `HERMES_SPOOL_DIR`, and its running gateway predates the spool mount:
+   `HERMES_SPOOL_DIR`, `HERMES_AGENT_DIR` and `HERMES_ADS_REPO_DIR`, and its running gateway
+   predates the spool mount:
 
    1. Pull: `sudo git -C /opt/projects/claude_code pull --ff-only`.
-   2. Add `HERMES_SPOOL_DIR` to `.env` with the non-printing line above.
+   2. Add HERMES_SPOOL_DIR, HERMES_AGENT_DIR and HERMES_ADS_REPO_DIR to .env with the non-printing lines above.
    3. `sudo docker compose down`.
    4. `rmdir` the empty store and any Docker-created spool (the two guarded lines above).
    5. Run the dry run, `--apply`, `--check` and the pre-flight above.

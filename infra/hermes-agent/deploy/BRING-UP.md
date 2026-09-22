@@ -1,10 +1,10 @@
 # VPS Bring-Up: From a Bought Box to Docker-Ready
 
 > **For provisioning an Ubuntu 24.04 box on Hostinger KVM 2 and running the systemd units
-> listed in the README at line 957.** This runbook covers phases 0–5 (buying and hardening
-> the host, the on-box layout these units require, `.env`, the compose build, and the bind-path
-> measurement); it then hands off to the README sequence. Phase 7 covers reaching the
-> dashboard from a laptop.
+> listed in the README at line 957.** This runbook covers phases 0–4 (buying and hardening
+> the host, the on-box layout these units require, `.env`, and the compose build); Phase 5
+> then hands off to the README sequence, and Phase 6 confirms the bind agreement once the
+> README steps have run. Phase 7 covers reaching the dashboard from a laptop.
 
 Spec: `docs/superpowers/specs/2026-09-18-vps-provisioning-and-bring-up-design.md`
 First real run (2026-09-21), and every correction below that it earned:
@@ -253,15 +253,15 @@ Phase 2 created `/opt/hermes-agent` and `/opt/projects/...` under `sudo`, so the
 are root-owned. That is correct: `sudo docker compose` reads the files as root, and deploy
 commands run under `sudo` (the deploy user is deliberately not in the `docker` group).
 
-Copy the example to `.env` at mode 600 and set the dummy key. `HERMES_GOVERNANCE_DIR`
-already defaults to `/var/lib/hermes/governance` in the example, and `HERMES_SPOOL_DIR` to
-`/var/lib/hermes/spool`.
+Copy the example to `.env` at mode 600 and set the dummy key. `.env.example` already sets
+`HERMES_GOVERNANCE_DIR`, `HERMES_SPOOL_DIR`, `HERMES_AGENT_DIR` and `HERMES_ADS_REPO_DIR` to
+the box's paths.
 
 ```bash
 sudo install -m 600 /opt/hermes-agent/.env.example /opt/hermes-agent/.env
 sudo sed -i 's/^ANTHROPIC_API_KEY=$/ANTHROPIC_API_KEY=dummy-key-this-wave/' /opt/hermes-agent/.env
 # verify — key NAMES only, never values
-sudo grep -Ev '^\s*(#|$)' /opt/hermes-agent/.env | cut -d= -f1       # ANTHROPIC_API_KEY, HERMES_GOVERNANCE_DIR, HERMES_SPOOL_DIR
+sudo grep -Ev '^\s*(#|$)' /opt/hermes-agent/.env | cut -d= -f1       # ANTHROPIC_API_KEY, HERMES_GOVERNANCE_DIR, HERMES_SPOOL_DIR, HERMES_AGENT_DIR, HERMES_ADS_REPO_DIR
 sudo grep -c '^ANTHROPIC_API_KEY=dummy-key-this-wave$' /opt/hermes-agent/.env   # 1 — sed is silent on a non-match
 sudo git -C /opt/projects/claude_code status --short                  # empty — .env is gitignored
 ```
@@ -333,76 +333,14 @@ tracked in the findings record.
 
 ---
 
-## Phase 5: Measure the Bind Paths
+## Phase 5: Hand Off
 
-This phase measures the bind sources Docker Compose sends to the allow-list proxy. The proxy
-is not running yet, so its log is not the instrument; instead, we inspect the container's
-`HostConfig.Binds` after it is created but before it starts.
+**Not blocked.** Installing and verifying the units creates no container: the proxy only opens
+its socket at start, the broker's `ExecStartPre` checks make no Docker call, and the
+`curl …/version` probe is on the proxy's allow-list (F9 spec §3.1). The store and spool layout
+(F10) is landed, and README step 1 (users and groups) was run and verified on 2026-09-21.
 
-```bash
-sudo docker compose --profile tools create ads-mutator
-CONTAINER_ID=$(sudo docker ps -a --filter "name=ads-mutator" --format "{{.ID}}")
-sudo docker inspect "$CONTAINER_ID" --format '{{json .HostConfig.Binds}}'
-```
-
-This returns a JSON array of strings like:
-
-```json
-["/var/lib/hermes/governance/approvals:/opt/governance/approvals:ro",
- "/var/lib/hermes/governance/control:/opt/governance/control:ro",
- ...]
-```
-
-Each bind source (the part before the colon) must exactly match one of the seven `--allow-bind`
-values in `hermes-docker-proxy.service:32-38`:
-
-```bash
-sed -n '32,38p' /opt/hermes-agent/deploy/hermes-docker-proxy.service
-```
-
-Expected (from the design spec):
-- `/var/lib/hermes/governance/approvals`
-- `/var/lib/hermes/governance/control`
-- `/var/lib/hermes/governance/registry`
-- `/var/lib/hermes/governance/log`
-- `/opt/projects/claude-google-ads`
-- `/opt/hermes-agent/registry`
-- `/opt/hermes-agent/bin`
-
-**On any mismatch:** stop here. Record the finding. Do not widen the allow-list. A rail that
-refuses is a refusal, not a breach, and widening a policy to make bring-up pass is the reflex
-the handoff's §3 and §5 name explicitly. The mismatch is worth investigating — it may reveal
-that the symlink strategy (or copy strategy) needs adjustment, or that Compose resolves paths
-differently than expected.
-
-Clean up:
-
-```bash
-sudo docker rm "$CONTAINER_ID"
-```
-
-**Result of the first run (2026-09-21): MISMATCH — open.** Compose resolves the symlink, so
-`./bin` and `./registry` arrive as `/opt/projects/claude_code/infra/hermes-agent/{bin,registry}`,
-not the allow-listed `/opt/hermes-agent/{bin,registry}` (`hermes-docker-proxy.service:37-38`);
-the proxy requires the bind set to equal the pinned set exactly (`docker-create-proxy.py:231-232`). The ads-repo entry matches.
-No layout satisfies all three today: a real directory at `/opt/hermes-agent` fixes `bin` and
-`registry` but sends `../../../claude-google-ads` to `/claude-google-ads`. This was measured on
-the `hermes-agent` service, which uses the same relative forms; `ads-mutator` itself was
-**not** created, because creating it before README step 2 would make Docker lay down the
-governance subdirectories as root. Mutation is disabled, so this blocks nothing yet; the fix
-is a design change landed by PR, not an allow-list edit on the box.
-
----
-
-## Phase 6: Hand Off
-
-**Blocked on F9 only** (the bind paths vs the proxy allow-list — see
-`docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`). The store and spool layout
-(F10) is landed: README "VPS deploy sequence" step 2 creates both on a fresh box with
-`init-host-layout.py`, and the broker unit verifies them at every start. README step 1 (users
-and groups) was run and verified on 2026-09-21.
-
-Once the bind paths match (or are reconciled), hand off to:
+Hand off to:
 
 1. README "VPS deploy sequence" steps 1–5 (create the Hermes users and groups, install the
    systemd units, run the preflight checks)
@@ -415,9 +353,62 @@ switch lives.
 
 ---
 
+## Phase 6: Confirm the Bind Agreement
+
+**Run this only after README "VPS deploy sequence" steps 2–5**: the store exists, both units
+run, and the kill switch is **absent**. CI already proved the agreement on Linux (the
+`bind-agreement` job). This confirms it on the box's own Compose version and real image, on
+the broker's real path: as `hermes-broker`, through the proxy socket, with the broker unit's
+environment and `--env-file /dev/null`. The ids are dummies. The executor checks the kill
+switch before it reads anything else, so this cannot touch an account.
+
+```bash
+sudo -u hermes-broker env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  HOME="$(getent passwd hermes-broker | cut -d: -f6)" \
+  DOCKER_HOST=unix:///run/hermes/docker-proxy.sock \
+  HERMES_GOVERNANCE_DIR=/var/lib/hermes/governance HERMES_AGENT_DIR=/opt/hermes-agent \
+  HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads HERMES_SPOOL_DIR=/var/lib/hermes/spool \
+  docker compose --env-file /dev/null -f /opt/hermes-agent/docker-compose.yml \
+  run --rm --no-deps -T ads-mutator \
+  --client slug-1 --changeset 20260922-120000-abcdef01 --request 00000000-0000-4000-8000-000000000000
+echo "rc=$?"
+sudo journalctl -u hermes-docker-proxy --since "-5 min" --no-pager | grep 'containers/create'
+```
+
+Expected: `rc=2`, output containing `mutation is disabled`, and a journal line
+`ALLOW POST /v…/containers/create`. The values in the command are the ones in
+`hermes-broker.service`; if you changed the unit, use its values.
+
+**On anything else:** stop and record it. A `DENY … bind set does not match` means the box's
+Compose sends different strings than CI measured. Do not widen the allow-list. A refusal is a
+refusal, not a breach, and widening a policy to make bring-up pass is the reflex this runbook
+exists to prevent. Never run the old `sudo docker compose --profile tools create ads-mutator`
+instrument. Run as root from the working directory, Compose resolves the symlink the broker
+does not (F9 spec §2, M6), and before README step 2 it makes Docker create governance
+directories as root.
+
+---
+
+## Gate: First Approved Request (Rehearsal)
+
+This gate is not run by this runbook. It sits between Phase 6 and anything that touches the
+kill switch. **It needs:** F9 (landed), F12 (a working approval writer: `approve-changeset.py`
+cannot reach `data/vaults` as `hermes-broker` today), `.env.gaw` with the write credential, and
+Phase 6 passed.
+
+**The proof:** with the kill switch **absent**, a human-approved request goes broker → proxy →
+container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
+broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
+
+**Still required before the kill switch can be created:** F12, F14 (a Compose failure is
+reported as "refused, nothing was mutated", which could be false mid-run), and the §6
+hardening gates.
+
+---
+
 ## Phase 7: Reach the Dashboard From the Laptop
 
-Independent of phase 6 — needs only the phase 4 stack. Verified end to end on 2026-09-21.
+Independent of phase 5 — needs only the phase 4 stack. Verified end to end on 2026-09-21.
 
 The dashboard is **off by default**: with `HERMES_DASHBOARD` unset the container runs only
 `s6-supervise dashboard` with nothing under it, and `127.0.0.1:9119` resets (curl exit 56) —
