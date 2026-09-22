@@ -12,26 +12,39 @@
 # and died with "client registry not found".
 #
 # `.env` is parsed as DATA, never sourced — the same rule run-ads-mutate.sh applies to
-# `.env.gaw`, and the rule this capsule writes down. Only `HERMES_GOVERNANCE_DIR` is
-# read; every other line, including every credential, is ignored and never evaluated.
+# `.env.gaw`, and the rule this capsule writes down. Only the four keys below are read; every
+# other line, including every credential, is ignored and never evaluated.
 #
-# An explicit environment value always wins over `.env`, so a one-off run against a
+# An explicit environment value always wins over `.env`, PER KEY, so a one-off run against a
 # different store stays a prefix on the command line.
-
-if [ -z "${HERMES_GOVERNANCE_DIR:-}" ] && [ -f "$here/.env" ]; then
+#
+# F9 (spec 2026-09-22 §3.3, R1). The three keys after HERMES_GOVERNANCE_DIR are Compose
+# interpolation input only: run-ads-mutate.sh runs `docker compose --env-file /dev/null`, so
+# Compose never opens .env and must get them from the environment. They are PARSED here, not
+# guarded — compose's own ${VAR:?} refuses an unset one, and changeset.sh, which also sources
+# this file, never runs Compose. `.env` is opened only when a key is missing AND the file is
+# readable: on the VPS the broker sources this with all four set by its unit and .env
+# 600 root:root, and a failed redirect under `set -eu` would abort the wrapper.
+_hermes_env_default() {
+  eval "_cur=\${$1:-}"
+  [ -z "$_cur" ] || return 0
+  [ -r "$here/.env" ] || return 0
   while IFS= read -r _line || [ -n "$_line" ]; do
     case "$_line" in
-      HERMES_GOVERNANCE_DIR=*) : ;;
+      "$1"=*) : ;;
       *) continue ;;
     esac
-    _val=${_line#HERMES_GOVERNANCE_DIR=}
+    _val=${_line#"$1"=}
     case "$_val" in
       \"*\") _val=${_val#\"}; _val=${_val%\"} ;;
       \'*\') _val=${_val#\'}; _val=${_val%\'} ;;
     esac
-    HERMES_GOVERNANCE_DIR=$_val
+    eval "$1=\$_val"
   done < "$here/.env"
-fi
+}
+for _hermes_key in HERMES_GOVERNANCE_DIR HERMES_AGENT_DIR HERMES_ADS_REPO_DIR HERMES_SPOOL_DIR; do
+  _hermes_env_default "$_hermes_key"
+done
 
 # R4 guard: an unset or empty value makes Docker Compose substitute "" for
 # ${HERMES_GOVERNANCE_DIR} in docker-compose.yml, which would bind-mount /approvals,
@@ -52,3 +65,10 @@ esac
 export HERMES_GOVERNANCE_DIR
 export HERMES_GOVERNANCE_ROOT="$HERMES_GOVERNANCE_DIR"
 export VAULT_ROOT="$here/data/vaults"
+
+# Compose reads these from the environment (run-ads-mutate.sh passes --env-file /dev/null).
+# Exported only when set: an unset one must stay unset so compose's :? names it.
+for _hermes_key in HERMES_AGENT_DIR HERMES_ADS_REPO_DIR HERMES_SPOOL_DIR; do
+  eval "_cur=\${$_hermes_key:-}"
+  [ -z "$_cur" ] || export "$_hermes_key"
+done
