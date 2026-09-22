@@ -174,7 +174,7 @@ you want to verify, run the script against mocks rather than counting by eye.)
    does not use SSH, so you can still reach the box. Log in as root there and reconcile the
    issue.
 
-### Step 1e: Verify the gid-10000 precondition (before README:957 runs)
+### Step 1e: Verify the gid-10000 precondition (before README "VPS deploy sequence" runs)
 
 SSH in as `hermesops` and check:
 
@@ -395,8 +395,8 @@ and groups) was run and verified on 2026-09-21.
 
 Once the bind paths match (or are reconciled), hand off to:
 
-1. `README.md:957` steps 1–5 (create the Hermes users and groups, install the systemd units,
-   run the preflight checks)
+1. README "VPS deploy sequence" steps 1–5 (create the Hermes users and groups, install the
+   systemd units, run the preflight checks)
 2. `docs/superpowers/handoffs/2026-09-17-vps-deploy-and-remeasurement.md` §2–§5 (the 2026-09-17
    handoff sequence)
 
@@ -491,8 +491,8 @@ dashboard has not been measured.
 ## What This Runbook Does Not Do
 
 - Create the Hermes users (`hermes`, `hermes-broker`, `hermes-docker-proxy`, `hermes-rail`) or
-  groups. The README:957 sequence owns this.
-- Install the systemd units. The README:957 sequence owns this.
+  groups. The README "VPS deploy sequence" owns this.
+- Install the systemd units. The README "VPS deploy sequence" owns this.
 - Provision real credentials. Mutation stays disabled.
 - Enable the kill switch. The handoff's §6 owns this.
 
