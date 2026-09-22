@@ -253,9 +253,9 @@ switch is absent there, so nothing can mutate); designed in its own PR.
 
 ## 7. Accepted risks
 
-- The box's Compose version may behave differently from v2.38.2. Phase 5 on the box catches it
+- The box's Compose version may behave differently from v2.38.2. Phase 6 on the box catches it
   before the rehearsal.
-- The stand-in image is not the real image (Python version, base layers). Phase 5 on the box runs
+- The stand-in image is not the real image (Python version, base layers). Phase 6 on the box runs
   the real image.
 - The proxy denies `GET /info` and `GET /networks/<name>` and Compose v2.38.2 continues (M5b).
   Recorded as Linux evidence for README's "re-measure the endpoint allow-list" note; nothing is

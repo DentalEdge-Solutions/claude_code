@@ -28,7 +28,7 @@
 _hermes_env_default() {
   eval "_cur=\${$1:-}"
   [ -z "$_cur" ] || return 0
-  [ -r "$here/.env" ] || return 0
+  [ -f "$here/.env" ] && [ -r "$here/.env" ] || return 0
   while IFS= read -r _line || [ -n "$_line" ]; do
     case "$_line" in
       "$1"=*) : ;;

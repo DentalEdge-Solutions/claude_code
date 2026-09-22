@@ -85,5 +85,27 @@ class TestUnreadableEnv(Base):
         self.assertIn("HERMES_GOVERNANCE_DIR is unset or empty", p.stderr)
 
 
+class TestEnvIsADirectory(Base):
+    """`[ -r "$here/.env" ]` passes for a directory too. Without a companion `-f` test the
+    redirect `read ... < "$here/.env"` then fails ("Is a directory"), and under `set -eu`
+    the wrapper aborts on the next unbound `_line` reference instead of skipping .env the
+    way an unreadable file is skipped."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        shutil.copy2(HOSTENV, os.path.join(self.home, "hostenv.sh"))
+        os.mkdir(os.path.join(self.home, ".env"))
+
+    def test_governance_dir_set_alone_still_sources_cleanly(self):
+        """Only HERMES_GOVERNANCE_DIR is supplied, so the other three keys are still
+        unset going into `_hermes_env_default`, which then reaches the .env check for
+        each of them — the exact path that used to abort with a directory .env."""
+        p, v = self.source(HERMES_GOVERNANCE_DIR="/g")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("Is a directory", p.stderr)
+        self.assertEqual(v["HERMES_GOVERNANCE_DIR"], "/g")
+
+
 if __name__ == "__main__":
     unittest.main()

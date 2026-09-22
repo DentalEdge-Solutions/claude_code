@@ -11,6 +11,12 @@ resolution, no cleaning (M2) — and gives a bare entry the mode "rw" (M3). A RE
 joined to a project directory whose spelling depends on how Compose was started (-f form, PWD,
 sudo: M1, M6). That dependence is F9 itself, so a relative source is refused here rather than
 guessed at.
+
+Only two interpolation forms are actually implemented: bare `${VAR}` and the guarded
+`${VAR:?msg}`. Every other form — `${VAR:-default}`, `${VAR?err}`, a bare unbraced `$VAR` — is
+deliberately left literal rather than interpolated, so it fails closed: either as a "relative
+bind source" (it does not start with `/`) or as a mismatch against the pins. A `}` inside a
+guard message will also mis-parse, since `${VAR:?msg}` is matched up to the first `}`.
 """
 import re
 import shlex

@@ -277,7 +277,7 @@ Two prohibitions:
 ## Phase 4: Build, Measure, Then Start
 
 **Measure the binds before anything starts.** An earlier version ran `up` here and measured in
-phase 5 — the wrong order: if compose had resolved paths from the symlink lexically, the
+the old phase 5 — the wrong order: if compose had resolved paths from the symlink lexically, the
 gateway's `../..` mount would have been the host root, and `up` would have started a container
 with it. `create` builds containers without running them, and `inspect` shows only paths (this
 is not `docker compose config`; no secret is rendered).
@@ -362,7 +362,15 @@ the broker's real path: as `hermes-broker`, through the proxy socket, with the b
 environment and `--env-file /dev/null`. The ids are dummies. The executor checks the kill
 switch before it reads anything else, so this cannot touch an account.
 
+**Why not just run `run-ads-mutate.sh`?** The wrapper refuses at this point in bring-up: it
+requires `.env.gaw` carrying the WRITE Google Ads credential, which does not exist yet. So
+this pastes the wrapper's own Compose invocation directly instead. `proxy-policy-sync.test.py`
+(`TestRunbookMatchesTheWrapper`) is what keeps the two equal — it fails if the wrapper's
+invocation ever changes and this block is not updated to match.
+
 ```bash
+# Precondition check — stated below, not previously verified:
+[ ! -e /var/lib/hermes/governance/control/mutation-enabled ] && echo "kill switch absent — safe to proceed"
 sudo -u hermes-broker env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
   HOME="$(getent passwd hermes-broker | cut -d: -f6)" \
   DOCKER_HOST=unix:///run/hermes/docker-proxy.sock \
@@ -377,7 +385,9 @@ sudo journalctl -u hermes-docker-proxy --since "-5 min" --no-pager | grep 'conta
 
 Expected: `rc=2`, output containing `mutation is disabled`, and a journal line
 `ALLOW POST /v…/containers/create`. The values in the command are the ones in
-`hermes-broker.service`; if you changed the unit, use its values.
+`hermes-broker.service`; if you changed the unit, use its values. The refusal is doubly safe:
+`slug-1` is also not a registered client (a fresh store's `registry/clients.json` is `{}`), so
+even a kill switch present would not reach an account.
 
 **On anything else:** stop and record it. A `DENY … bind set does not match` means the box's
 Compose sends different strings than CI measured. Do not widen the allow-list. A refusal is a

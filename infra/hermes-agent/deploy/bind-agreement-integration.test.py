@@ -16,7 +16,13 @@ that variable is set, in which case any skip is a FAILURE. It prints how many te
 read that line on the PR run AND on the merge commit.
 
 NOT FOR THE VPS. It creates /opt/projects/claude_code, /opt/hermes-agent, the governance
-store and the spool, and REFUSES to run if any of them already exists.
+store and the spool, and REFUSES to run if any of them already exists. /opt/projects and
+/var/lib/hermes (the store's and spool's shared parent) are shared parents it may ADOPT
+rather than own — it narrows its own file-mode and ownership changes to the paths it
+creates under them, and never widens an existing parent it did not create. Teardown removes
+none of: /opt/projects, /var/lib/hermes, the hermes/hermes-broker/hermes-rail users and
+groups, the hermes-agent-claude image tag, or /run/hermes-f9-it — it is written for an
+ephemeral CI runner that is discarded whole, not for a host this suite must leave clean.
 
 FIDELITY GAPS (say so, do not paper over): the proxy runs as root here, not as
 hermes-docker-proxy (the socket's group, hermes-rail, is what the broker needs, and that is
@@ -96,7 +102,11 @@ def setUpModule():
     # BRING-UP Phase 2: a checkout under /opt/projects, /opt/hermes-agent a SYMLINK to it.
     skip = shutil.ignore_patterns("__pycache__", "*.pyc", "data", ".env", ".env.gaw")
     shutil.copytree(AGENT, REAL_AGENT, ignore=skip, symlinks=True)
-    run(["chmod", "-R", "a+rX", "/opt/projects"], check=True)
+    # Narrowed to CHECKOUT (the tree this suite just created — why_not_runnable() already
+    # refused if it pre-existed): copytree preserves sane modes on its own, this is
+    # belt-and-braces, and it must never reach across /opt/projects into some OTHER
+    # project a Linux developer keeps there.
+    run(["chmod", "-R", "a+rX", CHECKOUT], check=True)
     os.symlink(REAL_AGENT, AGENT_DIR)
     os.makedirs(ADS_REPO, 0o755)
     # BRING-UP Phase 3: .env root 600, dummy values only. Includes every interpolation input.
@@ -127,14 +137,20 @@ def setUpModule():
     # group/world-writable, or init-host-layout.py --apply refuses outright. exist_ok=True
     # because this parent may legitimately pre-exist (it is not one of the paths the suite
     # OWNS per why_not_runnable() — only STORE and SPOOL themselves are). The mode passed to
-    # makedirs is subject to umask, so chmod/chown explicitly afterwards.
+    # makedirs is subject to umask, so chmod/chown explicitly afterwards — but ONLY when this
+    # suite is the one that created the directory: re-owning a pre-existing /var/lib/hermes
+    # would silently override whatever ownership was already there. If it pre-exists and is
+    # not suitable, init-host-layout.py --apply refuses on its own ancestor check below, which
+    # is the correct outcome — this must not paper over that by forcing the mode/owner first.
     assert os.path.dirname(STORE) == os.path.dirname(SPOOL), (
         "STORE and SPOOL no longer share a parent — the BRING-UP Phase 2 install -d step "
         "creates one directory for both; if this ever diverges, this needs two.")
     shared_parent = os.path.dirname(STORE)
+    shared_parent_created = not os.path.isdir(shared_parent)
     os.makedirs(shared_parent, exist_ok=True)
-    os.chmod(shared_parent, 0o755)
-    os.chown(shared_parent, 0, 0)
+    if shared_parent_created:
+        os.chmod(shared_parent, 0o755)
+        os.chown(shared_parent, 0, 0)
     # README step 2: the store and spool, the documented way.
     r = run(["python3", os.path.join(AGENT_DIR, "bin", "init-host-layout.py"),
              "--store-root", STORE, "--spool-root", SPOOL, "--apply"], env=root_env())
