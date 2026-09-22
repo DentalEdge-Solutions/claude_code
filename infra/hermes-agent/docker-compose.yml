@@ -94,10 +94,16 @@ services:
     entrypoint: ["python3", "/opt/cc-bin/apply-changeset.py"]
     environment:
       HERMES_GOVERNANCE_ROOT: /opt/governance
+    # F9: EVERY source here is absolute and comes from a :?-guarded variable. Compose sends an
+    # absolute source verbatim (spec 2026-09-22 §2, M2), so the strings the proxy compares are
+    # exactly the values the broker unit sets — and those equal hermes-docker-proxy.service's
+    # --allow-bind sources (proxy-policy-sync.test.py asserts it). NEVER use a relative source
+    # here: Compose joins it to a project directory whose spelling depends on how Compose was
+    # started (-f form, PWD, sudo — M1/M6), and the proxy refuses anything but an exact match.
     volumes:
-      - ${HERMES_GOVERNANCE_DIR}/approvals:/opt/governance/approvals:ro
-      - ${HERMES_GOVERNANCE_DIR}/control:/opt/governance/control:ro
-      - ${HERMES_GOVERNANCE_DIR}/registry:/opt/governance/registry:ro
+      - ${HERMES_GOVERNANCE_DIR:?HERMES_GOVERNANCE_DIR must be set, see .env.example}/approvals:/opt/governance/approvals:ro
+      - ${HERMES_GOVERNANCE_DIR:?HERMES_GOVERNANCE_DIR must be set, see .env.example}/control:/opt/governance/control:ro
+      - ${HERMES_GOVERNANCE_DIR:?HERMES_GOVERNANCE_DIR must be set, see .env.example}/registry:/opt/governance/registry:ro
       # log/ is the ONLY governance directory this container writes: append_log in
       # apply-changeset.py, fsync'd per action, is the reversibility record --undo
       # later reads. It must stay writable.
@@ -109,7 +115,7 @@ services:
       # contents — that residual is untouched by this wave (see the design doc's
       # "Explicitly not this wave"). Do not "fix" this to :ro — append_log would fail
       # mid-apply, which is exit 3 after a live account change.
-      - ${HERMES_GOVERNANCE_DIR}/log:/opt/governance/log
+      - ${HERMES_GOVERNANCE_DIR:?HERMES_GOVERNANCE_DIR must be set, see .env.example}/log:/opt/governance/log
       # NO seen/ MOUNT. The seen-set (replay protection) is written and read entirely
       # host-side, by the broker — MEASURED, not assumed: every caller of append_seen,
       # seen_contains and iter_seen_records lives in hermes-broker.py, and nothing
@@ -119,9 +125,9 @@ services:
       # path's benefit. preflight-governance-access.py's READ_WRITE_DIRS is the
       # coupled half of this: dropping the mount without dropping the pre-flight's
       # declared requirement would make the pre-flight false-refuse.
-      - ../../../claude-google-ads:/projects/claude_google_ads:ro
-      - ./registry:/opt/registry:ro
-      - ./bin:/opt/cc-bin:ro
+      - ${HERMES_ADS_REPO_DIR:?HERMES_ADS_REPO_DIR must be set, see README Executor bind sources}:/projects/claude_google_ads:ro
+      - ${HERMES_AGENT_DIR:?HERMES_AGENT_DIR must be set, see README Executor bind sources}/registry:/opt/registry:ro
+      - ${HERMES_AGENT_DIR:?HERMES_AGENT_DIR must be set, see README Executor bind sources}/bin:/opt/cc-bin:ro
 
   # Credential access audit. Same isolation rationale as ads-mutator: this injects the
   # WRITE credential, and must not do so into the container Hermes has a shell in.

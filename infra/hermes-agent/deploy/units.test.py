@@ -5,6 +5,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(AGENT, "bin"))
 import host_layout as H
+import bind_agreement as BA
 
 
 def unit(name):
@@ -181,6 +182,44 @@ class TestSpoolPathContract(unittest.TestCase):
         source = mounts[0].split(":/opt/data/spool")[0]
         self.assertTrue(source.startswith("- ${HERMES_SPOOL_DIR:?"), mounts[0])
         self.assertNotIn(":-", source)
+
+
+class TestExecutorBindContract(unittest.TestCase):
+    """F9. The broker unit, .env.example and the units' own program paths must name the same
+    executor bind sources. proxy-policy-sync.test.py compares them with the proxy's pins."""
+
+    def setUp(self):
+        self.env = BA.unit_environment(unit("hermes-broker.service"))
+        self.example = open(os.path.join(AGENT, ".env.example"), encoding="utf-8").read()
+
+    def test_the_broker_sets_the_executor_bind_sources(self):
+        self.assertEqual(self.env.get("HERMES_AGENT_DIR"), "/opt/hermes-agent")
+        self.assertEqual(self.env.get("HERMES_ADS_REPO_DIR"), "/opt/projects/claude-google-ads")
+
+    def test_the_brokers_spool_dir_is_its_spool_root(self):
+        self.assertEqual(self.env.get("HERMES_SPOOL_DIR"), self.env.get("HERMES_SPOOL_ROOT"))
+        self.assertEqual(self.env.get("HERMES_SPOOL_DIR"), H.DEFAULT_SPOOL_ROOT)
+
+    def test_env_example_agrees_with_the_broker(self):
+        for key in ("HERMES_AGENT_DIR", "HERMES_ADS_REPO_DIR", "HERMES_GOVERNANCE_DIR",
+                    "HERMES_SPOOL_DIR"):
+            self.assertRegex(self.example,
+                             r"(?m)^%s=%s$" % (key, re.escape(self.env[key])), key)
+
+    def test_both_units_run_their_program_from_the_agent_dir(self):
+        """HERMES_AGENT_DIR is the checkout both units already execute from; a unit that
+        runs from one path and binds from another is F9 again."""
+        agent = self.env["HERMES_AGENT_DIR"]
+        for name in ("hermes-broker.service", "hermes-docker-proxy.service"):
+            start = [l for l in live_lines(unit(name)) if l.startswith("ExecStart=")]
+            self.assertEqual(len(start), 1, name)
+            self.assertIn(agent + "/bin/", start[0], name)
+
+    def test_firing_control_a_drifted_example_fails_the_regex(self):
+        drifted = self.example.replace("HERMES_AGENT_DIR=/opt/hermes-agent",
+                                       "HERMES_AGENT_DIR=/opt/elsewhere")
+        self.assertNotEqual(drifted, self.example, "the control did not drift anything")
+        self.assertNotRegex(drifted, r"(?m)^HERMES_AGENT_DIR=/opt/hermes-agent$")
 
 
 if __name__ == "__main__":
