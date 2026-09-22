@@ -1,4 +1,5 @@
-import datetime, importlib.util, json, os, subprocess, sys, tempfile, unittest
+import contextlib, datetime, importlib.util, io, json, os, stat, subprocess, sys, tempfile, unittest, uuid
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -142,9 +143,12 @@ class TestRefusalsNeverExecute(Base):
         C.write_approval(SLUG, CID, DIGEST, "operator", NOW, 24)   # fresh approval
         self.file_request(request_id=rid)      # same id, filed again
         r = RecordingRunner()
-        self.drain(r)
+        out = self.drain(r)
         self.assertEqual(r.calls, [])
-        self.assertEqual(self.result_for(rid)["classification"], "refused_replay")
+        self.assertEqual([o["classification"] for o in out], ["refused_replay"])
+        # I2 (F10 final review): the replay is refused, but the first pass's completed
+        # result stays on disk. It is never overwritten with "refused, exit 2".
+        self.assertEqual(self.result_for(rid)["classification"], "accepted_applied")
 
     def test_replay_survives_deletion_of_the_whole_spool(self):
         # The property that justifies putting the seen-set in the governance store.
@@ -307,6 +311,74 @@ class TestRefusalsNeverExecute(Base):
         self.assertEqual(r.calls, [])
         self.assertTrue(os.path.isfile(tmp_path),
                          "a half-written temp artifact must be left untouched, not discarded")
+
+
+class TestACompletedResultIsNeverOverwritten(Base):
+    """F10 final review, I2. The gateway writes requests/ and can reuse any request_id
+    it has seen a result for. Two refusal paths used to write their result with an
+    unconditional replace, so a re-filed request could turn a completed
+    accepted_applied / failed_after_mutation result into "refused, exit 2", which
+    asserts nothing was mutated. Each test below fires one of those two paths against a
+    completed result and asserts the result survives. The request entry is still
+    discarded, and the runner is never called.
+    """
+
+    COMPLETED = {"status": "applied", "classification": "accepted_applied",
+                 "exit_code": 0, "detail": "the change-set was applied",
+                 "finished_at": "2026-08-24T10:15:00Z"}
+
+    def _complete(self, rid):
+        payload = dict(self.COMPLETED, request_id=rid)
+        S.write_result(rid, payload, self.spool)
+        with open(S.result_path(rid, self.spool), "rb") as f:
+            return f.read()
+
+    def _result_bytes(self, rid):
+        with open(S.result_path(rid, self.spool), "rb") as f:
+            return f.read()
+
+    def test_an_invalid_request_reusing_a_completed_id_does_not_overwrite_it(self):
+        rid = str(uuid.uuid4())
+        before = self._complete(rid)
+        self.file_request(request_id=rid, operator="root")     # extra key: rejected
+        r = RecordingRunner()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self._result_bytes(rid), before)
+        self.assertEqual([o["classification"] for o in out], ["refused_request"])
+        self.assertIn("already has a result on disk", err.getvalue())
+        self.assertNotIn("%s.json" % rid, os.listdir(S.requests_dir(self.spool)),
+                         "the request entry must still be discarded")
+
+    def test_a_replayed_valid_request_does_not_overwrite_a_completed_result(self):
+        rid = str(uuid.uuid4())
+        before = self._complete(rid)
+        C.append_seen(SLUG, rid, NOW)
+        self.file_request(request_id=rid)                       # valid, but a replay
+        r = RecordingRunner()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = self.drain(r)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(self._result_bytes(rid), before)
+        self.assertEqual([o["classification"] for o in out], ["refused_replay"])
+        self.assertIn("already has a result on disk", err.getvalue())
+        self.assertNotIn("%s.json" % rid, os.listdir(S.requests_dir(self.spool)),
+                         "the request entry must still be discarded")
+
+    def test_control_with_no_prior_result_both_refusals_are_still_written(self):
+        # Without this, a guard that skipped EVERY refusal write would pass both tests
+        # above. "A result on every outcome" (spec §12) still holds for a fresh id.
+        bad = self.file_request(operator="root")
+        seen = str(uuid.uuid4())
+        C.append_seen(SLUG, seen, NOW)
+        self.file_request(request_id=seen)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.drain(RecordingRunner())
+        self.assertEqual(self.result_for(bad)["classification"], "refused_request")
+        self.assertEqual(self.result_for(seen)["classification"], "refused_replay")
 
 
 class TestAcceptedTodayFailsClosed(Base):
@@ -610,6 +682,83 @@ class TestPoisonedSpoolEntries(Base):
         # forever as new work.
         out2 = self.drain(RecordingRunner())              # must not raise
         self.assertNotIn(poison_name, os.listdir(d))
+
+
+class TestQuarantineIsVerified(Base):
+    """F10b and R1. The gateway can write requests/, so it can plant '.quarantine' first
+    (as a symlink, or as a directory it owns) and have the broker move entries through
+    it. The broker must verify the directory before using it. Empty planted directories
+    are rmdir'ed instead (R1: a non-root broker cannot move a gateway-owned directory to
+    another parent on Linux, so quarantine is not always available)."""
+
+    POISON = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.json"
+
+    def plant(self, empty):
+        d = S.requests_dir(self.spool)
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, self.POISON)
+        os.mkdir(p)
+        if not empty:
+            with open(os.path.join(p, "x"), "w") as f:
+                f.write("x")
+        return d, p
+
+    def other_request(self):
+        rid = str(uuid.uuid4())
+        C.append_seen(SLUG, rid, NOW)          # a replay: refused without a runner call
+        self.file_request(request_id=rid)
+        return rid
+
+    def drain_stderr(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.drain(RecordingRunner())          # must not raise
+        return err.getvalue()
+
+    def test_an_empty_planted_directory_is_removed_without_quarantine(self):
+        d, p = self.plant(empty=True)
+        self.drain_stderr()
+        self.assertFalse(os.path.exists(p))
+        self.assertFalse(os.path.exists(os.path.join(d, ".quarantine")))
+
+    def test_control_a_non_empty_directory_goes_to_a_trusted_quarantine(self):
+        d, p = self.plant(empty=False)
+        other = self.other_request()
+        self.drain_stderr()
+        self.assertFalse(os.path.exists(p))
+        q = os.path.join(d, ".quarantine")
+        self.assertEqual(len(os.listdir(q)), 1)
+        self.assertEqual(stat.S_IMODE(os.lstat(q).st_mode) & 0o022, 0)
+        self.assertEqual(self.result_for(other)["classification"], "refused_replay")
+
+    def test_a_symlinked_quarantine_is_refused_and_nothing_moves_through_it(self):
+        d, p = self.plant(empty=False)
+        elsewhere = tempfile.mkdtemp()
+        os.symlink(elsewhere, os.path.join(d, ".quarantine"))
+        other = self.other_request()
+        err = self.drain_stderr()
+        self.assertTrue(os.path.isdir(p))
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertIn(".quarantine", err)
+        self.assertEqual(self.result_for(other)["classification"], "refused_replay")
+
+    def test_a_group_writable_quarantine_is_refused(self):
+        d, p = self.plant(empty=False)
+        q = os.path.join(d, ".quarantine")
+        os.mkdir(q)
+        os.chmod(q, 0o770)
+        err = self.drain_stderr()
+        self.assertTrue(os.path.isdir(p))
+        self.assertEqual(os.listdir(q), [])
+        self.assertIn("writable", err)
+
+    def test_a_quarantine_owned_by_another_uid_is_refused(self):
+        d, p = self.plant(empty=False)
+        os.mkdir(os.path.join(d, ".quarantine"), 0o700)
+        with mock.patch.object(B.os, "geteuid", return_value=os.geteuid() + 4242):
+            err = self.drain_stderr()
+        self.assertTrue(os.path.isdir(p))
+        self.assertIn("owned by uid", err)
 
 
 class TestExecution(Base):

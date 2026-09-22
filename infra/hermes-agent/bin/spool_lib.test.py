@@ -263,5 +263,23 @@ class TestWriteResult(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
 
+class TestResultFileMode(unittest.TestCase):
+    """F10a. mkstemp always creates 0600, so on Linux a result written by hermes-broker
+    was unreadable by the gateway (uid 10000): every fetch reported result_unreadable."""
+
+    def test_the_spool_file_mode_is_group_read(self):
+        self.assertEqual(S.SPOOL_FILE_MODE, 0o640)
+
+    def test_a_result_lands_0640_whatever_the_umask(self):
+        for umask in (0o000, 0o077):
+            root = tempfile.mkdtemp()
+            old = os.umask(umask)
+            try:
+                p = S.write_result(GOOD_ID, {"status": "refused"}, root)
+            finally:
+                os.umask(old)
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o640, oct(umask))
+
+
 if __name__ == "__main__":
     unittest.main()

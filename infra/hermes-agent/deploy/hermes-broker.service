@@ -5,8 +5,9 @@ Requires=hermes-docker-proxy.service
 
 [Service]
 Type=simple
-# Its own user. .env.gaw and the governance store are readable ONLY by this user, so
-# even the deploy user's shell cannot read the write credential (spec §16.2).
+# Its own user. .env.gaw is readable ONLY by this user, so even the deploy user's shell
+# cannot read the write credential (spec §16.2). The governance store is NOT private to
+# it: the executor (uid 10000) reads the store through group hermes (bin/host_layout.py).
 User=hermes-broker
 Group=hermes-broker
 # hermes-rail: connect to the proxy socket. hermes (gid 10000): read the governance
@@ -19,11 +20,18 @@ WorkingDirectory=/opt/hermes-agent
 Environment=DOCKER_HOST=unix:///run/hermes/docker-proxy.sock
 Environment=HERMES_GOVERNANCE_DIR=/var/lib/hermes/governance
 Environment=HERMES_GOVERNANCE_ROOT=/var/lib/hermes/governance
-Environment=HERMES_SPOOL_ROOT=/opt/hermes-agent/data/spool
+# Outside data/ on purpose (F10b): data/ is owned by the gateway's uid, which could
+# rename the spool and leave a symlink into the governance store in its place.
+Environment=HERMES_SPOOL_ROOT=/var/lib/hermes/spool
 # Refuses at BOOT rather than mid-apply, where the failure is exit 3 after a live
 # account change. Since S3-b this also refuses when a registered client has no
 # pre-created log — so --bootstrap-logs MUST have been run before this unit is
 # enabled, or Restart=on-failure turns it into a five-second restart loop.
+# F10: the layout first — exact owners and modes, including what the pre-flight cannot
+# see (a wrong OWNER with the right bits). It never repairs; a mismatch prints the
+# expected state. Then the executor-access pre-flight.
+ExecStartPre=/usr/bin/python3 /opt/hermes-agent/bin/init-host-layout.py --check \
+    --store-root /var/lib/hermes/governance --spool-root /var/lib/hermes/spool
 ExecStartPre=/usr/bin/python3 /opt/hermes-agent/bin/preflight-governance-access.py \
     --root /var/lib/hermes/governance
 ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/hermes-broker.py --watch --interval 5
@@ -33,7 +41,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/hermes/governance /opt/hermes-agent/data/spool
+ReadWritePaths=/var/lib/hermes/governance /var/lib/hermes/spool
 RestrictAddressFamilies=AF_UNIX
 MemoryMax=256M
 

@@ -174,7 +174,7 @@ you want to verify, run the script against mocks rather than counting by eye.)
    does not use SSH, so you can still reach the box. Log in as root there and reconcile the
    issue.
 
-### Step 1e: Verify the gid-10000 precondition (before README:957 runs)
+### Step 1e: Verify the gid-10000 precondition (before README "VPS deploy sequence" runs)
 
 SSH in as `hermesops` and check:
 
@@ -197,8 +197,9 @@ The systemd units at lines noted below dictate this layout. It is not free-choic
 |---|---|---|
 | `/opt/projects/claude_code` | this repo | so compose's `../../../claude-google-ads` resolves to `/opt/projects/claude-google-ads` |
 | `/opt/projects/claude-google-ads` | the ads repo | `hermes-docker-proxy.service:36` |
-| `/opt/hermes-agent` | `bin/`, `registry/`, `data/spool` | `hermes-broker.service:17,22,27,29`; `hermes-docker-proxy.service:26,37,38` |
-| `/var/lib/hermes/governance` | the governance store | `hermes-broker.service:20,21,28,36`; `hermes-docker-proxy.service:32-35` |
+| `/opt/hermes-agent` | `bin/`, `registry/` | `hermes-broker.service:18,33,35,37`; `hermes-docker-proxy.service:26,37,38` |
+| `/var/lib/hermes/governance` | the governance store | `hermes-broker.service:21,22,34,36,44`; `hermes-docker-proxy.service:32-35` |
+| `/var/lib/hermes/spool` | the request spool | `hermes-broker.service` (`HERMES_SPOOL_ROOT`, `ReadWritePaths`); `docker-compose.yml` (`HERMES_SPOOL_DIR`) |
 
 In a `hermesops@<host>` session:
 
@@ -207,11 +208,12 @@ sudo mkdir -p /opt/projects /var/lib/hermes
 # claude_code is public — no credential on the box for it
 sudo git clone https://github.com/DentalEdge-Solutions/claude_code.git /opt/projects/claude_code
 sudo ln -s /opt/projects/claude_code/infra/hermes-agent /opt/hermes-agent
-sudo install -d -m 700 /var/lib/hermes/governance
+sudo install -d -m 755 -o root -g root /var/lib/hermes
+# the store and the spool under it are created by README "VPS deploy sequence" step 2
 # verify
 sudo git -C /opt/projects/claude_code log -1 --oneline     # must equal origin/main
 readlink -f /opt/hermes-agent                               # /opt/projects/claude_code/infra/hermes-agent
-sudo stat -c '%a %U:%G %n' /var/lib/hermes/governance       # 700 root:root
+sudo stat -c '%a %U:%G %n' /var/lib/hermes                  # 755 root:root
 ```
 
 **Do not `mkdir /opt/hermes-agent` before the `ln -s`.** An earlier version of this runbook did.
@@ -252,13 +254,14 @@ are root-owned. That is correct: `sudo docker compose` reads the files as root, 
 commands run under `sudo` (the deploy user is deliberately not in the `docker` group).
 
 Copy the example to `.env` at mode 600 and set the dummy key. `HERMES_GOVERNANCE_DIR`
-already defaults to `/var/lib/hermes/governance` in the example.
+already defaults to `/var/lib/hermes/governance` in the example, and `HERMES_SPOOL_DIR` to
+`/var/lib/hermes/spool`.
 
 ```bash
 sudo install -m 600 /opt/hermes-agent/.env.example /opt/hermes-agent/.env
 sudo sed -i 's/^ANTHROPIC_API_KEY=$/ANTHROPIC_API_KEY=dummy-key-this-wave/' /opt/hermes-agent/.env
 # verify — key NAMES only, never values
-sudo grep -Ev '^\s*(#|$)' /opt/hermes-agent/.env | cut -d= -f1       # ANTHROPIC_API_KEY, HERMES_GOVERNANCE_DIR
+sudo grep -Ev '^\s*(#|$)' /opt/hermes-agent/.env | cut -d= -f1       # ANTHROPIC_API_KEY, HERMES_GOVERNANCE_DIR, HERMES_SPOOL_DIR
 sudo grep -c '^ANTHROPIC_API_KEY=dummy-key-this-wave$' /opt/hermes-agent/.env   # 1 — sed is silent on a non-match
 sudo git -C /opt/projects/claude_code status --short                  # empty — .env is gitignored
 ```
@@ -286,12 +289,20 @@ sudo docker inspect $(sudo docker compose ps -a -q hermes-agent) --format '{{ran
 sudo docker compose down
 ```
 
-Every source must be under `/opt/projects/`. Measured 2026-09-21 — identical from
-`/opt/hermes-agent` and from the physical path, i.e. compose **resolves** the symlink:
+Every source must be under `/opt/projects/`, with **one** expected exception: the spool,
+`/var/lib/hermes/spool:/opt/data/spool` (from `HERMES_SPOOL_DIR`, F10). Measured 2026-09-21,
+before the spool bind existed — identical from `/opt/hermes-agent` and from the physical path,
+i.e. compose **resolves** the symlink:
 `/opt/projects/claude_code:/projects/claude_code:ro`,
 `/opt/projects/claude-google-ads:/projects/claude_google_ads:ro`,
 `/opt/projects/claude_code/infra/hermes-agent/{bin,registry,data,skills/...,masks/empty}`.
-Any source of `/` or outside `/opt/projects/` is a stop.
+Any source of `/`, or outside `/opt/projects/` other than `/var/lib/hermes/spool`, is a stop.
+
+**The `up` below makes Docker create `/var/lib/hermes/spool` as `755 root:root`,** because
+README "VPS deploy sequence" step 2 has not laid it out yet. That is expected, and wrong:
+`init-host-layout.py --apply` refuses it. README step 2 takes the gateway down, removes the
+Docker-created directory, lays out the real spool, and brings the gateway back up so it mounts
+that spool.
 
 **`data/` must belong to uid 10000 before `up`.** It is gitignored, so it does not exist on a
 fresh clone; Docker creates missing bind sources as root at *start* (not at `create`), and the
@@ -385,29 +396,16 @@ is a design change landed by PR, not an allow-list edit on the box.
 
 ## Phase 6: Hand Off
 
-**Blocked as of 2026-09-21 — do not start until the layout below is designed and landed.**
-README step 1 (users and groups) was run and verified. Step 2 onwards assumes a governance
-store that already has content; on a fresh box nothing creates it:
+**Blocked on F9 only** (the bind paths vs the proxy allow-list — see
+`docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`). The store and spool layout
+(F10) is landed: README "VPS deploy sequence" step 2 creates both on a fresh box with
+`init-host-layout.py`, and the broker unit verifies them at every start. README step 1 (users
+and groups) was run and verified on 2026-09-21.
 
-- `approvals/`, `control/`, `registry/`, `log/`, `seen/` and `registry/clients.json` are only
-  ever created by `migrate()` from existing local vaults. The VPS has none.
-  `--bootstrap-logs` deliberately refuses a missing `log/` (`migrate_governance_shim.py:153`).
-- The store's **owner** is unspecified beyond "deploy/broker user" (README:894), but the
-  broker writes `seen/`, `approvals/` and `control/.locks/`.
-- `data/spool/` must exist for the broker unit's `ReadWritePaths=`, is written by uid 10000
-  and read, deleted and quarantined by `hermes-broker` — and `data/` is `700` uid 10000.
-  The spool is the only channel between agent and broker, so its permissions are a security
-  design decision, not a bring-up chmod.
+Once the bind paths match (or are reconciled), hand off to:
 
-The pre-flight, run as `hermes-broker` against the empty store, refuses (exit 2) — correctly —
-but cannot distinguish "missing" from "unreadable", and its suggested fix `chmod`s a `log/`
-that does not exist yet.
-
-Once the bind paths match (or are reconciled) **and the store/spool layout is landed**, hand
-off to:
-
-1. `README.md:957` steps 1–5 (create the Hermes users and groups, install the systemd units,
-   run the preflight checks)
+1. README "VPS deploy sequence" steps 1–5 (create the Hermes users and groups, install the
+   systemd units, run the preflight checks)
 2. `docs/superpowers/handoffs/2026-09-17-vps-deploy-and-remeasurement.md` §2–§5 (the 2026-09-17
    handoff sequence)
 
@@ -502,8 +500,8 @@ dashboard has not been measured.
 ## What This Runbook Does Not Do
 
 - Create the Hermes users (`hermes`, `hermes-broker`, `hermes-docker-proxy`, `hermes-rail`) or
-  groups. The README:957 sequence owns this.
-- Install the systemd units. The README:957 sequence owns this.
+  groups. The README "VPS deploy sequence" owns this.
+- Install the systemd units. The README "VPS deploy sequence" owns this.
 - Provision real credentials. Mutation stays disabled.
 - Enable the kill switch. The handoff's §6 owns this.
 

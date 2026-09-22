@@ -20,6 +20,14 @@ import governance_lib
 
 DEFAULT_SPOOL_ROOT = "/opt/data/spool"
 
+# Every file in the spool is written 0640, set on the fd so the umask cannot defeat it
+# (F10a). mkstemp always creates 0600, and the two sides of the spool are DIFFERENT
+# users on Linux (gateway uid 10000, broker hermes-broker): 0600 made every request
+# unreadable to the broker and every result unreadable to the gateway. Group read is
+# enough because both files carry group hermes (10000) — requests/ and results/ are
+# setgid (bin/host_layout.py). Invisible on darwin, where both sides are one user.
+SPOOL_FILE_MODE = 0o640
+
 # A few KB. A well-formed request is ~150 bytes; anything approaching this is either a
 # mistake or an attempt to make the broker read an unbounded file into memory.
 MAX_REQUEST_BYTES = 4096
@@ -198,6 +206,7 @@ def write_result(request_id, payload, root=None):
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".%s." % request_id, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), SPOOL_FILE_MODE)
             json.dump(payload, f, indent=2, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())

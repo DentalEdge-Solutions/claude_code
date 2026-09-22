@@ -55,6 +55,7 @@ def submit(client, changeset, root=None):
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".%s." % request_id, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), S.SPOOL_FILE_MODE)  # F10a: the broker is another user
             json.dump(req, f, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())

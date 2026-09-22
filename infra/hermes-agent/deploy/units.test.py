@@ -1,10 +1,21 @@
-import os, re, unittest
+import os, re, sys, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+AGENT = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(AGENT, "bin"))
+import host_layout as H
 
 
 def unit(name):
     return open(os.path.join(HERE, name), encoding="utf-8").read()
+
+
+def live_lines(body):
+    """Directive lines only: stripped, no comments, no blanks. A commented-out
+    directive is how a gate gets disabled mid-debug and left that way."""
+    return [l.strip() for l in body.splitlines()
+            if l.strip() and not l.strip().startswith("#")]
 
 
 class TestUnits(unittest.TestCase):
@@ -124,6 +135,52 @@ class TestUnits(unittest.TestCase):
                  re.findall(r"--allow-bind (\S+)", unit("hermes-docker-proxy.service"))]
         self.assertEqual(modes.count("rw"), 1)
         self.assertEqual(len(modes), 7)
+
+    def test_the_layout_check_runs_before_the_preflight(self):
+        """F10. The pre-flight predicts what uid 10000 can do; it cannot tell a wrong
+        OWNER from a right one with the same bits. The layout --check can. It runs
+        first so a wrong layout refuses with its own expected-state lines."""
+        pre = [l for l in live_lines(unit("hermes-broker.service"))
+               if l.startswith("ExecStartPre=")]
+        layout = [i for i, l in enumerate(pre) if "init-host-layout.py" in l]
+        flight = [i for i, l in enumerate(pre) if "preflight-governance-access.py" in l]
+        self.assertEqual(len(layout), 1, pre)
+        self.assertEqual(len(flight), 1, pre)
+        self.assertLess(layout[0], flight[0])
+        self.assertIn("--check", pre[layout[0]])
+        self.assertNotIn("--apply", " ".join(pre))
+
+    def test_the_broker_writes_only_the_store_and_the_spool(self):
+        rw = [l.split("=", 1)[1].split() for l in live_lines(unit("hermes-broker.service"))
+              if l.startswith("ReadWritePaths=")]
+        self.assertEqual(rw, [[H.DEFAULT_STORE_ROOT, H.DEFAULT_SPOOL_ROOT]])
+
+    def test_no_live_directive_points_the_broker_at_data_spool(self):
+        """F10b: under the gateway-owned data/, the spool is a redirect into the store."""
+        for l in live_lines(unit("hermes-broker.service")):
+            self.assertNotIn("data/spool", l)
+
+
+class TestSpoolPathContract(unittest.TestCase):
+    """F10b. The unit, .env.example, the compose mount and host_layout must name one
+    spool path, and compose must have no fallback to a path under data/."""
+
+    def read(self, rel):
+        return open(os.path.join(AGENT, rel), encoding="utf-8").read()
+
+    def test_unit_and_env_example_agree_with_the_layout(self):
+        self.assertIn("Environment=HERMES_SPOOL_ROOT=%s" % H.DEFAULT_SPOOL_ROOT,
+                      live_lines(unit("hermes-broker.service")))
+        self.assertRegex(self.read(".env.example"),
+                         r"(?m)^HERMES_SPOOL_DIR=%s$" % re.escape(H.DEFAULT_SPOOL_ROOT))
+
+    def test_the_gateway_mounts_the_spool_with_no_fallback(self):
+        mounts = [l for l in live_lines(self.read("docker-compose.yml"))
+                  if "/opt/data/spool" in l]
+        self.assertEqual(len(mounts), 1, mounts)
+        source = mounts[0].split(":/opt/data/spool")[0]
+        self.assertTrue(source.startswith("- ${HERMES_SPOOL_DIR:?"), mounts[0])
+        self.assertNotIn(":-", source)
 
 
 if __name__ == "__main__":

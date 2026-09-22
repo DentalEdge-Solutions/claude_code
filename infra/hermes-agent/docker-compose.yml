@@ -48,6 +48,13 @@ services:
         condition: service_completed_successfully   # auth file exists before gateway boots
     volumes:
       - ./data:/opt/data                # Hermes state (gitignored)
+      # The request spool (F10b). Its own bind, OUTSIDE ./data: data/ is owned by the
+      # gateway's uid, so a spool under it could be renamed and replaced with a symlink
+      # the host-side broker would follow. Mounted here, /opt/data/spool is a mount point
+      # the gateway cannot rename (EBUSY). No fallback on purpose: an unset variable must
+      # stop compose, never quietly mean ./data/spool. Locally, HERMES_SPOOL_DIR=./data/spool
+      # is fine — darwin has no uid separation to protect.
+      - ${HERMES_SPOOL_DIR:?HERMES_SPOOL_DIR must be set, see README Spool layout}:/opt/data/spool
       - ../..:/projects/claude_code:ro  # THIS repo, READ-ONLY (P2; writes gated to P5)
       - ../../../claude-google-ads:/projects/claude_google_ads:ro  # DentalEdge Google Ads (client-adjacent; secrets gitignored, not in tree)
       - ./registry:/opt/registry:ro     # project registry (version-controlled, read-only)

@@ -154,8 +154,8 @@ def bootstrap_logs(governance_root, dry_run=False, expected_gid=None):
         raise RuntimeError(
             "no log directory at %s — refusing to create it, because a log/ laid down "
             "here would get the wrong mode and produce a store the executor cannot use. "
-            "Create it host-side at mode %04o (see the README's ownership section) and "
-            "re-run." % (log_dir, governance_lib.LOG_DIR_MODE))
+            "Create the layout with init-host-layout.py --apply (it lays log/ down at "
+            "mode %04o, root:hermes) and re-run." % (log_dir, governance_lib.LOG_DIR_MODE))
     # I2(b): stat what we are about to create files under, not just what we are about
     # to create them AS. A log/ that already exists but is group-writable or carries
     # the wrong group is a store this function would otherwise populate with files

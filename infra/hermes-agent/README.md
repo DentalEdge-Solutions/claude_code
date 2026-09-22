@@ -718,17 +718,46 @@ the agent can write and the broker can read.
 
 ### Spool layout
 
-`data/spool/` (inside the container, `/opt/data/spool`), overridable with `HERMES_SPOOL_ROOT`:
+On a Linux host the spool is `/var/lib/hermes/spool` (`HERMES_SPOOL_DIR` in `.env`), bind-mounted
+into the gateway at `/opt/data/spool`. Host-side callers use `HERMES_SPOOL_ROOT`.
 
 ```
-data/spool/
-  requests/<request_id>.json    # Hermes writes; the broker reads and deletes
-  results/<request_id>.json     # the broker writes; Hermes reads
+/var/lib/hermes/spool/               root:hermes            0750
+  requests/                          hermes-broker:hermes   3770  (setgid + sticky)
+    .quarantine/                     hermes-broker:hermes-broker 0700
+    <request_id>.json                10000:hermes           0640  Hermes writes; the broker reads and deletes
+  results/                           hermes-broker:hermes   2750
+    <request_id>.json                hermes-broker:hermes   0640  the broker writes; Hermes reads
 ```
+
+`init-host-layout.py` creates it (see "Ownership on a Linux host"). The modes do work:
+
+- **Sticky `requests/`, owned by the broker.** The gateway can create requests but cannot delete
+  or rename anything the broker owns, including `.quarantine/`. The broker, as the directory's
+  owner, can delete the gateway's requests.
+- **Pre-created `.quarantine/`.** If it did not exist, the gateway could create the name first —
+  as a symlink, or as a directory it controls — and the broker would move entries through it.
+  The broker also re-checks it on every use: a real directory, its own, not group- or
+  world-writable.
+- **Group-read-only `results/`.** The gateway cannot forge a result.
+- **`0640` files, set on the fd.** Both sides are different users on Linux. `mkstemp`'s `0600`
+  made every request unreadable to the broker and every result unreadable to the gateway (F10a).
+
+**Why not `data/spool`.** `data/` is owned by the gateway's uid. A spool under it could be renamed
+and replaced with a symlink, which the host-side broker would follow into the only other tree it
+can write: the governance store (F10b). As a separate bind mount, `/opt/data/spool` is a mount
+point the gateway cannot rename. Compose has no fallback: an unset `HERMES_SPOOL_DIR` stops
+`docker compose up`. On a laptop, `HERMES_SPOOL_DIR=./data/spool` is fine, because darwin has
+no uid separation to protect.
 
 `<request_id>` is a uuid, and the filename must match the `request_id` inside the file. The broker
 treats every byte here as hostile: closed schema, size cap, regular-files-only, no symlinks, no
 directories, and a quarantine for entries it cannot parse.
+
+**Known residual.** A non-empty directory the gateway plants in `requests/` can be neither removed
+nor quarantined by a non-root broker, because moving a directory needs write on it. It stays in
+place and is re-rejected and logged on every drain. Other requests are still served. Remove it as
+root.
 
 ### Client — `hermes-syscall`, in-container
 
@@ -737,7 +766,7 @@ credential, never a file path.
 
 ```bash
 python3 /opt/cc-bin/hermes-syscall.py apply  --client <slug> --changeset <id>
-python3 /opt/cc-bin/hermes-syscall.py result --request <request_id>
+python3 /opt/cc-bin/hermes-syscall.py result --request-id <request_id>
 ```
 
 | Exit | Meaning |
@@ -798,8 +827,9 @@ quarantined entries either; both are operator tasks today.
 Order matters — the pre-flight exists to stop a half-configured store becoming an exit-3 *after* a
 live mutation:
 
-1. **Governance store in place** — `approvals/`, `control/`, `registry/`, `log/`, `seen/` all present.
-   `seen/` is host-only and must **not** be mounted into the executor.
+1. **Governance store and spool in place** — created by `init-host-layout.py --apply` and verified
+   by `--check` (see "Ownership on a Linux host"). `seen/` is host-only and must **not** be mounted
+   into the executor.
 2. **Pre-flight passes** — `python3 bin/preflight-governance-access.py --root "$HERMES_GOVERNANCE_DIR"`
    exits 0. It is a deliberate **no-op off Linux**, so a clean run on macOS proves nothing.
 3. **Mutation disabled at rest** — no kill-switch file. Absence means disabled; that is the safe default.
@@ -842,8 +872,9 @@ through it rather than composing them independently.
 **`HERMES_GOVERNANCE_DIR`** (in `.env`, gitignored) is the absolute host path to this
 tree. It must be **outside this repo** (the repo is bind-mounted into the gateway
 container) and **outside `./data`** (the one read-write mount the gateway does have).
-Create it mode `700` before first use; Compose does not expand `~`, so write the path
-in full (`/Users/you/.hermes/governance`, not `~/.hermes/governance`). See
+On a Linux host `init-host-layout.py` creates it, with the owners and modes below; locally, any
+directory you own. Compose does not expand `~`, so write the path in full
+(`/Users/you/.hermes/governance`, not `~/.hermes/governance`). See
 `.env.example` for the annotated template.
 
 **Who mounts what:**
@@ -891,21 +922,43 @@ resolves and contains every destination it opens.
 
 ### Ownership on a Linux host
 
-The store is documented as mode `700` owned by the deploy/broker user — and the
-one-shot `ads-mutator` executor runs as **uid 10000** (`Dockerfile`: `USER hermes`). On
-Linux those are the same UID namespace, so a `700` store owned by anyone else is simply
-**unreadable to the executor**: the kill switch reads as absent, client resolution
-raises, and `append_log` fails *mid-apply* — exit 3 after a live account change has
-landed. macOS hides this entirely, because Docker Desktop remaps ownership, so the
-local gate passes and the VPS is where it breaks.
+The store is shared by three identities: the broker (`hermes-broker`), the one-shot executor
+(`ads-mutator`, **uid 10000**, `Dockerfile`: `USER hermes`) and root. On Linux they share one
+UID namespace with the host. On macOS none of this shows, because Docker Desktop remaps
+ownership, so the local gate passes and the VPS is where it breaks. The layout is one table,
+`bin/host_layout.py`:
 
-Give the store an ownership the executor's UID can use — either group access:
+| Path | Owner:group | Mode | Why |
+|---|---|---|---|
+| (root) | `root:hermes` | `0750` | broker and executor traverse; only root renames children |
+| `approvals/` | `hermes-broker:hermes` | `2750` | the broker reserves and records; the executor reads |
+| `control/` | `root:hermes` | `2750` | **only root can create the kill switch** — the broker cannot enable mutation |
+| `control/.locks/` | `hermes-broker:hermes-broker` | `0700` | the broker's per-client locks |
+| `registry/` | `root:hermes` | `2750` | operator-edited |
+| `registry/clients.json` | `root:hermes` | `0640` | created as `{}` only if absent |
+| `log/` | `root:hermes` | `2750` | append-but-not-unlink (below) |
+| `seen/` | `hermes-broker:hermes-broker` | `0700` | broker-only replay state |
+
+Create and verify it with the governed operator CLI. It is a dry run by default. `--apply`
+creates only what is missing, and **refuses — creating nothing — if anything that exists is
+wrong**. It never repairs.
 
 ```bash
-sudo chgrp -R 10000 "$HERMES_GOVERNANCE_DIR"
-sudo chmod -R g+rX "$HERMES_GOVERNANCE_DIR"
-sudo chmod 2750 "$HERMES_GOVERNANCE_DIR"/log
-sudo find "$HERMES_GOVERNANCE_DIR"/log -type f -name '*.jsonl' -exec chmod 0660 {} +
+python3 infra/hermes-agent/bin/init-host-layout.py                       # dry run
+sudo python3 infra/hermes-agent/bin/init-host-layout.py --apply
+sudo -u hermes-broker python3 infra/hermes-agent/bin/init-host-layout.py --check
+```
+
+The same `--check` is the broker unit's first `ExecStartPre`. A mismatch line names the path,
+what it found and the expected `owner:group mode`. Set exactly that by hand, then re-run
+`--check`.
+
+**Editing the client registry.** An editor that replaces `clients.json` recreates it with the
+editor's owner and umask, and `--check` then stops the broker. Edit a copy, then install it in
+place:
+
+```bash
+sudo install -o root -g hermes -m 0640 clients.json.new /var/lib/hermes/governance/registry/clients.json
 ```
 
 `log/` gets **no group write**. Write on a directory is what grants `unlink`, and
@@ -915,7 +968,7 @@ merely a quota. It appends to a **pre-created** per-client file instead; `setgid
 `log/` is what makes those files inherit gid 10000, without which `0660` grants
 the operator's own group and uid 10000 falls through to `other`.
 
-Create the per-client logs — required for every registered client, and idempotent:
+Create the per-client logs. This is required for every registered client, and idempotent:
 
 ```bash
 infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs            # dry run
@@ -925,24 +978,20 @@ infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs --apply
 `seen/` is not mounted into the executor at all and needs no access for uid 10000.
 Widening it would hand the governed party the replay-protection state again.
 
-or outright ownership. POSIX selects the owner class before the group class, so a
-`log/` directory owned by the executor is writable by it no matter how tight the mode
-looks, and write on a directory is what grants `unlink` — so the sequence must restore
-`log/` to a non-executor owner afterward:
+**Accepted residual.** `hermes-broker` is in gid 10000 so it can read `clients.json`, which
+also gives it group write on `log/*.jsonl`. It can truncate an audit log, though it cannot
+unlink one. Closing that needs a second, executor-only group. It is not justified now: the
+broker already owns `approvals/` and `seen/`, so a compromised broker is already past it.
 
-```bash
-sudo chown -R 10000:10000 "$HERMES_GOVERNANCE_DIR" && sudo chmod -R 700 "$HERMES_GOVERNANCE_DIR"
-sudo chown root:10000 "$HERMES_GOVERNANCE_DIR"/log && sudo chmod 2750 "$HERMES_GOVERNANCE_DIR"/log
-```
+**Never `chmod 777`**, and never `chown -R` the store to the executor. POSIX selects the owner
+class first, so an executor-owned `log/` is writable by it however tight the mode looks. The
+store is the one tree Hermes cannot reach; making it world-writable hands it to every process
+on the host.
 
-**Never `chmod 777`.** The store is the one tree Hermes cannot reach; making it
-world-writable hands it to every process on the host and deletes the isolation the
-whole tier rests on.
-
-`run-ads-mutate.sh` pre-flights this before it does anything else
-(`bin/preflight-governance-access.py`), so the condition surfaces as a refusal with the
-remedy printed, rather than as an exit-3 failure halfway through an apply. The check is
-a no-op on non-Linux, where a stat-based prediction would be false.
+`run-ads-mutate.sh` pre-flights executor access before it does anything else
+(`bin/preflight-governance-access.py`), so a bad store surfaces as a refusal with the remedy
+printed, rather than as an exit-3 failure halfway through an apply. The check is a no-op on
+non-Linux, where a stat-based prediction would be false.
 
 **Migration** copies the pre-governance-store artifacts (client registry, audit log)
 from the vault tier into the store. Dry run by default; `--apply` performs the copy.
@@ -1006,10 +1055,56 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
    supplementary groups, `docker` absent from the broker) — it does not and cannot
    assert that these groups exist on any given host; that is this step's job.
 
-2. **Lay out the governance store** — the ownership block already documented above:
-   `chgrp -R 10000`, `chmod -R g+rX`, `chmod 2750 log`, and
-   `find log -type f -name '*.jsonl' -exec chmod 0660 {} +`. Do this before bootstrapping
-   logs in the next step, since bootstrap writes into `log/`.
+2. **Lay out the governance store and the spool.** Everything below runs from
+   `/opt/hermes-agent`.
+
+   **Make sure `.env` sets the spool.** A `.env` copied from `.env.example` already has
+   `HERMES_SPOOL_DIR=/var/lib/hermes/spool`; an older one does not. `.env` is root `600`, and
+   this line adds the key only when it is missing, without printing the file:
+
+   ```bash
+   sudo grep -q '^HERMES_SPOOL_DIR=' .env || echo 'HERMES_SPOOL_DIR=/var/lib/hermes/spool' | sudo tee -a .env >/dev/null
+   ```
+
+   **Take the gateway down, and remove any directory Docker made in the tool's place.**
+   BRING-UP Phase 4 runs `sudo docker compose up -d` before this step. Docker creates a
+   missing bind source as `755 root:root`, so after that `up` `/var/lib/hermes/spool`
+   already exists, with the wrong owner and mode, and `--apply` refuses it. Stop the gateway
+   first: removing the directory while the gateway runs leaves the container writing into a
+   deleted directory. `rmdir` succeeds only on an empty directory, which is the check. If it
+   refuses, stop and inspect: something wrote there.
+
+   ```bash
+   sudo docker compose down
+   [ ! -e /var/lib/hermes/spool ]      || sudo rmdir /var/lib/hermes/spool
+   [ ! -e /var/lib/hermes/governance ] || sudo rmdir /var/lib/hermes/governance
+   ```
+
+   **Lay out both trees, verify them, then bring the gateway back up** so it mounts the real
+   spool:
+
+   ```bash
+   python3 bin/init-host-layout.py                              # dry run: every line "create"
+   sudo python3 bin/init-host-layout.py --apply
+   sudo -u hermes-broker python3 bin/init-host-layout.py --check      # must exit 0
+   sudo -u hermes-broker python3 bin/preflight-governance-access.py \
+     --root /var/lib/hermes/governance                                # must exit 0
+   sudo docker compose up -d                                    # only after --check exits 0
+   ```
+
+   Both checks run as `hermes-broker`, as the broker unit will. The pre-flight passes on the
+   fresh store because `clients.json` is `{}`, which means zero registered clients.
+
+   **The box from the first bring-up (2026-09-21)** needs the same steps, in this order. Its
+   store exists as an **empty** `700 root:root` directory, its `.env` predates
+   `HERMES_SPOOL_DIR`, and its running gateway predates the spool mount:
+
+   1. Pull: `sudo git -C /opt/projects/claude_code pull --ff-only`.
+   2. Add `HERMES_SPOOL_DIR` to `.env` with the non-printing line above.
+   3. `sudo docker compose down`.
+   4. `rmdir` the empty store and any Docker-created spool (the two guarded lines above).
+   5. Run the dry run, `--apply`, `--check` and the pre-flight above.
+   6. `sudo docker compose up -d`.
 
 3. **Bootstrap the logs — before enabling any unit:**
 
@@ -1045,8 +1140,13 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
    sudo -u hermes-broker curl --unix-socket /run/hermes/docker-proxy.sock http://localhost/version
    ```
 
-   A restart loop at 5-second intervals in `systemctl status hermes-broker` almost
-   always means step 3 was skipped — go back and run `--bootstrap-logs --apply`, then
+   A restart loop at 5-second intervals in `systemctl status hermes-broker` means an
+   `ExecStartPre` refused. Usually step 3 was skipped: go back and run
+   `--bootstrap-logs --apply`. It can also be layout drift, which the first `ExecStartPre`
+   catches, for example an editor that rewrote `registry/clients.json` with a new owner or
+   mode. Run `sudo -u hermes-broker python3 /opt/hermes-agent/bin/init-host-layout.py --check`:
+   it names each mismatch and the expected owner, group and mode. `journalctl -u hermes-broker`
+   shows which check refused. Either way, fix the cause, then run
    `systemctl reset-failed hermes-broker` before re-enabling.
 
 > **The endpoint allow-list is re-measured on the VPS, not inherited.** Per R22 the darwin

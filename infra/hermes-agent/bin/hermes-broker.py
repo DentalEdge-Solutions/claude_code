@@ -29,7 +29,7 @@ path (control/.locks/<slug>.lock) is a DIFFERENT FILE from Task 4's sidecar
 (approvals/<slug>/<cid>.approval.lock) — nesting them cannot deadlock, and they must
 not be merged into one lock; see changeset_lib._approval_lock's docstring.
 """
-import argparse, collections, datetime, fcntl, json, os, subprocess, sys, time
+import argparse, collections, datetime, fcntl, json, os, stat, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
@@ -153,6 +153,39 @@ def _write_result(rid, spool, classification, status, exit_code, detail, now):
     }, spool)
 
 
+def _has_result(rid, spool):
+    """True when results/<rid>.json already exists. A result on disk is never
+    overwritten by a refusal: it may say a mutation landed, and a refusal says nothing
+    was mutated. spool_lib.write_result replaces unconditionally, so every refusal path
+    that can meet a reused request_id checks here first (F10 final review, I2)."""
+    return os.path.isfile(S.result_path(rid, spool))
+
+
+def _quarantine_problem(qdir):
+    """None if qdir is safe to move entries into, else the reason it is not.
+
+    F10b: requests/ is gateway-writable, so the gateway can create '.quarantine' first —
+    as a symlink into the governance store (the broker's only other writable tree under
+    ProtectSystem=strict), or as a directory it owns and can empty. makedirs(exist_ok)
+    accepted both. The layout pre-creates it broker-owned 0700 (bin/host_layout.py); this
+    re-verifies it on every use, because a pre-created name is only safe while it is
+    still the directory that was pre-created."""
+    try:
+        os.mkdir(qdir, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(qdir)
+    if not stat.S_ISDIR(st.st_mode):
+        return "%s is not a real directory (a symlink or other entry)" % qdir
+    if st.st_uid != os.geteuid():
+        return "%s is owned by uid %d, not this broker (uid %d)" % (
+            qdir, st.st_uid, os.geteuid())
+    if st.st_mode & 0o022:
+        return "%s is group- or world-writable (mode %04o)" % (
+            qdir, stat.S_IMODE(st.st_mode))
+    return None
+
+
 def _discard(path):
     """Remove a processed spool entry. Must never raise: a single poisoned or
     already-vanished entry must never crash the drain and must never block any other
@@ -169,24 +202,38 @@ def _discard(path):
     mutation rail, starving every other client's queued requests in the same and
     every subsequent pass.
 
-    Three-step fallback, each step only tried if the previous one failed:
+    Four-step fallback, each step only tried if the previous one failed:
       1. os.unlink — the fast, common case. FileNotFoundError (already gone, e.g. a
          concurrent cleanup or a path replaced out from under us between scan and
          delete) is success, not an error: something else already resolved it.
-      2. If unlink fails for any other reason — it is a directory, or a permission
-         quirk we cannot otherwise explain — QUARANTINE it: os.replace() it into
-         requests/.quarantine/, a location _scan never looks at, under a
-         collision-proof name. This is chosen over recursively deleting whatever the
-         entry is (which could itself be adversarially deep or surprising — this is
-         hostile-input-handling code and should not recurse into untrusted structure)
-         and over leaving it in requests/ (which would make _scan find it again on
-         every future pass, forever re-triggering the same rejection AND the same
-         failing delete attempt — unbounded repeated "new work" and unbounded stderr
-         noise on every single drain from here on, which is only a slower-motion
-         version of the same permanent stall).
-      3. If even the quarantine move fails (e.g. the entry was swapped again, mid-move,
-         for something else entirely), log once to stderr and give up on this one
-         entry. The drain must survive this by moving on, not by looping.
+      2. If unlink fails, try rmdir (R1, F10): an EMPTY directory the gateway planted
+         is removable by the broker, as owner of the sticky requests/, whoever owns it.
+      3. Otherwise QUARANTINE it: os.replace() it into requests/.quarantine/ — but only
+         after _quarantine_problem() has verified that directory is a real,
+         broker-owned, non-group/world-writable directory (F10b) — a location _scan
+         never looks at, under a collision-proof name. This is chosen over recursively
+         deleting whatever the entry is (which could itself be adversarially deep or
+         surprising — this is hostile-input-handling code and should not recurse into
+         untrusted structure) and over leaving it in requests/ (which would make _scan
+         find it again on every future pass, forever re-triggering the same rejection
+         AND the same failing delete attempt — unbounded repeated "new work" and
+         unbounded stderr noise on every single drain from here on, which is only a
+         slower-motion version of the same permanent stall).
+      4. If even the quarantine move fails (e.g. the entry was swapped again, mid-move,
+         for something else entirely, or _quarantine_problem refused the directory),
+         log once to stderr and give up on this one entry. The drain must survive this
+         by moving on, not by looping.
+
+    STATED RESIDUAL (R1). On Linux the broker is not root, and moving a directory to a
+    different parent needs write permission on that directory. A NON-EMPTY directory the
+    gateway planted at, say, 0700 can therefore be neither removed nor quarantined: it
+    stays in requests/, is re-scanned, re-rejected and logged on every drain pass. Its
+    refused_request result is written once; later passes find it on disk and do not
+    rewrite it (I2), so a planted entry that reuses a completed request_id cannot turn
+    that result into a refusal either. The drain survives it and every other request is
+    still processed — deploy/layout-integration.test.py is written to prove both on real
+    uids (Linux CI). Removing it needs root. The "permanent stall" FIX ROUND 2 closed is closed for
+    the drain; it is not closed for the log noise.
     """
     try:
         os.unlink(path)
@@ -196,9 +243,25 @@ def _discard(path):
     except OSError:
         pass                            # not a plain deletable file; fall through
 
+    # R1: an EMPTY directory is removable by the broker even when the gateway owns it —
+    # requests/ is sticky and the broker owns it, and rmdir needs nothing from the entry
+    # itself. Quarantine does: moving a directory to a different parent needs write on
+    # the directory (it rewrites '..'), and the gateway chose that mode.
+    try:
+        os.rmdir(path)
+        return
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass                            # not empty, or not a directory; fall through
+
     try:
         qdir = os.path.join(os.path.dirname(path), ".quarantine")
-        os.makedirs(qdir, exist_ok=True)
+        problem = _quarantine_problem(qdir)
+        if problem:
+            print("hermes-broker: refusing to quarantine %s: %s — leaving it in place; "
+                  "an operator must inspect the spool" % (path, problem), file=sys.stderr)
+            return
         dest = os.path.join(qdir, "%s.%d.%d" % (os.path.basename(path),
                                                  time.time_ns(), os.getpid()))
         os.replace(path, dest)
@@ -295,7 +358,13 @@ def drain(spool=None, projects=None, runner=None, now=None):
         if S.REQUEST_ID_RE.fullmatch(rid):
             outcomes.append({"request_id": rid, "classification": "refused_request",
                              "detail": reason})
-            _write_result(rid, spool, "refused_request", "refused", 2, reason, now)
+            # I2: the gateway can plant an invalid request under the name of a request
+            # that already completed. Refuse it, discard it, but never overwrite.
+            if _has_result(rid, spool):
+                print("broker: request %s already has a result on disk; NOT "
+                      "overwriting it with a refused_request" % rid, file=sys.stderr)
+            else:
+                _write_result(rid, spool, "refused_request", "refused", 2, reason, now)
         _discard(os.path.join(S.requests_dir(spool), name))
 
     pending = collections.Counter(req["client"] for _, req in parsed)
@@ -367,7 +436,7 @@ def drain(spool=None, projects=None, runner=None, now=None):
             # ("refused_request" / exit_code=2, which asserts nothing was mutated).
             # spool_lib.write_result performs an unconditional os.replace with no
             # already-written guard of its own, so that check belongs here.
-            if os.path.isfile(S.result_path(rid, spool)):
+            if _has_result(rid, spool):
                 print("broker: request %s already has a result on disk; NOT "
                       "overwriting it with a refused_request derived from: %s"
                       % (rid, e), file=sys.stderr)
@@ -385,7 +454,14 @@ def _process(req, spool, projects, pending_count, runner, now):
 
     if C.seen_contains(slug, rid):
         detail = "request_id %s has already been accepted — replay refused" % rid
-        _write_result(rid, spool, "refused_replay", "refused", 2, detail, now)
+        # I2: a replayed id usually has a completed result on disk (accepted_applied,
+        # failed_after_mutation, ...). The replay is refused and its entry discarded by
+        # drain(), but that result is never overwritten with "refused, exit 2".
+        if _has_result(rid, spool):
+            print("broker: request %s already has a result on disk; NOT "
+                  "overwriting it with a refused_replay" % rid, file=sys.stderr)
+        else:
+            _write_result(rid, spool, "refused_replay", "refused", 2, detail, now)
         return {"request_id": rid, "classification": "refused_replay", "detail": detail}
 
     rec = vault_lib.resolve(slug)                       # unknown slug raises -> refusal
