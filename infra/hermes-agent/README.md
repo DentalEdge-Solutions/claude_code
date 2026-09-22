@@ -989,8 +989,10 @@ the operator's own group and uid 10000 falls through to `other`.
 Create the per-client logs. This is required for every registered client, and idempotent:
 
 ```bash
-infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs            # dry run
-infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs --apply
+# --governance-root is REQUIRED on the host (F16): the tool defaults to the CONTAINER
+# path /opt/governance, so without it these address the wrong tree.
+infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs            # dry run
+infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs --apply
 ```
 
 `seen/` is not mounted into the executor at all and needs no access for uid 10000.
@@ -1132,7 +1134,9 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
 3. **Bootstrap the logs — before enabling any unit:**
 
    ```bash
-   infra/hermes-agent/bin/migrate-governance.py --bootstrap-logs --apply
+   # Run from /opt/hermes-agent. --governance-root is REQUIRED (F16): without it the tool
+   # resolves the CONTAINER default /opt/governance, not the host store.
+   sudo python3 bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs --apply
    ```
 
    > **Run `--bootstrap-logs` BEFORE enabling the broker.** Since S3-b the pre-flight refuses
