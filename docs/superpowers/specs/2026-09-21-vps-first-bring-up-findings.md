@@ -18,8 +18,8 @@ dashboard basic-auth password. None of them appears in this document or in git.*
 | 2 Layout | done — runbook `mkdir`-then-`ln -s` bug avoided (F5); ads repo is a **placeholder** (F6) |
 | 3 `.env` | done — dummy key, `600 root:root`, checkout clean |
 | 4 Start | done — binds measured **before** `up` (F7); `data/` ownership fixed (F8); gateway running, `claude 2.1.278` |
-| 5 Bind paths | **mismatch, open** (F9) — measured, not widened |
-| 6 Units | **parked** — README step 1 done and verified; the store/spool layout (F10) is fixed in PR #35; step 2+ still waits on F9 |
+| 5 Bind paths | **fixed in the repo** (F9, PR #38); box confirmation pending (BRING-UP Phase 6) |
+| 6 Units | **not blocked** — README step 1 done and verified; F10 landed (PR #35); F9 does not gate unit installation |
 | 7 Dashboard | done — form login enforced, reachable only through an SSH tunnel |
 
 Host: Hostinger KVM 2, Ubuntu 24.04.4 LTS, x86_64, kernel 6.8.0. Docker 29.8.1, compose plugin
@@ -98,7 +98,7 @@ bundled skills, and also `docker_config_migrate.py failed; continuing`. Docker D
 all of this on macOS. **Fix:** `data/` in the runbook (in this PR). **Open:** `data/skills`
 ownership, and the migrate warning.
 
-### F9: the bind paths do not match the proxy allow-list, and no layout matches both
+### F9: the bind paths do not match the proxy allow-list — fixed (PR #38)
 
 Measured binds of the `hermes-agent` service (identical from both directories):
 
@@ -122,8 +122,29 @@ at `/opt/hermes-agent` would fix those two, but it would send `../../../claude-g
 `/claude-google-ads`. **This is an inference for `ads-mutator`, which uses the same relative
 forms.** It was deliberately not created, because doing so before README step 2 would have made
 Docker lay the governance subdirectories down as root. Nothing was widened.
-**Open:** a design fix in the repo. The candidates are pinning the allow-list to the canonical
+**Was open:** a design fix in the repo. The candidates are pinning the allow-list to the canonical
 paths, or giving compose absolute paths. The fix must keep `proxy-policy-sync.test.py` meaningful.
+
+**Correction (2026-09-22, measured on Linux CI).** The measurement above was partly caused by how
+it was taken. `sudo docker compose` run from the working directory has no `PWD`, so Compose
+takes the resolved path as its project directory. The broker's real path
+(`run-ads-mutate.sh`, `-f /opt/hermes-agent/docker-compose.yml`) sends `/opt/hermes-agent/bin`
+and `/opt/hermes-agent/registry`, which match the pins, and `/claude-google-ads`, which does not.
+No invocation matched all seven. The root cause was the relative sources. See spec
+`2026-09-22-f9-bind-paths-and-proxy-allow-list-design.md` §2, M1 and M6.
+
+**Fix (PR #38).** Every `ads-mutator` source is an absolute `:?`-guarded variable, set by the
+broker unit and equal to the proxy's pins. The allow-list and the proxy are unchanged.
+`proxy-policy-sync.test.py` compares the strings on every platform, and the CI job
+`bind-agreement` drives the broker's path through the real proxy on Linux.
+
+**Second defect on the same path, fixed in the same PR.** `hermes-broker` cannot read `.env`
+(`600 root:root`), and Compose aborts on an unreadable `.env` even when every variable is
+exported (M4). `run-ads-mutate.sh` now passes `--env-file /dev/null`, and the broker unit
+supplies the variables. The handoff's first half was wrong: `hostenv.sh` never read `.env` as
+the broker, because the unit already sets `HERMES_GOVERNANCE_DIR`.
+
+**Remaining:** the box confirmation (BRING-UP Phase 6) on the box's own Compose and real image.
 
 ### F10: Phase 6 assumes a governance store and spool that nothing creates on a fresh box
 
@@ -200,6 +221,20 @@ shows as the "RUN RECORD NOT PERSISTED" banner, with the executor's exit status 
 **Gates creating the kill switch, not Phase 6.** Installing the units approves nothing.
 F10's `approvals/` ownership (`hermes-broker:hermes 2750`) is compatible with any F12 fix.
 
+### F14: a Compose failure is reported as "refused, nothing was mutated" (recorded, not fixed)
+
+`docker compose run` exits 1 on any Compose-level failure. Two such failures were measured on
+Linux CI (2026-09-22): a proxy refusal at create, and an unreadable `.env`. The broker maps
+exit 1 to `refused_usage`, whose detail says "nothing was mutated" (`hermes-broker.py`,
+`CLASSIFICATION_BY_RC` / `DETAIL_BY_CLASSIFICATION`). For a refusal at create, that is true.
+If Compose loses the proxy connection **after** the container started, it may also return 1
+while the executor is mid-apply, and the broker would promise "nothing was mutated" about a run
+that may have changed the account. That goes around the exit-2 guarantee in
+`apply-changeset.py`. **Inferred, not measured.** It gates the kill switch, not the rehearsal:
+the kill switch is absent there, so nothing can be mutated. **Open:** a distinct wrapper exit
+code for "Compose failed before the container started", designed in its own PR (F9 spec §3.7,
+§5).
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -213,8 +248,9 @@ F10's `approvals/` ownership (`hermes-broker:hermes 2750`) is compatible with an
 
 ## Open items, in order
 
-1. F9: the allow-list and compose path design. This unblocks Phase 6.
+1. BRING-UP Phase 6: confirm the bind agreement on the box, after README steps 2–5.
 2. F3: a `--check` for usable sudo, with a firing control.
 3. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
 4. F6: a deploy-key clone of the ads repo, after the security review.
 5. F12: host-side approval and run-record writes vs data/vaults. Gates the kill switch.
+6. F14: Compose failures reported as "nothing was mutated". Gates the kill switch.
