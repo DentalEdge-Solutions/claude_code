@@ -121,6 +121,20 @@ def setUpModule():
                 "GOOGLE_ADS_CUSTOMER_ID=1234567890\n")
     os.chown(gaw, 0, grp.getgrnam("hermes-broker").gr_gid)
     os.chmod(gaw, 0o640)
+    # BRING-UP Phase 2: `sudo install -d -m 755 -o root -g root /var/lib/hermes` — the shared
+    # parent of STORE and SPOOL. check_ancestors (bin/host_layout.py) requires every directory
+    # ABOVE the store/spool roots to already exist, be a real directory, root-owned and not
+    # group/world-writable, or init-host-layout.py --apply refuses outright. exist_ok=True
+    # because this parent may legitimately pre-exist (it is not one of the paths the suite
+    # OWNS per why_not_runnable() — only STORE and SPOOL themselves are). The mode passed to
+    # makedirs is subject to umask, so chmod/chown explicitly afterwards.
+    assert os.path.dirname(STORE) == os.path.dirname(SPOOL), (
+        "STORE and SPOOL no longer share a parent — the BRING-UP Phase 2 install -d step "
+        "creates one directory for both; if this ever diverges, this needs two.")
+    shared_parent = os.path.dirname(STORE)
+    os.makedirs(shared_parent, exist_ok=True)
+    os.chmod(shared_parent, 0o755)
+    os.chown(shared_parent, 0, 0)
     # README step 2: the store and spool, the documented way.
     r = run(["python3", os.path.join(AGENT_DIR, "bin", "init-host-layout.py"),
              "--store-root", STORE, "--spool-root", SPOOL, "--apply"], env=root_env())
