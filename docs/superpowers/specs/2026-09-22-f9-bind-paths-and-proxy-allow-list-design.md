@@ -1,7 +1,8 @@
 # F9 — The executor's bind paths and the proxy allow-list (design)
 
-> **Status:** design approved in brainstorming, 2026-09-22. Implementation plan follows via
-> `superpowers:writing-plans`.
+> **Status:** design approved in brainstorming, 2026-09-22; amended while writing the plan the
+> same day (R1 the shell guard, R2 `.env` needs the new keys, R3 the CI job needs a PR — see §8).
+> Plan: `docs/superpowers/plans/2026-09-22-f9-bind-paths-and-proxy-allow-list.md`.
 > **Handoff:** `docs/superpowers/handoffs/2026-09-22-f9-bind-paths-and-proxy-allow-list.md`
 > **Finding:** F9 in `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`
 > **Constraints carried from the handoff:** mutation stays disabled (no kill switch); the
@@ -122,7 +123,8 @@ environment:
   it parses `HERMES_GOVERNANCE_DIR` today (never sourced), **per variable and only when that
   variable is unset**. A value already in the environment always wins. When all four are set,
   `.env` is not opened at all — required, because on the box it is unreadable and a failed
-  redirect under `set -eu` would abort the wrapper. The R4 guard is extended to all four.
+  redirect under `set -eu` would abort the wrapper. The R4 guard stays on
+  `HERMES_GOVERNANCE_DIR` only (R1, §8): the other three are guarded by compose's `:?`.
 
 `.env` stays `600 root:root`. It is not made group-readable: it holds `ANTHROPIC_API_KEY`, which
 the broker has no business seeing.
@@ -178,18 +180,19 @@ implementer asks rather than doing it.
 - **Phase 5 is replaced.** The old instrument (`sudo docker compose --profile tools create
   ads-mutator`) measures the wrong thing (M6: `sudo` from the cwd resolves the symlink; the
   broker's path does not) and, run before README step 2, makes Docker create governance
-  directories as root. The new Phase 5, **Confirm the bind agreement**, runs **after** README
+  directories as root. The new **Confirm the bind agreement** phase runs **after** README
   steps 2–5 (layout and units in place) and confirms what CI proved, on the real path: as
   `hermes-broker`, through the proxy socket, with the broker unit's environment and
   `--env-file /dev/null`, run the wrapper's Compose command with dummy ids. Expected: the proxy
   journal shows `ALLOW POST …/containers/create` and the executor exits 2, "mutation is
   disabled". This also confirms the box's own Compose version and the proxy's endpoint set.
-  On any refusal: stop, record, do not widen. The phases are reordered accordingly; the old
-  phase's 2026-09-21 result moves to the findings record.
-- **Phase 6 banner:** "Not blocked. Installing and verifying the units creates no container",
+  On any refusal: stop, record, do not widen. Numbering: the old Phase 5 is removed (its
+  2026-09-21 result moves to the findings record), Hand Off becomes Phase 5, and Confirm is the
+  new Phase 6, followed by the rehearsal gate, then Phase 7 (dashboard) unchanged.
+- **Hand Off banner (now Phase 5):** "Not blocked. Installing and verifying the units creates no container",
   citing §3.1.
 - **New gate, First approved request (rehearsal):** needs F9 (this work), F12 (a working approval
-  writer), `.env.gaw` with the write credential, and Phase 5 passed. Proof: with the kill switch
+  writer), `.env.gaw` with the write credential, and Phase 6 (Confirm) passed. Proof: with the kill switch
   **absent**, a human-approved request goes broker → proxy → container and comes back
   `refused_preflight`, "mutation is disabled". Still required before the kill switch is created:
   F12, F14 (§3.7), and the existing §6 hardening gates.
@@ -211,8 +214,8 @@ switch is absent there, so nothing can mutate); designed in its own PR.
   measurement was an artifact of `sudo docker compose` from the working directory (M6); on the
   broker's path only the ads-repo bind was wrong. The `.env` defect recorded inside F9 as a second
   defect on the same path, fixed, with M4, and the handoff's first half corrected. F14 added. The
-  outcome table: Phase 5 "fixed in the repo, box confirmation pending"; Phase 6 "not blocked".
-  Open items: item 1 becomes the Phase 5 box confirmation; F14 added.
+  outcome table: Phase 5 "fixed in the repo, box confirmation pending (BRING-UP Phase 6)"; Phase 6
+  "not blocked". Open items: item 1 becomes the BRING-UP Phase 6 box confirmation; F14 added.
 - **Handoff:** a short correction note (the `.env` premise; the "container only after the kill
   switch" premise) pointing here.
 - **Canon:** untouched. A brain session entry records that the canon line "F9 is the only blocker
@@ -254,3 +257,22 @@ switch is absent there, so nothing can mutate); designed in its own PR.
 - The proxy denies `GET /info` and `GET /networks/<name>` and Compose v2.38.2 continues (M5b).
   Recorded as Linux evidence for README's "re-measure the endpoint allow-list" note; nothing is
   widened.
+
+## 8. Amendments (while writing the plan, 2026-09-22)
+
+- **R1 — the shell guard.** `hostenv.sh` is also sourced by `changeset.sh`, which never runs
+  Compose. Refusing there on the three Compose-only variables would break a tool that does not
+  need them. `hostenv.sh` therefore only *parses* `HERMES_AGENT_DIR`, `HERMES_ADS_REPO_DIR` and
+  `HERMES_SPOOL_DIR`; compose's `:?` is their guard (an unset or empty value stops Compose before
+  any create). The R4 guard and the absolute-path check stay on `HERMES_GOVERNANCE_DIR`, which
+  host-side tools use directly.
+- **R2 — `.env` needs the new keys.** Compose interpolates the whole file, inactive profiles
+  included, so once `ads-mutator` uses `${HERMES_AGENT_DIR:?…}` and `${HERMES_ADS_REPO_DIR:?…}`,
+  every `docker compose` call that reads `.env` (the operator's `up`, `down`, the audit wrappers)
+  needs both keys. README step 2 gains non-printing append lines for them, beside the existing
+  `HERMES_SPOOL_DIR` line, and the 2026-09-21 box's upgrade list names them. The laptop's `.env`
+  needs them too (the operator adds them; nobody reads `.env`).
+- **R3 — the CI job needs a PR.** `ci.yml` runs on `pull_request` to `main` and on `push` to
+  `main` only, so the new job first runs on a PR. The plan opens a **draft** PR after the
+  integration task (outward-facing: ask the operator first) and reads the executed count there
+  before the remaining tasks.
