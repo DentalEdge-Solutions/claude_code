@@ -254,13 +254,14 @@ are root-owned. That is correct: `sudo docker compose` reads the files as root, 
 commands run under `sudo` (the deploy user is deliberately not in the `docker` group).
 
 Copy the example to `.env` at mode 600 and set the dummy key. `HERMES_GOVERNANCE_DIR`
-already defaults to `/var/lib/hermes/governance` in the example.
+already defaults to `/var/lib/hermes/governance` in the example, and `HERMES_SPOOL_DIR` to
+`/var/lib/hermes/spool`.
 
 ```bash
 sudo install -m 600 /opt/hermes-agent/.env.example /opt/hermes-agent/.env
 sudo sed -i 's/^ANTHROPIC_API_KEY=$/ANTHROPIC_API_KEY=dummy-key-this-wave/' /opt/hermes-agent/.env
 # verify — key NAMES only, never values
-sudo grep -Ev '^\s*(#|$)' /opt/hermes-agent/.env | cut -d= -f1       # ANTHROPIC_API_KEY, HERMES_GOVERNANCE_DIR
+sudo grep -Ev '^\s*(#|$)' /opt/hermes-agent/.env | cut -d= -f1       # ANTHROPIC_API_KEY, HERMES_GOVERNANCE_DIR, HERMES_SPOOL_DIR
 sudo grep -c '^ANTHROPIC_API_KEY=dummy-key-this-wave$' /opt/hermes-agent/.env   # 1 — sed is silent on a non-match
 sudo git -C /opt/projects/claude_code status --short                  # empty — .env is gitignored
 ```
@@ -288,12 +289,20 @@ sudo docker inspect $(sudo docker compose ps -a -q hermes-agent) --format '{{ran
 sudo docker compose down
 ```
 
-Every source must be under `/opt/projects/`. Measured 2026-09-21 — identical from
-`/opt/hermes-agent` and from the physical path, i.e. compose **resolves** the symlink:
+Every source must be under `/opt/projects/`, with **one** expected exception: the spool,
+`/var/lib/hermes/spool:/opt/data/spool` (from `HERMES_SPOOL_DIR`, F10). Measured 2026-09-21,
+before the spool bind existed — identical from `/opt/hermes-agent` and from the physical path,
+i.e. compose **resolves** the symlink:
 `/opt/projects/claude_code:/projects/claude_code:ro`,
 `/opt/projects/claude-google-ads:/projects/claude_google_ads:ro`,
 `/opt/projects/claude_code/infra/hermes-agent/{bin,registry,data,skills/...,masks/empty}`.
-Any source of `/` or outside `/opt/projects/` is a stop.
+Any source of `/`, or outside `/opt/projects/` other than `/var/lib/hermes/spool`, is a stop.
+
+**The `up` below makes Docker create `/var/lib/hermes/spool` as `755 root:root`,** because
+README "VPS deploy sequence" step 2 has not laid it out yet. That is expected, and wrong:
+`init-host-layout.py --apply` refuses it. README step 2 takes the gateway down, removes the
+Docker-created directory, lays out the real spool, and brings the gateway back up so it mounts
+that spool.
 
 **`data/` must belong to uid 10000 before `up`.** It is gitignored, so it does not exist on a
 fresh clone; Docker creates missing bind sources as root at *start* (not at `create`), and the

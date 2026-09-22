@@ -487,9 +487,9 @@ REMEDY = """
 Fix by LAYOUT, never by widening a mode. The store's owners and modes are one table
 (bin/host_layout.py; README "Ownership on a Linux host"), created and verified by:
 
-    init-host-layout.py --store-root %(root)s              # dry run
-    sudo init-host-layout.py --store-root %(root)s --apply  # create what is missing
-    sudo -u hermes-broker init-host-layout.py --store-root %(root)s --check
+    python3 /opt/hermes-agent/bin/init-host-layout.py --store-root %(root)s   # dry run
+    sudo python3 /opt/hermes-agent/bin/init-host-layout.py --store-root %(root)s --apply
+    sudo -u hermes-broker python3 /opt/hermes-agent/bin/init-host-layout.py --store-root %(root)s --check
 
 The tool never repairs an existing entry. When --check names a mismatch it prints the
 expected owner, group and mode: set exactly that by hand, then re-run --check.

@@ -1055,18 +1055,33 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
    supplementary groups, `docker` absent from the broker) — it does not and cannot
    assert that these groups exist on any given host; that is this step's job.
 
-2. **Lay out the governance store and the spool.**
+2. **Lay out the governance store and the spool.** Everything below runs from
+   `/opt/hermes-agent`.
 
-   On the box from the first bring-up (2026-09-21), the store exists as an **empty**
-   `700 root:root` directory. The tool refuses it like any other mismatch. Remove it first
-   (`rmdir` succeeds only on an empty directory, which is the check):
+   **Make sure `.env` sets the spool.** A `.env` copied from `.env.example` already has
+   `HERMES_SPOOL_DIR=/var/lib/hermes/spool`; an older one does not. `.env` is root `600`, and
+   this line adds the key only when it is missing, without printing the file:
 
    ```bash
-   sudo rmdir /var/lib/hermes/governance
+   sudo grep -q '^HERMES_SPOOL_DIR=' .env || echo 'HERMES_SPOOL_DIR=/var/lib/hermes/spool' | sudo tee -a .env >/dev/null
    ```
 
-   Set `HERMES_SPOOL_DIR=/var/lib/hermes/spool` in `.env` (see `.env.example`). Then, from
-   `/opt/hermes-agent`:
+   **Take the gateway down, and remove any directory Docker made in the tool's place.**
+   BRING-UP Phase 4 runs `sudo docker compose up -d` before this step. Docker creates a
+   missing bind source as `755 root:root`, so after that `up` `/var/lib/hermes/spool`
+   already exists, with the wrong owner and mode, and `--apply` refuses it. Stop the gateway
+   first: removing the directory while the gateway runs leaves the container writing into a
+   deleted directory. `rmdir` succeeds only on an empty directory, which is the check. If it
+   refuses, stop and inspect: something wrote there.
+
+   ```bash
+   sudo docker compose down
+   [ ! -e /var/lib/hermes/spool ]      || sudo rmdir /var/lib/hermes/spool
+   [ ! -e /var/lib/hermes/governance ] || sudo rmdir /var/lib/hermes/governance
+   ```
+
+   **Lay out both trees, verify them, then bring the gateway back up** so it mounts the real
+   spool:
 
    ```bash
    python3 bin/init-host-layout.py                              # dry run: every line "create"
@@ -1074,10 +1089,22 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
    sudo -u hermes-broker python3 bin/init-host-layout.py --check      # must exit 0
    sudo -u hermes-broker python3 bin/preflight-governance-access.py \
      --root /var/lib/hermes/governance                                # must exit 0
+   sudo docker compose up -d                                    # only after --check exits 0
    ```
 
    Both checks run as `hermes-broker`, as the broker unit will. The pre-flight passes on the
    fresh store because `clients.json` is `{}`, which means zero registered clients.
+
+   **The box from the first bring-up (2026-09-21)** needs the same steps, in this order. Its
+   store exists as an **empty** `700 root:root` directory, its `.env` predates
+   `HERMES_SPOOL_DIR`, and its running gateway predates the spool mount:
+
+   1. Pull: `sudo git -C /opt/projects/claude_code pull --ff-only`.
+   2. Add `HERMES_SPOOL_DIR` to `.env` with the non-printing line above.
+   3. `sudo docker compose down`.
+   4. `rmdir` the empty store and any Docker-created spool (the two guarded lines above).
+   5. Run the dry run, `--apply`, `--check` and the pre-flight above.
+   6. `sudo docker compose up -d`.
 
 3. **Bootstrap the logs — before enabling any unit:**
 
@@ -1113,8 +1140,13 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
    sudo -u hermes-broker curl --unix-socket /run/hermes/docker-proxy.sock http://localhost/version
    ```
 
-   A restart loop at 5-second intervals in `systemctl status hermes-broker` almost
-   always means step 3 was skipped — go back and run `--bootstrap-logs --apply`, then
+   A restart loop at 5-second intervals in `systemctl status hermes-broker` means an
+   `ExecStartPre` refused. Usually step 3 was skipped: go back and run
+   `--bootstrap-logs --apply`. It can also be layout drift, which the first `ExecStartPre`
+   catches, for example an editor that rewrote `registry/clients.json` with a new owner or
+   mode. Run `sudo -u hermes-broker python3 /opt/hermes-agent/bin/init-host-layout.py --check`:
+   it names each mismatch and the expected owner, group and mode. `journalctl -u hermes-broker`
+   shows which check refused. Either way, fix the cause, then run
    `systemctl reset-failed hermes-broker` before re-enabling.
 
 > **The endpoint allow-list is re-measured on the VPS, not inherited.** Per R22 the darwin
