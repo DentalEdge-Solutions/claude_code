@@ -250,7 +250,12 @@ class TestExecStartProgramsAreExecutable(unittest.TestCase):
         return r.stdout.split()[0]
 
     def directly_executed_programs(self):
-        """(unit, program path) for every Exec* line whose program is a repo file."""
+        """(unit, program path) for every Exec* line whose program is a repo file.
+
+        Scope: ExecStart/ExecStartPre/ExecStartPost, the lines that decide whether a unit
+        can START — which is what F15 broke. Add ExecStop/ExecStopPost/ExecReload here if a
+        unit ever execs a repo file from one of those.
+        """
         out = []
         for name in ("hermes-broker.service", "hermes-docker-proxy.service"):
             for line in live_lines(re.sub(r"\\\n", " ", unit(name))):
