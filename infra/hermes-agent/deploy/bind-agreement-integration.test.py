@@ -15,8 +15,8 @@ with HERMES_REQUIRE_LINUX_INTEGRATION=1. Anywhere else it prints SKIPPED and exi
 that variable is set, in which case any skip is a FAILURE. It prints how many tests executed:
 read that line on the PR run AND on the merge commit.
 
-NOT FOR THE VPS. It creates /opt/projects/claude_code, /opt/hermes-agent and the governance
-store, and REFUSES to run if any of them already exists.
+NOT FOR THE VPS. It creates /opt/projects/claude_code, /opt/hermes-agent, the governance
+store and the spool, and REFUSES to run if any of them already exists.
 
 FIDELITY GAPS (say so, do not paper over): the proxy runs as root here, not as
 hermes-docker-proxy (the socket's group, hermes-rail, is what the broker needs, and that is
@@ -68,7 +68,7 @@ def why_not_runnable():
         return "docker unavailable"
     if run(["docker", "compose", "version"]).returncode != 0:
         return "docker compose unavailable"
-    for p in (CHECKOUT, AGENT_DIR, STORE, ADS_REPO):
+    for p in (CHECKOUT, AGENT_DIR, STORE, SPOOL, ADS_REPO):
         if os.path.lexists(p):
             return "%s already exists — this suite builds the box layout and must not run on a real host" % p
     return None
