@@ -10,3 +10,7 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-08-05 promoted decisions/candidates/2026-08-05-p6-ads-audit-pilot-validated.md → canon/2026-08-05-p6-ads-audit-pilot-validated.md
 - 2026-08-17 promoted decisions/candidates/2026-08-17-credential-governance-lessons.md → canon/2026-08-17-credential-governance-lessons.md
 - 2026-08-19 promoted decisions/candidates/2026-08-17-credential-governance-lessons.md → canon/2026-08-17-credential-governance-lessons.md
+- 2026-08-24 promoted decisions/candidates/2026-08-17-credential-governance-lessons.md → canon/2026-08-17-credential-governance-lessons.md
+- 2026-08-26 promoted decisions/candidates/2026-08-05-p6-ads-audit-pilot-validated.md → canon/2026-08-05-p6-ads-audit-pilot-validated.md
+- 2026-09-22 promoted decisions/candidates/2026-09-22-f10-store-and-spool-layout-landed-pr-35-phase-6-now-waits-on.md → decisions/active/2026-09-22-f10-store-and-spool-layout-landed-pr-35-phase-6-now-waits-on.md
+- 2026-09-22 promoted decisions/active/2026-09-22-f10-store-and-spool-layout-landed-pr-35-phase-6-now-waits-on.md → canon/2026-09-22-f10-store-and-spool-layout-landed-pr-35-phase-6-now-waits-on.md
