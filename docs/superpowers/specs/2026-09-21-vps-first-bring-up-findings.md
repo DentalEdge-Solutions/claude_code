@@ -19,7 +19,7 @@ dashboard basic-auth password. None of them appears in this document or in git.*
 | 3 `.env` | done — dummy key, `600 root:root`, checkout clean |
 | 4 Start | done — binds measured **before** `up` (F7); `data/` ownership fixed (F8); gateway running, `claude 2.1.278` |
 | 5 Bind paths | **mismatch, open** (F9) — measured, not widened |
-| 6 Units | **parked** — README step 1 done and verified; the store/spool layout (F10) is fixed in PR #<N>; step 2+ still waits on F9 |
+| 6 Units | **parked** — README step 1 done and verified; the store/spool layout (F10) is fixed in PR #35; step 2+ still waits on F9 |
 | 7 Dashboard | done — form login enforced, reachable only through an SSH tunnel |
 
 Host: Hostinger KVM 2, Ubuntu 24.04.4 LTS, x86_64, kernel 6.8.0. Docker 29.8.1, compose plugin
@@ -143,7 +143,7 @@ suggested fix `chmod`s a `log/` that does not exist. Gaps:
   spool's Linux permissions are undocumented. It is the only channel between agent and broker,
   so this is a security design decision.
 
-**Fixed** in PR #<N> (design: `docs/superpowers/specs/2026-09-21-f10-governance-store-and-spool-layout-design.md`).
+**Fixed** in PR #35 (design: `docs/superpowers/specs/2026-09-21-f10-governance-store-and-spool-layout-design.md`).
 Reading the code to design the layout found three more faults, fixed in the same PR:
 
 - **F10a — the spool could not work on Linux in either direction.** Both sides wrote `0600`
