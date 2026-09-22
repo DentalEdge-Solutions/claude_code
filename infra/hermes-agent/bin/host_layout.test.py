@@ -286,6 +286,30 @@ class TestPlan(Base):
         with self.assertRaises(H.LayoutError):
             H.plan("governance", self.spool, **self.kw())
 
+    def test_overlapping_roots_are_refused_and_nothing_is_created(self):
+        # M6 (F10 final review). Equal roots would make compose bind the governance
+        # store into the gateway as its spool. Nested roots put one tree inside the
+        # other's modes. Every spelling is refused before any step is planned.
+        before = snapshot(self.base)
+        for store, spool in [
+                (self.store, self.store),
+                (self.store, self.store + "/"),
+                (self.store, os.path.join(self.base, "x", "..", "governance")),
+                (self.store, os.path.join(self.store, "spool")),
+                (os.path.join(self.spool, "governance"), self.spool)]:
+            with self.subTest(store=store, spool=spool):
+                with self.assertRaises(H.LayoutError):
+                    H.plan(store, spool, **self.kw())
+                with self.assertRaises(H.LayoutError):
+                    H.check(store, spool, **self.kw())
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_control_sibling_roots_sharing_a_name_prefix_are_not_overlapping(self):
+        # A bare startswith() would wrongly refuse <base>/governance vs
+        # <base>/governance-spool. Only a separator-bounded prefix is nesting.
+        steps = H.plan(self.store, self.store + "-spool", **self.kw())
+        self.assertEqual({s.action for s in steps}, {"create"})
+
 
 class TestApply(Base):
     def apply(self, **over):

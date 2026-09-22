@@ -171,6 +171,15 @@ def plan(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/")
     for r in (store_root, spool_root):
         if not os.path.isabs(r):
             raise LayoutError("%r is not an absolute path" % r)
+    # M6: the two trees must be disjoint. Equal roots would make compose bind the
+    # governance store into the gateway as its spool; nested roots would put one tree
+    # under the other's owners and modes. Lexical, like every other path here.
+    a, b = os.path.normpath(store_root), os.path.normpath(spool_root)
+    if a == b or a.startswith(b.rstrip(os.sep) + os.sep) \
+            or b.startswith(a.rstrip(os.sep) + os.sep):
+        raise LayoutError("the governance store %r and the spool %r overlap — they must "
+                          "be separate trees, neither inside the other"
+                          % (store_root, spool_root))
     steps, seen = [], set()
     for root in (store_root, spool_root):
         for path, detail in check_ancestors(root, ancestor_uids, ancestor_top):
