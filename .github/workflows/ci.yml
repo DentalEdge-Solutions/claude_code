@@ -114,6 +114,19 @@ jobs:
       - name: Host layout integration (root, real ids)
         run: sudo env HERMES_REQUIRE_LINUX_INTEGRATION=1 python3 infra/hermes-agent/deploy/layout-integration.test.py
 
+  bind-agreement:
+    name: Bind agreement (root, Linux, real proxy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # F9: ads-mutator's real binds, through the real proxy started with the unit's own
+      # flags, driven as hermes-broker through run-ads-mutate.sh to the real executor, which
+      # must refuse (kill switch absent). Its own job, not a step in `tests`: F10 Tier 2 also
+      # creates users and paths as root. HERMES_REQUIRE_LINUX_INTEGRATION=1 turns any skip
+      # into a failure — read "executed N" on the PR run AND on the merge commit.
+      - name: Bind agreement integration
+        run: sudo env HERMES_REQUIRE_LINUX_INTEGRATION=1 python3 infra/hermes-agent/deploy/bind-agreement-integration.test.py
+
   static-scan-skills:
     name: Static scan all skills
     runs-on: ubuntu-latest
