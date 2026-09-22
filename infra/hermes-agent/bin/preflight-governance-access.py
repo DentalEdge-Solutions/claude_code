@@ -95,6 +95,9 @@ def _check_dir(path, uid, gid, need_write):
     per-file check on log/<slug>.jsonl)."""
     try:
         st = os.stat(path)
+    except FileNotFoundError:
+        return ("%s: missing — nothing has created it. Create the layout with "
+                "init-host-layout.py (dry run, then --apply as root)" % path)
     except OSError as e:
         return "%s: cannot stat (%s)" % (path, e)
     if not stat.S_ISDIR(st.st_mode):
@@ -391,10 +394,39 @@ def _check_registered_logs(root):
             % (root, missing, governance_lib.LOG_DIR_MODE)]
 
 
+def _root_problem(root):
+    """F10: when THIS PROCESS cannot reach the root, every per-child check below it fails
+    the same way, and the cascade reads as N permission faults — with a remedy that
+    chmods directories that may not exist. One line instead, naming the real cause.
+
+    Real I/O on purpose, unlike the _perm_bits simulation used everywhere else: this is
+    about whether the check can run at all, not about what uid 10000 could do."""
+    try:
+        os.stat(root)
+    except FileNotFoundError:
+        return ("%s: missing — nothing has created the governance store. Create the "
+                "layout with init-host-layout.py (dry run, then --apply as root, then "
+                "--check)" % root)
+    except OSError as e:
+        return "%s: cannot stat (%s)" % (root, e)
+    try:
+        os.stat(os.path.join(root, "."))      # needs search permission on root itself
+    except PermissionError:
+        return ("%s: this process (uid %d) cannot enter the store, so nothing below it "
+                "can be checked. Run as a member of gid %d, and verify the root with "
+                "init-host-layout.py --check" % (root, os.geteuid(), EXECUTOR_GID))
+    except OSError as e:
+        return "%s: cannot enter (%s)" % (root, e)
+    return None
+
+
 def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
     """Return a list of human-readable problems; empty means the executor can work."""
     if not applies(platform):
         return []
+    p = _root_problem(root)
+    if p:
+        return [p]
     problems = []
     p = _check_dir(root, uid, gid, need_write=False)
     if p:
@@ -452,13 +484,15 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
 
 
 REMEDY = """
-Fix by OWNERSHIP, not by widening the mode. Either run the store under a group the
-executor's UID belongs to:
+Fix by LAYOUT, never by widening a mode. The store's owners and modes are one table
+(bin/host_layout.py; README "Ownership on a Linux host"), created and verified by:
 
-    sudo chgrp -R %(gid)d %(root)s
-    sudo chmod -R g+rX %(root)s
-    sudo chmod 2750 %(root)s/log
-    sudo find %(root)s/log -type f -name '*.jsonl' -exec chmod 0660 {} +
+    init-host-layout.py --store-root %(root)s              # dry run
+    sudo init-host-layout.py --store-root %(root)s --apply  # create what is missing
+    sudo -u hermes-broker init-host-layout.py --store-root %(root)s --check
+
+The tool never repairs an existing entry. When --check names a mismatch it prints the
+expected owner, group and mode: set exactly that by hand, then re-run --check.
 
 log/ gets NO group write: write on a directory is what grants unlink, and a deleted
 audit log costs reversibility (both --undo and the daily caps read through it), not
@@ -468,14 +502,6 @@ the wrong group and uid %(uid)d falls through to `other`. Create missing per-cli
 with:
 
     migrate-governance.py --bootstrap-logs --apply
-
-or give the store to the executor's UID outright. POSIX selects the owner class before
-the group class, so a log/ directory owned by the executor is writable by it no matter
-how tight the mode looks, and write on a directory is what grants unlink — so the
-sequence must restore log/ to a non-executor owner afterward:
-
-    sudo chown -R %(uid)d:%(gid)d %(root)s && sudo chmod -R 700 %(root)s
-    sudo chown root:%(gid)d %(root)s/log && sudo chmod 2750 %(root)s/log
 
 Do NOT `chmod 777`. The store is the one place Hermes cannot reach; making it
 world-writable hands it to every process on the host and removes the isolation this

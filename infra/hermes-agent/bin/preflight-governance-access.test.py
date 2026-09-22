@@ -156,16 +156,58 @@ class TestLinuxSemantics(Base):
     def test_owner_class_wins_even_when_group_and_other_are_wider(self):
         """POSIX selects exactly ONE permission class. A directory owned by the
         executor at mode 0o077 is unreadable to it however wide `other` is; an
-        implementation that OR'd the classes would wrongly pass this."""
-        self._chmod_all(0o077)
-        problems = PF.check(self.root, self.uid, self.gid, platform="linux")
-        self.assertEqual(len(problems), len(ALL_DIRS) + 1)
+        implementation that OR'd the classes would wrongly pass this.
 
-    def test_a_missing_subdirectory_is_reported(self):
+        F10: the ROOT stays enterable here. With the root itself at 0o077 the checking
+        process cannot enter it either, and that is now one collapsed line (see
+        TestRootCollapse), so this test would count the collapse, not the class rule."""
+        self._chmod_all(0o077)
+        os.chmod(self.root, 0o700)
+        problems = PF.check(self.root, self.uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), len(ALL_DIRS), problems)
+
+    def test_a_missing_subdirectory_is_reported_as_missing(self):
+        """F10: 'missing' is its own fault, with its own remedy. It used to read
+        'cannot stat', which is indistinguishable from a permission fault."""
         self._chmod_all(0o755)
         os.rmdir(os.path.join(self.root, "control"))
         problems = PF.check(self.root, self.uid, self.gid, platform="linux")
-        self.assertTrue(any("control" in p and "cannot stat" in p for p in problems))
+        hits = [p for p in problems if "control" in p]
+        self.assertEqual(len(hits), 1, problems)
+        self.assertIn("missing", hits[0])
+        self.assertNotIn("cannot stat", hits[0])
+        self.assertIn("init-host-layout.py", hits[0])
+
+
+class TestRootCollapse(Base):
+    """F10. Run as hermes-broker against an empty 700 root:root store, the pre-flight
+    printed 'Permission denied' for every subdirectory and suggested chmod'ing a log/ that
+    did not exist. When the CHECKING PROCESS cannot reach the root, nothing below it can
+    be checked, so that is one line — with the right remedy for its cause."""
+
+    def test_a_missing_root_is_one_line_naming_the_layout_tool(self):
+        absent = os.path.join(self.root, "absent")
+        problems = PF.check(absent, self.uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("missing", problems[0])
+        self.assertIn("init-host-layout.py", problems[0])
+
+    @unittest.skipIf(os.geteuid() == 0, "root enters any directory")
+    def test_an_unenterable_root_is_one_line(self):
+        self._chmod_all(0o000)
+        problems = PF.check(self.root, self.uid, self.gid, platform="linux")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("cannot enter", problems[0])
+
+    def test_control_an_enterable_root_still_reports_each_child(self):
+        """The collapse must not swallow real per-child faults the process CAN see."""
+        self._chmod_all(0o700)
+        problems = PF.check(self.root, self.other_uid, self.other_gid, platform="linux")
+        self.assertEqual(len(problems), len(ALL_DIRS) + 1)
+
+    def test_non_linux_still_reports_nothing(self):
+        absent = os.path.join(self.root, "absent")
+        self.assertEqual(PF.check(absent, self.uid, self.gid, platform="darwin"), [])
 
 
 class TestFileLevelChecks(Base):
@@ -543,7 +585,8 @@ class TestCli(Base):
         rc, err = self._main(["--root", self.root, "--uid", str(self.other_uid),
                               "--gid", str(self.other_gid)])
         self.assertEqual(rc, 2)
-        self.assertIn("chown", err)
+        self.assertIn("init-host-layout.py", err)
+        self.assertNotIn("chown -R", err)
         self.assertIn("Do NOT `chmod 777`", err)
 
 
