@@ -34,6 +34,10 @@ ExecStart=/opt/x/bin/tool.py \\
 Restart=on-failure
 """
 
+INTERPRETER_UNIT = """[Service]
+ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/hermes-broker.py --watch --interval 5
+"""
+
 
 class TestInterpolate(unittest.TestCase):
     def test_a_guarded_set_variable_is_substituted(self):
@@ -115,6 +119,13 @@ class TestUnits(unittest.TestCase):
     def test_a_unit_without_exec_start_raises(self):
         with self.assertRaises(ValueError):
             BA.unit_exec_args("[Service]\nUser=x\n")
+
+    def test_an_interpreter_exec_start_keeps_the_script_path_in_the_args(self):
+        """Documented contract: only the FIRST token is dropped. allow_binds is unaffected
+        because it selects by flag name."""
+        self.assertEqual(BA.unit_exec_args(INTERPRETER_UNIT),
+                         ["/opt/hermes-agent/bin/hermes-broker.py", "--watch", "--interval", "5"])
+        self.assertEqual(BA.allow_binds(INTERPRETER_UNIT), [])
 
 
 if __name__ == "__main__":

@@ -101,6 +101,12 @@ def _directives(unit_text):
 
 
 def unit_exec_args(unit_text):
+    """ExecStart tokens after the FIRST token only.
+
+    For /path/to/program --flags, returns ['--flags'].
+    For /usr/bin/interpreter /path/to/script --flags, returns ['/path/to/script', '--flags'].
+    The only caller needing flags is the proxy unit (docker-create-proxy.service).
+    """
     for line in _directives(unit_text):
         if line.startswith("ExecStart="):
             return shlex.split(line[len("ExecStart="):])[1:]
