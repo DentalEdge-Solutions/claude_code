@@ -172,12 +172,12 @@ reviews missed, so keep the final review. The PR should include:
 
 | | |
 |---|---|
-| `main` | `6ddef24` (Merge PR #35), plus the PR carrying this handoff and the F10 canon entry. CI green **on the merge commit** `6ddef24` (run 35731718400), with F10 Tier 2 `executed 22, skipped 0`. |
+| `main` | `af17792` (Merge PR #31). It includes F10 (PR #35, `6ddef24`), this handoff plus the F10 canon entry (PR #36, `64cc54e`), and the Tailscale design note (PR #31). CI green **on the merge commit** `af17792` (run 35744754627), with F10 Tier 2 `executed 22, skipped 0`. |
 | Suites | hermes bin 29/29 · units 16 · provision 56 · node 22/22 · Tier 2 skips on darwin (runs on CI) |
 | VPS | **Unchanged since 2026-09-21. F10 is not applied there yet.** The store is still an empty `700 root:root` directory, and there is no spool. Stack running, dashboard behind basic auth (tunnel only), public `:22` only. README step 1 users and groups exist. No units installed. The ads repo is a placeholder. |
 | Kill switch | **ABSENT** |
 | Laptop | Local `.env` needs `HERMES_SPOOL_DIR=./data/spool` before the next `docker compose up`. |
-| Open PRs | #31 Tailscale (proposal only; do not act on it) · #4 (stale) · the PR carrying this handoff |
+| Open PRs | #4 (stale). #31 merged the Tailscale design note **as a proposal only**: nothing is adopted or set up, so do not act on it. |
 
 Run `git log`, `git status` and the suites before trusting any of this.
 
