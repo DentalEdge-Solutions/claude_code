@@ -108,6 +108,11 @@ jobs:
         run: python3 infra/hermes-agent/deploy/units.test.py
       - name: Provisioning script suite
         run: python3 infra/hermes-agent/deploy/provision.test.py
+      # F10 Tier 2: root, real uids/gids/modes, and Docker for the mount-point probe.
+      # HERMES_REQUIRE_LINUX_INTEGRATION=1 turns any skip into a failure, and the suite
+      # prints "executed N" — read that line on the PR run AND on the merge commit.
+      - name: Host layout integration (root, real ids)
+        run: sudo env HERMES_REQUIRE_LINUX_INTEGRATION=1 python3 infra/hermes-agent/deploy/layout-integration.test.py
 
   static-scan-skills:
     name: Static scan all skills
