@@ -235,7 +235,7 @@ the kill switch is absent there, so nothing can be mutated. **Open:** a distinct
 code for "Compose failed before the container started", designed in its own PR (F9 spec §3.7,
 §5).
 
-### F15: the proxy unit execs a script that is not executable in git — fixed (PR #<N>)
+### F15: the proxy unit execs a script that is not executable in git — fixed (PR #40)
 
 **Measured on the VPS, 2026-09-22**, installing the units for the first time (BRING-UP Phase 5).
 `hermes-docker-proxy.service` runs `ExecStart=/opt/hermes-agent/bin/docker-create-proxy.py …`
@@ -250,7 +250,7 @@ otherwise correct: both `ExecStartPre` checks exited 0, and `id hermes-broker` s
 SAY. Neither runs systemd. The same class as F9's own lesson: a check that never exercises
 the real invocation proves nothing about it.
 
-**Fix (PR #<N>).** `bin/docker-create-proxy.py` is `100755` in git, and
+**Fix (PR #40).** `bin/docker-create-proxy.py` is `100755` in git, and
 `units.test.py::TestExecStartProgramsAreExecutable` now asserts that every `Exec*` program
 that is a repo file (i.e. run directly, not via `/usr/bin/python3`) is `100755` in the git
 INDEX — the working tree's mode is a local accident. It has two controls: one proving the
@@ -260,7 +260,7 @@ vacuously). It failed against the pre-fix tree with `'100644' != '100755'`.
 
 **Operator note:** the 2026-09-22 box was unblocked by hand with
 `sudo chmod 0755 /opt/projects/claude_code/infra/hermes-agent/bin/docker-create-proxy.py`.
-After pulling PR #<N> the working tree and git agree; no conflict.
+After pulling PR #40 the working tree and git agree; no conflict.
 
 ### F16: README step 3 omits `--governance-root`, so it targets the container path (recorded)
 
@@ -268,7 +268,7 @@ After pulling PR #<N> the working tree and git agree; no conflict.
 CONTAINER path `/opt/governance` (`governance_lib.governance_root`). README "VPS deploy
 sequence" step 3 and the step near README:992 both invoke `--bootstrap-logs` with no
 `--governance-root` and no env prefix, so on the host they do not address
-`/var/lib/hermes/governance`. Corrected in the README by PR #<N>; recorded here because the
+`/var/lib/hermes/governance`. Corrected in the README by PR #40; recorded here because the
 same omission pattern (host tool, container default) is worth checking in the other
 host-side tools.
 
