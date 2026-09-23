@@ -363,7 +363,7 @@ def write_snapshot_bytes(slug, cid, data):
     """
     if not isinstance(data, bytes):
         raise ValueError("snapshot payload must be bytes, got %s" % type(data).__name__)
-    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
+    _ensure_approvals_dir(slug)
     dst = governance_lib.snapshot_path(slug, cid)
     tmp = dst + ".tmp"
     with open(tmp, "wb") as out:
@@ -428,6 +428,15 @@ APPROVAL_LOCK_MODE = 0o660          # lock sidecar: the broker must be able to f
 APPROVAL_OWNER_USER = "hermes-broker"
 APPROVAL_OWNER_GROUP = "hermes"
 
+# F12 spec R2 (§2.2 correction): approve-changeset.py runs as root (§2.3), so a bare
+# os.makedirs for the per-client approvals/<slug>/ directory lands root-owned. Group
+# hermes gets, at best, r-x inherited from the setgid approvals/ parent -- never write --
+# and the broker needs to CREATE its .tmp file and the lock sidecar inside this directory,
+# which requires write. Owning the directory (not merely belonging to its group) is what
+# gives the broker that write; setgid keeps group hermes on everything created inside it
+# afterwards, same as every other per-client directory in this store (records/, §2.4).
+APPROVALS_DIR_MODE = 0o2750
+
 
 def _apply_owner_mode(fd, mode):
     """Set MODE on FD, and (as root, on Linux) owner hermes-broker:hermes.
@@ -451,6 +460,33 @@ def _apply_owner_mode(fd, mode):
             "F12: cannot set approval ownership — %s. Create the users and groups first "
             "(README 'VPS deploy sequence' step 1)." % e)
     os.fchown(fd, uid, gid)
+
+
+def _ensure_approvals_dir(slug):
+    """Create approvals/<slug>/ if needed and pin its owner/mode. Called from BOTH
+    write_snapshot_bytes and write_approval -- factored here so the two cannot drift.
+
+    os.makedirs alone is not enough (F12 R2): as root it leaves the directory root-owned,
+    and the broker -- a group member, not the owner -- cannot write inside it. Applied on
+    an open directory fd (O_DIRECTORY | O_NOFOLLOW), never a path: a path-based chmod/chown
+    on a directory an attacker swapped for a symlink between create and chmod would be
+    redirected, same reasoning as _apply_owner_mode for the artifacts themselves.
+
+    Idempotent: on the second and later approvals for an already-approved client this
+    directory already exists. Re-applying the same owner/mode is a no-op in effect,
+    whether the caller is root (always permitted) or the non-root owner of a directory it
+    already created (chmod/chown-of-self is permitted). A caller that is neither root nor
+    the owner would get EPERM from fchown/fchmod -- that should never happen on the
+    approve path (§2.3 requires root on Linux; darwin has no such separation), so it is
+    left to raise rather than being swallowed.
+    """
+    path = governance_lib.approvals_dir(slug)
+    os.makedirs(path, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _apply_owner_mode(fd, APPROVALS_DIR_MODE)
+    finally:
+        os.close(fd)
 
 
 def _atomic_write_json(path, obj):
@@ -532,7 +568,7 @@ def write_approval(slug, cid, digest, operator, now, ttl_hours):
     # This comment used to read "MUST precede the lock — see docstring", contradicting
     # the docstring above, which had already been corrected to say the opposite. An
     # inline comment that disagrees with the docstring it cites is worse than neither.
-    os.makedirs(governance_lib.approvals_dir(slug), exist_ok=True)
+    _ensure_approvals_dir(slug)
     with _approval_lock(slug, cid):
         _atomic_write_json(approval_path(slug, cid), rec)
     return rec

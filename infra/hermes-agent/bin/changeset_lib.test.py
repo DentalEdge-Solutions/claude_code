@@ -1160,5 +1160,50 @@ class TestApprovalArtifactModes(unittest.TestCase):
             os.umask(old)
 
 
+class TestApprovalsDirOwnershipAndMode(unittest.TestCase):
+    """F12 spec R2 (§2.2 correction, traced during Task 5): approve-changeset.py now runs
+    as root (§2.3), so a bare os.makedirs for approvals/<slug>/ leaves it root-owned. Group
+    hermes gets r-x there (inherited from the setgid approvals/ parent, or not even that on
+    a filesystem with no such parent), never write -- and write on the directory is what
+    the broker needs to create its .tmp file and the lock sidecar inside it. Fixing the
+    sidecar's own mode (TestApprovalArtifactModes above) is necessary but not sufficient;
+    this is F12's symptom reappearing one level up, at the directory that holds it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+
+    def test_the_per_client_approvals_dir_is_0o2750_under_a_hostile_umask(self):
+        old = os.umask(0o077)
+        try:
+            digest = C.write_snapshot_bytes(SLUG, CID, b'{"actions": []}\n')
+            C.write_approval(SLUG, CID, digest, "operator", NOW, 24)
+        finally:
+            os.umask(old)
+        d = governance_lib.approvals_dir(SLUG)
+        self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o2750, d)
+
+    def test_control_a_bare_makedirs_would_not_have_landed_on_0o2750(self):
+        """Firing control -- WITHOUT mutating any tracked file. Builds a THROWAWAY sibling
+        directory with a bare os.makedirs (the exact call the pre-fix code made, no
+        explicit chmod/chown) under the identical hostile umask, and shows it does NOT
+        land on 0o2750. os.makedirs's default mode is 0o777, which the umask can only
+        narrow -- it can never SET the setgid bit -- so a bare makedirs can never produce
+        0o2750 on its own under a hostile umask. This is what proves the assertion above
+        is discriminating: against the pre-fix code (a bare os.makedirs at the same call
+        site) it would have failed exactly like this, not passed by accident of a lenient
+        default umask (the sibling control in TestApprovalArtifactModes already rules that
+        half out)."""
+        old = os.umask(0o077)
+        try:
+            bare = os.path.join(self.tmp, "approvals", "a-bare-client")
+            os.makedirs(bare, exist_ok=True)
+            self.assertNotEqual(stat.S_IMODE(os.stat(bare).st_mode), 0o2750, bare)
+        finally:
+            os.umask(old)
+
+
 if __name__ == "__main__":
     unittest.main()
