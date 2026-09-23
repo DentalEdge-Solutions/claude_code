@@ -114,14 +114,17 @@ class Base(unittest.TestCase):
         os.makedirs(os.path.join(self.vault, "changes"))
 
         self.gov = os.path.join(self.tmp, "governance")
-        # The COMPLETE skeleton. The pre-flight stats every one of these and refuses the
-        # whole run if any is missing; creating only registry/ made this fixture pass on
-        # darwin (pre-flight silent) and fail on Linux (pre-flight live). See the platform
-        # gate above. "records" is NOT one of these — the pre-flight deliberately never
-        # declares it (spec 2026-09-23 §2.5) — but persist-run-record.py still needs
-        # somewhere to write, so its destination is precomputed here (F12: the run
-        # record now lands in the governance store, not the vault above).
-        for _d in ("approvals", "control", "registry", "log", "seen"):
+        # The COMPLETE skeleton. The pre-flight stats every one of these (except
+        # "records", which it deliberately never declares — spec 2026-09-23 §2.5, it
+        # is host-side only) and refuses the whole run if any is missing; creating only
+        # registry/ made this fixture pass on darwin (pre-flight silent) and fail on
+        # Linux (pre-flight live). See the platform gate above. "records" IS created
+        # here even though the pre-flight never checks it: persist_run_record_shim now
+        # REFUSES rather than auto-creates a missing records/ tree (F12 review — the
+        # layout row is a hard prerequisite, `init-host-layout.py --apply` owns it, not
+        # a defensive os.makedirs at persist time), so this fixture has to lay it down
+        # itself, the same way it lays down the other four.
+        for _d in ("approvals", "control", "registry", "log", "seen", "records"):
             os.makedirs(os.path.join(self.gov, _d), exist_ok=True)
         self.records = governance_lib.records_dir(SLUG, root=self.gov)
         reg = governance_lib.clients_registry_path(self.gov)
@@ -194,8 +197,10 @@ class TestPersistRefusalIsLoud(Base):
         p = self._run(executor_rc=0)
         self.assertIn("RUN RECORD NOT PERSISTED", p.stderr)
         self.assertIn("CONTAINMENT REFUSAL", p.stderr)
-        # It must say what to do, not merely that something happened.
-        self.assertIn("inspect the vault", p.stderr)
+        # It must say what to do, not merely that something happened. F12: a refusal
+        # now means something in the governance store's records/ tree, not the vault —
+        # sending an operator to the wrong tree mid-incident costs real time.
+        self.assertIn("records/<client>", p.stderr)
         self.assertIn("governance audit log", p.stderr)
 
     def test_the_refusal_does_not_hijack_the_executor_status(self):

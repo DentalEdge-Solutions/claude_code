@@ -343,20 +343,37 @@ def persist(record_dir, result, root=None):
     RELATIVE TO an already-open directory descriptor (R20(b)), with O_NOFOLLOW, a
     regular-file assertion and a single-link assertion (R20(a)). Anything that cannot
     be proven raises PersistRefused (a ValueError) rather than being skipped. Modes are
-    set explicitly on open file descriptors — 0750 on the per-client directory, 0640 on
-    both files — so no umask, however strict, can make them unreadable later.
+    set explicitly on open file descriptors — governance_lib.RECORDS_DIR_MODE (0o2750,
+    setgid) on the per-client directory, 0640 on both files — so no umask, however
+    strict, can make them unreadable later.
     """
     records_real = _resolve_records(record_dir, root)
     parent_real = os.path.dirname(records_real)
     slug_name = os.path.basename(records_real)
 
-    # The records/ tree itself is one well-known path under the governance root,
-    # created by host_layout in production; created here defensively (the same
-    # path-based pattern changeset_lib already uses for approvals_dir) if it is
-    # somehow still missing. It is NOT the attacker-relevant boundary — the
-    # per-client directory below is, which is why THAT one is created and opened
-    # relative to an already-open descriptor instead.
-    os.makedirs(parent_real, exist_ok=True)
+    # Validate and derive every destination NAME before anything is created (R20(c)
+    # extended to slug/cid validation, spec 2026-09-23 review): governance_lib.record_
+    # path and .records_timeline_path validate slug_name and the changeset id via
+    # governance_lib's own _slug/_cid, and a refusal on a bad id must not leave an
+    # attacker-chosen directory behind either — exactly what _resolve_records's
+    # docstring already promises for the containment checks, extended here to cover
+    # name validation too.
+    base = os.path.basename(governance_lib.record_path(slug_name, result["changeset_id"]))
+    tmp_base = base + ".tmp"
+    timeline_base = os.path.basename(governance_lib.records_timeline_path(slug_name))
+
+    # The records/ tree itself is a hard prerequisite laid down by host_layout /
+    # init-host-layout.py --apply (setgid, hermes-broker:hermes) — NOT something this
+    # module may create. Auto-creating it here (as an earlier version of this function
+    # did, via a defensive os.makedirs) would build it path-based, with a umask-derived
+    # mode and no setgid bit — exactly the wrong-moded tree the row exists to prevent
+    # (spec 2026-09-23 §2.4 correction R1) — and init-host-layout.py verifies the row
+    # but deliberately never repairs it. Refuse instead of silently building it wrong.
+    if not os.path.isdir(parent_real):
+        raise PersistRefused(
+            "records root %s does not exist — the governance store layout is a hard "
+            "prerequisite; run init-host-layout.py --apply before persisting records"
+            % parent_real)
 
     pfd = _open_dir(parent_real)
     try:
@@ -371,17 +388,20 @@ def persist(record_dir, result, root=None):
 
         rfd = _open_dir(slug_name, dir_fd=pfd)
         try:
-            # Explicit, umask-independent (spec 2026-09-23 §2.4): the setgid records/
-            # parent supplies the group, this call supplies the mode.
-            os.fchmod(rfd, 0o750)
+            # Explicit, umask-independent (spec 2026-09-23 §2.4, correction R1): MUST
+            # be governance_lib.RECORDS_DIR_MODE (0o2750, setgid), never a bare 0750.
+            # records/ is setgid, so a freshly created per-client directory already
+            # inherits group "hermes" and its OWN setgid bit from the kernel — but that
+            # inheritance happens independently of, and BEFORE, this fchmod call, and a
+            # plain 0750 here would STRIP the inherited setgid bit right back off.
+            # Without it, files this step writes take the writing PROCESS's effective
+            # group — hermes-broker (Group=hermes-broker in the unit, hermes only
+            # supplementary) — not the inherited "hermes", which is the exact failure
+            # the row's setgid bit exists to prevent. Darwin has no such uid/gid
+            # separation to expose this, which is why it was missed at first: the
+            # spec briefly said plain 0750 too, corrected 2026-09-23 (R1).
+            os.fchmod(rfd, governance_lib.RECORDS_DIR_MODE)
 
-            # Canonical location: governance_lib.record_path is the single definition
-            # of where a result file lives — deriving only its BASENAME here (never
-            # composing a second, divergent filename convention) keeps this in sync
-            # with governance_lib.records_timeline_path and every other reader.
-            base = os.path.basename(
-                governance_lib.record_path(slug_name, result["changeset_id"]))
-            tmp_base = base + ".tmp"
             path = os.path.join(records_real, base)
             _check_dest(path, records_real)
             _check_dest(path + ".tmp", records_real)
@@ -403,9 +423,9 @@ def persist(record_dir, result, root=None):
             # differs on Windows, which this tier does not target.
             os.rename(tmp_base, base, src_dir_fd=rfd, dst_dir_fd=rfd)
 
-            timeline = os.path.join(records_real, "timeline.md")
+            timeline = os.path.join(records_real, timeline_base)
             _check_dest(timeline, records_real)
-            tfd = _open_regular("timeline.md", os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            tfd = _open_regular(timeline_base, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                                dir_fd=rfd)
             os.fchmod(tfd, 0o640)
             with os.fdopen(tfd, "a", encoding="utf-8") as f:

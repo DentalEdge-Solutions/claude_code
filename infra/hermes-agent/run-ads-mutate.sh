@@ -121,9 +121,10 @@ if [ "$prc" -ne 0 ]; then
   echo "!!! RUN RECORD NOT PERSISTED — persist-run-record.py exited $prc" >&2
   echo "!!!" >&2
   echo "!!! Exit 2 means the destination could not be proven to stay inside the" >&2
-  echo "!!! client vault — a symlink or hardlink pointing out of it. That is a" >&2
-  echo "!!! CONTAINMENT REFUSAL, not an I/O hiccup: treat it as an attempt to make" >&2
-  echo "!!! this step write outside the vault, and inspect the vault before re-running." >&2
+  echo "!!! governance store's records/ directory — a symlink or hardlink pointing" >&2
+  echo "!!! out of it. That is a CONTAINMENT REFUSAL, not an I/O hiccup: treat it as" >&2
+  echo "!!! an attempt to make this step write outside records/, and inspect the" >&2
+  echo "!!! governance store's records/<client> directory before re-running." >&2
   echo "!!!" >&2
   echo "!!! The executor's own status ($rc) is UNCHANGED and is still what says" >&2
   echo "!!! whether the account was touched. This banner is about the RECORD of the" >&2

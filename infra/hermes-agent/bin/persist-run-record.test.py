@@ -113,6 +113,32 @@ class TestPersist(_RecordsBase):
         timeline = os.path.join(self.records, "timeline.md")
         self.assertEqual(stat.S_IMODE(os.stat(timeline).st_mode), 0o640)
 
+    def test_the_per_client_directory_is_setgid_2750_not_umask_dependent(self):
+        """F12 review (Important 2): nothing asserted the per-client directory's own
+        mode — deleting the os.fchmod(rfd, ...) call in persist() left the whole suite
+        green. The FULL mode is asserted (stat.S_IMODE, not `& 0o777`), because the bit
+        under test IS the setgid bit: 0750 without it is the exact regression the spec
+        correction (R1) fixed — it strips the group inheritance records/'s setgid bit
+        exists to give, and files then land group-owned by the writer's own primary
+        group (hermes-broker) instead of the intended "hermes".
+
+        A FRESH per-client directory — not self.records, which _RecordsBase.setUp
+        already created under whatever umask the test process happened to have — is
+        created here, and only inside the os.umask(0o077) block, so a pass can only be
+        explained by persist()'s explicit os.fchmod, never by a mode that happened to
+        already be right before persist() ran.
+        """
+        fresh = governance_lib.records_dir("other-clinic", root=self.root)
+        self.assertFalse(os.path.exists(fresh), "fixture bug: this must be created "
+                         "fresh, by persist(), under the hostile umask below")
+        old = os.umask(0o077)
+        try:
+            P.persist(fresh, RESULT)
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE(os.stat(fresh).st_mode),
+                         governance_lib.RECORDS_DIR_MODE)
+
 
 class TestSymlinkEscape(_RecordsBase):
     """C1 (final whole-branch review, F12-updated). persist() runs HOST-SIDE and writes
@@ -231,6 +257,11 @@ class TestMain(unittest.TestCase):
             json.dump({"clients": {"acme-dental": {"project": "claude_google_ads",
                                                    "customer_id": "1234567890",
                                                    "status": "active"}}}, f)
+        # F12 review: persist() now REFUSES a missing records/ tree rather than
+        # auto-creating it (the layout row is a hard prerequisite, laid down by
+        # init-host-layout.py --apply) — lay it down here the same way that would, for
+        # the same reason run-ads-mutate.test.py's fixture now does.
+        os.makedirs(os.path.join(self.root, "records"), exist_ok=True)
         self.records = governance_lib.records_dir("acme-dental", root=self.root)
 
     def _restore_gov(self):
@@ -357,6 +388,10 @@ class TestParkedResiduals(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, True)
         self.records = governance_lib.records_dir("slug-1", root=self.root)
         os.makedirs(self.records, exist_ok=True)
+        # Stands in for a tree outside records/ that persist() must never be able to
+        # write into or through, even via a swapped-in symlink (Important 3 below).
+        self.outside = os.path.join(self.root, "outside")
+        os.makedirs(self.outside, exist_ok=True)
         self.result = {"changeset_id": "20260824-101500-abcdef01",
                        "status": "applied", "applied": 1,
                        "finished_at": "2026-08-24T10:15:00Z"}
@@ -507,6 +542,75 @@ class TestParkedResiduals(unittest.TestCase):
         self.assertEqual(os.listdir(original_records), [],
                          "the write followed the swapped NAME instead of the "
                          "descriptor captured before the swap — the TOCTOU is open")
+
+    def test_a_symlinked_per_client_directory_is_refused_by_nofollow_not_islink(self):
+        """F12 review (Important 3). Retirement #3
+        (`test_a_changes_symlink_resolving_back_inside_the_vault_is_still_refused`,
+        deleted from the pre-F12 suite) discriminated `_open_dir`'s O_NOFOLLOW from a
+        path-level `islink` check — nothing in the F12 suite did, so mutating either
+        one away left every test green. This restores that discrimination for the
+        per-client directory.
+
+        MEASURED, not assumed: my first attempt at this test swapped the per-client
+        entry for a symlink and left it swapped for the rest of the call, exactly as
+        the review comment describes. That does NOT kill the O_NOFOLLOW mutation
+        (removing O_NOFOLLOW from `_open_dir`'s flags at persist_run_record_shim.py:183
+        and re-running left this test GREEN) — because `_check_dest`'s own, entirely
+        separate, path-based `os.path.realpath` re-check on the FINAL FILE names
+        (`path`, `path + ".tmp"`, the timeline) also resolves through the still-present
+        symlink and raises `PersistRefused` on its own, independently of whether
+        `_open_dir`'s open ever refused anything. That masked the very regression this
+        test exists to catch.
+
+        The fix: put the symlink in place ONLY for the single `_open_dir` call that
+        opens the per-client name relative to the parent descriptor (`dir_fd is not
+        None` — `_resolve_records`'s own islink check already ran, on an ordinary
+        directory, before this point), then restore an ordinary empty directory at
+        that name immediately afterwards, in a `finally`, BEFORE `_check_dest` or
+        anything else downstream ever looks at the path again. That isolates exactly
+        one property: whether THIS open, by itself, refuses to follow the symlink.
+        Under the real code it does (O_NOFOLLOW -> ELOOP -> PersistRefused, before the
+        restore even matters) and `self.outside` is never touched. Under the mutation
+        it does not: the open follows the symlink, returns an fd bound to
+        `self.outside`'s inode, and every subsequent write in `persist()` — the
+        restored on-disk name no longer being what the fd refers to — lands inside
+        `self.outside` instead, so `persist()` returns successfully (no
+        `PersistRefused` at all) and `self.outside` gains files. Both assertions below
+        independently catch that.
+        """
+        real_open_dir = P._open_dir
+        state = {"hooked": False}
+
+        def swapping_open_dir(name, dir_fd=None):
+            # Only the call that opens the per-client name RELATIVE TO the parent
+            # (records/) fd — the parent-level open itself (dir_fd=None) is left alone.
+            if state["hooked"] or dir_fd is None:
+                return real_open_dir(name, dir_fd=dir_fd)
+            state["hooked"] = True
+            shutil.rmtree(self.records)
+            os.symlink(self.outside, self.records)
+            try:
+                return real_open_dir(name, dir_fd=dir_fd)
+            finally:
+                # Restore an ordinary, valid, self-contained directory regardless of
+                # outcome — so nothing downstream of THIS open (_check_dest's separate
+                # path-based re-check included) can independently catch the symlink
+                # and mask whether _open_dir's own O_NOFOLLOW was the thing that fired.
+                os.unlink(self.records)
+                os.makedirs(self.records)
+
+        P._open_dir = swapping_open_dir
+        try:
+            with self.assertRaises(P.PersistRefused):
+                P.persist(self.records, self.result, root=self.root)
+        finally:
+            P._open_dir = real_open_dir
+
+        self.assertTrue(state["hooked"], "the hook never fired — test is not "
+                        "exercising the swap it claims to")
+        self.assertEqual(os.listdir(self.outside), [],
+                         "the symlink was followed and something was written "
+                         "into the outside tree through it")
 
     # --- (c) makedirs before the containment check ---------------------------------
     def test_an_out_of_root_records_dir_is_refused_without_being_created(self):
