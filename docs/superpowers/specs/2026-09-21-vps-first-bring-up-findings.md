@@ -291,6 +291,15 @@ refusing the create gives wrapper status 4 with `compose rc=1`; the broker path'
 is attested (`bind-agreement: executed 6, skipped 0`). **Still unmeasured:** an actual
 connection loss after the container started — the fix does not depend on it.
 
+**Merged and applied to the box, 2026-09-23.** Merge commit `4074295`: CI run 35908282335,
+`bind-agreement: executed 6, skipped 0`, `layout-integration: executed 30, skipped 0`. The box
+pulled `9df03d4..4074295` (fast-forward), `init-host-layout.py --check` as `hermes-broker`
+exited 0, and `hermes-broker` was restarted (`ActiveEnterTimestamp` 19:41:36 UTC, `NRestarts=0`,
+the unit's `ExecStartPre` logged `layout OK`); both units `active`. On disk:
+`run-ads-mutate.sh` carries `set +eu  # F14`, `hermes-broker.py` the `failed_unverified_exit`
+mapping. **Still unexercised on the box:** a real run through the new path — it waits for the
+rehearsal gate (`.env.gaw` with the WRITE credential). Kill switch: absent.
+
 ### F15: the proxy unit execs a script that is not executable in git — fixed (PR #40)
 
 **Measured on the VPS, 2026-09-22**, installing the units for the first time (BRING-UP Phase 5).
