@@ -424,10 +424,16 @@ of which is self-guarding and none of which this needs.
 
 ```bash
 cd /opt/hermes-agent
-python3 bin/init-host-layout.py                                   # dry run: "create records"
+sudo python3 bin/init-host-layout.py                              # dry run: one "create records", the rest "ok"
 sudo python3 bin/init-host-layout.py --apply
 sudo -u hermes-broker python3 bin/init-host-layout.py --check     # must exit 0
 ```
+
+**The dry run needs `sudo` here** (it did not in README step 2, where the store did not yet
+exist). The store is `root:hermes 2750` and `hermesops` is deliberately not in `hermes`, so an
+unprivileged dry run cannot `lstat` anything below `governance/` or `spool/` and reports every
+child as `mismatch … Permission denied` — alarming, and wrong (F17). Run as `hermesops` without
+`sudo` on 2026-09-23, it printed exactly that.
 
 **Run `--apply` promptly after the pull — the broker will not start until you do.** Its
 `ExecStartPre=` is `init-host-layout.py --check`, which now covers the `records` row, so any

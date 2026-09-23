@@ -17,6 +17,12 @@ real unit installation. The repo is ahead of the box: everything F12 added is on
 proven on Linux CI, but the VPS has not been touched since 2026-09-22 and does not yet have the
 `records/` directory the broker now checks for at every start.
 
+> **Update 2026-09-23 (later the same day):** the FIRST TASK below is **done**. The box is at
+> `9df03d4`, `records/` exists as `hermes-broker:hermes 2750`, `--check` as `hermes-broker` exits 0
+> (and exited 2 naming `records` before `--apply`), both units active, `NRestarts=0`. The F12
+> brain candidate is canon (PR #44). The dry-run command below now has `sudo` — without it,
+> `hermesops` cannot see inside the store (F17). The table is kept as written for the record.
+
 ## What is true now (re-verify before relying on it)
 
 | | |
@@ -43,7 +49,7 @@ On the box, from `/opt/hermes-agent` (BRING-UP's "After pulling F12" block has t
 
 ```bash
 sudo git -C /opt/projects/claude_code pull --ff-only
-python3 bin/init-host-layout.py                                   # dry run: one line, "create records"
+sudo python3 bin/init-host-layout.py                              # dry run: one "create records", the rest "ok"
 sudo python3 bin/init-host-layout.py --apply
 sudo -u hermes-broker python3 bin/init-host-layout.py --check     # must exit 0
 systemctl is-active hermes-docker-proxy hermes-broker             # both active
