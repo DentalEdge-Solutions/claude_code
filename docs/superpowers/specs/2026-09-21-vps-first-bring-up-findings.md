@@ -275,9 +275,11 @@ If Compose loses the proxy connection **after** the container started, it may al
 while the executor is mid-apply, and the broker would promise "nothing was mutated" about a run
 that may have changed the account. That goes around the exit-2 guarantee in
 `apply-changeset.py`. **Inferred, not measured.** It gates the kill switch, not the rehearsal:
-the kill switch is absent there, so nothing can be mutated. **Open:** a distinct wrapper exit
+the kill switch is absent there, so nothing can be mutated. ~~Open: a distinct wrapper exit
 code for "Compose failed before the container started", designed in its own PR (F9 spec §3.7,
-§5).
+§5).~~ Superseded by the fix below: instead of a distinct code for that one case, the wrapper
+now verifies EVERY exit and falls back to exit 4 whenever it cannot, which covers this case
+along with any other unattested Compose failure.
 
 **Fix (PR #46, spec `2026-09-23-f14-attested-executor-exit-design.md`).** The executor prints
 `HERMES-EXIT <nonce> <rc>` for the exits it chose, bound to a per-run nonce the wrapper

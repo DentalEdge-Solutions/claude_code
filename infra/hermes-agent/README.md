@@ -828,6 +828,15 @@ request is still queued and may still succeed. Treat it as "ask again later", ne
 and never re-file the request — a second request for the same change-set is refused as a replay,
 and the original is still in flight.
 
+**This table's exit 4 (pending) is not the same 4 as the host-side wrapper's.**
+`run-ads-mutate.sh` exits 4 when the executor's own exit could not be verified (F14 —
+no attested `HERMES-EXIT <nonce> <rc>` line, or Compose failed before one could be
+written): treat the account as possibly modified and reconcile from the governance
+audit log. The broker classifies a wrapper 4 the same way it classifies a wrapper
+3 — both become `EXIT_FAILED_AFTER_MUTATION` at this in-container syscall layer, i.e.
+exit **3** above, never exit 4. Exit 4 here always means "no result written yet",
+regardless of which status the wrapper produced.
+
 ### Broker — host-side
 
 ```bash

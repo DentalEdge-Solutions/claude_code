@@ -448,7 +448,11 @@ broker's own path (reservation, the wrapper, persistence), which Phase 6 does no
 
 **Still required before the kill switch can be created:** the §6 hardening gates. (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
-now status 4, "possibly modified".)
+now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
+hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —
+until it is restarted, a wrapper 4 is recorded as `failed_unknown_exit` instead, which is
+still fail-closed but not the intended label. No unit change, no image rebuild; the kill
+switch stays absent.)
 
 ---
 

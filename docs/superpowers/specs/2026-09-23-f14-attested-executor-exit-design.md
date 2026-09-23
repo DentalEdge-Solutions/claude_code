@@ -1,6 +1,6 @@
 # F14 — The executor attests its own exit; anything unattested fails closed (design)
 
-**Status:** approved in conversation 2026-09-23, awaiting written-spec review.
+**Status:** approved 2026-09-23; implemented in PR #46.
 **Finding:** F14 in `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`
 (first recorded in the F9 spec, `2026-09-22-f9-bind-paths-and-proxy-allow-list-design.md` §3.7, §5).
 **Gates:** the kill switch. Not the rehearsal (the kill switch is absent there, so nothing can mutate).
@@ -78,9 +78,12 @@ Three further holes on the same seam, found while designing:
   wrapper, that fails closed).
 - Order: flush stderr, write the line to stdout, flush stdout.
 - `HERMES_EXIT_NONCE` must **never** be in `_RUNTIME_ENV_KEYS` (`apply-changeset.py:50`).
-  `_child_env()` is an allow-list, so the mutator subprocess cannot see the nonce today; if it
-  could, text the executor echoes from it (`_scrub(err)` into `_refuse` messages) could forge the
-  line. A test pins the absence.
+  `_child_env()` is an allow-list, which keeps the nonce out of the mutator subprocess's
+  environment so text the mutator echoes (its stderr, via `_scrub(err)` into `_refuse`
+  messages) cannot carry it and forge the line. The mutator runs as the same user in the
+  same container and could still read the parent's `/proc` environ directly — the
+  allow-list does not stop that — but it already holds the write credential, so that would
+  not be a new capability. A test pins the allow-list's absence of the nonce.
 - `apply()`, `build_plan()` and the meaning of every existing status are unchanged.
 
 ### 3.2 Wrapper — `run-ads-mutate.sh`
