@@ -447,68 +447,16 @@ def _handle(conn, upstream_path):
             head, rest = _read_until_headers(conn, buf)
             if head is None:
                 return
-            line = head.split(b"\r\n")[0].decode("latin1")
-            parts = line.split(" ")
-            if len(parts) < 2:
-                _refuse(conn, "malformed request line")
-                return
-            method, path = parts[0], parts[1]
-            clen, has_te, bad_clen = 0, False, False
-            for h in head.split(b"\r\n")[1:]:
-                lo = h.lower()
-                if lo.startswith(b"content-length:"):
-                    # DIGITS ONLY. RFC 9110 defines Content-Length as 1*DIGIT, but
-                    # Python's int() also accepts "-5", "+5", "1_0" and an empty value
-                    # (via the old `or b"0"`), and Go's ParseUint — which is what
-                    # dockerd uses — accepts none of them. Every one of those is this
-                    # proxy and its upstream disagreeing about where the request ends,
-                    # which is the same shape as the CL.TE Critical documented below.
-                    # MEASURED 2026-09-17: `Content-Length: 7_7` parsed here as 77 and
-                    # carried a smuggled create's bytes through to the upstream socket;
-                    # `Content-Length: -5` made the framing below do
-                    # `rest[:-5], rest[-5:]`, silently handing the last five body bytes
-                    # to the next loop iteration as a request line; and a non-numeric
-                    # value raised ValueError out of _handle (which catches only
-                    # OSError) as an unhandled traceback. Refuse instead of guessing.
-                    if not h.split(b":", 1)[1].strip().isdigit():
-                        bad_clen = True
-                    else:
-                        clen = int(h.split(b":", 1)[1].strip())
-                if lo.startswith(b"transfer-encoding:"):
-                    has_te = True
-            # CL.TE / TE.CL REQUEST SMUGGLING. This proxy frames every request by
-            # Content-Length alone (`while len(rest) < clen` below); dockerd is Go
-            # net/http, which frames by Transfer-Encoding when BOTH headers are
-            # present on a request. A request that carries Transfer-Encoding at
-            # all — alone, or alongside Content-Length — is therefore ambiguous:
-            # this proxy would read exactly `clen` bytes as "the body" and treat
-            # anything past that as the start of the NEXT request on the
-            # connection, while dockerd treats (say) an empty chunked body as
-            # ending THIS request and parses the remainder as a wholly separate,
-            # uninspected second request. MEASURED against the real `_handle`
-            # before this fix: an allowed `POST .../wait` carrying both headers,
-            # with an empty chunked body followed by a smuggled `POST
-            # /containers/create {Privileged: true, Binds: ["/:/host:rw"]}` in the
-            # declared Content-Length tail, produced exactly one logged decision
-            # (`ALLOW POST .../wait`) — `decide()` was never called for the
-            # create, and dockerd executed it as a second request on the same
-            # connection. Refuse unconditionally, for every path (not just
-            # `/containers/create`), before any framing or forwarding, and close
-            # the connection rather than trying to keep reading a stream we can
-            # no longer unambiguously frame.
-            if has_te:
-                _refuse(conn, "Transfer-Encoding is not permitted on requests")
-                print("DENY %s %s (Transfer-Encoding present; CL.TE smuggling risk)"
-                      % (method, path), file=sys.stderr)
-                return
-            if bad_clen:
-                # Close, do not continue the loop: without a usable length there is no
-                # way to know where this body ends, so there is no safe place to resume
-                # reading. The offending value is deliberately NOT logged — it is
-                # attacker-controlled bytes headed for the journal.
-                _refuse(conn, "malformed Content-Length")
-                print("DENY %s %s (malformed Content-Length)" % (method, path),
-                      file=sys.stderr)
+            # The framing hardening (spec 2026-09-23): the head is parsed ONCE, strictly,
+            # by _parse_head, and anything it cannot parse unambiguously is refused. Close,
+            # do not continue the loop: after an unparseable head there is no safe place to
+            # resume reading. The reason is a fixed string; refused bytes never reach the
+            # journal (method/path are logged only when the request line itself parsed).
+            try:
+                method, path, clen = _parse_head(head)
+            except HeadRefused as e:
+                _refuse(conn, e.reason)
+                print("DENY %s %s (%s)" % (e.method, e.path, e.reason), file=sys.stderr)
                 return
             # Substring, not the regex fullmatch the rest of the file uses — deliberately
             # over-inclusive relative to decide()'s ALLOWED patterns, never under. A path

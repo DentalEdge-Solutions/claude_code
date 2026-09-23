@@ -840,6 +840,85 @@ class TestPlumbing(unittest.TestCase):
             "a request the proxy never decided still reached the upstream: %r"
             % upstream_saw)
 
+    # ---- the framing hardening, end to end (spec 2026-09-23) ---------------------------
+    # Each form carries a privileged create hidden in an allowed `wait` request. The proof is
+    # NON-RECEIPT: `/containers/create` must appear nowhere in the upstream's raw bytes.
+
+    SMUGGLED = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
+                b"Content-Length: 2\r\n\r\n{}")
+    WAIT = b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+
+    def _assert_smuggle_refused(self, req, reason):
+        resp = self._send(req)
+        self.assertIn(b"403", resp)
+        self.assertIn(reason.encode(), resp)
+        self.assertFalse(any(b"/containers/create" in b for b in self.upstream_raw),
+                         "smuggled create reached the upstream socket: %r" % self.upstream_raw)
+
+    def test_an_obs_fold_smuggled_create_is_refused(self):
+        tail = b"0\r\n\r\n" + self.SMUGGLED
+        req = (self.WAIT + b"Host: d\r\nX-Pad: pad\r\n\tTransfer-Encoding: chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        self._assert_smuggle_refused(req, "malformed header line")
+
+    def test_a_space_before_colon_smuggled_create_is_refused(self):
+        tail = b"0\r\n\r\n" + self.SMUGGLED
+        req = (self.WAIT + b"Host: d\r\nTransfer-Encoding : chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        self._assert_smuggle_refused(req, "malformed header line")
+
+    def test_a_duplicate_content_length_smuggled_create_is_refused(self):
+        req = (self.WAIT + b"Host: d\r\nContent-Length: 0\r\n"
+               b"Content-Length: " + str(len(self.SMUGGLED)).encode() + b"\r\n\r\n"
+               + self.SMUGGLED)
+        self._assert_smuggle_refused(req, "duplicate Content-Length")
+
+    def test_a_bare_lf_smuggled_create_is_refused(self):
+        tail = b"0\r\n\r\n" + self.SMUGGLED
+        req = (self.WAIT + b"Host: d\r\nX-Pad: a\nTransfer-Encoding: chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        self._assert_smuggle_refused(req, "malformed request")
+
+    def test_a_refused_head_closes_the_connection(self):
+        """After a head it could not parse there is no safe place to resume reading: the
+        connection must close, so nothing sent after it reaches the upstream."""
+        import socket as _s
+        self._start_proxy()
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(b"GET /_ping HTTP/1.0\r\nHost: d\r\n\r\n")
+        first = c.recv(65536)
+        self.assertIn(b"403", first)
+        self.assertIn(b"malformed request line", first)
+        try:
+            c.sendall(b"GET /_ping HTTP/1.1\r\nHost: d\r\n\r\n")
+            c.settimeout(2)
+            second = c.recv(65536)
+        except OSError:
+            second = b""
+        c.close()
+        self.assertEqual(second, b"", "the proxy kept reading after a refused head")
+        self.assertEqual(self.upstream_raw, [])
+
+    def test_ordinary_heads_still_reach_upstream(self):
+        """POSITIVE CONTROL for the grammar at the socket level: well-formed heads of the
+        shapes real clients send are still forwarded. Separate connections on purpose: the
+        fake upstream closes after each reply, so a keep-alive pair would fail for a reason
+        unrelated to the grammar."""
+        import socket as _s
+        self._start_proxy()
+        for req in (b"HEAD /_ping HTTP/1.1\r\nHost: d\r\n\r\n",
+                    self.WAIT + b"Host: localhost:2375\r\nUser-Agent: compose/v2.38.2\r\n"
+                                b"Content-Length: 0\r\n\r\n"):
+            c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+            c.connect(self.li_path)
+            c.sendall(req)
+            self.assertNotIn(b"403", c.recv(65536), req)
+            c.close()
+        self.assertIn("HEAD /_ping HTTP/1.1", self.upstream_saw)
+        self.assertTrue(any(l.startswith("POST /v1.55/containers/deadbeef/wait")
+                            for l in self.upstream_saw), self.upstream_saw)
+
 
 if __name__ == "__main__":
     unittest.main()
