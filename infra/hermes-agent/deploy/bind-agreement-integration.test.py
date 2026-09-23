@@ -54,6 +54,8 @@ CMD = ["--client", "slug-1", "--changeset", "20260922-120000-abcdef01",
 BIN_PIN = "%s/bin:/opt/cc-bin:ro" % AGENT_DIR
 CREATE_ALLOWED = re.compile(r"ALLOW POST /v[0-9.]+/containers/create")
 CREATE_DENIED = re.compile(r"DENY POST /v[0-9.]+/containers/create")
+# F14: the real executor's attested exit line, nonce-bound (spec 2026-09-23 §3.1).
+ATTESTED_2 = re.compile(r"^HERMES-EXIT [0-9a-f]{32} 2$", re.MULTILINE)
 PROXIES = []
 _UNIT_PROXY = []
 
@@ -255,6 +257,10 @@ class TestTheBrokerPath(BrokerPath):
         self.assertRegex(plog, CREATE_ALLOWED, "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
         self.assertEqual(r.returncode, 2, out)
         self.assertIn("mutation is disabled", out)
+        # F14: the nonce crossed `docker compose run -e` and the real proxy, and the real
+        # executor attested its own refusal — the 2 above is PROVEN, not inferred.
+        self.assertEqual(len(ATTESTED_2.findall(out)), 1, out)
+        self.assertNotIn("EXECUTOR EXIT NOT VERIFIED", out)
 
     def test_the_static_model_matches_real_compose(self):
         """bind_agreement's model (verbatim absolute sources, bare -> :rw) against what real
@@ -285,15 +291,19 @@ class TestFiringControls(BrokerPath):
         r, out, plog = self.wrapper(sock, log)
         self.assertRegex(plog, CREATE_DENIED, plog)
         self.assertIn("bind set does not match", plog)
-        self.assertNotEqual(r.returncode, 2, "a refused create must not look like the "
-                                             "executor's own exit-2 refusal:\n" + out)
+        # F14, MEASURED: the proxy refused the create, so Compose exited 1 on its own and
+        # no executor ever ran to attest anything. The wrapper must say "unverified" (4),
+        # never "nothing was mutated" (1) and never the executor's own refusal (2).
+        self.assertEqual(r.returncode, 4, out)
+        self.assertIn("EXECUTOR EXIT NOT VERIFIED (compose rc=1)", out)
 
     def test_one_wrong_path_in_the_broker_environment_is_refused(self):
         r, out, plog = self.wrapper(self.sock, self.log,
                                     HERMES_ADS_REPO_DIR="/opt/projects/elsewhere")
         self.assertRegex(plog, CREATE_DENIED, plog)
         self.assertIn("bind set does not match", plog)
-        self.assertNotEqual(r.returncode, 2, out)
+        self.assertEqual(r.returncode, 4, out)
+        self.assertIn("EXECUTOR EXIT NOT VERIFIED (compose rc=1)", out)
 
     def test_without_env_file_compose_cannot_read_env(self):
         """Spike M4, kept as a control: the defect --env-file /dev/null exists to avoid."""
