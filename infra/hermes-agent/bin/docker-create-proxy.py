@@ -346,7 +346,10 @@ def _parse_head(head):
             # to the next loop iteration as a request line; and a non-numeric
             # value raised ValueError out of _handle (which catches only
             # OSError) as an unhandled traceback. Refuse instead of guessing.
-            if not _DIGITS_RE.fullmatch(value):
+            # 19 digits is the most Go's ParseUint(v, 10, 63) accepts (2**63-1); staying at
+            # or under it also keeps int() well under Python's 4300-digit conversion limit.
+            # MAX_BODY is enforced later, in _handle.
+            if not _DIGITS_RE.fullmatch(value) or len(value) > 19:
                 raise HeadRefused("malformed Content-Length", method, path)
             clen = int(value)
     return method, path, (clen or 0)

@@ -413,9 +413,14 @@ class TestParseHead(unittest.TestCase):
             self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\n" + pair, "duplicate Content-Length")
 
     def test_a_non_digit_content_length_is_refused(self):
-        for v in (b"7_7", b"-5", b"+5", b"", b"5, 5", b"0x10"):
+        for v in (b"7_7", b"-5", b"+5", b"", b"5, 5", b"0x10", b"1" * 20, b"1" * 5000):
             self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\nContent-Length: " + v,
                                "malformed Content-Length")
+
+    def test_a_19_digit_content_length_parses(self):
+        self.assertEqual(
+            PX._parse_head(b"POST /v1.55/x HTTP/1.1\r\nContent-Length: " + b"9" * 19),
+            ("POST", "/v1.55/x", int("9" * 19)))
 
     def test_any_transfer_encoding_is_refused(self):
         for line in (b"Transfer-Encoding: chunked", b"transfer-encoding: gzip",
