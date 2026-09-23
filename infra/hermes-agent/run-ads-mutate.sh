@@ -103,11 +103,16 @@ cat "$tmp_out"
 # status instead. So persist's status never becomes the script's status.
 #
 # S1-M2: but it must not VANISH either, which `|| true` made it do. persist-run-record
-# exits 2 for a PersistRefused — a destination that could not be proven to stay inside
-# the client vault, i.e. a symlink or hardlink pointing out of it. That is not a
-# routine I/O failure, it is an ATTACK DETECTION, and swallowing it left the single
-# loudest signal this rail produces as one line of stderr in the middle of the
-# executor's own output, with the exit status discarded entirely.
+# exits 2 for a PersistRefused. That is not a routine I/O failure — but as of F12 it is
+# not necessarily an attack either, and the banner below no longer says it is. TWO
+# causes now share exit 2: a missing records/ tree (the shim refuses rather than
+# building it with the wrong mode — the likeliest cause, an operator who pulled and has
+# not run `init-host-layout.py --apply` yet), and a containment refusal (a destination
+# that could not be proven to stay inside records/, i.e. a symlink or hardlink pointing
+# out of it — that one IS an attack detection). The `persist-run-record:` line printed
+# immediately above the banner distinguishes them. Either way it must not be swallowed:
+# `|| true` left the loudest signal this rail produces as one line of stderr in the
+# middle of the executor's own output, with the exit status discarded entirely.
 #
 # `|| prc=$?` instead of `|| true` — the same pattern the executor invocation above
 # uses — so `set -e` still does not fire, $rc still decides the script's status, and a
@@ -120,10 +125,15 @@ if [ "$prc" -ne 0 ]; then
   echo "!!! ================================================================" >&2
   echo "!!! RUN RECORD NOT PERSISTED — persist-run-record.py exited $prc" >&2
   echo "!!!" >&2
-  echo "!!! Exit 2 means the destination could not be proven to stay inside the" >&2
-  echo "!!! client vault — a symlink or hardlink pointing out of it. That is a" >&2
-  echo "!!! CONTAINMENT REFUSAL, not an I/O hiccup: treat it as an attempt to make" >&2
-  echo "!!! this step write outside the vault, and inspect the vault before re-running." >&2
+  echo "!!! Exit 2 is a REFUSAL, not an I/O hiccup. The 'persist-run-record:' line" >&2
+  echo "!!! just above says which one. Two causes, in order of likelihood:" >&2
+  echo "!!!   1. SETUP — the governance store has no records/ tree yet. Most common" >&2
+  echo "!!!      right after a pull: run 'sudo python3 bin/init-host-layout.py --apply'" >&2
+  echo "!!!      (then '--check' as hermes-broker). Nothing was attacked." >&2
+  echo "!!!   2. CONTAINMENT REFUSAL — the destination could not be proven to stay" >&2
+  echo "!!!      inside records/: a symlink or hardlink pointing out of it. Treat that" >&2
+  echo "!!!      as an attempt to make this step write outside records/, and inspect" >&2
+  echo "!!!      the governance store's records/<client> directory before re-running." >&2
   echo "!!!" >&2
   echo "!!! The executor's own status ($rc) is UNCHANGED and is still what says" >&2
   echo "!!! whether the account was touched. This banner is about the RECORD of the" >&2

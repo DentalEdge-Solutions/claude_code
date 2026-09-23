@@ -385,9 +385,10 @@ def drain(spool=None, projects=None, runner=None, now=None):
     #   * A failure to even launch the executor (missing script, exec permission,
     #     ENOENT/EACCES, ...) surfaces as OSError (FileNotFoundError/PermissionError
     #     are subclasses) — already in the tuple below.
-    #   * C.reserve_approval and C.record_outcome raise only ValueError or OSError, and
-    #     _execute already catches both around EACH call individually, so neither
-    #     propagates here either.
+    #   * C.reserve_approval and C.record_outcome raise ValueError, OSError or
+    #     RuntimeError, and _execute already catches all three around EACH call
+    #     individually, so none propagates here either. RuntimeError is in that set as
+    #     of F12 and is NOT a broker bug — see the corrected paragraph below.
     #   * subprocess.SubprocessError is added explicitly, defensively: it is the base
     #     class for the executor-invocation family (TimeoutExpired included) and, like
     #     OSError from a failed exec, describes the external process misbehaving, not
@@ -401,19 +402,45 @@ def drain(spool=None, projects=None, runner=None, now=None):
     #     untrusted spool file) and vault_lib.resolve raises plain KeyError for it.
     #     Removing KeyError from this tuple would turn that refusal into an uncaught
     #     crash that starves every other client's queued requests in the same batch.
-    # Deliberately NOT added: NotImplementedError, or a bare Exception/RuntimeError/
-    # TypeError/AttributeError catch-all. Those signal a bug in the broker's own code
-    # (a stub still standing, a typo, a wrong argument shape) rather than a guard
-    # saying "no" or an external process misbehaving, and R12's point survives Task 6
-    # unchanged: a programming error must still fail loudly, never be rendered as a
-    # governance refusal.
+    #   * RuntimeError — ADDED, and the reason this paragraph had to be rewritten (F12
+    #     final whole-branch review). Through Task 6 it sat in the "deliberately NOT
+    #     added" list below on the premise that a RuntimeError could only ever mean a
+    #     bug in the broker's own code. THAT PREMISE IS NOW FALSE. changeset_lib's
+    #     _apply_owner_mode (F12) raises RuntimeError for two OPERATIONAL faults, and
+    #     it is reached from C.reserve_approval and C.record_outcome via _approval_lock
+    #     on every single apply:
+    #       - the `hermes` group or the `hermes-broker` user does not exist on this
+    #         host (pwd/grp lookup by NAME — a missing group is a refusal, never a
+    #         guessed gid), and
+    #       - EPERM from fchmod/fchown on an approval artifact or on approvals/<slug>/
+    #         (a user-namespaced root without CAP_CHOWN/CAP_FOWNER, a root_squash NFS
+    #         mount, or a file an earlier `sudo approve` left owned by someone else).
+    #     Both are host provisioning/permission state — the same category as OSError's
+    #     ENOENT/EACCES, which is already here — and both are things an operator fixes
+    #     on the box. Neither is a typo in this module. Leaving RuntimeError out does
+    #     not make the broker fail "loudly and honestly"; it makes it fail in the one
+    #     place that cannot afford an escape (see _execute's record_outcome call site:
+    #     an escape there skips _write_result entirely, and FINDING 1 there explains at
+    #     length why a MISSING result is only tolerable when it is deliberate).
+    #     R12 is not weakened by this: R12 is about not laundering PROGRAMMING errors
+    #     into governance refusals. A missing system group is not a programming error.
+    #
+    # Deliberately NOT added: NotImplementedError, or a bare Exception/TypeError/
+    # AttributeError catch-all. Those signal a bug in the broker's own code (a stub
+    # still standing, a typo, a wrong argument shape) rather than a guard saying "no"
+    # or an external process misbehaving, and R12's point survives Task 6 unchanged: a
+    # programming error must still fail loudly, never be rendered as a governance
+    # refusal. RuntimeError's move out of this list is narrow and justified above — it
+    # is not licence to widen the tuple again on a hunch; the next addition needs the
+    # same "here is the named, operational, operator-fixable fault" argument.
     for name, req in parsed:
         rid, slug, cid = req["request_id"], req["client"], req["changeset"]
         path = os.path.join(S.requests_dir(spool), name)
         try:
             with _ClientLock(slug):
                 outcome = _process(req, spool, projects, pending[slug], runner, now)
-        except (ValueError, KeyError, OSError, subprocess.SubprocessError) as e:
+        except (ValueError, KeyError, OSError, RuntimeError,
+                subprocess.SubprocessError) as e:
             # S6: the FULL exception goes to stderr (host-side, journalled) and the
             # FIXED text goes to the spool. The outcome dict returned from drain() is
             # printed on the broker's own stdout by main(), which is also host-side, so
@@ -569,10 +596,18 @@ def _execute(req, spool, runner, now):
     # change-set applicable a second time (spec §7).
     try:
         C.reserve_approval(slug, cid, rid, now)
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, RuntimeError) as e:
         # S6: full reason host-side, fixed text to the spool. An OSError here renders
         # the governance-store path it failed on, which the agent must not learn from a
         # refusal it can provoke.
+        #
+        # RuntimeError (F12): _approval_lock -> _apply_owner_mode raises it when the
+        # `hermes` group / `hermes-broker` user is missing, or fchmod/fchown on the lock
+        # sidecar or approvals/<slug>/ hits EPERM. That is host provisioning state, not
+        # a broker bug, and it is classified here for the same reason OSError is: the
+        # request genuinely was NOT executed, so refused_approval ("nothing was mutated")
+        # is the true reading. Its text carries a governance-store path, so it takes the
+        # same S6 treatment — journal, not spool.
         print("broker: request %s client %s changeset %s — approval unavailable: %s: %s"
               % (rid, slug, cid, type(e).__name__, e), file=sys.stderr)
         detail = EXCEPTION_DETAIL_REFUSED_APPROVAL
@@ -594,7 +629,17 @@ def _execute(req, spool, runner, now):
           % (rid, slug, cid, rc, output), file=sys.stderr)
     try:
         C.record_outcome(slug, cid, classification, now)
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, RuntimeError) as e:
+        # RuntimeError (F12) is caught here for the reason that matters most on this
+        # whole path: THIS CALL RUNS AFTER THE EXECUTOR. The mutation may already have
+        # landed. An escape from this frame would skip the _write_result below entirely
+        # and then be caught by drain()'s per-request handler, which writes exit_code 2
+        # — under spec §12 a GUARANTEE that nothing was mutated. That is the precise
+        # false-guarantee FINDING 1 below exists to prevent, arriving by a different
+        # door. Reaching it needs nothing exotic: _approval_lock -> _apply_owner_mode
+        # raises RuntimeError on a missing `hermes` group or an EPERM fchmod of the lock
+        # sidecar, both of which are host state that can change under a running broker.
+        # Failing to record the outcome is logged, never laundered into a result.
         print("broker: could not record outcome for %s: %s" % (cid, e), file=sys.stderr)
 
     if timed_out:

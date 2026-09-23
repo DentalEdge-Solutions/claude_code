@@ -43,6 +43,10 @@ LAYOUT = (
     Entry("store", "registry/clients.json", FILE, "root", "hermes", 0o640, b"{}\n"),
     # S3-b: no group write on the directory, because write on a directory grants unlink.
     Entry("store", "log", DIR, "root", "hermes", governance_lib.LOG_DIR_MODE, None),
+    # F12: run records. The broker owns and writes them; setgid keeps group hermes on the
+    # slug dirs so an operator in that group can read without root. Never mounted.
+    Entry("store", "records", DIR, "hermes-broker", "hermes",
+          governance_lib.RECORDS_DIR_MODE, None),
     Entry("store", "seen", DIR, "hermes-broker", "hermes-broker", 0o700, None),
     # Spool root: nobody but root can rename requests/ or results/.
     Entry("spool", "", DIR, "root", "hermes", 0o750, None),

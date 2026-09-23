@@ -1110,5 +1110,134 @@ class TestVerifyApprovalReservationHandoff(unittest.TestCase):
         self.assertIn("expired", str(cm2.exception))
 
 
+import stat
+import governance_lib
+
+SLUG = "acme-dental"
+CID = "20260824-101500-abcdef01"
+
+class TestApprovalArtifactModes(unittest.TestCase):
+    """F12: with UMask=0077 (the §6 hardening) the executor must still be able to READ an
+    approval, and the broker must still be able to WRITE the lock sidecar. Neither may
+    depend on the umask of whoever ran approve-changeset."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+
+    def test_approval_and_snapshot_are_0640_under_a_hostile_umask(self):
+        old = os.umask(0o077)
+        try:
+            digest = C.write_snapshot_bytes(SLUG, CID, b'{"actions": []}\n')
+            C.write_approval(SLUG, CID, digest, "operator", NOW, 24)
+        finally:
+            os.umask(old)
+        for p in (governance_lib.approval_path(SLUG, CID),
+                  governance_lib.snapshot_path(SLUG, CID)):
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o640, p)
+
+    def test_the_lock_sidecar_is_0660_under_a_hostile_umask(self):
+        old = os.umask(0o077)
+        try:
+            digest = C.write_snapshot_bytes(SLUG, CID, b'{"actions": []}\n')
+            C.write_approval(SLUG, CID, digest, "operator", NOW, 24)
+        finally:
+            os.umask(old)
+        lock = governance_lib.approval_lock_path(SLUG, CID)
+        self.assertEqual(stat.S_IMODE(os.stat(lock).st_mode), 0o660, lock)
+
+    def test_control_the_umask_really_is_hostile(self):
+        """Without this the two tests above could pass on a lenient umask and prove nothing."""
+        old = os.umask(0o077)
+        try:
+            p = os.path.join(self.tmp, "probe")
+            with open(p, "w") as f:
+                f.write("x")
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
+        finally:
+            os.umask(old)
+
+
+class TestApprovalsDirOwnershipAndMode(unittest.TestCase):
+    """F12 spec R2 (§2.2 correction, traced during Task 5): approve-changeset.py now runs
+    as root (§2.3), so a bare os.makedirs for approvals/<slug>/ leaves it root-owned. Group
+    hermes gets r-x there (inherited from the setgid approvals/ parent, or not even that on
+    a filesystem with no such parent), never write -- and write on the directory is what
+    the broker needs to create its .tmp file and the lock sidecar inside it. Fixing the
+    sidecar's own mode (TestApprovalArtifactModes above) is necessary but not sufficient;
+    this is F12's symptom reappearing one level up, at the directory that holds it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+
+    def test_the_per_client_approvals_dir_is_0o2750_under_a_hostile_umask(self):
+        old = os.umask(0o077)
+        try:
+            digest = C.write_snapshot_bytes(SLUG, CID, b'{"actions": []}\n')
+            C.write_approval(SLUG, CID, digest, "operator", NOW, 24)
+        finally:
+            os.umask(old)
+        d = governance_lib.approvals_dir(SLUG)
+        self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o2750, d)
+
+    def test_control_a_bare_makedirs_would_not_have_landed_on_0o2750(self):
+        """Firing control -- WITHOUT mutating any tracked file.
+
+        CORRECTED (F12 R2 review, IMPORTANT 3): the first version of this control built
+        its throwaway directory under a PLAIN (non-setgid) tempdir and argued "the umask
+        can only narrow permission bits, it can never SET the setgid bit, so a bare
+        makedirs can never land 0o2750" -- true as far as it goes, but unsound as an
+        account of the real bug: in production approvals/ IS setgid 0o2750
+        (host_layout.py), and on Linux a directory created under a setgid PARENT inherits
+        the setgid bit itself via System V semantics -- independent of umask entirely, not
+        narrowed by it, not granted by it. That inheritance, not a lenient umask, is
+        exactly how the R2 defect happens: in production approve runs as root under the
+        ordinary umask 022, so a bare os.makedirs there lands 0o2755 -- setgid intact
+        from the parent, permission bits masked to 0o755 -- which still gives group
+        hermes only r-x, never write, so the broker cannot create its .tmp file or the
+        lock sidecar inside it.
+
+        So this control now reproduces the real PARENT shape instead of a blank tempdir:
+        it chmods a throwaway "approvals" directory to 0o2750 (setgid) BEFORE the bare
+        makedirs, so the child is created under a genuinely setgid parent, matching
+        production.
+
+        WHAT THIS TEST ACTUALLY PRODUCES IS NOT 0o2755 (corrected, final whole-branch
+        review -- the deferred minor). This test runs under the hostile umask 0o077 it
+        sets three lines down, not production's root umask 022, so on Linux the bare
+        makedirs here lands 0o2700: setgid inherited from the parent, permission bits
+        masked all the way to 0o700 by THIS umask. 0o2755 is the shape the REAL root
+        approve produces, and the shape Tier 2 (layout-integration.test.py, root on
+        Linux CI) can show -- it is not the shape reachable from inside this suite. The
+        two are different numbers for the same defect: neither one is 0o2750, and in
+        neither one does group hermes get write.
+
+        This sandbox is darwin, where a bare mkdir does NOT propagate S_ISGID to a new
+        child at all -- BSD semantics, not System V ('Darwin proves nothing about group
+        inheritance', the standing R1 lesson elsewhere in this file) -- verified directly
+        against this filesystem rather than assumed: the same setup here lands 0o700
+        (umask alone, no setgid survives). So three platforms/privilege combinations
+        produce three different modes (0o2755 real-root-on-Linux, 0o2700 this test on
+        Linux, 0o700 this test on darwin), which is exactly why the assertion below
+        checks only inequality to 0o2750 rather than any hardcoded value. Pinning a
+        number here would be the same class of unsound, platform-blind claim this
+        docstring has now twice been rewritten to stop making."""
+        old = os.umask(0o077)
+        try:
+            parent = os.path.join(self.tmp, "approvals")
+            os.makedirs(parent, exist_ok=True)
+            os.chmod(parent, 0o2750)      # reproduce host_layout.py's real parent shape
+            bare = os.path.join(parent, "a-bare-client")
+            os.makedirs(bare)
+            self.assertNotEqual(stat.S_IMODE(os.stat(bare).st_mode), 0o2750, bare)
+        finally:
+            os.umask(old)
+
+
 if __name__ == "__main__":
     unittest.main()

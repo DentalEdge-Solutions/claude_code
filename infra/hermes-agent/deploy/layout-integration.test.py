@@ -17,9 +17,13 @@ writes under /var/lib. Run it on a CI runner, not on the deploy target.
 
 UNPROVEN HERE (spec §5.3): systemd's ProtectSystem=strict with the new ReadWritePaths;
 the real gateway identity inside the hermes-agent image; compose's :? interpolation
-against a real .env.
+against a real .env. Also unproven: F12 §2.3's root guard and approve-changeset.py's
+own CLI path — TestApprovalOwnership drives changeset_lib.write_snapshot_bytes /
+write_approval directly (the same calls approve-changeset.py makes), not the CLI
+itself, because exercising the CLI end to end needs a vault this fixture does not
+build.
 """
-import os, shutil, stat, subprocess, sys, tempfile, unittest, uuid
+import grp, json, os, pwd, shutil, stat, subprocess, sys, tempfile, unittest, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.dirname(HERE)
@@ -350,6 +354,178 @@ class TestSpoolMountPoint(Layout):
         r = self.mv(self.data + ":/opt/data")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(os.path.isdir(os.path.join(self.data, "moved")))
+
+
+class TestRunRecords(Layout):
+    """F12 half B, with real identities: the broker writes run records into the store, the
+    gateway cannot, and the hermes group can read them."""
+
+    SLUG = "slug-1"
+
+    def register_client(self):
+        """vault_lib.resolve refuses an unregistered slug, so the record path needs one."""
+        reg = os.path.join(self.store, "registry", "clients.json")
+        with open(reg, "w") as f:
+            json.dump({"clients": {self.SLUG: {"project": "claude_google_ads",
+                                               "customer_id": "1234567890",
+                                               "status": "active"}}}, f)
+        run(["chown", "root:hermes", reg], check=True)
+        run(["chmod", "0640", reg], check=True)
+
+    def persist_as_broker(self, payload):
+        """Drive the real CLI the wrapper drives, on stdin, as hermes-broker."""
+        p = subprocess.run(BROKER + ["python3", self.py("persist-run-record.py"),
+                                     "--client", self.SLUG],
+                           input=payload, capture_output=True, text=True, env=self.env)
+        return p
+
+    def test_the_broker_writes_a_record_the_group_can_read(self):
+        self.register_client()
+        cid = "20260923-120000-abcdef01"
+        payload = ('HERMES-RESULT-JSON {"changeset_id": "%s", "status": "ok", "applied": 1, '
+                   '"finished_at": "2026-09-23T12:00:00Z", "operator": "operator", '
+                   '"actions": []}\n' % cid)
+        p = self.persist_as_broker(payload)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        rec = os.path.join(self.store, "records", self.SLUG, cid + ".result.json")
+        st = os.stat(rec)
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o640, rec)
+        self.assertEqual(grp.getgrgid(st.st_gid).gr_name, "hermes")
+        self.assertTrue(os.path.isfile(os.path.join(self.store, "records", self.SLUG,
+                                                    "timeline.md")))
+        # The mode and the gid name are necessary but not sufficient — the per-slug
+        # directory also has to be traversable by group hermes. Have an actual hermes
+        # member (uid 10000, gid 10000 == group hermes) read the record back.
+        r = self.gateway("python3", "-c", "import sys; open(sys.argv[1]).read()", rec)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_gateway_cannot_write_into_records(self):
+        """The refusal has to come from the records/slug-1/ directory's real MODE, not
+        from the directory not existing yet. Create it the production way first
+        (persist_as_broker, which makes it hermes-broker:hermes 02750 through the real
+        persist path), then attempt the write and pin the cause to a permission error."""
+        self.register_client()
+        cid = "20260923-130000-abcdef02"
+        payload = ('HERMES-RESULT-JSON {"changeset_id": "%s", "status": "ok", "applied": 1, '
+                   '"finished_at": "2026-09-23T13:00:00Z", "operator": "operator", '
+                   '"actions": []}\n' % cid)
+        p = self.persist_as_broker(payload)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        target = os.path.join(self.store, "records", self.SLUG, "planted.json")
+        r = self.gateway("python3", "-c",
+                         "import sys; open(sys.argv[1], 'w').write('x')", target)
+        self.assertNotEqual(r.returncode, 0, "the gateway wrote into records/: %s" % r.stdout)
+        self.assertIn("Permission denied", r.stderr)
+
+    def test_control_a_group_writable_records_dir_lets_the_gateway_write(self):
+        """Proves the refusal above comes from the MODE, not from something unrelated."""
+        self.register_client()
+        d = os.path.join(self.store, "records", self.SLUG)
+        os.makedirs(d, exist_ok=True)
+        os.chmod(d, 0o770)
+        run(["chgrp", "hermes", d], check=True)
+        target = os.path.join(d, "planted.json")
+        r = self.gateway("python3", "-c",
+                         "import sys; open(sys.argv[1], 'w').write('x')", target)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestApprovalOwnership(Layout):
+    """F12 half A, the exact failure the finding records: root approves, then the broker
+    must be able to reserve. Before the fix the lock sidecar is root-owned 0600 and
+    reserve_approval fails on the first apply."""
+
+    SLUG = "slug-1"
+    CID = "20260923-120000-abcdef01"
+
+    def approve_as_root(self):
+        """Write the snapshot + approval the way approve-changeset does, as root."""
+        code = (
+            "import sys; sys.path.insert(0, %r);"
+            "import changeset_lib as C, datetime;"
+            "d = C.write_snapshot_bytes(%r, %r, b'{\"actions\": []}\\n');"
+            "C.write_approval(%r, %r, d, 'operator',"
+            " datetime.datetime(2026, 9, 23, 12, 0, 0, tzinfo=datetime.timezone.utc), 24)"
+            % (self.bin, self.SLUG, self.CID, self.SLUG, self.CID))
+        return run(["python3", "-c", code], env=self.env)
+
+    def reserve_as_broker(self):
+        code = (
+            "import sys; sys.path.insert(0, %r);"
+            "import changeset_lib as C, datetime;"
+            "C.reserve_approval(%r, %r, '00000000-0000-4000-8000-000000000000',"
+            " datetime.datetime(2026, 9, 23, 12, 5, 0, tzinfo=datetime.timezone.utc))"
+            % (self.bin, self.SLUG, self.CID))
+        return run(BROKER + ["python3", "-c", code], env=self.env)
+
+    def test_root_approves_and_the_broker_can_reserve(self):
+        r = self.approve_as_root()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d = os.path.join(self.store, "approvals", self.SLUG)
+        # R2: the directory itself must be OWNED by hermes-broker (not merely group
+        # hermes) or the broker cannot create the .tmp files it needs inside it. Tier 2
+        # is the only place that can check this — Tier 1 has no second identity.
+        self.assertEqual(pwd.getpwuid(os.stat(d).st_uid).pw_name, "hermes-broker", d)
+        lock = os.path.join(d, self.CID + ".approval.lock")
+        st = os.stat(lock)
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o660, lock)
+        self.assertEqual(pwd.getpwuid(st.st_uid).pw_name, "hermes-broker")
+        r = self.reserve_as_broker()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # The broker's own egid is hermes-broker, not hermes — only the directory's
+        # setgid bit keeps the REWRITTEN approval record's group at hermes after this
+        # write-back. If that bit were ever lost, this is the assertion that would
+        # catch it (the R1 failure mode, one directory over).
+        approval = os.path.join(d, self.CID + ".approval.json")
+        self.assertEqual(grp.getgrgid(os.stat(approval).st_gid).gr_name, "hermes",
+                         approval)
+
+    def test_firing_control_a_root_owned_0600_lock_breaks_reserve(self):
+        """F12 as it was: this is the state the fix removes. If this ever passes, the
+        assertion above is not proving what it claims."""
+        r = self.approve_as_root()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lock = os.path.join(self.store, "approvals", self.SLUG,
+                            self.CID + ".approval.lock")
+        os.chown(lock, 0, 0)
+        os.chmod(lock, 0o600)
+        r = self.reserve_as_broker()
+        self.assertNotEqual(r.returncode, 0,
+                            "the broker reserved through a root-owned 0600 lock")
+
+    def test_firing_control_a_root_owned_02755_approvals_dir_breaks_reserve(self):
+        """R2 as it was before this fix: the sidecar control above covers Task 3 only.
+        Nothing else forces the approvals/<slug>/ DIRECTORY back to its pre-R2 shape —
+        root-owned, group hermes with no write bit. reserve_approval opens the
+        (correctly-owned) lock sidecar fine, then fails at _atomic_write_json's
+        open(tmp, "w") — a different failure site from the sidecar control's, and this
+        is the control that names it."""
+        r = self.approve_as_root()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d = os.path.join(self.store, "approvals", self.SLUG)
+        os.chown(d, 0, 0)
+        os.chmod(d, 0o2755)
+        r = self.reserve_as_broker()
+        self.assertNotEqual(r.returncode, 0, "the broker wrote into a root-owned 02755 dir")
+
+    def test_the_executor_uid_can_read_the_approval(self):
+        r = self.approve_as_root()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        approval = os.path.join(self.store, "approvals", self.SLUG,
+                                self.CID + ".approval.json")
+        r = self.gateway("python3", "-c",
+                         "import sys; open(sys.argv[1]).read()", approval)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_control_a_0600_approval_is_unreadable_to_the_executor(self):
+        r = self.approve_as_root()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        approval = os.path.join(self.store, "approvals", self.SLUG,
+                                self.CID + ".approval.json")
+        os.chmod(approval, 0o600)
+        r = self.gateway("python3", "-c",
+                         "import sys; open(sys.argv[1]).read()", approval)
+        self.assertNotEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":

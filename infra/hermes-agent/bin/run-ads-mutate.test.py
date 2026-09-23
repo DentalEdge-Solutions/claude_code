@@ -6,10 +6,17 @@ account. The test asserts the wrapper's own control flow — which status it exi
 with, and what it says on stderr — not anything about mutation.
 
 S1-M2 is the reason this file exists. persist-run-record.py exits 2 for a
-PersistRefused: a destination that could not be proven to stay inside the client
-vault, i.e. a symlink or hardlink pointing out of it. That is an ATTACK DETECTION,
-and it was swallowed by `|| true` — status discarded, stdout to /dev/null, leaving
-one line of stderr buried in the executor's own output.
+PersistRefused: a destination that could not be proven to stay inside the governance
+store's records/ tree (F12 — it used to be the client vault), i.e. a symlink or
+hardlink pointing out of it. That is an ATTACK DETECTION, and it was swallowed by
+`|| true` — status discarded, stdout to /dev/null, leaving one line of stderr buried
+in the executor's own output.
+
+F12 review (I1): exit 2 now ALSO covers a plain setup mistake — a records/ tree that
+`init-host-layout.py --apply` has not created yet. The banner therefore no longer
+asserts an attack as fact; it names both causes and points at the
+`persist-run-record:` line above it, which says which one fired.
+TestPersistRefusalIsLoud below pins that wording.
 
 The two properties are in tension and both matter, so both are pinned here:
   * the executor's status must still win (an exit-2 refusal is a promise the account
@@ -114,12 +121,19 @@ class Base(unittest.TestCase):
         os.makedirs(os.path.join(self.vault, "changes"))
 
         self.gov = os.path.join(self.tmp, "governance")
-        # The COMPLETE skeleton. The pre-flight stats every one of these and refuses the
-        # whole run if any is missing; creating only registry/ made this fixture pass on
-        # darwin (pre-flight silent) and fail on Linux (pre-flight live). See the platform
-        # gate above.
-        for _d in ("approvals", "control", "registry", "log", "seen"):
+        # The COMPLETE skeleton. The pre-flight stats every one of these (except
+        # "records", which it deliberately never declares — spec 2026-09-23 §2.5, it
+        # is host-side only) and refuses the whole run if any is missing; creating only
+        # registry/ made this fixture pass on darwin (pre-flight silent) and fail on
+        # Linux (pre-flight live). See the platform gate above. "records" IS created
+        # here even though the pre-flight never checks it: persist_run_record_shim now
+        # REFUSES rather than auto-creates a missing records/ tree (F12 review — the
+        # layout row is a hard prerequisite, `init-host-layout.py --apply` owns it, not
+        # a defensive os.makedirs at persist time), so this fixture has to lay it down
+        # itself, the same way it lays down the other four.
+        for _d in ("approvals", "control", "registry", "log", "seen", "records"):
             os.makedirs(os.path.join(self.gov, _d), exist_ok=True)
+        self.records = governance_lib.records_dir(SLUG, root=self.gov)
         reg = governance_lib.clients_registry_path(self.gov)
         os.makedirs(os.path.dirname(reg), exist_ok=True)
         with open(reg, "w") as f:
@@ -151,12 +165,14 @@ class Base(unittest.TestCase):
             capture_output=True, text=True, env=env, timeout=120)
         return p
 
-    def _poison_the_vault(self):
+    def _poison_the_records_dir(self):
         """Make persist refuse for the reason that matters: a timeline symlinked out
-        of the vault. This is the containment refusal, not a generic I/O error."""
+        of the records directory (F12: no longer the vault). This is the containment
+        refusal, not a generic I/O error."""
         outside = os.path.join(self.tmp, "outside.md")
         open(outside, "w").close()
-        os.symlink(outside, os.path.join(self.vault, "timeline.md"))
+        os.makedirs(self.records, exist_ok=True)
+        os.symlink(outside, os.path.join(self.records, "timeline.md"))
 
 
 class TestControlsFirst(Base):
@@ -170,7 +186,7 @@ class TestControlsFirst(Base):
                          "the harness wrote into the REAL vault tree")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("HERMES-RESULT-JSON", p.stdout)
-        self.assertTrue(os.path.exists(os.path.join(self.vault, "timeline.md")),
+        self.assertTrue(os.path.exists(os.path.join(self.records, "timeline.md")),
                         "persist did not run at all — the fixture is not exercising it")
         self.assertNotIn("RUN RECORD NOT PERSISTED", p.stderr)
 
@@ -184,30 +200,53 @@ class TestControlsFirst(Base):
 
 class TestPersistRefusalIsLoud(Base):
     def test_a_containment_refusal_is_announced_unmissably(self):
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         p = self._run(executor_rc=0)
         self.assertIn("RUN RECORD NOT PERSISTED", p.stderr)
         self.assertIn("CONTAINMENT REFUSAL", p.stderr)
-        # It must say what to do, not merely that something happened.
-        self.assertIn("inspect the vault", p.stderr)
+        # It must say what to do, not merely that something happened. F12: a refusal
+        # now means something in the governance store's records/ tree, not the vault —
+        # sending an operator to the wrong tree mid-incident costs real time.
+        self.assertIn("records/<client>", p.stderr)
         self.assertIn("governance audit log", p.stderr)
+
+    def test_the_banner_does_not_assert_an_attack_as_the_only_cause(self):
+        """F12 review (I1). Exit 2 covers TWO causes now: a records/ tree that
+        `init-host-layout.py --apply` has not created yet (the likeliest one, right
+        after a pull) and a genuine containment refusal. The banner used to state the
+        second as fact — "treat it as an attempt to make this step write outside
+        records/" with no alternative offered — which hands an operator a security
+        incident for a setup mistake. It must now name the setup cause, name the
+        remediation, and point at the `persist-run-record:` line that distinguishes
+        them."""
+        self._poison_the_records_dir()
+        p = self._run(executor_rc=0)
+        self.assertIn("init-host-layout.py --apply", p.stderr)
+        # The QUOTED form, not a bare "persist-run-record:" — the tool prints its own
+        # prefixed line on this path anyway, so a bare substring would pass against a
+        # banner that never mentioned it.
+        self.assertIn("'persist-run-record:' line", p.stderr)
+        self.assertIn("SETUP", p.stderr)
+        # And it must not have become vague in the process: the containment reading is
+        # still spelled out, it is just no longer the only one on offer.
+        self.assertIn("symlink or hardlink", p.stderr)
 
     def test_the_refusal_does_not_hijack_the_executor_status(self):
         """The other half, and the reason `|| true` was there in the first place. A
         persist failure must be loud but must NEVER become the script's status: exit 0
         here still means the executor succeeded. A fix that simply propagated persist's
         status would pass the test above and fail this one."""
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         self.assertEqual(self._run(executor_rc=0).returncode, 0)
 
     def test_it_does_not_mask_a_real_executor_failure_either(self):
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         self.assertEqual(self._run(executor_rc=3).returncode, 3)
 
     def test_the_banner_names_the_executor_status_it_is_not_overriding(self):
         """The banner exists to be read next to the exit code. If it did not state
         which status still stands, it would read as though the run itself had failed."""
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         p = self._run(executor_rc=3)
         self.assertIn("status (3) is UNCHANGED", p.stderr)
 

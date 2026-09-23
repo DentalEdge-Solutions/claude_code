@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
-"""Persist an executor run record into the client vault. Stdlib-only.
+"""Persist an executor run record into the governance store's records/ tree. Stdlib-only.
 
-The executor runs in a one-shot container that deliberately does not mount the vault,
-so it emits its result on stdout and the CALLER persists it. The audit log in the
-governance store remains the reversibility record and is written by the executor,
-fsynced per action; result.json and timeline.md are convenience artifacts for humans
-and for Hermes. If this step is lost, the audit log still holds the truth and --undo
-still works.
+The executor runs in a one-shot container that deliberately does not mount the vault
+(or records/), so it emits its result on stdout and the CALLER persists it. The audit
+log in the governance store remains the reversibility record and is written by the
+executor, fsynced per action; result.json and timeline.md are convenience artifacts for
+humans and for Hermes. If this step is lost, the audit log still holds the truth and
+--undo still works.
 
-THIS STEP RUNS HOST-SIDE AND WRITES INTO THE ONE TREE HERMES CAN WRITE. That makes
-every destination here attacker-shaped, and it is the reason for the containment work
-below rather than a plain open(). A symlink planted in the vault turns this step into
-a write primitive against anything the host user can reach — demonstrated on
-2026-08-19 by symlinking timeline.md at the governance store's `control/mutation-enabled`
-(the O_CREAT|O_APPEND open then CREATES it, and kill_switch_ok() only asks whether the
-file exists, so mutation becomes globally enabled) and by symlinking the `.tmp` path at
-the audit log (the O_TRUNC open then erases the cap consumption the guards count).
-Reachable in practice because `--undo` runs with the kill switch off and still emits a
-result line, and because HERMES_GOVERNANCE_DIR is in `.env`, the gateway's env_file.
+THIS STEP RUNS HOST-SIDE, as hermes-broker, and writes into records/<slug>/ in the
+governance store: records/ itself is hermes-broker:hermes 0o2750 (host_layout), NOT
+mounted into any container, and NOT writable by the gateway.
+
+Until F12 (2026-09-23) this step wrote into data/vaults instead — the one tree the
+gateway (and, through it, anything reachable from the mutation path) could read and
+write. A symlink planted there turned this step into a write primitive against
+anything the host user could reach: demonstrated on 2026-08-19 by symlinking
+timeline.md at the governance store's `control/mutation-enabled` (the O_CREAT|O_APPEND
+open then CREATES it, and kill_switch_ok() only asks whether the file exists, so
+mutation becomes globally enabled) and by symlinking the `.tmp` path at the audit log
+(the O_TRUNC open then erases the cap consumption the guards count). That was reachable
+in practice because `--undo` runs with the kill switch off and still emits a result
+line, and because HERMES_GOVERNANCE_DIR is in `.env`, the gateway's env_file.
+
+Moving the destination to records/ closes that specific vector: nothing that can plant
+a symlink can reach records/ any more — it is owned by the same identity that runs this
+step, unmounted, unreadable and unwritable by the gateway and the executor alike. The
+containment below stays anyway, as defence in depth and because it is structural rather
+than a response to one incident: a future writer added to this module, a bind mount
+added later, or a mode mis-set on records/ itself must not silently turn this step back
+into a write primitive the way the vault did. Refuse loudly and provably, not "it
+shouldn't be reachable so the check can go."
 
 The containment is structural rather than a check: `os.O_NOFOLLOW` means a symlinked
 destination cannot be opened at all, and the fstat regular-file test means a directory
@@ -25,19 +38,18 @@ or a fifo in that position refuses instead of raising something unrelated. The
 resolved-path checks then cover the intermediate components, which O_NOFOLLOW on the
 final component does not.
 
-OPERATIONAL CONSTRAINT (R20(a)): nothing may hard-link INTO data/vaults. The st_nlink > 1
+OPERATIONAL CONSTRAINT (R20(a)): nothing may hard-link INTO records/. The st_nlink > 1
 refusal below is not a false-positive risk to soften — it blocks a proven, demonstrated
 write primitive against the host-owned governance store now that this step runs as that
 store's owner (see the hardlink docstrings below). But it does mean a backup or rotation
 tool that hard-links rather than copies (`cp -al`, rsnapshot-style snapshots, and similar)
-would permanently fail every future persist for whichever vault file it touches. Document
-this as a deployment constraint on whatever backs up data/vaults — copy, don't hard-link —
-rather than weakening the check to accommodate it.
+would permanently fail every future persist for whichever record file it touches. Document
+this as a deployment constraint on whatever backs up the governance store — copy, don't
+hard-link — rather than weakening the check to accommodate it.
 """
 import json, os, stat, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import changeset_lib as C
-import vault_lib
+import governance_lib
 
 MARKER = "HERMES-RESULT-JSON "
 
@@ -76,7 +88,7 @@ if _missing:
 
 
 class PersistRefused(ValueError):
-    """A destination that cannot be proven to stay inside the client vault.
+    """A destination that cannot be proven to stay inside the records directory.
 
     Subclasses ValueError so persist-run-record.py's existing fail-closed handler
     turns it into exit 2 with the message on stderr — never a silent skip.
@@ -102,84 +114,51 @@ def _contained(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
-def _resolve_vault(vault, root=None):
-    """Resolve the client vault and prove it lies under the configured vault root.
+def _resolve_records(record_dir, root=None):
+    """Resolve the per-client records directory and prove it lies under the records
+    root inside the governance store.
 
-    Refuses a symlinked vault outright even when it resolves back inside the root: the
-    guarantee wanted here is "this directory is what it appears to be", and admitting a
-    benign-looking symlink today is what makes the next one arguable.
+    Refuses a symlinked records directory outright even when it resolves back inside
+    the root: the guarantee wanted here is "this directory is what it appears to be",
+    and admitting a benign-looking symlink today is what makes the next one arguable.
 
-    R20(c): the containment check now precedes the mkdir. The previous order created
-    the directory FIRST and refused afterwards — an out-of-root vault path was left on
-    disk by a refusal that was supposed to be refusing exactly that side effect.
+    R20(c): the containment check precedes any creation. Creation itself happens later,
+    in persist(), relative to an already-open parent descriptor — this function only
+    proves the destination before anything touches disk, so a refusal here can never
+    leave an attacker-chosen path behind.
     """
-    root_real = os.path.realpath(root or vault_lib.vault_root())
-    if os.path.islink(vault):
-        raise PersistRefused("vault path is a symlink, refusing: %s" % vault)
-    # Prove containment of the path we are ABOUT to create, using the resolved parent
-    # (the vault itself may not exist yet, so it cannot be realpath'd directly).
-    candidate = os.path.join(os.path.realpath(os.path.dirname(vault)),
-                             os.path.basename(vault))
-    if not _contained(candidate, root_real):
+    root_real = os.path.realpath(
+        root if root is not None
+        else os.path.join(governance_lib.governance_root(), "records"))
+    if os.path.islink(record_dir):
+        raise PersistRefused("records path is a symlink, refusing: %s" % record_dir)
+    # Prove containment of the path we are ABOUT to use, using the resolved parent
+    # (the per-client directory may not exist yet, so it cannot be realpath'd
+    # directly).
+    records_real = os.path.join(os.path.realpath(os.path.dirname(record_dir)),
+                                os.path.basename(record_dir))
+    if not _contained(records_real, root_real):
         raise PersistRefused(
-            "vault %s resolves to %s, which is outside the vault root %s — refusing"
-            % (vault, candidate, root_real))
-    if not os.path.exists(vault):
-        os.makedirs(vault, exist_ok=True)
-    if not os.path.isdir(vault):
-        raise PersistRefused("vault path is not a directory, refusing: %s" % vault)
-    vault_real = os.path.realpath(vault)
-    # Re-check after creation: the pre-check proved the intent, this proves the result
-    # (belt and suspenders against a race between the two path resolutions).
-    if not _contained(vault_real, root_real):
-        raise PersistRefused(
-            "vault %s resolves to %s, which is outside the vault root %s — refusing"
-            % (vault, vault_real, root_real))
-    return vault_real
+            "records dir %s resolves to %s, which is outside the records root %s — refusing"
+            % (record_dir, records_real, root_real))
+    return records_real
 
 
-def _resolve_subdir(parent_real, name, vault_real):
-    """makedirs(exist_ok=True) happily accepts a symlink-to-directory, so the
-    intermediate component needs its own check: O_NOFOLLOW on the final file would
-    not notice that `changes/` itself points out of the vault.
-
-    R20(b) review note: `persist()` now creates this directory via
-    `os.mkdir(name, dir_fd=vfd)` BEFORE calling this function, so the path-based
-    `os.makedirs` call below is normally a no-op (the directory already exists) and
-    this function's real remaining job is the `islink` + containment re-check. That
-    check is now genuine, deliberate redundancy: the O_NOFOLLOW dirfd open in
-    `_open_dir` independently refuses a symlinked `changes` regardless of what this
-    function decides (confirmed by mutation testing — deleting this function's
-    `islink` check does not make any test fail). It stays for its named,
-    path-specific error message, not because it is load-bearing.
-    """
-    p = os.path.join(parent_real, name)
-    if os.path.islink(p):
-        raise PersistRefused("%s is a symlink, refusing" % p)
-    os.makedirs(p, exist_ok=True)
-    real = os.path.realpath(p)
-    if not _contained(real, vault_real):
-        raise PersistRefused("%s resolves to %s, outside the vault %s — refusing"
-                             % (p, real, vault_real))
-    if not os.path.isdir(real):
-        raise PersistRefused("%s is not a directory, refusing" % p)
-    return real
-
-
-def _check_dest(path, vault_real):
+def _check_dest(path, records_real):
     """Refuse a destination before opening it. O_NOFOLLOW below is the structural
     guarantee; this exists so the failure is a named refusal naming the path rather
     than an ELOOP the operator has to decode, and so the containment is asserted for
     the rename target too (rename does not follow symlinks, but a reader of this code
     should not have to know that to believe the destination is safe)."""
     if os.path.islink(path):
-        raise PersistRefused("%s is a symlink, refusing to follow it out of the vault" % path)
+        raise PersistRefused("%s is a symlink, refusing to follow it out of the "
+                             "records directory" % path)
     if os.path.exists(path) and not os.path.isfile(path):
         raise PersistRefused("%s exists and is not a regular file, refusing" % path)
     final = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
-    if not _contained(final, vault_real):
-        raise PersistRefused("%s resolves to %s, outside the vault %s — refusing"
-                             % (path, final, vault_real))
+    if not _contained(final, records_real):
+        raise PersistRefused("%s resolves to %s, outside the records directory %s — "
+                             "refusing" % (path, final, records_real))
 
 
 def _open_dir(name, dir_fd=None):
@@ -196,12 +175,10 @@ def _open_dir(name, dir_fd=None):
     nothing more — it does not itself re-walk a path. The guarantee that NOTHING in
     the whole call chain re-walks a path depends on every caller chaining subsequent
     opens off the descriptor this returns, rather than re-deriving a path string.
-    `persist()` does this for `vault_real` -> `vfd` -> `changes` (created via
-    `os.mkdir(changes_name, dir_fd=vfd)`, opened via this function with
-    `dir_fd=vfd`) -> `cfd`, so no directory component on that chain is looked up by
-    path more than once. The one intentional exception is `_resolve_subdir`, which
-    re-validates `changes` by path AFTER it already exists — accepted, deliberate
-    redundancy (see its docstring), not a second creation path.
+    `persist()` does this for `parent_real` -> `pfd` -> the per-client records
+    directory (created via `os.mkdir(slug_name, dir_fd=pfd)`, opened via this
+    function with `dir_fd=pfd`) -> `rfd`, so no directory component on that chain is
+    looked up by path more than once.
     """
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
@@ -215,11 +192,11 @@ def _open_regular(path, flags, dir_fd=None):
 
     O_NOFOLLOW refuses a symlink at the final component and the fstat S_ISREG check
     refuses a directory, fifo, device or socket in that position — but NEITHER of
-    those sees a HARD LINK (R20(a)). A hard link planted in the vault, pointing at a
-    file inside the governance store, passes both existing barriers, and now that
-    this step runs as the OWNER of the governance store, writing through that link is
-    a write primitive against the store itself. `st_nlink > 1` is the check that
-    closes it.
+    those sees a HARD LINK (R20(a)). A hard link planted in the records directory,
+    pointing at a file elsewhere inside the governance store, passes both existing
+    barriers, and now that this step runs as the OWNER of the governance store,
+    writing through that link is a write primitive against the store itself.
+    `st_nlink > 1` is the check that closes it.
 
     Everything is asserted on the FD, never the path, so nothing can be swapped
     between the test and the write. `dir_fd`, when given, makes the open relative to
@@ -234,8 +211,9 @@ def _open_regular(path, flags, dir_fd=None):
         if st.st_nlink > 1:
             raise PersistRefused(
                 "%s has %d hard links, refusing: a hard link to a file outside the "
-                "vault passes both O_NOFOLLOW and the regular-file test, and this "
-                "step runs as the owner of the governance store" % (path, st.st_nlink))
+                "records directory passes both O_NOFOLLOW and the regular-file test, "
+                "and this step runs as the owner of the governance store"
+                % (path, st.st_nlink))
     except BaseException:
         os.close(fd)
         raise
@@ -295,8 +273,8 @@ def _create_tmp_exclusive(name, dir_fd, display_path):
         if st.st_nlink > 1:
             raise PersistRefused(
                 "%s has %d hard links, refusing: this step runs as the owner of the "
-                "governance store and a hard link out of the vault is a write "
-                "primitive against it" % (display_path, st.st_nlink))
+                "governance store and a hard link out of the records directory is a "
+                "write primitive against it" % (display_path, st.st_nlink))
     finally:
         os.close(fd)
 
@@ -330,10 +308,10 @@ def _refuse_if_hardlinked(name, dir_fd, display_path):
     - for the FINAL name, a hard link is not corrupted by the rename that would
       replace it (rename(2) swaps the directory entry, it does not write through the
       old inode), but silently replacing a name that is entangled with a file outside
-      the vault is exactly the kind of coincidence R20(a) exists to make a named,
-      operator-visible refusal rather than best-effort silence. This IS the only
-      check for that path — there is no structural equivalent needed because rename
-      itself is not a destructive operation on the old inode's content.
+      the records directory is exactly the kind of coincidence R20(a) exists to make a
+      named, operator-visible refusal rather than best-effort silence. This IS the
+      only check for that path — there is no structural equivalent needed because
+      rename itself is not a destructive operation on the old inode's content.
 
     Symlinks at `name` are not this function's concern — O_NOFOLLOW here means a
     symlinked name raises OSError (ELOOP) rather than proceeding, and the callers in
@@ -351,56 +329,112 @@ def _refuse_if_hardlinked(name, dir_fd, display_path):
         if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
             raise PersistRefused(
                 "%s has %d hard links, refusing: this step runs as the owner of the "
-                "governance store and a hard link out of the vault is a write "
-                "primitive against it" % (display_path, st.st_nlink))
+                "governance store and a hard link out of the records directory is a "
+                "write primitive against it" % (display_path, st.st_nlink))
     finally:
         os.close(fd)
 
 
-def persist(vault, result, root=None):
-    """Write <vault>/changes/<cid>.result.json and append <vault>/timeline.md.
+def persist(record_dir, result, root=None):
+    """Write <record_dir>/<cid>.result.json and append <record_dir>/timeline.md into
+    the per-client records directory inside the governance store.
 
-    Every destination is proven to lie inside the vault, then opened RELATIVE TO an
-    already-open directory descriptor (R20(b)), with O_NOFOLLOW, a regular-file
-    assertion and a single-link assertion (R20(a)). Anything that cannot be proven
-    raises PersistRefused (a ValueError) rather than being skipped.
+    Every destination is proven to lie inside the records directory, then opened
+    RELATIVE TO an already-open directory descriptor (R20(b)), with O_NOFOLLOW, a
+    regular-file assertion and a single-link assertion (R20(a)). Anything that cannot
+    be proven raises PersistRefused (a ValueError) rather than being skipped. Modes are
+    set explicitly on open file descriptors — governance_lib.RECORDS_DIR_MODE (0o2750,
+    setgid) on the per-client directory, 0640 on both files — so no umask, however
+    strict, can make them unreadable later.
     """
-    # Canonical location: changeset_lib.result_path is the single definition of where a
-    # result file lives — composing a second, divergent path here (e.g. vault root)
-    # would leave the next reader looking in the wrong place.
-    vault_real = _resolve_vault(vault, root)
-    changes_name = os.path.basename(C.changes_dir(vault_real))
+    records_real = _resolve_records(record_dir, root)
+    parent_real = os.path.dirname(records_real)
+    slug_name = os.path.basename(records_real)
 
-    vfd = _open_dir(vault_real)
+    # Validate and derive every destination NAME before anything is created (R20(c)
+    # extended to slug/cid validation, spec 2026-09-23 review): governance_lib.record_
+    # path and .records_timeline_path validate slug_name and the changeset id via
+    # governance_lib's own _slug/_cid, and a refusal on a bad id must not leave an
+    # attacker-chosen directory behind either — exactly what _resolve_records's
+    # docstring already promises for the containment checks, extended here to cover
+    # name validation too.
+    base = os.path.basename(governance_lib.record_path(slug_name, result["changeset_id"]))
+    tmp_base = base + ".tmp"
+    timeline_base = os.path.basename(governance_lib.records_timeline_path(slug_name))
+
+    # The records/ tree itself is a hard prerequisite laid down by host_layout /
+    # init-host-layout.py --apply (setgid, hermes-broker:hermes) — NOT something this
+    # module may create. Auto-creating it here (as an earlier version of this function
+    # did, via a defensive os.makedirs) would build it path-based, with a umask-derived
+    # mode and no setgid bit — exactly the wrong-moded tree the row exists to prevent
+    # (spec 2026-09-23 §2.4 correction R1) — and init-host-layout.py verifies the row
+    # but deliberately never repairs it. Refuse instead of silently building it wrong.
+    if not os.path.isdir(parent_real):
+        raise PersistRefused(
+            "records root %s does not exist — the governance store layout is a hard "
+            "prerequisite; run init-host-layout.py --apply before persisting records"
+            % parent_real)
+
+    pfd = _open_dir(parent_real)
     try:
-        # R20(b), review finding: create `changes` relative to the already-open vault
-        # descriptor FIRST — os.mkdir IS in os.supports_dir_fd (see the import-time
-        # guard above) — so the dirfd chain starts at `vfd` and never re-walks this
-        # component by path before it does. The previous version created it via
-        # _resolve_subdir's path-based os.makedirs BEFORE vfd existed, then reopened
-        # it by name: a real, if narrow, re-walk of that one path component.
+        # R20(b): create the per-client directory relative to the already-open
+        # parent descriptor — os.mkdir IS in os.supports_dir_fd (see the import-time
+        # guard above) — then reopen it the same way. No directory component on this
+        # chain is looked up by path more than once.
         try:
-            os.mkdir(changes_name, dir_fd=vfd)
+            os.mkdir(slug_name, dir_fd=pfd)
         except FileExistsError:
             pass
-        # Kept as deliberate, genuine redundancy (see its docstring) — normally a
-        # no-op now that the directory already exists via the mkdir above.
-        _resolve_subdir(vault_real, changes_name, vault_real)
 
-        cfd = _open_dir(changes_name, dir_fd=vfd)
+        rfd = _open_dir(slug_name, dir_fd=pfd)
         try:
-            base = os.path.basename(C.result_path(vault_real, result["changeset_id"]))
-            tmp_base = base + ".tmp"
-            path = os.path.join(vault_real, changes_name, base)
-            _check_dest(path, vault_real)
-            _check_dest(path + ".tmp", vault_real)
+            # Explicit, umask-independent (spec 2026-09-23 §2.4, correction R1): MUST
+            # be governance_lib.RECORDS_DIR_MODE (0o2750, setgid), never a bare 0750.
+            # records/ is setgid, so a freshly created per-client directory already
+            # inherits group "hermes" and its OWN setgid bit from the kernel — but that
+            # inheritance happens independently of, and BEFORE, this fchmod call, and a
+            # plain 0750 here would STRIP the inherited setgid bit right back off.
+            # Without it, files this step writes take the writing PROCESS's effective
+            # group — hermes-broker (Group=hermes-broker in the unit, hermes only
+            # supplementary) — not the inherited "hermes", which is the exact failure
+            # the row's setgid bit exists to prevent. Darwin has no such uid/gid
+            # separation to expose this, which is why it was missed at first: the
+            # spec briefly said plain 0750 too, corrected 2026-09-23 (R1).
+            #
+            # UNCONDITIONAL — re-applied on EVERY persist, not only at creation, and
+            # deliberately the opposite of changeset_lib._approval_lock, which calls
+            # _ensure_approvals_dir only `if not os.path.isdir(d)`. The asymmetry is
+            # real and worth stating (MINOR 5, final whole-branch review), because
+            # reading either site alone makes the other look like a mistake:
+            #   * approvals/<slug>/ is created by approve-changeset as ROOT and is then
+            #     written by TWO different identities. Re-moding it on every lock
+            #     acquisition means a deliberate permission change by an operator — or
+            #     by a test's fault-injection fixture — is silently undone by the next
+            #     lock, which is exactly the regression that made it conditional.
+            #   * records/<slug>/ has ONE writer, ONE identity (hermes-broker, inside
+            #     the broker's sandbox) and no legitimate reason for its mode ever to be
+            #     anything but RECORDS_DIR_MODE. There is nothing here for an idempotent
+            #     re-apply to trample, and the run record is written on the far side of
+            #     a live mutation — a directory that has drifted (an interrupted earlier
+            #     persist, a manual mkdir) must be corrected NOW rather than silently
+            #     accepted, because the alternative is a run record group-owned
+            #     hermes-broker that an operator in group `hermes` cannot read.
+            # Different number of writers, different default. If records/<slug>/ ever
+            # gains a second writer, this line inherits _approval_lock's problem and
+            # should inherit its conditional too.
+            os.fchmod(rfd, governance_lib.RECORDS_DIR_MODE)
+
+            path = os.path.join(records_real, base)
+            _check_dest(path, records_real)
+            _check_dest(path + ".tmp", records_real)
             # Belt-and-braces early refusal (see _refuse_if_hardlinked's docstring);
             # the STRUCTURAL protection for the tmp name is _create_tmp_exclusive's
             # O_EXCL below, not this check.
-            _refuse_if_hardlinked(tmp_base, cfd, path + ".tmp")
-            _refuse_if_hardlinked(base, cfd, path)
+            _refuse_if_hardlinked(tmp_base, rfd, path + ".tmp")
+            _refuse_if_hardlinked(base, rfd, path)
 
-            fd = _create_tmp_exclusive(tmp_base, cfd, path + ".tmp")
+            fd = _create_tmp_exclusive(tmp_base, rfd, path + ".tmp")
+            os.fchmod(fd, 0o640)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2, sort_keys=True)
                 f.flush()
@@ -409,18 +443,19 @@ def persist(vault, result, root=None):
             # darwin (measured 2026-08-24), while os.rename IS. On POSIX the two are
             # the same call — rename(2) already overwrites atomically; replace only
             # differs on Windows, which this tier does not target.
-            os.rename(tmp_base, base, src_dir_fd=cfd, dst_dir_fd=cfd)
-        finally:
-            os.close(cfd)
+            os.rename(tmp_base, base, src_dir_fd=rfd, dst_dir_fd=rfd)
 
-        timeline = os.path.join(vault_real, "timeline.md")
-        _check_dest(timeline, vault_real)
-        fd = _open_regular("timeline.md", os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                           dir_fd=vfd)
-        with os.fdopen(fd, "a", encoding="utf-8") as f:
-            f.write("- %s  change-set `%s`  status=%s  actions=%s\n"
-                    % (result.get("finished_at", ""), result["changeset_id"],
-                       result.get("status", "?"), result.get("applied", "?")))
+            timeline = os.path.join(records_real, timeline_base)
+            _check_dest(timeline, records_real)
+            tfd = _open_regular(timeline_base, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                               dir_fd=rfd)
+            os.fchmod(tfd, 0o640)
+            with os.fdopen(tfd, "a", encoding="utf-8") as f:
+                f.write("- %s  change-set `%s`  status=%s  actions=%s\n"
+                        % (result.get("finished_at", ""), result["changeset_id"],
+                           result.get("status", "?"), result.get("applied", "?")))
+        finally:
+            os.close(rfd)
     finally:
-        os.close(vfd)
+        os.close(pfd)
     return path
