@@ -8,7 +8,7 @@ is fail-closed on every field: unknown action types, unknown fields, non-digit
 ids, and control characters are all refusals, never coercions.
 See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 """
-import contextlib, datetime, fcntl, hashlib, json, os, re, sys
+import contextlib, datetime, fcntl, grp, hashlib, json, os, pwd, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib
 import vault_lib
@@ -370,6 +370,7 @@ def write_snapshot_bytes(slug, cid, data):
         out.write(data)
         out.flush()
         os.fsync(out.fileno())
+        _apply_owner_mode(out.fileno(), APPROVAL_ARTIFACT_MODE)
     os.replace(tmp, dst)
     # fsync the directory too — same reasoning as _atomic_write_json and append_log.
     # write_snapshot is a fourth writer of a newly-named file in this tier; a caller
@@ -416,6 +417,39 @@ def file_digest(path):
     return h.hexdigest()
 
 
+# F12. Every approval artifact's mode is set EXPLICITLY on the open fd, never left to the
+# umask: with UMask=0077 (the §6 hardening) an approval written 0600 is unreadable to the
+# executor that must verify it, and a 0600 lock sidecar cannot be flocked by the broker —
+# which is exactly how F12 was found (root-owned 0600 sidecar, reserve_approval fails on
+# the first apply). fchmod/fchown on the fd, not chmod/chown on the path: a path-based
+# call can be redirected by a symlink swapped in between create and chmod.
+APPROVAL_ARTIFACT_MODE = 0o640      # approval record, change-set snapshot: executor reads
+APPROVAL_LOCK_MODE = 0o660          # lock sidecar: the broker must be able to flock it
+APPROVAL_OWNER_USER = "hermes-broker"
+APPROVAL_OWNER_GROUP = "hermes"
+
+
+def _apply_owner_mode(fd, mode):
+    """Set MODE on FD, and (as root, on Linux) owner hermes-broker:hermes.
+
+    Non-root callers still get the explicit mode; ownership is left alone, because a
+    non-root approve cannot produce broker-owned files and approve-changeset.py refuses
+    that case on Linux anyway. Groups are resolved BY NAME — a missing group is a refusal,
+    never a guessed gid.
+    """
+    os.fchmod(fd, mode)
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return
+    try:
+        uid = pwd.getpwnam(APPROVAL_OWNER_USER).pw_uid
+        gid = grp.getgrnam(APPROVAL_OWNER_GROUP).gr_gid
+    except KeyError as e:
+        raise RuntimeError(
+            "F12: cannot set approval ownership — %s. Create the users and groups first "
+            "(README 'VPS deploy sequence' step 1)." % e)
+    os.fchown(fd, uid, gid)
+
+
 def _atomic_write_json(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -423,6 +457,7 @@ def _atomic_write_json(path, obj):
         f.write("\n")
         f.flush()
         os.fsync(f.fileno())
+        _apply_owner_mode(f.fileno(), APPROVAL_ARTIFACT_MODE)
     os.replace(tmp, path)
     # fsync the directory so the rename itself is durable — same reasoning as
     # append_log and propose. All three writers of a newly-named file in this tier
@@ -766,6 +801,7 @@ def _approval_lock(slug, cid):
     p = governance_lib.approval_lock_path(slug, cid)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     fd = os.open(p, os.O_CREAT | os.O_RDWR, 0o600)
+    _apply_owner_mode(fd, APPROVAL_LOCK_MODE)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:

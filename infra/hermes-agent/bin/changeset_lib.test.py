@@ -1110,5 +1110,55 @@ class TestVerifyApprovalReservationHandoff(unittest.TestCase):
         self.assertIn("expired", str(cm2.exception))
 
 
+import stat
+import governance_lib
+
+SLUG = "acme-dental"
+CID = "20260824-101500-abcdef01"
+
+class TestApprovalArtifactModes(unittest.TestCase):
+    """F12: with UMask=0077 (the §6 hardening) the executor must still be able to READ an
+    approval, and the broker must still be able to WRITE the lock sidecar. Neither may
+    depend on the umask of whoever ran approve-changeset."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gov-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
+        self.addCleanup(os.environ.pop, "HERMES_GOVERNANCE_ROOT", None)
+
+    def test_approval_and_snapshot_are_0640_under_a_hostile_umask(self):
+        old = os.umask(0o077)
+        try:
+            digest = C.write_snapshot_bytes(SLUG, CID, b'{"actions": []}\n')
+            C.write_approval(SLUG, CID, digest, "operator", NOW, 24)
+        finally:
+            os.umask(old)
+        for p in (governance_lib.approval_path(SLUG, CID),
+                  governance_lib.snapshot_path(SLUG, CID)):
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o640, p)
+
+    def test_the_lock_sidecar_is_0660_under_a_hostile_umask(self):
+        old = os.umask(0o077)
+        try:
+            digest = C.write_snapshot_bytes(SLUG, CID, b'{"actions": []}\n')
+            C.write_approval(SLUG, CID, digest, "operator", NOW, 24)
+        finally:
+            os.umask(old)
+        lock = governance_lib.approval_lock_path(SLUG, CID)
+        self.assertEqual(stat.S_IMODE(os.stat(lock).st_mode), 0o660, lock)
+
+    def test_control_the_umask_really_is_hostile(self):
+        """Without this the two tests above could pass on a lenient umask and prove nothing."""
+        old = os.umask(0o077)
+        try:
+            p = os.path.join(self.tmp, "probe")
+            with open(p, "w") as f:
+                f.write("x")
+            self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
+        finally:
+            os.umask(old)
+
+
 if __name__ == "__main__":
     unittest.main()
