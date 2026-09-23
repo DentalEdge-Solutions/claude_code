@@ -180,8 +180,10 @@ kill switch is created by anything in this design.
   `reserve_approval` still fails, so the test is watching the right thing.
 - **Records round trip:** as `hermes-broker`, persist into `records/<slug>/`; assert `0640`, that
   the **gateway (uid 10000) cannot write** there, and that a member of group `hermes` can read.
-  **Firing controls:** a `records/` without setgid loses group inheritance; a `0770` `records/`
-  lets the gateway write.
+  **Firing controls:** a `0770` per-client records directory lets the gateway write (Tier 2). The
+  "without setgid, group inheritance is lost" control lives at **Tier 1**
+  (`bin/persist-run-record.test.py`), not here — the property is covered, and this bullet
+  previously said otherwise (corrected 2026-09-23, Task 5 review).
 - **Executor readability:** an approval written by root is readable by uid 10000. Control: `0600`
   makes it unreadable.
 
