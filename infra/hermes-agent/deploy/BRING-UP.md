@@ -446,9 +446,9 @@ it. No unit files change, so nothing restarts on its own account.
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
-**Still required before the kill switch can be created:** F14 (a Compose failure is
-reported as "refused, nothing was mutated", which could be false mid-run), and the §6
-hardening gates.
+**Still required before the kill switch can be created:** the §6 hardening gates. (F14 —
+a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
+now status 4, "possibly modified".)
 
 ---
 

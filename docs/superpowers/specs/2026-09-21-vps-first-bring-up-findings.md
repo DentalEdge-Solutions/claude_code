@@ -253,8 +253,9 @@ group inheritance at all (BSD vs System V), which is the mechanism the records d
 governance is unaffected (the fsynced audit log is the authoritative record). Revisit as its own
 design if the analyst is shown to need it.
 
-**Still open:** F14 (a Compose failure reported as "nothing was mutated") and the §6 hardening
-gates, including `UMask=0077`, which this fix makes safe to land but does not land.
+**Still open:** the §6 hardening gates, including `UMask=0077`, which this fix makes safe to
+land but does not land. F14 (a Compose failure reported as "nothing was mutated") is fixed
+(PR #46).
 
 **Applied to the box, 2026-09-23.** Pulled `da2a0ae..9df03d4` (fast-forward, no mode conflict).
 Firing control first: `sudo -u hermes-broker init-host-layout.py --check` exited **2**, naming
@@ -264,7 +265,7 @@ Then `--apply` printed `created /var/lib/hermes/governance/records` and `layout 
 `NRestarts=0` on the broker; a `sudo` dry run showed all 13 rows `ok`. **Still unexercised on the
 box:** an approval written by the new code, and a run record — both wait for the rehearsal gate.
 
-### F14: a Compose failure is reported as "refused, nothing was mutated" (recorded, not fixed)
+### F14: a Compose failure is reported as "refused, nothing was mutated" — fixed (PR #46)
 
 `docker compose run` exits 1 on any Compose-level failure. Two such failures were measured on
 Linux CI (2026-09-22): a proxy refusal at create, and an unreadable `.env`. The broker maps
@@ -277,6 +278,16 @@ that may have changed the account. That goes around the exit-2 guarantee in
 the kill switch is absent there, so nothing can be mutated. **Open:** a distinct wrapper exit
 code for "Compose failed before the container started", designed in its own PR (F9 spec §3.7,
 §5).
+
+**Fix (PR #46, spec `2026-09-23-f14-attested-executor-exit-design.md`).** The executor prints
+`HERMES-EXIT <nonce> <rc>` for the exits it chose, bound to a per-run nonce the wrapper
+generates; `run-ads-mutate.sh` passes 0–3 through only on exactly one exact match and
+otherwise exits **4**, which the broker records as `failed_unverified_exit` ("possibly
+modified") and the Hermes client returns as `EXIT_FAILED_AFTER_MUTATION`. Pre-start Compose
+failures are now false alarms by decision. **Measured on Linux CI** (run 35905446915): the proxy
+refusing the create gives wrapper status 4 with `compose rc=1`; the broker path's real refusal
+is attested (`bind-agreement: executed 6, skipped 0`). **Still unmeasured:** an actual
+connection loss after the container started — the fix does not depend on it.
 
 ### F15: the proxy unit execs a script that is not executable in git — fixed (PR #40)
 
@@ -347,8 +358,8 @@ the store is `root:hermes 2750` and `hermesops` is by design only in `sudo` and 
 1. F6: a deploy-key clone of the ads repo, after the security review (the box's ads repo is still a placeholder).
 2. F3: a `--check` for usable sudo, with a firing control.
 3. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
-4. F14: Compose failures reported as "nothing was mutated". Gates the kill switch. The
-   rehearsal gate no longer needs F12 (fixed, PR #42) — its remaining prerequisite is
-   `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
+4. F14: Compose failures reported as "nothing was mutated" — fixed (PR #46). Gates the kill
+   switch. The rehearsal gate no longer needs F12 (fixed, PR #42) — its remaining
+   prerequisite is `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
