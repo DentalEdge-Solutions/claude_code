@@ -26,7 +26,12 @@ import spool_lib as S
 # which is a different event from a refusal and must never collapse into one.
 EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED_AFTER_MUTATION, EXIT_PENDING = 0, 1, 2, 3, 4
 
-_EXIT_BY_CODE = {0: EXIT_OK, 2: EXIT_REFUSED, 3: EXIT_FAILED_AFTER_MUTATION}
+# Keys are the BROKER's exit_code values, not this client's own exit statuses: the
+# broker's 4 (F14, "exit could not be verified") and this client's EXIT_PENDING = 4 are
+# different namespaces, and this map is the translation. 4 is "possibly modified", never
+# the EXIT_REFUSED default.
+_EXIT_BY_CODE = {0: EXIT_OK, 2: EXIT_REFUSED, 3: EXIT_FAILED_AFTER_MUTATION,
+                 4: EXIT_FAILED_AFTER_MUTATION}
 
 
 def submit(client, changeset, root=None):

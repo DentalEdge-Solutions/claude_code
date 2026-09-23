@@ -517,6 +517,11 @@ Exit codes of `apply-changeset.py` are unchanged and remain load-bearing: `0` su
 `2` pre-flight refusal (**guaranteed nothing was mutated**), `3` failure after at least one live
 mutation landed.
 
+**Amended 2026-09-23 (F14).** `run-ads-mutate.sh` passes `0`–`3` through only when the executor
+attested them on a nonce-bound `HERMES-EXIT <nonce> <rc>` line; any other outcome is wrapper
+status `4`, recorded as `failed_unverified_exit` — possibly modified — and returned by
+`hermes-syscall` as its failed-after-mutation status, never as a refusal.
+
 The broker maps these into the result file without collapsing them. A result is written on **every**
 outcome including refusal, so **file existence is the discriminator** between "the broker has not
 processed this yet" and "the broker processed it and refused" — these are different events and

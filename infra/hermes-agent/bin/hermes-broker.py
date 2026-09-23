@@ -509,7 +509,9 @@ def _process(req, spool, projects, pending_count, runner, now):
 
 # Exit semantics are load-bearing and must not be collapsed (spec §12):
 #   0 success · 1 usage · 2 pre-flight refusal (NOTHING was mutated) · 3 failure after
-#   at least one live mutation landed.
+#   at least one live mutation landed · 4 (F14) the executor's exit could not be
+#   verified — run-ads-mutate.sh passes 0-3 through only when the executor attested
+#   them, so 4 covers Compose's own failures, including one after the container started.
 # An unrecognised code is treated as a FAILURE, never as a success: the only safe
 # reading of "the executor did something we do not understand" is that it may have
 # touched the account.
@@ -518,6 +520,7 @@ CLASSIFICATION_BY_RC = {
     1: ("refused_usage", "refused"),
     2: ("refused_preflight", "refused"),
     3: ("failed_after_mutation", "failed"),
+    4: ("failed_unverified_exit", "failed"),
 }
 UNKNOWN_RC = ("failed_unknown_exit", "failed")
 
@@ -533,6 +536,9 @@ DETAIL_BY_CLASSIFICATION = {
                              "— an operator must reconcile this run",
     "failed_unknown_exit": "the executor exited with an unrecognised status; treat the "
                            "account as possibly modified",
+    "failed_unverified_exit": "the executor's exit could not be verified (e.g. Compose "
+                              "failed, possibly after the container started); treat the "
+                              "account as possibly modified and reconcile from the audit log",
 }
 
 # S6. The same policy, extended to the two sites that were bypassing it.

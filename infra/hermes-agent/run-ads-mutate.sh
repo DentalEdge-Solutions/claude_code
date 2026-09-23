@@ -16,6 +16,10 @@
 # Mirrors run-ads-report.sh, which does the same for the READ-ONLY credential; the
 # two files are deliberately separate so the read path keeps its platform-level
 # backstop.
+#
+# Exit status (F14): 0/1/2/3 are the EXECUTOR's, passed through only when it attested
+# them (`HERMES-EXIT <nonce> <rc>`); 1 is also this script's own refusals before Compose.
+# 4 = the executor's exit could not be verified — treat the account as possibly modified.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 
@@ -76,6 +80,19 @@ if [ "${GOOGLE_ADS_CREDENTIAL_ROLE:-}" != "write" ]; then
   echo "run-ads-mutate: .env.gaw must set GOOGLE_ADS_CREDENTIAL_ROLE=write (got '${GOOGLE_ADS_CREDENTIAL_ROLE:-}')" >&2
   exit 1
 fi
+# F14 (spec 2026-09-23 §3.2): a fresh per-run nonce. The executor echoes it on its
+# attested exit line, and the status below is trusted only when that line matches.
+# Failing to make one is refused HERE, before anything runs: an unattestable run would
+# always end as 4 anyway, and exit 1 before Compose is still an honest "nothing ran".
+nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || nonce=""
+case "$nonce" in
+  *[!0-9a-f]*) nonce="" ;;
+esac
+if [ "${#nonce}" -ne 32 ]; then
+  echo "run-ads-mutate: could not generate the exit nonce — refusing before anything runs" >&2
+  exit 1
+fi
+export HERMES_EXIT_NONCE="$nonce"
 # The executor runs in the one-shot ads-mutator container (not the gateway — see
 # docker-compose.yml). Its exit status must survive the persist step: `cmd | persist`
 # would take its status from persist, turning an exit-2 refusal into a false success.
@@ -93,14 +110,43 @@ rc=0
 docker compose --env-file /dev/null -f "$here/docker-compose.yml" run --rm --no-deps \
   -e GOOGLE_ADS_DEVELOPER_TOKEN -e GOOGLE_ADS_CLIENT_ID -e GOOGLE_ADS_CLIENT_SECRET \
   -e GOOGLE_ADS_REFRESH_TOKEN -e GOOGLE_ADS_LOGIN_CUSTOMER_ID -e GOOGLE_ADS_CUSTOMER_ID \
-  -e GOOGLE_ADS_CREDENTIAL_ROLE \
+  -e GOOGLE_ADS_CREDENTIAL_ROLE -e HERMES_EXIT_NONCE \
   -T ads-mutator "$@" > "$tmp_out" 2>&1 || rc=$?
+# F14: from here on NOTHING may end this script except the single `exit "$final"` at the
+# bottom. -e and -u are both off from here: under `set -e` a failing `cat` (or grep, or
+# anything) would exit with ITS status — 1, which the broker reads as "nothing was
+# mutated" — about a run that may have applied; under `set -u` an unset-variable read
+# would do the same with dash's own status (2). `final` is always assigned before the
+# `exit "$final"` at the bottom, so nothing else needs to decide the script's status.
+set +eu  # F14
 cat "$tmp_out"
-# The executor's status ($rc) is what the operator relies on — an exit-2 refusal is a
-# promise the client's account was not touched. persist-run-record.py failing for an
-# unrelated reason (e.g. it cannot write the vault file) must not override that promise
-# and, under `set -e`, a bare non-zero exit here would abort the script with persist's
-# status instead. So persist's status never becomes the script's status.
+# Trust Compose's status only when the executor attested it: exactly one line
+# `HERMES-EXIT <nonce> <rc>` for THIS run's nonce, and no other line for this nonce.
+# Anything else — Compose's own failure (possibly after the container started), a
+# killed container, a forged or disagreeing line, an unreadable file — is 4.
+final=4  # F14: unverified until the attestation below proves otherwise
+case "$rc" in
+  0|1|2|3)
+    exact=$(grep -Fxc "HERMES-EXIT $nonce $rc" "$tmp_out" 2>/dev/null)
+    any=$(grep -c "^HERMES-EXIT $nonce " "$tmp_out" 2>/dev/null)
+    if [ "$exact" = "1" ] && [ "$any" = "1" ]; then
+      final=$rc
+    fi
+    ;;
+esac
+if [ "$final" -eq 4 ]; then
+  echo "" >&2
+  echo "!!! ================================================================" >&2
+  echo "!!! EXECUTOR EXIT NOT VERIFIED (compose rc=$rc) — the executor may have" >&2
+  echo "!!! run; treat the account as possibly modified; reconcile from the" >&2
+  echo "!!! governance audit log before doing anything else with this client." >&2
+  echo "!!! ================================================================" >&2
+  echo "" >&2
+fi
+# $final (the verified status — see F14 above) is what the operator relies on — an
+# exit-2 refusal is a promise the client's account was not touched. persist-run-record.py
+# failing for an unrelated reason (e.g. it cannot write the vault file) must not override
+# that promise. So persist's status never becomes the script's status.
 #
 # S1-M2: but it must not VANISH either, which `|| true` made it do. persist-run-record
 # exits 2 for a PersistRefused. That is not a routine I/O failure — but as of F12 it is
@@ -115,8 +161,9 @@ cat "$tmp_out"
 # middle of the executor's own output, with the exit status discarded entirely.
 #
 # `|| prc=$?` instead of `|| true` — the same pattern the executor invocation above
-# uses — so `set -e` still does not fire, $rc still decides the script's status, and a
-# non-zero persist gets an unmissable banner of its own.
+# uses — so a non-zero persist cannot itself end the script (both -e and -u are off by
+# now — see F14 above), $final still decides the script's status, and a non-zero
+# persist gets an unmissable banner of its own.
 # VAULT_ROOT and HERMES_GOVERNANCE_ROOT are exported by hostenv.sh above.
 prc=0
 python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null || prc=$?
@@ -135,10 +182,10 @@ if [ "$prc" -ne 0 ]; then
   echo "!!!      as an attempt to make this step write outside records/, and inspect" >&2
   echo "!!!      the governance store's records/<client> directory before re-running." >&2
   echo "!!!" >&2
-  echo "!!! The executor's own status ($rc) is UNCHANGED and is still what says" >&2
+  echo "!!! The executor's own status ($final) is UNCHANGED and is still what says" >&2
   echo "!!! whether the account was touched. This banner is about the RECORD of the" >&2
   echo "!!! run, which is now missing — reconcile from the governance audit log." >&2
   echo "!!! ================================================================" >&2
   echo "" >&2
 fi
-exit "$rc"
+exit "$final"

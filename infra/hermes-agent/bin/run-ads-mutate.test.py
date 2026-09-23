@@ -40,6 +40,8 @@ def _load(name, filename):
 
 
 PF = _load("preflight_governance_access", "preflight-governance-access.py")
+B = _load("hermes_broker", "hermes-broker.py")
+K = _load("hermes_syscall", "hermes-syscall.py")
 
 # PLATFORM GATE. The wrapper runs the pre-flight (run-ads-mutate.sh:34) before it does
 # anything else, and the pre-flight is a NO-OP off Linux by design (PF.applies()), because
@@ -71,12 +73,19 @@ RESULT = {"changeset_id": CID, "status": "ok", "applied": 1,
 FAKE_DOCKER = """#!/bin/sh
 # Stands in for the real `docker`. Emits what the executor would have printed and
 # exits with the status this test asked for. It NEVER creates a container.
+# /bin/cat, not cat: a test puts a failing `cat` first on PATH to prove the WRAPPER's
+# own post-Compose `cat` cannot decide its status (F14).
 printf '%%s\n' "$@" > "$(dirname "$0")/docker.argv"
-cat <<'HERMES_FAKE_DOCKER_EOF'
+printf '%%s\n' "${HERMES_EXIT_NONCE-<unset>}" >> "$(dirname "$0")/docker.nonces"
+/bin/cat <<'HERMES_FAKE_DOCKER_EOF'
 HERMES-RESULT-JSON %(payload)s
 HERMES_FAKE_DOCKER_EOF
+%(attest)s
 exit %(rc)s
 """
+
+_SAME = object()
+FORGED_NONCE = "fedcba9876543210fedcba9876543210"
 
 
 @unittest.skipUnless(_UID_OK, _SKIP_WHY)
@@ -143,14 +152,25 @@ class Base(unittest.TestCase):
         self.bin = os.path.join(self.tmp, "fakebin")
         os.makedirs(self.bin)
 
-    def _fake_docker(self, rc=0):
+    def _fake_docker(self, rc=0, attest_rc=_SAME, attest_times=1, extra=""):
+        """attest_rc: the status the fake EXECUTOR attests (default: the same as rc; None:
+        no line — Compose's own failure). extra: one more raw shell line (a forgery)."""
+        if attest_rc is _SAME:
+            attest_rc = rc
+        lines = []
+        if attest_rc is not None:
+            lines = ["printf 'HERMES-EXIT %%s %d\\n' \"$HERMES_EXIT_NONCE\"" % attest_rc] \
+                * attest_times
+        if extra:
+            lines.append(extra)
         p = os.path.join(self.bin, "docker")
         with open(p, "w") as f:
-            f.write(FAKE_DOCKER % {"payload": json.dumps(RESULT), "rc": rc})
+            f.write(FAKE_DOCKER % {"payload": json.dumps(RESULT), "rc": rc,
+                                   "attest": "\n".join(lines)})
         os.chmod(p, 0o755)
 
-    def _run(self, executor_rc=0):
-        self._fake_docker(executor_rc)
+    def _run(self, executor_rc=0, **fake):
+        self._fake_docker(executor_rc, **fake)
         env = dict(os.environ)
         env["PATH"] = self.bin + os.pathsep + env["PATH"]
         env["HERMES_GOVERNANCE_DIR"] = self.gov
@@ -160,10 +180,24 @@ class Base(unittest.TestCase):
         env["HERMES_ADS_REPO_DIR"] = os.path.join(self.tmp, "ads-repo")
         env["HERMES_SPOOL_DIR"] = os.path.join(self.tmp, "spool")
         env.pop("VAULT_ROOT", None)          # hostenv.sh owns it; see the class docstring
+        env.pop("HERMES_EXIT_NONCE", None)   # the wrapper must generate its own
         p = subprocess.run(
             ["/bin/sh", self.wrapper, "--client", SLUG, "--changeset", CID],
             capture_output=True, text=True, env=env, timeout=120)
         return p
+
+    def _patch_wrapper(self, old, new):
+        """Firing controls edit the fixture's TEMP COPY of the wrapper, never the tracked
+        file. `old` must occur exactly once, so a control cannot silently patch nothing."""
+        with open(self.wrapper) as f:
+            text = f.read()
+        self.assertEqual(text.count(old), 1, "control anchor %r not found once" % old)
+        with open(self.wrapper, "w") as f:
+            f.write(text.replace(old, new))
+
+    def _nonces(self):
+        with open(os.path.join(self.bin, "docker.nonces")) as f:
+            return f.read().splitlines()
 
     def _poison_the_records_dir(self):
         """Make persist refuse for the reason that matters: a timeline symlinked out
@@ -269,6 +303,142 @@ class TestComposeNeverReadsEnv(Base):
         self.assertEqual(argv[:3], ["compose", "--env-file", "/dev/null"], argv)
         self.assertIn("run", argv)
         self.assertLess(argv.index("--env-file"), argv.index("run"))
+
+
+class TestTheExitIsAttested(Base):
+    """F14 (spec 2026-09-23 §3.2). The wrapper passes Compose's status through ONLY when
+    exactly one `HERMES-EXIT <nonce> <rc>` line proves the executor chose it. Anything
+    else is 4: "the executor may have run; possibly modified"."""
+
+    def test_an_attested_status_passes_through(self):
+        for rc in (0, 1, 2, 3):
+            p = self._run(executor_rc=rc)
+            self.assertEqual(p.returncode, rc, p.stderr)
+            self.assertNotIn("EXECUTOR EXIT NOT VERIFIED", p.stderr)
+
+    def test_an_unattested_2_is_not_verified(self):
+        p = self._run(executor_rc=2, attest_rc=None)
+        self.assertEqual(p.returncode, 4, p.stderr)
+        self.assertIn("EXECUTOR EXIT NOT VERIFIED (compose rc=2)", p.stderr)
+        self.assertIn("possibly modified", p.stderr)
+
+    def test_compose_failing_with_1_is_not_verified(self):
+        """THE F14 CASE: Compose exits 1 on its own (a refused create, a lost connection);
+        no executor line exists."""
+        p = self._run(executor_rc=1, attest_rc=None)
+        self.assertEqual(p.returncode, 4, p.stderr)
+        self.assertIn("EXECUTOR EXIT NOT VERIFIED (compose rc=1)", p.stderr)
+
+    def test_a_forged_line_with_the_wrong_nonce_is_not_verified(self):
+        p = self._run(executor_rc=2, attest_rc=None,
+                      extra="echo 'HERMES-EXIT %s 2'" % FORGED_NONCE)
+        self.assertEqual(p.returncode, 4, p.stderr)
+
+    def test_a_line_disagreeing_with_rc_is_not_verified(self):
+        p = self._run(executor_rc=0, attest_rc=2)
+        self.assertEqual(p.returncode, 4, p.stderr)
+
+    def test_a_second_nonce_line_with_another_rc_is_not_verified(self):
+        p = self._run(executor_rc=2,
+                      extra="printf 'HERMES-EXIT %s 0\\n' \"$HERMES_EXIT_NONCE\"")
+        self.assertEqual(p.returncode, 4, p.stderr)
+
+    def test_two_matching_lines_are_not_verified(self):
+        p = self._run(executor_rc=2, attest_times=2)
+        self.assertEqual(p.returncode, 4, p.stderr)
+
+    def test_an_unknown_status_is_not_verified(self):
+        p = self._run(executor_rc=137, attest_rc=None)
+        self.assertEqual(p.returncode, 4, p.stderr)
+
+    def test_a_failing_cat_after_compose_cannot_decide_the_status(self):
+        cat = os.path.join(self.bin, "cat")
+        with open(cat, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(cat, 0o755)
+        p = self._run(executor_rc=2)
+        self.assertEqual(p.returncode, 2, p.stderr)
+
+    def test_the_nonce_is_passed_and_fresh_per_run(self):
+        self._run(executor_rc=0)
+        self._run(executor_rc=0)
+        nonces = self._nonces()
+        self.assertEqual(len(nonces), 2, nonces)
+        for n in nonces:
+            self.assertRegex(n, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(nonces[0], nonces[1])
+        argv = open(os.path.join(self.bin, "docker.argv")).read().splitlines()
+        i = argv.index("HERMES_EXIT_NONCE")
+        self.assertEqual(argv[i - 1], "-e")
+        self.assertLess(i, argv.index("ads-mutator"))
+
+    def test_no_nonce_means_no_run(self):
+        """Nonce generation failing must refuse BEFORE Compose — never run unattestable."""
+        od = os.path.join(self.bin, "od")
+        with open(od, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(od, 0o755)
+        p = self._run(executor_rc=0)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("exit nonce", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "docker.argv")),
+                         "Compose ran without a nonce")
+
+
+class TestAttestationFiringControls(Base):
+    """Each control breaks the fixture's TEMP COPY of the wrapper the way a regression
+    would, and shows the matching test above would have caught it."""
+
+    def test_control_a_wrapper_that_trusts_rc_passes_an_unattested_2(self):
+        self._patch_wrapper("final=4  # F14", "final=$rc  # F14")
+        p = self._run(executor_rc=2, attest_rc=None)
+        self.assertEqual(p.returncode, 2, "control did not fire:\n" + p.stderr)
+
+    def test_control_set_e_after_compose_lets_cat_decide(self):
+        self._patch_wrapper("set +eu  # F14", "set -eu  # F14")
+        cat = os.path.join(self.bin, "cat")
+        with open(cat, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(cat, 0o755)
+        p = self._run(executor_rc=2)
+        self.assertEqual(p.returncode, 1, "control did not fire:\n" + p.stderr)
+
+    def test_an_unset_variable_after_compose_cannot_decide_the_status(self):
+        """F14 review (I1). `set -u` staying on after Compose means an unset-variable
+        read there can end the script with dash's own status (2) instead of `$final` —
+        the same class of bug `set -e` posed for a failing `cat`. The fix is
+        `set +eu  # F14`, turning BOTH off from that point on."""
+        self._patch_wrapper("set +eu  # F14\n",
+                            "set +eu  # F14\n: \"$f14_unset_probe\"\n")
+        p = self._run(executor_rc=0)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_control_set_u_after_compose_lets_an_unset_read_decide(self):
+        """Discriminating control: undoing just the `u` half of the fix must make the
+        test above fail, or it would pass against a wrapper that never turned `-u` off."""
+        self._patch_wrapper("set +eu  # F14\n",
+                            "set +e  # F14\n: \"$f14_unset_probe\"\n")
+        p = self._run(executor_rc=0)
+        self.assertNotEqual(p.returncode, 0, "control did not fire:\n" + p.stderr)
+
+
+class TestTheF14ChainEndToEnd(Base):
+    """F14 on the laptop, across the real seam: a Compose failure with no executor line
+    becomes wrapper 4 → broker failed_unverified_exit → agent EXIT_FAILED_AFTER_MUTATION.
+    Nowhere on the chain may it read as "nothing was mutated"."""
+
+    def test_a_compose_failure_is_possibly_modified_all_the_way_to_the_agent(self):
+        p = self._run(executor_rc=1, attest_rc=None)
+        classification, status = B.CLASSIFICATION_BY_RC.get(p.returncode, B.UNKNOWN_RC)
+        self.assertEqual((classification, status), ("failed_unverified_exit", "failed"))
+        self.assertNotIn("nothing was mutated", B.DETAIL_BY_CLASSIFICATION[classification])
+        self.assertEqual(K._EXIT_BY_CODE.get(p.returncode), K.EXIT_FAILED_AFTER_MUTATION)
+
+    def test_control_an_attested_usage_exit_is_still_a_refusal(self):
+        """Discriminating control: an attested 1 must still read as refused_usage, or the
+        test above would pass against a chain that turned everything into a failure."""
+        p = self._run(executor_rc=1)
+        self.assertEqual(B.CLASSIFICATION_BY_RC[p.returncode][0], "refused_usage")
 
 
 if __name__ == "__main__":
