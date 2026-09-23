@@ -914,6 +914,108 @@ class TestExecution(Base):
             C.verify_approval(SLUG, CID, DIGEST, NOW)
 
 
+class TestOwnerModeRuntimeErrorIsClassifiedNotEscaped(Base):
+    """C1 (final whole-branch review). F12 gave changeset_lib._apply_owner_mode the
+    ability to raise RuntimeError, and it is reached from BOTH C.reserve_approval and
+    C.record_outcome via _approval_lock — i.e. on every single apply. The broker's
+    except tuples listed only (ValueError, OSError), and the comment above drain()'s
+    tuple positively argued that RuntimeError "signals a bug in the broker's own code"
+    and must therefore propagate. That premise is false as of F12: a missing `hermes`
+    group and an EPERM fchmod of a lock sidecar are HOST state, not broker bugs.
+
+    The record_outcome call site is the one that makes this urgent rather than tidy:
+    it runs AFTER the executor. An escape there skips _write_result entirely and lands
+    in drain()'s per-request handler, which writes exit_code 2 — under spec §12 a
+    GUARANTEE that nothing was mutated. That is the same false guarantee the FINDING 1
+    comment at the end of _execute exists to prevent, arriving through a different door.
+
+    Both call sites are pinned here, and both assert the SPOOL RESULT, because "it did
+    not crash" is not the property that matters — "the spool says something true about
+    this request" is.
+    """
+
+    def _deny_fchmod_inside_changeset_lib(self):
+        """Patch os.fchmod to raise EPERM for calls made from changeset_lib ONLY.
+
+        A blanket patch would also break spool_lib.write_result, which fchmods the very
+        result file these tests assert the existence of — the test would then pass or
+        fail for a reason that has nothing to do with the broker's except tuple.
+        Scoping by the CALLER's module keeps the injected fault where _apply_owner_mode
+        lives. os.fchmod is what reserve_approval reaches first (the lock sidecar), so
+        this reproduces the EPERM branch without needing root or a real `hermes` group.
+        """
+        real = os.fchmod
+
+        def fake(fd, mode):
+            if sys._getframe(1).f_globals.get("__name__") == "changeset_lib":
+                raise PermissionError(1, "Operation not permitted")
+            return real(fd, mode)
+
+        p = mock.patch.object(os, "fchmod", new=fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_control_the_injected_fault_really_makes_reserve_approval_raise(self):
+        """POSITIVE CONTROL, first. If the patch stopped reaching _apply_owner_mode —
+        a refactor to path-based chmod, say — every assertion below would pass against
+        a broker that simply never saw an exception."""
+        self._deny_fchmod_inside_changeset_lib()
+        with self.assertRaises(RuntimeError) as cm:
+            C.reserve_approval(SLUG, CID, "1111aaaa-2222-4bbb-8ccc-3333dddd4444", NOW)
+        self.assertIn("cannot set mode", str(cm.exception))
+
+    def test_a_reserve_time_runtimeerror_is_refused_approval_and_never_executes(self):
+        self._deny_fchmod_inside_changeset_lib()
+        r = RecordingRunner(rc=0)
+        rid = self.file_request()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.drain(r)
+        self.assertEqual(r.calls, [], "the executor ran despite an unreservable approval")
+        got = self.result_for(rid)
+        self.assertEqual(got["classification"], "refused_approval")
+        self.assertEqual(got["exit_code"], 2)
+        # S6 still holds for this exception class too: fixed vocabulary to the spool,
+        # the governance-store path only on the broker's own stderr.
+        self.assertEqual(got["detail"], B.EXCEPTION_DETAIL_REFUSED_APPROVAL)
+        self.assertNotIn(self.gov, json.dumps(got))
+        self.assertIn("RuntimeError", err.getvalue())
+
+    def test_a_record_outcome_runtimeerror_still_leaves_a_result_on_disk(self):
+        """The dangerous half. record_outcome runs after the executor; the mutation may
+        already have landed. The result must still be written, and must still describe
+        what the EXECUTOR did — not a refusal.
+
+        record_outcome is patched directly rather than through fchmod because the fault
+        has to arrive AFTER a successful reserve_approval, and both calls go through the
+        same lock. The exception raised is the real one _apply_owner_mode produces.
+        """
+        boom = RuntimeError("F12: cannot set mode 0660 on %s — [Errno 1] Operation not "
+                            "permitted" % governance_lib.approval_lock_path(SLUG, CID))
+        r = RecordingRunner(rc=0)
+        rid = self.file_request()
+        err = io.StringIO()
+        with mock.patch.object(C, "record_outcome", side_effect=boom), \
+             contextlib.redirect_stderr(err):
+            self.drain(r)
+        self.assertEqual(len(r.calls), 1, "the executor should have run normally")
+        got = self.result_for(rid)
+        self.assertEqual(got["classification"], "accepted_applied")
+        self.assertEqual(got["exit_code"], 0)
+        self.assertIn("could not record outcome", err.getvalue())
+
+    def test_control_a_clean_run_writes_the_same_result_without_the_fault(self):
+        """DISCRIMINATING CONTROL for the test above: same request, same runner, no
+        injected RuntimeError. Without it, "accepted_applied appears on disk" could be
+        satisfied by a broker that ignored record_outcome entirely."""
+        r = RecordingRunner(rc=0)
+        rid = self.file_request()
+        self.drain(r)
+        got = self.result_for(rid)
+        self.assertEqual(got["classification"], "accepted_applied")
+        self.assertEqual(got["exit_code"], 0)
+
+
 class TestRealSubprocess(Base):
     """The fake runner proves the logic. This proves the WIRING — that the broker can
     actually start a program and read its status back."""

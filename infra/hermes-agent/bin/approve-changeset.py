@@ -140,8 +140,19 @@ def main(argv=None):
         print("\nRead the actions above. If they are what you reviewed, re-run with:\n"
               "  --expect-sha256 %s" % e.digest, file=sys.stderr)
         return 2
-    except (ValueError, KeyError, OSError, TypeError, json.JSONDecodeError,
-            UnicodeDecodeError) as e:
+    # RuntimeError belongs here for ONE specific reason, not as a catch-all: F12's
+    # changeset_lib._apply_owner_mode raises it for the two OPERATIONAL faults it was
+    # written to make actionable — the `hermes` group or the `hermes-broker` user not
+    # existing yet (README "VPS deploy sequence" step 1), and EPERM on fchmod/fchown of
+    # an approval artifact or the approvals/<slug>/ directory. Both are reachable from
+    # write_snapshot_bytes and write_approval above, and both are things an operator
+    # fixes on the box. Without RuntimeError in this tuple the message that was written
+    # to tell them how ships as a traceback with exit 1 instead — which is exactly what
+    # the FIRST `sudo ./changeset.sh approve` on a freshly provisioned host would print.
+    # The refusal is still a refusal: exit 2, `approve-changeset: ` prefix, same as
+    # every other guard here.
+    except (ValueError, KeyError, OSError, TypeError, RuntimeError,
+            json.JSONDecodeError, UnicodeDecodeError) as e:
         print(f"approve-changeset: {e}", file=sys.stderr)
         return 2
     print(summarise(rec))

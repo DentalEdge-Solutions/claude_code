@@ -1,4 +1,4 @@
-import contextlib, datetime, hashlib, importlib.util, io, json, os, subprocess, sys, tempfile, unittest
+import contextlib, datetime, hashlib, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -234,6 +234,82 @@ class TestExpectShaIsRequired(T):
         self.assertIn("mismatch", out.stderr)
 
 
+def _deny_fchmod_inside_changeset_lib(real):
+    """Return an os.fchmod replacement that raises EPERM ONLY for calls made from
+    changeset_lib, and behaves normally everywhere else.
+
+    A blanket patch of os.fchmod would also break spool_lib.write_result and
+    hermes-syscall, which fchmod their own files for unrelated reasons — a test that
+    broke those would "pass" for the wrong reason. Scoping by the CALLER's module keeps
+    the injected fault exactly where _apply_owner_mode lives.
+    """
+    def fake(fd, mode):
+        if sys._getframe(1).f_globals.get("__name__") == "changeset_lib":
+            raise PermissionError(1, "Operation not permitted")
+        return real(fd, mode)
+    return fake
+
+
+class TestOwnerModeFailureIsARefusalNotATraceback(T):
+    """C1 (final whole-branch review). changeset_lib._apply_owner_mode raises
+    RuntimeError for two OPERATIONAL faults F12 added: the `hermes` group or the
+    `hermes-broker` user not existing yet, and EPERM on fchmod/fchown of an approval
+    artifact or of approvals/<slug>/. Both messages were written to be read by an
+    operator on the box — they name the artifact, the mode/owner Hermes needed, and the
+    remediation.
+
+    main()'s except tuple did not include RuntimeError, so all of that shipped as a
+    traceback with exit 1. The case is not exotic: it is the FIRST
+    `sudo ./changeset.sh approve` on a host where README's step-1 users and groups have
+    not been created — precisely the reader the message was written for.
+
+    Both branches are exercised here, and the whole point is the SHAPE of the failure
+    (exit 2, `approve-changeset: ` prefix, no traceback), not merely that it failed.
+    """
+
+    def _approve(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = A.main(["--client", "acme-dental", "--changeset", self.cs["changeset_id"],
+                         "--operator", "erick", "--registry", self.clients,
+                         "--projects", self.projects, "--expect-sha256", self._digest()])
+        return rc, err.getvalue()
+
+    def test_an_eperm_on_fchmod_is_an_actionable_refusal(self):
+        real = os.fchmod
+        with mock.patch.object(os, "fchmod",
+                               new=_deny_fchmod_inside_changeset_lib(real)):
+            rc, err = self._approve()
+        self.assertEqual(rc, 2, err)
+        self.assertTrue(err.startswith("approve-changeset: "), err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("cannot set mode", err)
+        # The remediation, not just the symptom.
+        self.assertIn("chown it back", err)
+
+    def test_a_missing_hermes_group_is_an_actionable_refusal(self):
+        """The other RuntimeError branch: groups are resolved BY NAME and a missing one
+        is a refusal, never a guessed gid. Forced platform/euid so the root branch that
+        does the lookup is reached on darwin too."""
+        with mock.patch.object(C.sys, "platform", "linux"), \
+             mock.patch.object(C.os, "geteuid", return_value=0), \
+             mock.patch.object(C.grp, "getgrnam",
+                               side_effect=KeyError("getgrnam(): name not found: 'hermes'")):
+            rc, err = self._approve()
+        self.assertEqual(rc, 2, err)
+        self.assertTrue(err.startswith("approve-changeset: "), err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("cannot set approval ownership", err)
+        self.assertIn("step 1", err)
+
+    def test_control_the_same_call_succeeds_unpatched(self):
+        """DISCRIMINATING CONTROL. Both tests above would be satisfied by an approve
+        that refused for any reason at all — this is the identical invocation with no
+        fault injected."""
+        rc, err = self._approve()
+        self.assertEqual(rc, 0, err)
+
+
 class TestRootRequirement(unittest.TestCase):
     """F12 (spec 2.3): on Linux the proposal lives in the gateway-owned vault (data/ is
     700 uid 10000), so reading it needs root; and a non-root writer leaves artifacts the
@@ -244,9 +320,25 @@ class TestRootRequirement(unittest.TestCase):
         # Own tmp dir, deliberately with NO client registry written into it: the
         # darwin control test is expected to fail later for that unrelated reason —
         # it asserts only that the ROOT refusal specifically did not fire.
+        #
+        # MINOR 6 (final whole-branch review): this used to mkdtemp with no cleanup and
+        # overwrite both env vars with no restore, so it leaked a temp tree per run and
+        # left every test that ran AFTER it pointed at a registry-less governance root.
+        # Nothing depended on that ordering today, which is precisely why it would have
+        # been diagnosed as a bug in some unrelated test later. Restored explicitly.
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._env = {k: os.environ.get(k) for k in ("VAULT_ROOT",
+                                                    "HERMES_GOVERNANCE_ROOT")}
+        self.addCleanup(self._restore_env)
         os.environ["VAULT_ROOT"] = self.tmp
         os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
+
+    def _restore_env(self):
+        for k, v in self._env.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
 
     def test_it_refuses_without_root_on_linux(self):
         with mock.patch.object(A.sys, "platform", "linux"), \
