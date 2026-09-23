@@ -257,6 +257,16 @@ design if the analyst is shown to need it.
 framing hardening and `UMask=0077` (§6 part A) are in PR #48. F14 (a Compose failure reported as
 "nothing was mutated") is fixed (PR #46).
 
+**§6 part A merged and applied to the box, 2026-09-23.** Merge commit `e1110bb`: CI run
+35927728502, `bind-agreement: executed 6, skipped 0`, `layout-integration: executed 30, skipped
+0`. The box pulled `4074295..e1110bb`, re-copied both units and ran `daemon-reload`; after the
+restart, `systemctl show -p UMask` gave `UMask=0077` for both units, the socket was still
+`hermes-docker-proxy:hermes-rail 660`, both units `active`, `NRestarts=0`. **Real traffic through
+the stricter parser, on the box:** BRING-UP Phase 6's create gave `rc=2` (`mutation is disabled`)
+and the proxy logged `ALLOW POST /v1.55/containers/create?name=hermes-agent-ads-mutator-run-…`,
+with no `malformed` refusal — which also discharges the end-to-end check the 2026-09-17 handoff §5
+owed for `65df9b1`. Kill switch: absent (checked with `sudo test`).
+
 **Applied to the box, 2026-09-23.** Pulled `da2a0ae..9df03d4` (fast-forward, no mode conflict).
 Firing control first: `sudo -u hermes-broker init-host-layout.py --check` exited **2**, naming
 only `/var/lib/hermes/governance/records: missing, expected dir hermes-broker:hermes 2750`.

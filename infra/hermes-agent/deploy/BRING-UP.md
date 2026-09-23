@@ -369,8 +369,9 @@ this pastes the wrapper's own Compose invocation directly instead. `proxy-policy
 invocation ever changes and this block is not updated to match.
 
 ```bash
-# Precondition check — stated below, not previously verified:
-[ ! -e /var/lib/hermes/governance/control/mutation-enabled ] && echo "kill switch absent — safe to proceed"
+# Precondition check. `sudo test`, not `[ ! -e ]`: hermesops is not in `hermes` and cannot
+# traverse the 2750 store, so an unprivileged test reports "absent" whatever is there (F17).
+sudo test ! -e /var/lib/hermes/governance/control/mutation-enabled && echo "kill switch absent — safe to proceed"
 sudo -u hermes-broker env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
   HOME="$(getent passwd hermes-broker | cut -d: -f6)" \
   DOCKER_HOST=unix:///run/hermes/docker-proxy.sock \
@@ -461,8 +462,10 @@ switch stays absent.)
 sudo cp /opt/projects/claude_code/infra/hermes-agent/deploy/hermes-docker-proxy.service /etc/systemd/system/
 sudo cp /opt/projects/claude_code/infra/hermes-agent/deploy/hermes-broker.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it
-sudo systemctl restart hermes-broker
+sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it —
+                                               # no second broker restart: it would interrupt that
+                                               # one mid-ExecStartPre (harmless, but logs "Failed
+                                               # with result 'signal'"; seen on the box 2026-09-23)
 systemctl show -p UMask hermes-docker-proxy hermes-broker          # UMask=0077, both
 sudo stat -c '%U:%G %a %n' /run/hermes/docker-proxy.sock           # hermes-docker-proxy:hermes-rail 660
 systemctl is-active hermes-docker-proxy hermes-broker              # active, active
