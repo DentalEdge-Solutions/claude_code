@@ -26,6 +26,7 @@ the upstream socket:
 | 1 | `X-Pad: pad\r\n\tTransfer-Encoding: chunked` | obs-fold continuation line; `startswith(b"transfer-encoding:")` is false for a line beginning with a tab |
 | 2 | `Transfer-Encoding : chunked` | space before the colon; same prefix test fails |
 | 3 | `Content-Length: 5` + `Content-Length: 77` | the parse loop keeps the **last** value |
+| 4 | `X-Pad: a\nTransfer-Encoding: chunked` (bare LF) | a split on CRLF sees one header; Go's textproto treats bare LF as a line end — **inferred 2026-09-23, not measured** |
 
 **What was measured is that the bytes arrive. What was NOT measured is whether dockerd
 parses them as a second request** — which is the only thing that makes any of them a
@@ -290,6 +291,13 @@ This removes the dependency on dockerd's strictness instead of documenting it. C
   it.
 - Prove each new guard by making it fail. Three assertions in this wave passed for reasons
   unrelated to their claims, and reading found none of them.
+
+**Implemented 2026-09-23 (PR #48), without the §5 measurement, as §6 allows.** `_parse_head`
+enforces all three rules above plus a fourth — no bare CR, LF or NUL anywhere in the head
+(form 4) — and also requires exactly `HTTP/1.1` and printable-ASCII header values, and bounds
+`Content-Length` to 19 digits (Go's `ParseUint` 63-bit maximum). The positive
+control was re-run on Linux CI (run 35924147988: `bind-agreement: executed 6, skipped 0`, `ALLOW` on
+create). §5 stays blank: the measurement is now informative, not a prerequisite.
 
 ## 8. Carry alongside: the end-to-end check F4 still owes
 

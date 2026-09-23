@@ -302,6 +302,143 @@ class TestBodyHandling(Base):
         self.assertFalse(ok)
 
 
+class TestParseHead(unittest.TestCase):
+    """The framing hardening (spec 2026-09-23). `_parse_head` is the single place a request
+    head is read. Anything it cannot parse unambiguously is refused, so the proxy and dockerd
+    can never disagree about where a request ends. Every refusal test pins the REASON: a
+    refusal for some unrelated reason must not satisfy it."""
+
+    def assertRefused(self, head, reason):
+        with self.assertRaises(PX.HeadRefused) as ctx:
+            PX._parse_head(head)
+        self.assertEqual(ctx.exception.reason, reason, head)
+        return ctx.exception
+
+    # ---- accepted ---------------------------------------------------------------------
+
+    def test_real_client_heads_are_accepted(self):
+        cases = [
+            (b"GET /_ping HTTP/1.1\r\nHost: api.moby.localhost\r\n"
+             b"User-Agent: Docker-Client/28.0.4 (linux)", ("GET", "/_ping", 0)),
+            (b"POST /v1.55/containers/create?name=hermes-agent-ads-mutator-run-1 HTTP/1.1\r\n"
+             b"Host: api.moby.localhost\r\nUser-Agent: compose/v2.38.2\r\n"
+             b"Content-Type: application/json\r\nContent-Length: 812",
+             ("POST", "/v1.55/containers/create?name=hermes-agent-ads-mutator-run-1", 812)),
+            (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+             b"Host: d\r\nContent-Length: 0",
+             ("POST", "/v1.55/containers/deadbeef/wait?condition=removed", 0)),
+            (b"POST /v1.55/containers/deadbeef/attach?stream=1&stdout=1 HTTP/1.1\r\n"
+             b"Host: d\r\nConnection: Upgrade\r\nUpgrade: tcp",
+             ("POST", "/v1.55/containers/deadbeef/attach?stream=1&stdout=1", 0)),
+            (b"HEAD /_ping HTTP/1.1", ("HEAD", "/_ping", 0)),
+        ]
+        for head, want in cases:
+            self.assertEqual(PX._parse_head(head), want, head)
+
+    def test_a_colon_in_the_value_is_accepted(self):
+        self.assertEqual(PX._parse_head(b"GET /_ping HTTP/1.1\r\nHost: localhost:2375"),
+                         ("GET", "/_ping", 0))
+
+    def test_an_empty_value_is_accepted(self):
+        self.assertEqual(PX._parse_head(b"GET /_ping HTTP/1.1\r\nX-Empty:"),
+                         ("GET", "/_ping", 0))
+
+    def test_content_length_with_surrounding_whitespace_is_accepted(self):
+        self.assertEqual(PX._parse_head(b"POST /v1.55/x HTTP/1.1\r\nContent-Length: \t5 "),
+                         ("POST", "/v1.55/x", 5))
+
+    def test_header_names_are_case_insensitive(self):
+        self.assertEqual(PX._parse_head(b"POST /v1.55/x HTTP/1.1\r\ncontent-LENGTH: 7"),
+                         ("POST", "/v1.55/x", 7))
+
+    # ---- rule 4: line structure --------------------------------------------------------
+
+    def test_a_bare_lf_inside_a_header_line_is_refused(self):
+        """Form 4 (new, inferred): Go's textproto treats a bare LF as a line end, so dockerd
+        would see a separate Transfer-Encoding line the old prefix check never saw."""
+        self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\nX-Pad: a\nTransfer-Encoding: chunked",
+                           "malformed request")
+
+    def test_a_bare_lf_pair_that_could_end_the_head_early_is_refused(self):
+        self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\nX-Pad: a\n\nPOST /v1.55/containers/create",
+                           "malformed request")
+
+    def test_a_bare_cr_is_refused(self):
+        self.assertRefused(b"GET /_ping HTTP/1.1\r\nX-Pad: a\rb", "malformed request")
+
+    def test_a_nul_is_refused(self):
+        self.assertRefused(b"GET /_ping HTTP/1.1\r\nX-Pad: a\x00b", "malformed request")
+
+    # ---- request line ------------------------------------------------------------------
+
+    def test_malformed_request_lines_are_refused(self):
+        for line in (b"GET /_ping",                      # 2 parts
+                     b"GET /_ping HTTP/1.1 extra",       # 4 parts
+                     b"GET  /_ping HTTP/1.1",            # double space
+                     b"GET /_ping HTTP/1.0",             # not HTTP/1.1
+                     b"GET /_p\x7fing HTTP/1.1",          # control char in target
+                     b"G(T /_ping HTTP/1.1",             # method not a token
+                     b""):                               # empty
+            e = self.assertRefused(line + b"\r\nHost: d", "malformed request line")
+            self.assertEqual((e.method, e.path), ("-", "-"), line)
+
+    # ---- rules 1 and 2: header lines ---------------------------------------------------
+
+    def test_obs_fold_is_refused(self):
+        """Form 1 (measured 2026-09-17: the bytes reached the upstream)."""
+        e = self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\nX-Pad: pad\r\n\tTransfer-Encoding: chunked",
+                               "malformed header line")
+        self.assertEqual((e.method, e.path), ("POST", "/v1.55/x"))
+
+    def test_a_leading_space_is_refused(self):
+        self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\n Transfer-Encoding: chunked",
+                           "malformed header line")
+
+    def test_a_space_before_the_colon_is_refused(self):
+        """Form 2 (measured 2026-09-17)."""
+        self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\nTransfer-Encoding : chunked",
+                           "malformed header line")
+
+    def test_other_malformed_header_lines_are_refused(self):
+        for line in (b": no-name", b"No-Colon", b"X-Ctl: a\x01b", b"X-High: caf\xc3\xa9",
+                     b"X-Del: a\x7fb"):
+            self.assertRefused(b"GET /_ping HTTP/1.1\r\n" + line, "malformed header line")
+
+    # ---- rule 3 and the framing headers ------------------------------------------------
+
+    def test_duplicate_content_length_is_refused(self):
+        """Form 3 (measured 2026-09-17: the old loop kept the LAST value)."""
+        for pair in (b"Content-Length: 5\r\nContent-Length: 77",
+                     b"Content-Length: 5\r\ncontent-length: 5"):
+            self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\n" + pair, "duplicate Content-Length")
+
+    def test_a_non_digit_content_length_is_refused(self):
+        for v in (b"7_7", b"-5", b"+5", b"", b"5, 5", b"0x10", b"1" * 20, b"1" * 5000):
+            self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\nContent-Length: " + v,
+                               "malformed Content-Length")
+
+    def test_a_19_digit_content_length_parses(self):
+        self.assertEqual(
+            PX._parse_head(b"POST /v1.55/x HTTP/1.1\r\nContent-Length: " + b"9" * 19),
+            ("POST", "/v1.55/x", int("9" * 19)))
+
+    def test_any_transfer_encoding_is_refused(self):
+        for line in (b"Transfer-Encoding: chunked", b"transfer-encoding: gzip",
+                     b"TRANSFER-ENCODING: identity"):
+            self.assertRefused(b"POST /v1.55/x HTTP/1.1\r\n" + line,
+                               "Transfer-Encoding is not permitted on requests")
+
+    def test_no_reason_ever_contains_request_bytes(self):
+        """The reason goes to the client and the journal; attacker bytes must not."""
+        marker = b"ZZ-MARKER-ZZ"
+        for head in (b"GET /_ping HTTP/1.1\r\nX: " + marker + b"\x01",
+                     b"GET /" + marker + b" HTTP/1.0",
+                     b"POST /x HTTP/1.1\r\nContent-Length: " + marker):
+            with self.assertRaises(PX.HeadRefused) as ctx:
+                PX._parse_head(head)
+            self.assertNotIn(marker.decode(), ctx.exception.reason)
+
+
 class TestPlumbing(unittest.TestCase):
     """The socket half. These use a fake upstream so no Docker daemon is needed."""
 
@@ -702,6 +839,96 @@ class TestPlumbing(unittest.TestCase):
             any("wait" in line for line in upstream_saw),
             "a request the proxy never decided still reached the upstream: %r"
             % upstream_saw)
+
+    # ---- the framing hardening, end to end (spec 2026-09-23) ---------------------------
+    # Each form carries a privileged create hidden in an allowed `wait` request. The proof is
+    # NON-RECEIPT: `/containers/create` must appear nowhere in the upstream's raw bytes.
+
+    SMUGGLED = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
+                b"Content-Length: 2\r\n\r\n{}")
+    WAIT = b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+
+    def _assert_never_reached_upstream(self, marker=b"/containers/create", settle=0.5):
+        """Non-receipt, race-free: the fake upstream appends on its own thread, so poll for
+        `settle` seconds and fail the moment the marker appears. Absence for the whole window
+        is the pass."""
+        deadline = time.monotonic() + settle
+        while True:
+            if any(marker in b for b in self.upstream_raw):
+                self.fail("smuggled create reached the upstream socket: %r" % self.upstream_raw)
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.01)
+
+    def _assert_smuggle_refused(self, req, reason):
+        resp = self._send(req)
+        self._assert_never_reached_upstream()
+        self.assertIn(b"403", resp)
+        self.assertIn(reason.encode(), resp)
+
+    def test_an_obs_fold_smuggled_create_is_refused(self):
+        tail = b"0\r\n\r\n" + self.SMUGGLED
+        req = (self.WAIT + b"Host: d\r\nX-Pad: pad\r\n\tTransfer-Encoding: chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        self._assert_smuggle_refused(req, "malformed header line")
+
+    def test_a_space_before_colon_smuggled_create_is_refused(self):
+        tail = b"0\r\n\r\n" + self.SMUGGLED
+        req = (self.WAIT + b"Host: d\r\nTransfer-Encoding : chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        self._assert_smuggle_refused(req, "malformed header line")
+
+    def test_a_duplicate_content_length_smuggled_create_is_refused(self):
+        req = (self.WAIT + b"Host: d\r\nContent-Length: 0\r\n"
+               b"Content-Length: " + str(len(self.SMUGGLED)).encode() + b"\r\n\r\n"
+               + self.SMUGGLED)
+        self._assert_smuggle_refused(req, "duplicate Content-Length")
+
+    def test_a_bare_lf_smuggled_create_is_refused(self):
+        tail = b"0\r\n\r\n" + self.SMUGGLED
+        req = (self.WAIT + b"Host: d\r\nX-Pad: a\nTransfer-Encoding: chunked\r\n"
+               b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
+        self._assert_smuggle_refused(req, "malformed request")
+
+    def test_a_refused_head_closes_the_connection(self):
+        """After a head it could not parse there is no safe place to resume reading: the
+        connection must close, so nothing sent after it reaches the upstream."""
+        import socket as _s
+        self._start_proxy()
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.sendall(b"GET /_ping HTTP/1.0\r\nHost: d\r\n\r\n")
+        first = c.recv(65536)
+        self.assertIn(b"403", first)
+        self.assertIn(b"malformed request line", first)
+        try:
+            c.sendall(b"GET /_ping HTTP/1.1\r\nHost: d\r\n\r\n")
+            c.settimeout(2)
+            second = c.recv(65536)
+        except OSError:
+            second = b""
+        c.close()
+        self.assertEqual(second, b"", "the proxy kept reading after a refused head")
+        self.assertEqual(self.upstream_raw, [])
+
+    def test_ordinary_heads_still_reach_upstream(self):
+        """POSITIVE CONTROL for the grammar at the socket level: well-formed heads of the
+        shapes real clients send are still forwarded. Separate connections on purpose: the
+        fake upstream closes after each reply, so a keep-alive pair would fail for a reason
+        unrelated to the grammar."""
+        import socket as _s
+        self._start_proxy()
+        for req in (b"HEAD /_ping HTTP/1.1\r\nHost: d\r\n\r\n",
+                    self.WAIT + b"Host: localhost:2375\r\nUser-Agent: compose/v2.38.2\r\n"
+                                b"Content-Length: 0\r\n\r\n"):
+            c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+            c.connect(self.li_path)
+            c.sendall(req)
+            self.assertNotIn(b"403", c.recv(65536), req)
+            c.close()
+        self.assertIn("HEAD /_ping HTTP/1.1", self.upstream_saw)
+        self.assertTrue(any(l.startswith("POST /v1.55/containers/deadbeef/wait")
+                            for l in self.upstream_saw), self.upstream_saw)
 
 
 if __name__ == "__main__":

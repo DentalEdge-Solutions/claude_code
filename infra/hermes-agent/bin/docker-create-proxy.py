@@ -257,6 +257,104 @@ def decide(method, path, body):
 MAX_BODY = 1024 * 1024
 
 
+# ---- The framing hardening (spec 2026-09-23) -------------------------------------------
+# This proxy forwards the ORIGINAL header block verbatim to dockerd, so its safety rests on
+# one invariant: it and dockerd always agree where a request ends. Every head is therefore
+# parsed ONCE, here, against a strict grammar, and anything not parseable unambiguously is
+# refused — instead of depending on dockerd (Go net/http) being stricter than this file.
+# Forms this closes (measurement plan 2026-09-17 §1): obs-fold continuation lines, a space
+# before the colon, duplicate Content-Length, and (inferred, not measured) a bare LF, which
+# Go's textproto treats as a line end while a split on CRLF does not.
+_TOKEN_RE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_TARGET_RE = re.compile(rb"[\x21-\x7e]+")
+_VALUE_RE = re.compile(rb"[\t\x20-\x7e]*")
+_DIGITS_RE = re.compile(rb"[0-9]+")
+
+
+class HeadRefused(ValueError):
+    """A request head this proxy will not forward. `reason` is one of a FIXED set of strings
+    and never contains request bytes (it goes to the client and to the journal)."""
+
+    def __init__(self, reason, method="-", path="-"):
+        super().__init__(reason)
+        self.reason = reason
+        self.method = method
+        self.path = path
+
+
+def _parse_head(head):
+    """(method, path, content_length) for a head that parses unambiguously, else raise
+    HeadRefused. `head` is the bytes before the first CRLFCRLF."""
+    lines = head.split(b"\r\n")
+    for line in lines:
+        if b"\r" in line or b"\n" in line or b"\x00" in line:
+            raise HeadRefused("malformed request")
+    parts = lines[0].split(b" ")
+    if (len(parts) != 3 or not _TOKEN_RE.fullmatch(parts[0])
+            or not _TARGET_RE.fullmatch(parts[1]) or parts[2] != b"HTTP/1.1"):
+        raise HeadRefused("malformed request line")
+    method, path = parts[0].decode("ascii"), parts[1].decode("ascii")
+    clen = None
+    for line in lines[1:]:
+        name, sep, value = line.partition(b":")
+        # The name must be a bare token that STARTS the line and is followed IMMEDIATELY by
+        # ':'. An obs-fold line (leading SP/HTAB) and "Name : v" both fail here.
+        if not sep or not _TOKEN_RE.fullmatch(name):
+            raise HeadRefused("malformed header line", method, path)
+        value = value.strip(b" \t")
+        if not _VALUE_RE.fullmatch(value):
+            raise HeadRefused("malformed header line", method, path)
+        lname = name.lower()
+        if lname == b"transfer-encoding":
+            # CL.TE / TE.CL REQUEST SMUGGLING. This proxy frames every request by
+            # Content-Length alone (`while len(rest) < clen` below); dockerd is Go
+            # net/http, which frames by Transfer-Encoding when BOTH headers are
+            # present on a request. A request that carries Transfer-Encoding at
+            # all — alone, or alongside Content-Length — is therefore ambiguous:
+            # this proxy would read exactly `clen` bytes as "the body" and treat
+            # anything past that as the start of the NEXT request on the
+            # connection, while dockerd treats (say) an empty chunked body as
+            # ending THIS request and parses the remainder as a wholly separate,
+            # uninspected second request. MEASURED against the real `_handle`
+            # before this fix: an allowed `POST .../wait` carrying both headers,
+            # with an empty chunked body followed by a smuggled `POST
+            # /containers/create {Privileged: true, Binds: ["/:/host:rw"]}` in the
+            # declared Content-Length tail, produced exactly one logged decision
+            # (`ALLOW POST .../wait`) — `decide()` was never called for the
+            # create, and dockerd executed it as a second request on the same
+            # connection. Refuse unconditionally, for every path (not just
+            # `/containers/create`), before any framing or forwarding, and close
+            # the connection rather than trying to keep reading a stream we can
+            # no longer unambiguously frame.
+            raise HeadRefused("Transfer-Encoding is not permitted on requests", method, path)
+        if lname == b"content-length":
+            if clen is not None:
+                # Refused even when both values agree: keeping one silently is exactly the
+                # "which one wins" question this proxy must never answer differently from
+                # dockerd.
+                raise HeadRefused("duplicate Content-Length", method, path)
+            # DIGITS ONLY. RFC 9110 defines Content-Length as 1*DIGIT, but
+            # Python's int() also accepts "-5", "+5", "1_0" and an empty value
+            # (via the old `or b"0"`), and Go's ParseUint — which is what
+            # dockerd uses — accepts none of them. Every one of those is this
+            # proxy and its upstream disagreeing about where the request ends,
+            # which is the same shape as the CL.TE Critical documented below.
+            # MEASURED 2026-09-17: `Content-Length: 7_7` parsed here as 77 and
+            # carried a smuggled create's bytes through to the upstream socket;
+            # `Content-Length: -5` made the framing below do
+            # `rest[:-5], rest[-5:]`, silently handing the last five body bytes
+            # to the next loop iteration as a request line; and a non-numeric
+            # value raised ValueError out of _handle (which catches only
+            # OSError) as an unhandled traceback. Refuse instead of guessing.
+            # 19 digits is the most Go's ParseUint(v, 10, 63) accepts (2**63-1); staying at
+            # or under it also keeps int() well under Python's 4300-digit conversion limit.
+            # MAX_BODY is enforced later, in _handle.
+            if not _DIGITS_RE.fullmatch(value) or len(value) > 19:
+                raise HeadRefused("malformed Content-Length", method, path)
+            clen = int(value)
+    return method, path, (clen or 0)
+
+
 def _read_until_headers(sock, buf):
     while b"\r\n\r\n" not in buf:
         chunk = sock.recv(65536)
@@ -349,68 +447,16 @@ def _handle(conn, upstream_path):
             head, rest = _read_until_headers(conn, buf)
             if head is None:
                 return
-            line = head.split(b"\r\n")[0].decode("latin1")
-            parts = line.split(" ")
-            if len(parts) < 2:
-                _refuse(conn, "malformed request line")
-                return
-            method, path = parts[0], parts[1]
-            clen, has_te, bad_clen = 0, False, False
-            for h in head.split(b"\r\n")[1:]:
-                lo = h.lower()
-                if lo.startswith(b"content-length:"):
-                    # DIGITS ONLY. RFC 9110 defines Content-Length as 1*DIGIT, but
-                    # Python's int() also accepts "-5", "+5", "1_0" and an empty value
-                    # (via the old `or b"0"`), and Go's ParseUint — which is what
-                    # dockerd uses — accepts none of them. Every one of those is this
-                    # proxy and its upstream disagreeing about where the request ends,
-                    # which is the same shape as the CL.TE Critical documented below.
-                    # MEASURED 2026-09-17: `Content-Length: 7_7` parsed here as 77 and
-                    # carried a smuggled create's bytes through to the upstream socket;
-                    # `Content-Length: -5` made the framing below do
-                    # `rest[:-5], rest[-5:]`, silently handing the last five body bytes
-                    # to the next loop iteration as a request line; and a non-numeric
-                    # value raised ValueError out of _handle (which catches only
-                    # OSError) as an unhandled traceback. Refuse instead of guessing.
-                    if not h.split(b":", 1)[1].strip().isdigit():
-                        bad_clen = True
-                    else:
-                        clen = int(h.split(b":", 1)[1].strip())
-                if lo.startswith(b"transfer-encoding:"):
-                    has_te = True
-            # CL.TE / TE.CL REQUEST SMUGGLING. This proxy frames every request by
-            # Content-Length alone (`while len(rest) < clen` below); dockerd is Go
-            # net/http, which frames by Transfer-Encoding when BOTH headers are
-            # present on a request. A request that carries Transfer-Encoding at
-            # all — alone, or alongside Content-Length — is therefore ambiguous:
-            # this proxy would read exactly `clen` bytes as "the body" and treat
-            # anything past that as the start of the NEXT request on the
-            # connection, while dockerd treats (say) an empty chunked body as
-            # ending THIS request and parses the remainder as a wholly separate,
-            # uninspected second request. MEASURED against the real `_handle`
-            # before this fix: an allowed `POST .../wait` carrying both headers,
-            # with an empty chunked body followed by a smuggled `POST
-            # /containers/create {Privileged: true, Binds: ["/:/host:rw"]}` in the
-            # declared Content-Length tail, produced exactly one logged decision
-            # (`ALLOW POST .../wait`) — `decide()` was never called for the
-            # create, and dockerd executed it as a second request on the same
-            # connection. Refuse unconditionally, for every path (not just
-            # `/containers/create`), before any framing or forwarding, and close
-            # the connection rather than trying to keep reading a stream we can
-            # no longer unambiguously frame.
-            if has_te:
-                _refuse(conn, "Transfer-Encoding is not permitted on requests")
-                print("DENY %s %s (Transfer-Encoding present; CL.TE smuggling risk)"
-                      % (method, path), file=sys.stderr)
-                return
-            if bad_clen:
-                # Close, do not continue the loop: without a usable length there is no
-                # way to know where this body ends, so there is no safe place to resume
-                # reading. The offending value is deliberately NOT logged — it is
-                # attacker-controlled bytes headed for the journal.
-                _refuse(conn, "malformed Content-Length")
-                print("DENY %s %s (malformed Content-Length)" % (method, path),
-                      file=sys.stderr)
+            # The framing hardening (spec 2026-09-23): the head is parsed ONCE, strictly,
+            # by _parse_head, and anything it cannot parse unambiguously is refused. Close,
+            # do not continue the loop: after an unparseable head there is no safe place to
+            # resume reading. The reason is a fixed string; refused bytes never reach the
+            # journal (method/path are logged only when the request line itself parsed).
+            try:
+                method, path, clen = _parse_head(head)
+            except HeadRefused as e:
+                _refuse(conn, e.reason)
+                print("DENY %s %s (%s)" % (e.method, e.path, e.reason), file=sys.stderr)
                 return
             # Substring, not the regex fullmatch the rest of the file uses — deliberately
             # over-inclusive relative to decide()'s ALLOWED patterns, never under. A path
@@ -419,7 +465,7 @@ def _handle(conn, upstream_path):
             # there is no bypass; it can only refuse a few extra non-create paths early.
             is_create = "/containers/create" in path
             # A create can no longer reach here with Transfer-Encoding set (chunked
-            # or otherwise) — the `has_te` check above already refused it. What's
+            # or otherwise) — `_parse_head` already refused any Transfer-Encoding. What's
             # left to catch is a create with NEITHER header, where `clen` defaults
             # to 0: decide() cannot safely run against a body of unknown length.
             if is_create and clen == 0:
@@ -534,6 +580,9 @@ def serve(listen, upstream):
     if os.path.exists(listen):
         os.remove(listen)
     srv = Server(listen, Handler)
+    # Under the unit's UMask=0077 the socket is created 0600; this chmod is what opens it to
+    # the hermes-rail group. Containment no longer rests only on RuntimeDirectoryMode=0750 —
+    # the socket is private from the instant it exists (2026-09-17 handoff §6).
     os.chmod(listen, 0o660)
     srv.serve_forever()
 
