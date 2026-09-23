@@ -51,6 +51,13 @@ _RUNTIME_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ
                      "SSL_CERT_FILE", "SSL_CERT_DIR", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
                      "REQUESTS_CA_BUNDLE")
 
+# F14 (spec 2026-09-23 §3.1). The wrapper's per-run nonce. The executor echoes it on its
+# attested exit line; the wrapper trusts 0/1/2/3 only when that line matches. It must NEVER
+# be added to _RUNTIME_ENV_KEYS: _child_env() is an allow-list precisely so the mutator —
+# whose stderr is echoed into _refuse messages — cannot learn the nonce and forge the line.
+EXIT_NONCE_VAR = "HERMES_EXIT_NONCE"
+_EXIT_NONCE_RE = re.compile(r"[0-9a-f]{32}")
+
 
 class PostMutationError(Exception):
     """Raised for any failure AFTER at least one live mutation landed. Exits 3, never 2 —
@@ -399,6 +406,43 @@ def apply(plan, now):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _chosen_status(code):
+    """The int status for a CHOSEN exit, or None when it was not one. bool is excluded
+    (SystemExit(True) is not a status anyone chose); None means 0, as sys.exit does."""
+    if code is None:
+        return 0
+    if isinstance(code, int) and not isinstance(code, bool):
+        return code
+    return None
+
+
+def _attested_exit(main_fn, environ=None):
+    """F14. Run main_fn and exit with its status. For an exit the executor CHOSE (a
+    returned int, or SystemExit with an int/None code) print `HERMES-EXIT <nonce> <rc>` as
+    the last stdout line first. A crash — any other exception, KeyboardInterrupt, a
+    non-int SystemExit — propagates unattested, so the wrapper cannot read it as "usage,
+    nothing mutated". No valid nonce: no line (a manual in-container run is unchanged)."""
+    environ = os.environ if environ is None else environ
+    try:
+        returned = main_fn()
+    except SystemExit as e:
+        rc = _chosen_status(e.code)
+        if rc is None:
+            raise
+    else:
+        # try/except/ELSE, not a SystemExit raised inside the try: that would be re-caught
+        # by the except above and attested as a chosen status.
+        rc = _chosen_status(returned)
+        if rc is None:
+            raise SystemExit(returned)
+    nonce = environ.get(EXIT_NONCE_VAR, "")
+    if _EXIT_NONCE_RE.fullmatch(nonce):
+        sys.stderr.flush()
+        sys.stdout.write("HERMES-EXIT %s %d\n" % (nonce, rc))
+        sys.stdout.flush()
+    raise SystemExit(rc)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--client", required=True)
@@ -433,4 +477,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _attested_exit(main)

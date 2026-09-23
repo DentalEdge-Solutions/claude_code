@@ -829,5 +829,131 @@ class TestRequestIdIsThreadedToTheApproval(Base):
         self.assertNotIn("reserved", (r.stderr or "").lower())
 
 
+NONCE = "0123456789abcdef0123456789abcdef"
+
+
+class TestAttestedExit(unittest.TestCase):
+    """F14. The executor states, on its LAST stdout line, the exit it chose, bound to the
+    wrapper's per-run nonce. It must never attest a crash: the wrapper trusts 0/1/2/3 only
+    when this line proves the executor itself picked it (spec 2026-09-23 §3.1)."""
+
+    def _attest(self, fn, environ):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            X._attested_exit(fn, environ=environ)
+        return ctx.exception.code, out.getvalue()
+
+    def _assert_attested_last(self, out, rc):
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "HERMES-EXIT %s %d" % (NONCE, rc), out)
+        self.assertEqual(sum(1 for l in lines if l.startswith("HERMES-EXIT")), 1, out)
+
+    def test_a_returned_status_is_attested_last(self):
+        for rc in (0, 1, 2, 3):
+            def fn(rc=rc):
+                print("executor output")
+                return rc
+            code, out = self._attest(fn, {X.EXIT_NONCE_VAR: NONCE})
+            self.assertEqual(code, rc)
+            self._assert_attested_last(out, rc)
+
+    def test_a_chosen_system_exit_is_attested(self):
+        for raised, rc in ((SystemExit(2), 2), (SystemExit(3), 3), (SystemExit(None), 0)):
+            def fn(raised=raised):
+                print("executor output")
+                raise raised
+            code, out = self._attest(fn, {X.EXIT_NONCE_VAR: NONCE})
+            self.assertEqual(code, rc)
+            self._assert_attested_last(out, rc)
+
+    def test_a_crash_is_never_attested(self):
+        for exc in (RuntimeError("boom"), KeyboardInterrupt()):
+            def fn(exc=exc):
+                raise exc
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(type(exc)):
+                X._attested_exit(fn, environ={X.EXIT_NONCE_VAR: NONCE})
+            self.assertNotIn("HERMES-EXIT", out.getvalue())
+
+    def test_a_bool_or_string_exit_is_not_attested(self):
+        for raised in (SystemExit(True), SystemExit("a message")):
+            def fn(raised=raised):
+                raise raised
+            code, out = self._attest(fn, {X.EXIT_NONCE_VAR: NONCE})
+            self.assertEqual(code, raised.code)
+            self.assertNotIn("HERMES-EXIT", out)
+
+    def test_no_valid_nonce_means_no_line(self):
+        for env in ({}, {X.EXIT_NONCE_VAR: ""}, {X.EXIT_NONCE_VAR: NONCE.upper()},
+                    {X.EXIT_NONCE_VAR: NONCE[:-1]}, {X.EXIT_NONCE_VAR: NONCE + "0"},
+                    {X.EXIT_NONCE_VAR: NONCE + "\n"}):
+            code, out = self._attest(lambda: 2, env)
+            self.assertEqual(code, 2)
+            self.assertNotIn("HERMES-EXIT", out, env)
+
+    def test_a_failing_stdout_is_not_attested(self):
+        class Broken(io.StringIO):
+            def write(self, s):
+                if "HERMES-EXIT" in s:
+                    raise BrokenPipeError(32, "Broken pipe")
+                return super().write(s)
+        out = Broken()
+        with contextlib.redirect_stdout(out), self.assertRaises(BrokenPipeError):
+            X._attested_exit(lambda: 2, environ={X.EXIT_NONCE_VAR: NONCE})
+        self.assertNotIn("HERMES-EXIT", out.getvalue())
+
+    def test_the_nonce_never_reaches_the_mutator(self):
+        env = dict(FULL_CRED, **{X.EXIT_NONCE_VAR: NONCE})
+        with mock.patch.dict(os.environ, env):
+            self.assertNotIn(X.EXIT_NONCE_VAR, X._child_env())
+
+    def test_control_the_child_env_probe_can_see_the_nonce(self):
+        """Firing control for the test above, in memory — never by editing the file."""
+        env = dict(FULL_CRED, **{X.EXIT_NONCE_VAR: NONCE})
+        widened = X._RUNTIME_ENV_KEYS + (X.EXIT_NONCE_VAR,)
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(X, "_RUNTIME_ENV_KEYS", widened):
+            self.assertIn(X.EXIT_NONCE_VAR, X._child_env())
+
+    def test_control_an_early_line_is_caught(self):
+        """Firing control: a variant that attests BEFORE main() finishes must fail the
+        'last line' assertion the tests above rely on."""
+        out = "HERMES-EXIT %s 2\nexecutor output\n" % NONCE
+        with self.assertRaises(AssertionError):
+            self._assert_attested_last(out, 2)
+
+    def test_control_a_finally_variant_would_attest_a_crash(self):
+        """Firing control: `finally: print(line)` attests a crash. Shows the crash test's
+        assertion discriminates."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                try:
+                    raise RuntimeError("boom")
+                finally:
+                    print("HERMES-EXIT %s 1" % NONCE)
+            except RuntimeError:
+                pass
+        with self.assertRaises(AssertionError):
+            self.assertNotIn("HERMES-EXIT", out.getvalue())
+
+    def test_the_cli_attests_its_usage_exits(self):
+        """The wire: the real __main__ goes through _attested_exit."""
+        env = dict(os.environ, **{X.EXIT_NONCE_VAR: NONCE})
+        for argv, rc in ((["--client", "acme-dental", "--changeset", "whatever",
+                           "--request", "not-a-uuid"], 1),
+                         ([], 2)):                                   # argparse: missing args
+            r = subprocess.run([sys.executable, APPLY] + argv, capture_output=True,
+                               text=True, env=env)
+            self.assertEqual(r.returncode, rc, r.stderr)
+            self._assert_attested_last(r.stdout, rc)
+
+    def test_the_cli_without_a_nonce_prints_no_line(self):
+        env = {k: v for k, v in os.environ.items() if k != X.EXIT_NONCE_VAR}
+        r = subprocess.run([sys.executable, APPLY], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("HERMES-EXIT", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
