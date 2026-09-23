@@ -238,12 +238,13 @@ without it, the broker still could not create its temp file or lock sidecar insi
 alone was necessary but not sufficient. `approve-changeset.py` now refuses non-root on Linux
 with a message naming `sudo`.
 
-**Proven:** Tier 2 on Linux CI reproduces the recorded failure — root approves, the broker
-reserves — with firing controls for both failure sites this fix closes: the root-owned `0600`
-sidecar that broke `reserve_approval` originally, and the root-owned `02755` per-client
-approvals directory that broke it again once the sidecar alone was fixed (R2). A second round
-trip shows the broker writing a run record that a member of group `hermes` can read, with the
+**How it is proven (tests written, not yet executed on CI):** Tier 2 is written to reproduce the
+recorded failure — root approves, the broker reserves — with a firing control that forces the old
+root-owned `0600` sidecar, and a second control that forces a root-owned `02755` approvals
+directory, each failing at a different site (the original defect and R2's). A second round trip is
+written to show the broker writing a run record that a member of group `hermes` can read, with the
 gateway (uid 10000) unable to write there, and a `0770` group-writable control.
+**CI RESULT: <fill in after this branch's CI run — run id, `executed N, skipped 0`>.**
 
 **Deliberate loss:** applied changes no longer appear in the vault's `timeline.md`, which
 `run-trend-audit.sh` feeds the analyst as client history. The audit path still writes that file;
@@ -253,8 +254,13 @@ design if the analyst is shown to need it.
 **Still open:** F14 (a Compose failure reported as "nothing was mutated") and the §6 hardening
 gates, including `UMask=0077`, which this fix makes safe to land but does not land.
 
-**Nothing above has run on the VPS.** Everything is repo + CI (Linux CI for Tier 2's real
-uid/gid proof). The box confirmation is a separate, later step.
+**Two gaps remain, both unproven as of this writing.** Nothing has run on the VPS. And CI has not
+yet run for this branch — Tier 2's real-uid/gid proof does not exist yet, only the tests that will
+produce it. The only executed evidence right now is local, on darwin, where Tier 2 cannot exercise
+real uids and correctly reports it: `infra/hermes-agent/bin/run-bin-tests.sh` — 31/31 suites passed,
+including `changeset_lib.test.py` at 114/114 — and `deploy/layout-integration.test.py` (Tier 2)
+prints `layout-integration: SKIPPED — not Linux` rather than a pass. The box confirmation and the
+CI run are both separate, later steps.
 
 ### F14: a Compose failure is reported as "refused, nothing was mutated" (recorded, not fixed)
 
