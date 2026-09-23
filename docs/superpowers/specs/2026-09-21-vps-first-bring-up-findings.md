@@ -253,8 +253,8 @@ group inheritance at all (BSD vs System V), which is the mechanism the records d
 governance is unaffected (the fsynced audit log is the authoritative record). Revisit as its own
 design if the analyst is shown to need it.
 
-**Still open:** the §6 hardening gates, including `UMask=0077`, which this fix makes safe to
-land but does not land. F14 (a Compose failure reported as "nothing was mutated") is fixed
+**Still open:** audit-log truncation (§6 part B). The framing hardening and `UMask=0077` (§6
+part A) landed in PR #48. F14 (a Compose failure reported as "nothing was mutated") is fixed
 (PR #46).
 
 **Applied to the box, 2026-09-23.** Pulled `da2a0ae..9df03d4` (fast-forward, no mode conflict).

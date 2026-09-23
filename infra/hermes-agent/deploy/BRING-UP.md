@@ -446,13 +446,32 @@ it. No unit files change, so nothing restarts on its own account.
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
-**Still required before the kill switch can be created:** the §6 hardening gates. (F14 —
+**Still required before the kill switch can be created:** audit-log truncation (§6 part B). (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
 now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
 hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —
 until it is restarted, a wrapper 4 is recorded as `failed_unknown_exit` instead, which is
 still fail-closed but not the intended label. No unit change, no image rebuild; the kill
 switch stays absent.)
+
+**After pulling the framing hardening (§6 part A), re-install both units** — they are copied into
+`/etc/systemd/system/`, so a pull alone does not apply `UMask=0077`:
+
+```bash
+sudo cp /opt/projects/claude_code/infra/hermes-agent/deploy/hermes-docker-proxy.service /etc/systemd/system/
+sudo cp /opt/projects/claude_code/infra/hermes-agent/deploy/hermes-broker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it
+sudo systemctl restart hermes-broker
+systemctl show -p UMask hermes-docker-proxy hermes-broker          # UMask=0077, both
+sudo stat -c '%U:%G %a %n' /run/hermes/docker-proxy.sock           # hermes-docker-proxy:hermes-rail 660
+systemctl is-active hermes-docker-proxy hermes-broker              # active, active
+systemctl show -p NRestarts hermes-docker-proxy hermes-broker      # not climbing
+```
+
+Then re-run Phase 6's pasted create: `rc=2`, `mutation is disabled`, and `ALLOW POST
+/v…/containers/create` in `journalctl -u hermes-docker-proxy`. A `DENY … (malformed …)` there is
+a finding — identify the client and the header before touching the grammar.
 
 ---
 
