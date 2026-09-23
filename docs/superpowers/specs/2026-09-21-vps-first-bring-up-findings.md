@@ -358,8 +358,8 @@ the store is `root:hermes 2750` and `hermesops` is by design only in `sudo` and 
 1. F6: a deploy-key clone of the ads repo, after the security review (the box's ads repo is still a placeholder).
 2. F3: a `--check` for usable sudo, with a firing control.
 3. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
-4. F14: Compose failures reported as "nothing was mutated" — fixed (PR #46). Gates the kill
-   switch. The rehearsal gate no longer needs F12 (fixed, PR #42) — its remaining
+4. F14: Compose failures reported as "nothing was mutated" — fixed (PR #46); no longer gates
+   the kill switch. The rehearsal gate no longer needs F12 (fixed, PR #42) — its remaining
    prerequisite is `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
