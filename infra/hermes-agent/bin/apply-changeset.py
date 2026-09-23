@@ -53,8 +53,12 @@ _RUNTIME_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ
 
 # F14 (spec 2026-09-23 §3.1). The wrapper's per-run nonce. The executor echoes it on its
 # attested exit line; the wrapper trusts 0/1/2/3 only when that line matches. It must NEVER
-# be added to _RUNTIME_ENV_KEYS: _child_env() is an allow-list precisely so the mutator —
-# whose stderr is echoed into _refuse messages — cannot learn the nonce and forge the line.
+# be added to _RUNTIME_ENV_KEYS: _child_env() is an allow-list, which keeps the nonce out of
+# the mutator's environment so text the mutator echoes (its stderr, into _refuse messages)
+# cannot carry it and forge the line. The mutator runs as the same user in the same
+# container and could still read the parent's /proc environ directly — this allow-list is
+# not what stops that — but it already holds the write credential, so reading the nonce
+# that way would not be a new capability.
 EXIT_NONCE_VAR = "HERMES_EXIT_NONCE"
 _EXIT_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 

@@ -113,9 +113,12 @@ docker compose --env-file /dev/null -f "$here/docker-compose.yml" run --rm --no-
   -e GOOGLE_ADS_CREDENTIAL_ROLE -e HERMES_EXIT_NONCE \
   -T ads-mutator "$@" > "$tmp_out" 2>&1 || rc=$?
 # F14: from here on NOTHING may end this script except the single `exit "$final"` at the
-# bottom. Under `set -e` a failing `cat` (or grep, or anything) would exit with ITS status
-# — 1, which the broker reads as "nothing was mutated" — about a run that may have applied.
-set +e  # F14
+# bottom. -e and -u are both off from here: under `set -e` a failing `cat` (or grep, or
+# anything) would exit with ITS status — 1, which the broker reads as "nothing was
+# mutated" — about a run that may have applied; under `set -u` an unset-variable read
+# would do the same with dash's own status (2). `final` is always assigned before the
+# `exit "$final"` at the bottom, so nothing else needs to decide the script's status.
+set +eu  # F14
 cat "$tmp_out"
 # Trust Compose's status only when the executor attested it: exactly one line
 # `HERMES-EXIT <nonce> <rc>` for THIS run's nonce, and no other line for this nonce.
@@ -140,11 +143,10 @@ if [ "$final" -eq 4 ]; then
   echo "!!! ================================================================" >&2
   echo "" >&2
 fi
-# The executor's status ($rc) is what the operator relies on — an exit-2 refusal is a
-# promise the client's account was not touched. persist-run-record.py failing for an
-# unrelated reason (e.g. it cannot write the vault file) must not override that promise
-# and, under `set -e`, a bare non-zero exit here would abort the script with persist's
-# status instead. So persist's status never becomes the script's status.
+# $final (the verified status — see F14 above) is what the operator relies on — an
+# exit-2 refusal is a promise the client's account was not touched. persist-run-record.py
+# failing for an unrelated reason (e.g. it cannot write the vault file) must not override
+# that promise. So persist's status never becomes the script's status.
 #
 # S1-M2: but it must not VANISH either, which `|| true` made it do. persist-run-record
 # exits 2 for a PersistRefused. That is not a routine I/O failure — but as of F12 it is
@@ -159,8 +161,9 @@ fi
 # middle of the executor's own output, with the exit status discarded entirely.
 #
 # `|| prc=$?` instead of `|| true` — the same pattern the executor invocation above
-# uses — so `set -e` still does not fire, $rc still decides the script's status, and a
-# non-zero persist gets an unmissable banner of its own.
+# uses — so a non-zero persist cannot itself end the script (both -e and -u are off by
+# now — see F14 above), $final still decides the script's status, and a non-zero
+# persist gets an unmissable banner of its own.
 # VAULT_ROOT and HERMES_GOVERNANCE_ROOT are exported by hostenv.sh above.
 prc=0
 python3 "$here/bin/persist-run-record.py" --client "$client" < "$tmp_out" > /dev/null || prc=$?

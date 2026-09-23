@@ -395,13 +395,31 @@ class TestAttestationFiringControls(Base):
         self.assertEqual(p.returncode, 2, "control did not fire:\n" + p.stderr)
 
     def test_control_set_e_after_compose_lets_cat_decide(self):
-        self._patch_wrapper("set +e  # F14", "set -e  # F14")
+        self._patch_wrapper("set +eu  # F14", "set -eu  # F14")
         cat = os.path.join(self.bin, "cat")
         with open(cat, "w") as f:
             f.write("#!/bin/sh\nexit 1\n")
         os.chmod(cat, 0o755)
         p = self._run(executor_rc=2)
         self.assertEqual(p.returncode, 1, "control did not fire:\n" + p.stderr)
+
+    def test_an_unset_variable_after_compose_cannot_decide_the_status(self):
+        """F14 review (I1). `set -u` staying on after Compose means an unset-variable
+        read there can end the script with dash's own status (2) instead of `$final` —
+        the same class of bug `set -e` posed for a failing `cat`. The fix is
+        `set +eu  # F14`, turning BOTH off from that point on."""
+        self._patch_wrapper("set +eu  # F14\n",
+                            "set +eu  # F14\n: \"$f14_unset_probe\"\n")
+        p = self._run(executor_rc=0)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_control_set_u_after_compose_lets_an_unset_read_decide(self):
+        """Discriminating control: undoing just the `u` half of the fix must make the
+        test above fail, or it would pass against a wrapper that never turned `-u` off."""
+        self._patch_wrapper("set +eu  # F14\n",
+                            "set +e  # F14\n: \"$f14_unset_probe\"\n")
+        p = self._run(executor_rc=0)
+        self.assertNotEqual(p.returncode, 0, "control did not fire:\n" + p.stderr)
 
 
 class TestTheF14ChainEndToEnd(Base):
