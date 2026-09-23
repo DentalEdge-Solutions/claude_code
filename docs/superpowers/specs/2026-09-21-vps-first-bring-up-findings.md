@@ -204,7 +204,7 @@ back under `data/`.
 - The browser controls were run after the fix. A wrong password was refused, and the correct
   one signed in.
 
-### F12: approvals and run records vs data/vaults — fixed (PR #<N>)
+### F12: approvals and run records vs data/vaults — fixed (PR #42)
 
 **Was open:** found while designing F10. `approve-changeset.py` reads the change-set from
 `data/vaults/` (uid 10000, `700`) and writes `approvals/<slug>/` plus a `0600` lock file that the
@@ -222,7 +222,7 @@ shows as the "RUN RECORD NOT PERSISTED" banner, with the executor's exit status 
 **Gates creating the kill switch, not Phase 6.** Installing the units approves nothing.
 F10's `approvals/` ownership (`hermes-broker:hermes 2750`) is compatible with any F12 fix.
 
-**Fix (PR #<N>).** Run records move to `<store>/records/<slug>/` — `hermes-broker:hermes 0o2750`
+**Fix (PR #42).** Run records move to `<store>/records/<slug>/` — `hermes-broker:hermes 0o2750`
 (setgid preserved: R1 — `0750` would have stripped it and left records unreadable to group
 `hermes` on Linux), files `0640` — so the mutation path never writes the vault. The writer
 refuses outright if `records/` itself is missing, naming `init-host-layout.py --apply`: the
@@ -238,13 +238,15 @@ without it, the broker still could not create its temp file or lock sidecar insi
 alone was necessary but not sufficient. `approve-changeset.py` now refuses non-root on Linux
 with a message naming `sudo`.
 
-**How it is proven (tests written, not yet executed on CI):** Tier 2 is written to reproduce the
-recorded failure — root approves, the broker reserves — with a firing control that forces the old
-root-owned `0600` sidecar, and a second control that forces a root-owned `02755` approvals
-directory, each failing at a different site (the original defect and R2's). A second round trip is
-written to show the broker writing a run record that a member of group `hermes` can read, with the
-gateway (uid 10000) unable to write there, and a `0770` group-writable control.
-**CI RESULT: <fill in after this branch's CI run — run id, `executed N, skipped 0`>.**
+**How it is proven (executed on Linux CI — see the result below):** Tier 2 reproduces the recorded
+failure and shows it fixed — root approves, the broker reserves — with a firing control that forces
+the old root-owned `0600` sidecar, and a second that forces a root-owned `02755` approvals
+directory, each failing at a different site (the original defect and R2's). A second round trip
+shows the broker writing a run record that a member of group `hermes` reads back, the gateway
+(uid 10000) refused with `Permission denied`, and a `0770` group-writable control proving that
+refusal comes from the mode. These ran with real uids and gids; darwin cannot exercise setgid
+group inheritance at all (BSD vs System V), which is the mechanism the records design rests on.
+**CI RESULT (PR #42, run 35890456609, 2026-09-23): `layout-integration: executed 30, skipped 0, failures 0, errors 0`** — 22 before F12, so all eight new Tier 2 tests ran and passed with real uids and gids. `bind-agreement: executed 6, skipped 0` stayed green alongside them.
 
 **Deliberate loss:** applied changes no longer appear in the vault's `timeline.md`, which
 `run-trend-audit.sh` feeds the analyst as client history. The audit path still writes that file;
@@ -254,13 +256,7 @@ design if the analyst is shown to need it.
 **Still open:** F14 (a Compose failure reported as "nothing was mutated") and the §6 hardening
 gates, including `UMask=0077`, which this fix makes safe to land but does not land.
 
-**Two gaps remain, both unproven as of this writing.** Nothing has run on the VPS. And CI has not
-yet run for this branch — Tier 2's real-uid/gid proof does not exist yet, only the tests that will
-produce it. The only executed evidence right now is local, on darwin, where Tier 2 cannot exercise
-real uids and correctly reports it: `infra/hermes-agent/bin/run-bin-tests.sh` — 31/31 suites passed,
-including `changeset_lib.test.py` at 114/114 — and `deploy/layout-integration.test.py` (Tier 2)
-prints `layout-integration: SKIPPED — not Linux` rather than a pass. The box confirmation and the
-CI run are both separate, later steps.
+**One gap remains.** Nothing has run on the VPS: no `init-host-layout.py --apply`, no `records/` directory, no approval written by the new code there. CI has now run (see the result above) and proves the Linux uid/gid behaviour darwin cannot; the box confirmation is still outstanding.
 
 ### F14: a Compose failure is reported as "refused, nothing was mutated" (recorded, not fixed)
 
@@ -330,6 +326,6 @@ host-side tools.
 2. F3: a `--check` for usable sudo, with a firing control.
 3. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
 4. F14: Compose failures reported as "nothing was mutated". Gates the kill switch. The
-   rehearsal gate no longer needs F12 (fixed, PR #<N>) — its remaining prerequisite is
+   rehearsal gate no longer needs F12 (fixed, PR #42) — its remaining prerequisite is
    `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
