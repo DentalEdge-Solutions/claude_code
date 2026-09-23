@@ -16,6 +16,39 @@ A = _load("approve_changeset", "approve-changeset.py")
 NOW = datetime.datetime(2026, 8, 12, 10, 15, 0, tzinfo=datetime.timezone.utc)
 CID = "20260824-101500-abcdef01"
 
+_REAL_GETEUID = os.geteuid
+
+
+def _fake_root_for_the_guard_only():
+    """os.geteuid() replacement that reports 0 ONLY to approve-changeset.py's own F12
+    (Task 4) root-requirement guard, and the REAL euid to every other caller —
+    including changeset_lib._apply_owner_mode, which makes its OWN root decision about
+    whether to attempt a chown.
+
+    CI (PR #42, run 35889278191) is the first Linux run of this suite. It is genuinely
+    non-root, and the guard fired for every approve-behaviour test that reaches
+    main() — 13 failed outright, and others (e.g. a bare `returncode == 2` check on a
+    bad-operator call) PASSED anyway, for the wrong reason: bouncing off the guard
+    looks identical to a real refusal if nothing checks what refused it. Those tests
+    were never exercising approve logic on Linux at all.
+
+    A blanket fake would trade that hole for a different one: on a genuinely non-root
+    Linux runner, faking root globally would send _apply_owner_mode down its
+    ownership-setting branch too, which has no real privilege to succeed there —
+    turning every approve-SUCCESS test into an unrelated EPERM/RuntimeError failure
+    instead of exercising approve's actual logic. Scoping by the CALLER's module keeps
+    the fake exactly where the Task 4 guard lives, and leaves _apply_owner_mode's own
+    root decision genuine — the same technique _deny_fchmod_inside_changeset_lib below
+    uses to scope a different fault to changeset_lib specifically.
+
+    TestRootRequirement does not use this: it patches os.geteuid itself, per test, to
+    prove the guard exists. This fake exists for every OTHER test, which is not about
+    the guard and must reach the same code on Linux as it does on darwin.
+    """
+    if sys._getframe(1).f_globals.get("__name__") == "approve_changeset":
+        return 0
+    return _REAL_GETEUID()
+
 REG = """version: 1
 
 projects:
@@ -55,9 +88,38 @@ class T(unittest.TestCase):
                                     "match_type": "PHRASE"}]}, f)
         self.cs = P.propose("acme-dental", src, NOW, registry=self.clients, projects=self.projects)
         self.vault = os.path.join(self.tmp, "acme-dental")
+        # F12 CI fix: every test below is about approve's OWN logic, not the Task 4
+        # root guard, so it must reach that logic on Linux exactly as it does on
+        # darwin. See _fake_root_for_the_guard_only's docstring for why this is scoped
+        # rather than a blanket fake. TestRootRequirement (below, not a subclass of T)
+        # is deliberately untouched by this.
+        patcher = mock.patch.object(A.os, "geteuid", new=_fake_root_for_the_guard_only)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _digest(self):
         return C.file_digest(C.changeset_path(self.vault, self.cs["changeset_id"]))
+
+    def _run_cli(self, *extra, operator="erick"):
+        """Runs approve-changeset.py's main() IN-PROCESS with the standard
+        --client/--changeset/--operator/--registry/--projects args plus EXTRA,
+        returning a subprocess.CompletedProcess-alike so every assertion against
+        .returncode/.stdout/.stderr below keeps working unchanged.
+
+        This used to shell out via subprocess.run. A real subprocess is a genuinely
+        separate OS process, so its os.geteuid() reflects the actual calling user —
+        no in-process mock (including the one this class's setUp installs) can fake
+        root for it. That is exactly why the Task 4 guard bounced every one of these
+        on the non-root Linux CI runner: see _fake_root_for_the_guard_only above.
+        Running in-process instead lets that fake reach the real call site.
+        """
+        argv = ["--client", "acme-dental", "--changeset", self.cs["changeset_id"],
+                "--operator", operator, "--registry", self.clients,
+                "--projects", self.projects, *extra]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = A.main(argv)
+        return subprocess.CompletedProcess(argv, rc, out.getvalue(), err.getvalue())
 
     def test_approval_records_digest_and_expiry(self):
         rec = A.approve("acme-dental", self.cs["changeset_id"], "erick", NOW,
@@ -106,24 +168,19 @@ class T(unittest.TestCase):
                       expect_sha256=self._digest())
 
     def test_cli_success_exit0(self):
-        out = subprocess.run(
-            [sys.executable, os.path.join(HERE, "approve-changeset.py"),
-             "--client", "acme-dental", "--changeset", self.cs["changeset_id"],
-             "--operator", "erick", "--registry", self.clients, "--projects", self.projects,
-             "--expect-sha256", self._digest()],
-            capture_output=True, text=True, env={**os.environ})
-        self.assertEqual(out.returncode, 0)
+        out = self._run_cli("--expect-sha256", self._digest())
+        self.assertEqual(out.returncode, 0, out.stderr)
 
     def test_cli_bad_operator_exit2(self):
         # Supplies a matching --expect-sha256 so exit 2 here is provably caused by the
-        # bad operator, not by the (now default) missing-confirmation refusal.
-        out = subprocess.run(
-            [sys.executable, os.path.join(HERE, "approve-changeset.py"),
-             "--client", "acme-dental", "--changeset", self.cs["changeset_id"],
-             "--operator", "a b", "--registry", self.clients, "--projects", self.projects,
-             "--expect-sha256", self._digest()],
-            capture_output=True, text=True, env={**os.environ})
+        # bad operator, not by the (now default) missing-confirmation refusal. Also
+        # pins the STDERR content, not just the return code: the Task 4 guard also
+        # returns 2, and rc alone can't tell the two apart — this is exactly the
+        # coincidence that let this test pass on non-root Linux CI while never
+        # actually reaching the operator check (F12 CI fix).
+        out = self._run_cli("--expect-sha256", self._digest(), operator="a b")
         self.assertEqual(out.returncode, 2)
+        self.assertIn("invalid operator", out.stderr)
 
 class TestOperatorCanSeeWhatIsBound(T):
     """I3 (final whole-branch review). The snapshot closes approve -> apply, not
@@ -133,12 +190,9 @@ class TestOperatorCanSeeWhatIsBound(T):
     decoration."""
 
     def _cli(self, *extra):
-        return subprocess.run(
-            [sys.executable, os.path.join(HERE, "approve-changeset.py"),
-             "--client", "acme-dental", "--changeset", self.cs["changeset_id"],
-             "--operator", "erick", "--registry", self.clients,
-             "--projects", self.projects, *extra],
-            capture_output=True, text=True, env={**os.environ})
+        # F12 CI fix: routes through T._run_cli (in-process, guard-faked) instead of
+        # subprocess.run — see _fake_root_for_the_guard_only's docstring.
+        return self._run_cli(*extra)
 
     def _digest(self):
         return C.file_digest(C.changeset_path(self.vault, self.cs["changeset_id"]))
@@ -199,12 +253,9 @@ class TestExpectShaIsRequired(T):
     docstring and ExpectShaRequired's docstring in approve-changeset.py."""
 
     def _cli(self, *extra):
-        return subprocess.run(
-            [sys.executable, os.path.join(HERE, "approve-changeset.py"),
-             "--client", "acme-dental", "--changeset", self.cs["changeset_id"],
-             "--operator", "erick", "--registry", self.clients,
-             "--projects", self.projects, *extra],
-            capture_output=True, text=True, env={**os.environ})
+        # F12 CI fix: routes through T._run_cli (in-process, guard-faked) instead of
+        # subprocess.run — see _fake_root_for_the_guard_only's docstring.
+        return self._run_cli(*extra)
 
     def test_approving_without_expect_sha256_refuses_and_prints_the_digest(self):
         out = self._cli()
