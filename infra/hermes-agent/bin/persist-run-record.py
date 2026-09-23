@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""CLI: read executor stdout on stdin, persist the run record into the client vault."""
+"""CLI: read executor stdout on stdin, persist the run record into the governance
+store's records/ tree (F12 — no longer the client vault; see
+persist_run_record_shim's module docstring)."""
 import argparse, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import persist_run_record_shim as P
+import governance_lib
 import vault_lib
 
 
@@ -16,8 +19,8 @@ def main(argv=None):
     if res is None:
         return 0                    # a refusal emits no result line; that is not an error here
     try:
-        rec = vault_lib.resolve(args.client)
-        P.persist(rec["vault_path"], res)
+        rec = vault_lib.resolve(args.client)      # still refuses an unregistered slug
+        P.persist(governance_lib.records_dir(rec["slug"]), res)
     # NotImplementedError (S1-M1): this is what Python raises when a dir_fd argument
     # cannot be honoured, and persist() is built entirely out of dir_fd calls. The
     # shim's import-time guard should make it unreachable, but "unreachable" is what

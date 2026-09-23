@@ -117,9 +117,13 @@ class Base(unittest.TestCase):
         # The COMPLETE skeleton. The pre-flight stats every one of these and refuses the
         # whole run if any is missing; creating only registry/ made this fixture pass on
         # darwin (pre-flight silent) and fail on Linux (pre-flight live). See the platform
-        # gate above.
+        # gate above. "records" is NOT one of these — the pre-flight deliberately never
+        # declares it (spec 2026-09-23 §2.5) — but persist-run-record.py still needs
+        # somewhere to write, so its destination is precomputed here (F12: the run
+        # record now lands in the governance store, not the vault above).
         for _d in ("approvals", "control", "registry", "log", "seen"):
             os.makedirs(os.path.join(self.gov, _d), exist_ok=True)
+        self.records = governance_lib.records_dir(SLUG, root=self.gov)
         reg = governance_lib.clients_registry_path(self.gov)
         os.makedirs(os.path.dirname(reg), exist_ok=True)
         with open(reg, "w") as f:
@@ -151,12 +155,14 @@ class Base(unittest.TestCase):
             capture_output=True, text=True, env=env, timeout=120)
         return p
 
-    def _poison_the_vault(self):
+    def _poison_the_records_dir(self):
         """Make persist refuse for the reason that matters: a timeline symlinked out
-        of the vault. This is the containment refusal, not a generic I/O error."""
+        of the records directory (F12: no longer the vault). This is the containment
+        refusal, not a generic I/O error."""
         outside = os.path.join(self.tmp, "outside.md")
         open(outside, "w").close()
-        os.symlink(outside, os.path.join(self.vault, "timeline.md"))
+        os.makedirs(self.records, exist_ok=True)
+        os.symlink(outside, os.path.join(self.records, "timeline.md"))
 
 
 class TestControlsFirst(Base):
@@ -170,7 +176,7 @@ class TestControlsFirst(Base):
                          "the harness wrote into the REAL vault tree")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("HERMES-RESULT-JSON", p.stdout)
-        self.assertTrue(os.path.exists(os.path.join(self.vault, "timeline.md")),
+        self.assertTrue(os.path.exists(os.path.join(self.records, "timeline.md")),
                         "persist did not run at all — the fixture is not exercising it")
         self.assertNotIn("RUN RECORD NOT PERSISTED", p.stderr)
 
@@ -184,7 +190,7 @@ class TestControlsFirst(Base):
 
 class TestPersistRefusalIsLoud(Base):
     def test_a_containment_refusal_is_announced_unmissably(self):
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         p = self._run(executor_rc=0)
         self.assertIn("RUN RECORD NOT PERSISTED", p.stderr)
         self.assertIn("CONTAINMENT REFUSAL", p.stderr)
@@ -197,17 +203,17 @@ class TestPersistRefusalIsLoud(Base):
         persist failure must be loud but must NEVER become the script's status: exit 0
         here still means the executor succeeded. A fix that simply propagated persist's
         status would pass the test above and fail this one."""
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         self.assertEqual(self._run(executor_rc=0).returncode, 0)
 
     def test_it_does_not_mask_a_real_executor_failure_either(self):
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         self.assertEqual(self._run(executor_rc=3).returncode, 3)
 
     def test_the_banner_names_the_executor_status_it_is_not_overriding(self):
         """The banner exists to be read next to the exit code. If it did not state
         which status still stands, it would read as though the run itself had failed."""
-        self._poison_the_vault()
+        self._poison_the_records_dir()
         p = self._run(executor_rc=3)
         self.assertIn("status (3) is UNCHANGED", p.stderr)
 

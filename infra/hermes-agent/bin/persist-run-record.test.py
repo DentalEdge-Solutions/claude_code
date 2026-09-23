@@ -1,10 +1,9 @@
-import contextlib, importlib.util, inspect, io, json, os, shutil, sys, tempfile, unittest
+import contextlib, importlib.util, inspect, io, json, os, shutil, stat, sys, tempfile, unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import persist_run_record_shim as P
-import changeset_lib as C
 import governance_lib
 
 
@@ -39,76 +38,91 @@ class TestParse(unittest.TestCase):
         self.assertEqual(P.parse_result(text), {"n": 2})
 
 
-class _VaultBase(unittest.TestCase):
-    """A vault laid out the way production lays it out: <VAULT_ROOT>/<slug>.
+class _RecordsBase(unittest.TestCase):
+    """The per-client records directory laid out the way production lays it out:
+    <GOVERNANCE_ROOT>/records/<slug> (F12 — this used to be <VAULT_ROOT>/<slug>).
 
     realpath() on the tempdir because macOS puts /var behind a symlink to /private/var;
     persist() resolves its destinations, so a test comparing raw paths against resolved
     ones would fail for a reason that has nothing to do with what it is testing.
     """
     def setUp(self):
-        self.root = os.path.realpath(tempfile.mkdtemp(prefix="vaultroot-"))
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="governance-"))
         self.addCleanup(shutil.rmtree, self.root, True)
-        self.vault = os.path.join(self.root, "acme-dental")
-        os.makedirs(self.vault)
-        self._old_vault_root = os.environ.get("VAULT_ROOT")
-        os.environ["VAULT_ROOT"] = self.root
-        self.addCleanup(self._restore_vault_root)
-        # Stands in for the host-owned governance store: a tree OUTSIDE the vault that
-        # the persist step must never be able to write, however the vault is shaped.
-        self.outside = os.path.realpath(tempfile.mkdtemp(prefix="governance-"))
+        self.records = governance_lib.records_dir("acme-dental", root=self.root)
+        os.makedirs(self.records)
+        self._old_gov_root = os.environ.get("HERMES_GOVERNANCE_ROOT")
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
+        self.addCleanup(self._restore_gov_root)
+        # Stands in for another tree inside the governance store — control/ (the kill
+        # switch), log/ (the audit log) — that the persist step must never be able to
+        # reach, however records/<slug> is shaped.
+        self.outside = os.path.realpath(tempfile.mkdtemp(prefix="governance-outside-"))
         self.addCleanup(shutil.rmtree, self.outside, True)
 
-    def _restore_vault_root(self):
-        if self._old_vault_root is None:
-            os.environ.pop("VAULT_ROOT", None)
+    def _restore_gov_root(self):
+        if self._old_gov_root is None:
+            os.environ.pop("HERMES_GOVERNANCE_ROOT", None)
         else:
-            os.environ["VAULT_ROOT"] = self._old_vault_root
+            os.environ["HERMES_GOVERNANCE_ROOT"] = self._old_gov_root
 
 
-class TestPersist(_VaultBase):
+class TestPersist(_RecordsBase):
 
     def test_writes_result_json_and_appends_timeline(self):
         res = {"changeset_id": "20260812-101500-abcd1234", "applied": 2,
                "status": "ok", "finished_at": "2026-08-12T10:20:00Z"}
-        path = P.persist(self.vault, res)
+        path = P.persist(self.records, res)
         with open(path) as f:
             self.assertEqual(json.load(f)["applied"], 2)
-        with open(os.path.join(self.vault, "timeline.md")) as f:
+        with open(os.path.join(self.records, "timeline.md")) as f:
             self.assertIn("20260812-101500-abcd1234", f.read())
 
-    def test_persist_writes_to_the_canonical_result_path(self):
-        """R15: changeset_lib.result_path is the single definition of where a result
-        file lives (<vault>/changes/<cid>.result.json) — persist() must obtain the
-        destination from it rather than composing a second, divergent convention (a
-        prior version of this function wrote to <vault>/<cid>.result.json, the vault
-        ROOT, which this test would catch: that path is not equal to result_path()'s,
-        so the assertEqual below fails against it)."""
+    def test_persist_writes_to_the_canonical_record_path(self):
+        """F12: governance_lib.record_path is the single definition of where a result
+        file lives (<records>/<slug>/<cid>.result.json, no "changes/" component any
+        more) — persist() must obtain the destination's basename from it rather than
+        composing a second, divergent convention."""
         res = {"changeset_id": "20260812-101500-abcd1234", "applied": 2,
                "status": "ok", "finished_at": "2026-08-12T10:20:00Z"}
-        path = P.persist(self.vault, res)
-        self.assertEqual(path, C.result_path(self.vault, res["changeset_id"]))
-        # And the canonical path is genuinely inside changes/, not the vault root.
-        self.assertEqual(os.path.dirname(path), os.path.join(self.vault, "changes"))
+        path = P.persist(self.records, res)
+        self.assertEqual(path, governance_lib.record_path(
+            "acme-dental", res["changeset_id"], root=self.root))
+        # And the canonical path is directly inside the per-client records directory,
+        # not a nested "changes" subdirectory — that layer no longer exists.
+        self.assertEqual(os.path.dirname(path), self.records)
 
     def test_timeline_appends_rather_than_truncates(self):
         res = {"changeset_id": "20260812-101500-abcd1234", "applied": 1,
                "status": "ok", "finished_at": "2026-08-12T10:20:00Z"}
-        P.persist(self.vault, res)
-        P.persist(self.vault, dict(res, changeset_id="20260812-111500-beef5678"))
-        with open(os.path.join(self.vault, "timeline.md")) as f:
+        P.persist(self.records, res)
+        P.persist(self.records, dict(res, changeset_id="20260812-111500-beef5678"))
+        with open(os.path.join(self.records, "timeline.md")) as f:
             body = f.read()
         self.assertIn("abcd1234", body)
         self.assertIn("beef5678", body)
 
+    def test_the_record_and_timeline_are_group_readable_not_umask_dependent(self):
+        """F12: UMask=0077 must not make records unreadable. The modes are explicit."""
+        old = os.umask(0o077)
+        try:
+            path = P.persist(self.records, RESULT)
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o640)
+        timeline = os.path.join(self.records, "timeline.md")
+        self.assertEqual(stat.S_IMODE(os.stat(timeline).st_mode), 0o640)
 
-class TestSymlinkEscape(_VaultBase):
-    """C1 (final whole-branch review). persist() runs HOST-SIDE and writes into
-    data/vaults — the one tree Hermes has read-write. Every destination it opens is
-    therefore attacker-shaped, and a plain open() follows a symlink out of the vault
-    into anything the host user can reach: the governance store's kill switch (create
-    it => mutation globally enabled) or the audit log (truncate it => the cap
-    consumption the guards count is erased).
+
+class TestSymlinkEscape(_RecordsBase):
+    """C1 (final whole-branch review, F12-updated). persist() runs HOST-SIDE and writes
+    into records/<slug>/ in the governance store. That tree is not mounted into any
+    container and not writable by the gateway, so the symlink-planting attack this
+    class was originally written against (2026-08-19, against the client vault) is no
+    longer reachable through the gateway or the mutation-path client vault — see
+    persist_run_record_shim's module docstring. The containment stays anyway, as
+    defence in depth, so these refusals remain load-bearing regression coverage for a
+    future writer or a mis-set mode, not coverage of a currently-reachable attack.
 
     The refusals below are only evidence because TestPersistControl proves the
     ordinary, non-symlinked write still succeeds against the same code.
@@ -119,33 +133,32 @@ class TestSymlinkEscape(_VaultBase):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         return p
 
-    def test_symlinked_timeline_pointing_outside_the_vault_is_refused(self):
-        """The demonstrated attack: timeline.md is appended with O_APPEND|O_CREAT, so
-        following it CREATES the kill switch — which is the whole enable-mutation
-        primitive, since kill_switch_ok() only asks whether the file exists."""
+    def test_symlinked_timeline_pointing_outside_the_records_dir_is_refused(self):
+        """timeline.md is appended with O_APPEND|O_CREAT, so following a planted
+        symlink there would CREATE whatever it points at — historically the kill
+        switch, since kill_switch_ok() only asks whether the file exists."""
         target = self._kill_switch()
         self.assertFalse(os.path.exists(target))
-        os.symlink(target, os.path.join(self.vault, "timeline.md"))
+        os.symlink(target, os.path.join(self.records, "timeline.md"))
         with self.assertRaises(ValueError):
-            P.persist(self.vault, RESULT)
+            P.persist(self.records, RESULT)
         self.assertFalse(os.path.exists(target),
-                         "the symlink target was created — the kill switch is writable "
-                         "from the vault")
+                         "the symlink target was created — records/ is writable "
+                         "somewhere it should not be")
 
     def test_symlinked_result_tmp_is_refused(self):
-        """The second demonstrated attack: the .tmp write is O_TRUNC, so following it
-        truncates whatever it points at — here the audit log, whose records are the
-        reversibility record and the daily-cap count."""
+        """The .tmp write is O_TRUNC, so following a planted symlink there would
+        truncate whatever it points at — historically the audit log, whose records
+        are the reversibility record and the daily-cap count."""
         target = os.path.join(self.outside, "log", "acme-dental.jsonl")
         os.makedirs(os.path.dirname(target))
         original = b'{"status":"applied","ts":"2026-08-12T10:00:00Z"}\n' * 3
         with open(target, "wb") as f:
             f.write(original)
-        changes = os.path.join(self.vault, "changes")
-        os.makedirs(changes)
-        os.symlink(target, C.result_path(self.vault, RESULT["changeset_id"]) + ".tmp")
+        os.symlink(target, governance_lib.record_path(
+            "acme-dental", RESULT["changeset_id"], root=self.root) + ".tmp")
         with self.assertRaises(ValueError):
-            P.persist(self.vault, RESULT)
+            P.persist(self.records, RESULT)
         with open(target, "rb") as f:
             self.assertEqual(f.read(), original, "the audit log was rewritten through "
                                                  "the .tmp symlink")
@@ -156,34 +169,23 @@ class TestSymlinkEscape(_VaultBase):
         target = os.path.join(self.outside, "clients.json")
         with open(target, "w") as f:
             f.write("{}")
-        changes = os.path.join(self.vault, "changes")
-        os.makedirs(changes)
-        os.symlink(target, C.result_path(self.vault, RESULT["changeset_id"]))
+        os.symlink(target, governance_lib.record_path(
+            "acme-dental", RESULT["changeset_id"], root=self.root))
         with self.assertRaises(ValueError):
-            P.persist(self.vault, RESULT)
+            P.persist(self.records, RESULT)
         with open(target) as f:
             self.assertEqual(f.read(), "{}")
 
-    def test_symlinked_changes_directory_is_refused(self):
-        """makedirs(exist_ok=True) succeeds on a symlink-to-directory, so the
-        containment check has to cover the intermediate component too."""
-        target = os.path.join(self.outside, "log")
-        os.makedirs(target)
-        os.symlink(target, os.path.join(self.vault, "changes"))
+    def test_records_dir_that_is_itself_a_symlink_is_refused(self):
+        records = os.path.join(os.path.dirname(self.records), "other-clinic")
+        os.symlink(self.outside, records)
         with self.assertRaises(ValueError):
-            P.persist(self.vault, RESULT)
-        self.assertEqual(os.listdir(target), [])
-
-    def test_vault_that_is_itself_a_symlink_is_refused(self):
-        vault = os.path.join(self.root, "other-clinic")
-        os.symlink(self.outside, vault)
-        with self.assertRaises(ValueError):
-            P.persist(vault, RESULT)
+            P.persist(records, RESULT)
         self.assertEqual(sorted(os.listdir(self.outside)), [])
 
-    def test_vault_outside_the_configured_root_is_refused(self):
-        """Containment is checked against the resolved VAULT_ROOT, not merely against
-        whatever directory the caller happened to pass."""
+    def test_records_dir_outside_the_configured_root_is_refused(self):
+        """Containment is checked against the resolved records root, not merely
+        against whatever directory the caller happened to pass."""
         stray = os.path.join(self.outside, "acme-dental")
         os.makedirs(stray)
         with self.assertRaises(ValueError):
@@ -191,39 +193,45 @@ class TestSymlinkEscape(_VaultBase):
         self.assertEqual(os.listdir(stray), [])
 
     def test_a_directory_where_timeline_belongs_is_refused_not_crashed(self):
-        os.mkdir(os.path.join(self.vault, "timeline.md"))
+        os.mkdir(os.path.join(self.records, "timeline.md"))
         with self.assertRaises(ValueError):
-            P.persist(self.vault, RESULT)
+            P.persist(self.records, RESULT)
 
 
-class TestPersistControl(_VaultBase):
+class TestPersistControl(_RecordsBase):
     """The control the refusals above depend on: with nothing planted, the same
     persist() call must still write both artifacts and touch nothing outside."""
 
-    def test_ordinary_persist_succeeds_and_writes_only_inside_the_vault(self):
+    def test_ordinary_persist_succeeds_and_writes_only_inside_the_records_dir(self):
         before = sorted(os.listdir(self.outside))
-        path = P.persist(self.vault, RESULT)
+        path = P.persist(self.records, RESULT)
         with open(path) as f:
             self.assertEqual(json.load(f)["applied"], 2)
-        with open(os.path.join(self.vault, "timeline.md")) as f:
+        with open(os.path.join(self.records, "timeline.md")) as f:
             self.assertIn(RESULT["changeset_id"], f.read())
         self.assertEqual(sorted(os.listdir(self.outside)), before)
 
 
-class TestMain(_VaultBase):
-    """Deferred minor #11: persist-run-record.py's main() had no automated cover."""
+class TestMain(unittest.TestCase):
+    """Deferred minor #11: persist-run-record.py's main() had no automated cover.
+
+    F12: persist now writes into the governance store's records/ tree, resolved via
+    HERMES_GOVERNANCE_ROOT — the vault is no longer involved in this step at all.
+    """
 
     def setUp(self):
-        super().setUp()
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="governance-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
         self._old_gov = os.environ.get("HERMES_GOVERNANCE_ROOT")
-        os.environ["HERMES_GOVERNANCE_ROOT"] = self.outside
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.root
         self.addCleanup(self._restore_gov)
-        reg = governance_lib.clients_registry_path(self.outside)
+        reg = governance_lib.clients_registry_path(self.root)
         os.makedirs(os.path.dirname(reg), exist_ok=True)
         with open(reg, "w") as f:
             json.dump({"clients": {"acme-dental": {"project": "claude_google_ads",
                                                    "customer_id": "1234567890",
                                                    "status": "active"}}}, f)
+        self.records = governance_lib.records_dir("acme-dental", root=self.root)
 
     def _restore_gov(self):
         if self._old_gov is None:
@@ -247,14 +255,15 @@ class TestMain(_VaultBase):
         must not be turned into one — the executor's own exit status is the verdict."""
         rc, _ = self._run(["--client", "acme-dental"], "apply-changeset: refused\n")
         self.assertEqual(rc, 0)
-        self.assertFalse(os.path.exists(os.path.join(self.vault, "timeline.md")))
+        self.assertFalse(os.path.exists(os.path.join(self.records, "timeline.md")))
 
     def test_output_passes_through_unchanged(self):
         text = "apply-changeset: ok\nHERMES-RESULT-JSON %s\n" % json.dumps(RESULT)
         rc, out = self._run(["--client", "acme-dental"], text)
         self.assertEqual(rc, 0)
         self.assertEqual(out, text)
-        self.assertTrue(os.path.exists(C.result_path(self.vault, RESULT["changeset_id"])))
+        self.assertTrue(os.path.exists(governance_lib.record_path(
+            "acme-dental", RESULT["changeset_id"], root=self.root)))
 
     def test_unknown_client_exits_non_zero(self):
         text = "HERMES-RESULT-JSON %s\n" % json.dumps(RESULT)
@@ -337,37 +346,38 @@ class TestDirFdGuardCoversEveryDependedOnCall(unittest.TestCase):
 class TestParkedResiduals(unittest.TestCase):
     """R20 (a) hardlinks, (b) directory-component TOCTOU, (c) makedirs before check.
 
-    Uses `P` (persist_run_record_shim), the same alias the rest of this file already
-    uses — not the `PR` alias the original task brief used, which does not exist in
-    this file's imports.
+    F12: the per-client records directory now sits directly under the governance
+    store's records/ tree (no intermediate "changes" subdirectory) — the (b) swap
+    below targets that directory relative to its parent instead of the old "changes"
+    subdirectory relative to the vault.
     """
 
     def setUp(self):
-        self.root = os.path.realpath(tempfile.mkdtemp(prefix="vaultroot-"))
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="governance-"))
         self.addCleanup(shutil.rmtree, self.root, True)
-        self.vault = os.path.join(self.root, "pilot-1")
-        os.makedirs(os.path.join(self.vault, "changes"), exist_ok=True)
+        self.records = governance_lib.records_dir("slug-1", root=self.root)
+        os.makedirs(self.records, exist_ok=True)
         self.result = {"changeset_id": "20260824-101500-abcdef01",
                        "status": "applied", "applied": 1,
                        "finished_at": "2026-08-24T10:15:00Z"}
 
     def test_control_a_normal_persist_still_works(self):
-        # The must-SUCCEED control. Three refusals are about to be added; if any of
+        # The must-SUCCEED control. Several refusals are exercised below; if any of
         # them over-reaches, this is the test that catches it.
-        p = P.persist(self.vault, self.result, root=self.root)
+        p = P.persist(self.records, self.result, root=self.root)
         self.assertTrue(os.path.isfile(p))
 
     # --- (a) hardlinks -------------------------------------------------------------
     def test_a_hardlinked_timeline_is_refused(self):
         # O_NOFOLLOW does not see a hardlink and S_ISREG accepts one, so both existing
         # barriers pass it. With the broker running this step as the governance store's
-        # OWNER, a hardlink from the vault to a store file is a write primitive.
+        # OWNER, a hardlink from records/ to a store file elsewhere is a write primitive.
         outside = os.path.join(self.root, "outside.txt")
         with open(outside, "w") as f:
             f.write("original\n")
-        os.link(outside, os.path.join(self.vault, "timeline.md"))
+        os.link(outside, os.path.join(self.records, "timeline.md"))
         with self.assertRaises(P.PersistRefused) as cm:
-            P.persist(self.vault, self.result, root=self.root)
+            P.persist(self.records, self.result, root=self.root)
         self.assertIn("hard link", str(cm.exception).lower())
         with open(outside) as f:
             self.assertEqual(f.read(), "original\n")   # untouched
@@ -379,25 +389,25 @@ class TestParkedResiduals(unittest.TestCase):
         # hard link planted here is not a corruption vector the way timeline.md's is.
         # It is refused anyway (via _refuse_if_hardlinked, checked before the rename)
         # as a matter of policy: silently letting a name entangled with a file outside
-        # the vault be swapped is exactly the kind of coincidence R20(a) exists to
+        # records/ be swapped is exactly the kind of coincidence R20(a) exists to
         # surface as a named refusal rather than best-effort silence.
         outside = os.path.join(self.root, "outside2.txt")
         with open(outside, "w") as f:
             f.write("original\n")
-        dest = os.path.join(self.vault, "changes",
-                            "20260824-101500-abcdef01.result.json")
+        dest = governance_lib.record_path("slug-1", self.result["changeset_id"],
+                                          root=self.root)
         os.link(outside, dest)
         with self.assertRaises(P.PersistRefused):
-            P.persist(self.vault, self.result, root=self.root)
+            P.persist(self.records, self.result, root=self.root)
         with open(outside) as f:
             self.assertEqual(f.read(), "original\n")
 
     def test_control_a_single_linked_file_is_accepted(self):
         # Proves the nlink check refuses hardlinks specifically and not ordinary
         # pre-existing files.
-        with open(os.path.join(self.vault, "timeline.md"), "w") as f:
+        with open(os.path.join(self.records, "timeline.md"), "w") as f:
             f.write("- earlier\n")
-        self.assertTrue(os.path.isfile(P.persist(self.vault, self.result,
+        self.assertTrue(os.path.isfile(P.persist(self.records, self.result,
                                                   root=self.root)))
 
     def test_hardlinked_tmp_content_survives_even_with_the_precheck_disabled(self):
@@ -419,15 +429,15 @@ class TestParkedResiduals(unittest.TestCase):
         known = "do-not-truncate-me\n" * 50
         with open(outside, "w") as f:
             f.write(known)
-        tmp_dest = os.path.join(self.vault, "changes",
-                                "20260824-101500-abcdef01.result.json.tmp")
+        tmp_dest = governance_lib.record_path(
+            "slug-1", self.result["changeset_id"], root=self.root) + ".tmp"
         os.link(outside, tmp_dest)
 
         real_refuse = P._refuse_if_hardlinked
         P._refuse_if_hardlinked = lambda *a, **k: None
         try:
             with self.assertRaises(P.PersistRefused):
-                P.persist(self.vault, self.result, root=self.root)
+                P.persist(self.records, self.result, root=self.root)
         finally:
             P._refuse_if_hardlinked = real_refuse
 
@@ -441,96 +451,65 @@ class TestParkedResiduals(unittest.TestCase):
     # NOTE: a source-text canary (asserting "dir_fd"/"O_DIRECTORY" appear via
     # inspect.getsource) previously lived here and was DELETED on review (2026-08-26).
     # It passed through the exact regression it was named for: with the dirfd chain
-    # gutted back to path-based opens on the result-file branch (mutation row 3
-    # below), it stayed green because those two strings still appear elsewhere in the
-    # file (in _open_dir and in the untouched timeline.md call). A test whose name
+    # gutted back to path-based opens on the result-file branch, it stayed green
+    # because those two strings still appear elsewhere in the file. A test whose name
     # claims a property it structurally cannot verify is worse than no test — it
     # reads as coverage to a future reader. The behavioural test immediately below
     # fully supersedes it and is the one mutation-proven to catch that regression.
 
-    def test_dirfd_chain_resists_a_swapped_changes_directory(self):
-        """Behavioural companion to the canary above. Hooks `P._open_dir` to swap the
-        `changes` directory ENTRY, by path, in the exact gap between persist() opening
-        it (capturing a directory descriptor via openat) and persist() writing through
-        that descriptor. A descriptor obtained via open()/openat() refers to the
-        underlying inode, not the name used to obtain it — an os.rename() of that name
-        afterwards cannot redirect it. If persist() re-resolved the path instead of
-        reusing the descriptor, the write would land in the ATTACKER directory that
-        now occupies the `changes` name; if it genuinely uses the descriptor, the
-        write lands in the original directory regardless of what `changes` now names.
+    def test_dirfd_chain_resists_a_swapped_records_directory(self):
+        """Behavioural companion, F12-adapted: with the "changes" subdirectory gone,
+        the equivalent TOCTOU-sensitive step is the per-client records directory
+        itself, opened relative to its PARENT (the records/ tree) via dir_fd. Hooks
+        `P._open_dir` to swap the per-client directory ENTRY, by path, in the exact
+        gap between persist() opening it (capturing a directory descriptor via
+        openat) and persist() writing through that descriptor. A descriptor obtained
+        via open()/openat() refers to the underlying inode, not the name used to
+        obtain it — an os.rename() of that name afterwards cannot redirect it. If
+        persist() re-resolved the path instead of reusing the descriptor, the write
+        would land in the ATTACKER directory that now occupies the per-client name; if
+        it genuinely uses the descriptor, the write lands in the original directory
+        regardless of what that name now resolves to.
         """
-        original_changes = os.path.join(self.vault, "changes")
-        attacker_dir = os.path.join(self.root, "attacker-changes")
+        original_records = self.records
+        parent = os.path.dirname(self.records)
+        slug_name = os.path.basename(self.records)
+        attacker_dir = os.path.join(self.root, "attacker-records")
         os.makedirs(attacker_dir, exist_ok=True)
-        displaced = os.path.join(self.vault, "changes-displaced")
+        displaced = os.path.join(parent, slug_name + "-displaced")
 
         real_open_dir = P._open_dir
         state = {"swapped": False}
 
         def swapping_open_dir(name, dir_fd=None):
             fd = real_open_dir(name, dir_fd=dir_fd)
-            # Only the call that opens "changes" RELATIVE TO the vault fd — the
-            # vault-level open itself (dir_fd=None) must be left alone, or nothing
-            # would be left to open the (now-renamed) changes directory through.
-            if not state["swapped"] and name == "changes" and dir_fd is not None:
+            # Only the call that opens the per-client name RELATIVE TO the parent
+            # (records/) fd — the parent-level open itself (dir_fd=None) must be left
+            # alone, or nothing would be left to open the (now-renamed) directory
+            # through.
+            if not state["swapped"] and name == slug_name and dir_fd is not None:
                 state["swapped"] = True
-                os.rename(original_changes, displaced)
-                os.rename(attacker_dir, original_changes)
+                os.rename(original_records, displaced)
+                os.rename(attacker_dir, original_records)
             return fd
 
         P._open_dir = swapping_open_dir
         try:
-            path = P.persist(self.vault, self.result, root=self.root)
+            path = P.persist(self.records, self.result, root=self.root)
         finally:
             P._open_dir = real_open_dir
 
         self.assertTrue(state["swapped"], "the hook never fired — test is not "
                         "exercising the swap it claims to")
         # The write must have landed in the ORIGINAL directory (now renamed aside),
-        # not in the attacker directory that currently occupies the "changes" name.
+        # not in the attacker directory that currently occupies the per-client name.
         self.assertTrue(os.path.isfile(os.path.join(displaced, os.path.basename(path))))
-        self.assertEqual(os.listdir(original_changes), [],
+        self.assertEqual(os.listdir(original_records), [],
                          "the write followed the swapped NAME instead of the "
                          "descriptor captured before the swap — the TOCTOU is open")
 
-    def test_a_symlinked_changes_directory_is_still_refused(self):
-        elsewhere = os.path.join(self.root, "elsewhere")
-        os.makedirs(elsewhere, exist_ok=True)
-        changes = os.path.join(self.vault, "changes")
-        os.rmdir(changes)
-        os.symlink(elsewhere, changes)
-        with self.assertRaises(P.PersistRefused):
-            P.persist(self.vault, self.result, root=self.root)
-
-    def test_a_changes_symlink_resolving_back_inside_the_vault_is_still_refused(self):
-        # Companion to the test above, added while investigating whether deleting
-        # _resolve_subdir's own `os.path.islink(p)` check is a killable mutation.
-        # `elsewhere` above is OUTSIDE the vault, so _resolve_subdir's downstream
-        # _contained() check catches it independently of the islink check — that
-        # mutation does not turn it red. This variant targets a symlink whose target
-        # resolves BACK inside the vault, which slips past _contained() too (the
-        # target IS contained), on the theory that only the islink check would be
-        # left to catch it.
-        #
-        # MEASURED: it still does not turn red when the islink check is deleted.
-        # _open_dir("changes", dir_fd=vfd), added for R20(b), opens the "changes"
-        # component with O_NOFOLLOW independently of anything _resolve_subdir
-        # decided — so a symlinked "changes" is refused by the dirfd chain itself
-        # regardless of target. That makes _resolve_subdir's islink check genuinely
-        # redundant now (good: defense in depth), but also means no behavioural test
-        # can distinguish "the islink check ran" from "the dirfd open blocked it
-        # anyway" — this mutation row is UNKILLABLE with the current architecture.
-        # Kept as coverage of the resolves-back-inside-vault case, not as a killer.
-        decoy = os.path.join(self.vault, "decoy")
-        os.makedirs(decoy, exist_ok=True)
-        changes = os.path.join(self.vault, "changes")
-        os.rmdir(changes)
-        os.symlink(decoy, changes)
-        with self.assertRaises(P.PersistRefused):
-            P.persist(self.vault, self.result, root=self.root)
-
     # --- (c) makedirs before the containment check ---------------------------------
-    def test_an_out_of_root_vault_is_refused_without_being_created(self):
+    def test_an_out_of_root_records_dir_is_refused_without_being_created(self):
         outside = os.path.join(tempfile.mkdtemp(), "not-in-the-root")
         with self.assertRaises(P.PersistRefused):
             P.persist(outside, self.result, root=self.root)
