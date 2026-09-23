@@ -1,7 +1,8 @@
 # F12 — Approvals and run records vs `data/vaults` (design)
 
 > **Status:** design approved in brainstorming, 2026-09-23; amended during execution
-> (R1: §2.4's per-client directory mode is `0o2750`, not `0750` — see the correction there).
+> (R1: §2.4's per-client directory mode is `0o2750`, not `0750`; R2: §2.2 also owns the
+> per-client APPROVALS directory root creates — see the corrections in those sections).
 > Plan: `docs/superpowers/plans/2026-09-23-f12-approvals-and-run-records.md`.
 > **Finding:** F12 in `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`
 > **Predecessors:** F10 (`2026-09-21-f10-governance-store-and-spool-layout-design.md`) laid the
@@ -91,6 +92,20 @@ ownership is left alone (see §2.3).
 
 This closes both recorded defects: the root-owned `0600` sidecar that breaks `reserve_approval`,
 and the umask dependence that `UMask=0077` would turn fatal.
+
+**CORRECTION (R2, 2026-09-23, traced during Task 5).** §2.2 as written covers the three
+ARTIFACTS but not the per-client DIRECTORY that holds them. `write_approval` and
+`write_snapshot_bytes` create `approvals/<slug>/` with a bare `os.makedirs`, and since
+`approve-changeset.py` runs as root (§2.3), that directory lands **root-owned `02755`** under a
+normal umask: group `hermes` gets `r-x`, no write. The broker is a group member, not the owner,
+so `reserve_approval` cannot create its `.tmp` file or the lock sidecar inside it — F12's symptom
+reappears at a different file. Fixing the sidecar's mode is necessary but not sufficient.
+
+So the per-client approvals directory is created with explicit ownership and mode too: owner
+`hermes-broker:hermes`, mode `0o2750`. The broker then writes as the directory's OWNER, and the
+setgid bit keeps group `hermes` on everything created inside it. Same rule as §2.4's records
+directory, same reason it was wrong there: a directory's mode is part of the contract, not an
+afterthought of whoever happened to create it.
 
 ### 2.3 `approve-changeset.py` requires root on Linux
 
