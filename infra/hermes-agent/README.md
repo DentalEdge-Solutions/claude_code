@@ -523,20 +523,30 @@ resource name.
 ```bash
 cd infra/hermes-agent
 ./changeset.sh propose --client <slug> --from actions.json               # no credential
-./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
+sudo ./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
     --expect-sha256 <hex>
 ./run-ads-mutate.sh --client <slug> --changeset <id>                      # write credential
 ./run-ads-mutate.sh --client <slug> --undo <id>
 ```
 
+**`approve` must run as root on Linux.** The proposal lives in the gateway-owned vault
+(`data/` is `700` uid 10000), and the approval, snapshot and lock sidecar must be left
+`hermes-broker:hermes` so the broker can reserve them. The tool refuses non-root on Linux
+rather than writing artifacts that fail later, at apply time (F12).
+
 **Run them through the wrappers, not the scripts directly.** `bin/propose-changeset.py`
 and `bin/approve-changeset.py` default to the **container** paths
 (`/opt/governance/registry/clients.json`, `/opt/data/vaults`), which on the host fail
-with *"client registry not found"*. `changeset.sh` sets the two host-side roots — and
+with *"client registry not found"*. `bin/persist-run-record.py` has the same shape of
+default: it resolves `HERMES_GOVERNANCE_ROOT` and, unset, targets the container's
+`records/` root, not the host's — so a host invocation that skips the wrapper silently
+misses the records root too. `changeset.sh` sets the two host-side roots — and
 resolves `HERMES_GOVERNANCE_DIR` the same way `run-ads-mutate.sh` does: from the
 environment if set, otherwise parsed **as data** out of `.env`, which Docker Compose
-reads for interpolation but never exports to your shell. The equivalent by hand, if you
-prefer to invoke the scripts directly, is:
+reads for interpolation but never exports to your shell. The broker unit exports
+`HERMES_GOVERNANCE_ROOT` directly for `persist-run-record.py`; `hostenv.sh` does the
+equivalent for the wrappers. The equivalent by hand, if you prefer to invoke the
+scripts directly, is:
 
 ```bash
 export HERMES_GOVERNANCE_ROOT="$HERMES_GOVERNANCE_DIR"   # ...itself exported first
@@ -555,10 +565,10 @@ rejection. Supply a digest that does not match and `approve` refuses with the sa
 code, naming the mismatch:
 
 ```bash
-./changeset.sh approve --client <slug> --changeset <id> --operator <name>
+sudo ./changeset.sh approve --client <slug> --changeset <id> --operator <name>
 # refuses: prints the digest + actions and tells you to re-run with --expect-sha256 <hex>
 
-./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
+sudo ./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
   --expect-sha256 <hex>        # succeeds only if the bytes on disk hash to <hex>
 ```
 
@@ -685,14 +695,23 @@ environment. `.env.ga` stays read-only so every other path keeps its backstop �
 credentials strictly from the injected environment and never loads a local `.env`,
 which would otherwise pick up that project's full-access token.
 
-**Vault artifacts** (gitignored, per client, under `data/vaults/<slug>/changes/`):
-the proposed change-set and a per-run result file. The **approval record and the
-byte-exact snapshot `apply` executes from** do not live here — they live in the
-host-owned governance store (see "Governance store" below), so Hermes can write the
-vault copy of a change-set but cannot reach or tamper with what `apply` actually reads.
-The **append-only audit log** (`log.jsonl`, one per client) that feeds the daily caps
-and undo also lives in the governance store, not the vault. Each apply still appends a
-line to the vault's `timeline.md`, so the next trend audit sees that a change was made.
+**Vault artifacts** (gitignored, per client, under `data/vaults/<slug>/changes/`): the
+proposed change-set only. The **run record**, the **approval record**, and the
+**byte-exact snapshot `apply` executes from** do not live here — they live in the
+host-owned governance store (see "Governance store" below): run records at
+`<store>/records/<slug>/<cid>.result.json` and `<store>/records/<slug>/timeline.md`,
+approvals at `<store>/approvals/<slug>/`. Hermes can write the vault copy of a
+change-set but cannot reach or tamper with what `apply` actually reads or what it
+recorded (F12). The **append-only audit log** (`log.jsonl`, one per client) that feeds
+the daily caps and undo also lives in the governance store, not the vault.
+
+> **Applied changes no longer appear in the vault's `timeline.md`.** That file is the
+> AUDIT path's history — written from inside the container by `vault-write.py`, and
+> still updated on every `run-trend-audit.sh` run — not the mutation path's. The
+> mutation path records to the store instead, where the broker can write and the
+> executor is never given access (F12), so `run-trend-audit.sh` no longer sees applied
+> changes as part of "this client's prior history." Governance is unaffected: the
+> fsynced audit log in the store remains the authoritative record.
 
 **Tests.** These suites are stdlib-only and are not discoverable by
 `scripts/run-all-tests.js`, which is node-only by design. Run all of them with:
@@ -881,6 +900,8 @@ $HERMES_GOVERNANCE_DIR/
   approvals/  <slug>/<cid>.approval.json  # approval record: hash + expiry
               <slug>/<cid>.changeset.json # byte-exact snapshot apply executes from
   log/        <slug>.jsonl                # append-only audit log; feeds caps + undo
+  records/    <slug>/<cid>.result.json    # F12: mutation-path run record — convenience,
+              <slug>/timeline.md          # not authoritative; log/ above is
   seen/       <slug>.jsonl                # replay-protection state (Plan 2)
 ```
 
@@ -897,11 +918,11 @@ directory you own. Compose does not expand `~`, so write the path in full
 
 **Who mounts what:**
 
-| Container | approvals/ control/ registry/ | log/ | seen/ |
-|---|---|---|---|
-| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted | not mounted |
-| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write | **not mounted** |
-| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted | not mounted |
+| Container | approvals/ control/ registry/ | log/ | seen/ | records/ |
+|---|---|---|---|---|---|
+| `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted | not mounted | not mounted |
+| `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write | **not mounted** | **not mounted** |
+| `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted | not mounted | not mounted |
 
 `seen/` is not mounted anywhere. The seen-set is replay-protection state written and
 read entirely host-side by the broker; nothing under the executor's entrypoint touches
@@ -909,6 +930,14 @@ it. It used to be mounted read-write into `ads-mutator` on the strength of a com
 rather than a measurement, which handed the governed party delete access to the state
 it is governed by (S3-a). `log/` must stay writable there — `append_log` is fsync'd per
 action and is the reversibility record `--undo` reads.
+
+`records/` is also not mounted anywhere (F12): `persist-run-record.py` writes it
+host-side, as `hermes-broker`, from outside any container. The executor is never given
+access, by design — giving it one would mean an eighth `ads-mutator` bind and a wider
+proxy allow-list, which this design does not touch (§1.1 of the F12 spec). It is
+host-side only for the same reason `seen/` is, and `preflight-governance-access.py`
+deliberately does not learn about it: that pre-flight declares what the container
+needs, and `records/` has no mount.
 
 The gateway **does not mount any part of the store** — no path in it is readable or
 writable from the container Hermes runs in. Verify at any time:
@@ -955,6 +984,7 @@ ownership, so the local gate passes and the VPS is where it breaks. The layout i
 | `registry/` | `root:hermes` | `2750` | operator-edited |
 | `registry/clients.json` | `root:hermes` | `0640` | created as `{}` only if absent |
 | `log/` | `root:hermes` | `2750` | append-but-not-unlink (below) |
+| `records/` | `hermes-broker:hermes` | `2750` | the broker writes run records (F12); setgid keeps group `hermes` on `<slug>/` |
 | `seen/` | `hermes-broker:hermes-broker` | `0700` | broker-only replay state |
 
 Create and verify it with the governed operator CLI. It is a dry run by default. `--apply`

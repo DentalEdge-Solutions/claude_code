@@ -204,14 +204,15 @@ back under `data/`.
 - The browser controls were run after the fix. A wrong password was refused, and the correct
   one signed in.
 
-### F12: approvals and run records are written by host-side tools that cannot reach `data/vaults` (recorded, not fixed)
+### F12: approvals and run records vs data/vaults — fixed (PR #<N>)
 
-Found while designing F10. `approve-changeset.py` reads the change-set from `data/vaults/`
-(uid 10000, `700`) and writes `approvals/<slug>/` plus a `0600` lock file that the broker later
-reopens. Run as root, it leaves root-owned `0600` locks, and `reserve_approval` fails on the
-first apply. Run as `hermes-broker`, it cannot read `data/vaults`. Approval and snapshot files
-are written with plain `open()`, so they are group-readable only because of the umask; the
-2026-09-17 handoff's §6 `UMask=0077` would make every approval unreadable to the executor.
+**Was open:** found while designing F10. `approve-changeset.py` reads the change-set from
+`data/vaults/` (uid 10000, `700`) and writes `approvals/<slug>/` plus a `0600` lock file that the
+broker later reopens. Run as root, it leaves root-owned `0600` locks, and `reserve_approval`
+fails on the first apply. Run as `hermes-broker`, it cannot read `data/vaults`. Approval and
+snapshot files are written with plain `open()`, so they are group-readable only because of the
+umask; the 2026-09-17 handoff's §6 `UMask=0077` would make every approval unreadable to the
+executor.
 
 Second case: `run-ads-mutate.sh` runs as `hermes-broker` inside the broker's sandbox, and after
 every apply it calls `persist-run-record.py`, which writes into `data/vaults/<slug>/`. `data/` is
@@ -220,6 +221,40 @@ shows as the "RUN RECORD NOT PERSISTED" banner, with the executor's exit status 
 
 **Gates creating the kill switch, not Phase 6.** Installing the units approves nothing.
 F10's `approvals/` ownership (`hermes-broker:hermes 2750`) is compatible with any F12 fix.
+
+**Fix (PR #<N>).** Run records move to `<store>/records/<slug>/` — `hermes-broker:hermes 0o2750`
+(setgid preserved: R1 — `0750` would have stripped it and left records unreadable to group
+`hermes` on Linux), files `0640` — so the mutation path never writes the vault. The writer
+refuses outright if `records/` itself is missing, naming `init-host-layout.py --apply`: the
+layout is a hard prerequisite, not something created ad hoc. The executor could not have
+written the vault either: `ads-mutator` has no vault mount, and giving it one would widen the
+proxy's pinned set (F9). Approval artifacts get explicit modes and ownership set on the open fd,
+before the rename: approval and snapshot `0640`, lock sidecar `0660`, owner
+`hermes-broker:hermes` when root — killing both the root-owned `0600` sidecar that broke
+`reserve_approval` and the umask dependence that `UMask=0077` would have made fatal. The
+per-client APPROVALS directory gets the same ownership and mode (R2, traced during review):
+without it, the broker still could not create its temp file or lock sidecar inside a root-owned
+`02755` directory — F12's symptom reappearing at a different file, so fixing the sidecar's mode
+alone was necessary but not sufficient. `approve-changeset.py` now refuses non-root on Linux
+with a message naming `sudo`.
+
+**Proven:** Tier 2 on Linux CI reproduces the recorded failure — root approves, the broker
+reserves — with firing controls for both failure sites this fix closes: the root-owned `0600`
+sidecar that broke `reserve_approval` originally, and the root-owned `02755` per-client
+approvals directory that broke it again once the sidecar alone was fixed (R2). A second round
+trip shows the broker writing a run record that a member of group `hermes` can read, with the
+gateway (uid 10000) unable to write there, and a `0770` group-writable control.
+
+**Deliberate loss:** applied changes no longer appear in the vault's `timeline.md`, which
+`run-trend-audit.sh` feeds the analyst as client history. The audit path still writes that file;
+governance is unaffected (the fsynced audit log is the authoritative record). Revisit as its own
+design if the analyst is shown to need it.
+
+**Still open:** F14 (a Compose failure reported as "nothing was mutated") and the §6 hardening
+gates, including `UMask=0077`, which this fix makes safe to land but does not land.
+
+**Nothing above has run on the VPS.** Everything is repo + CI (Linux CI for Tier 2's real
+uid/gid proof). The box confirmation is a separate, later step.
 
 ### F14: a Compose failure is reported as "refused, nothing was mutated" (recorded, not fixed)
 
@@ -288,6 +323,7 @@ host-side tools.
 1. F6: a deploy-key clone of the ads repo, after the security review (the box's ads repo is still a placeholder).
 2. F3: a `--check` for usable sudo, with a firing control.
 3. F8: `data/skills` ownership; the `docker_config_migrate.py` warning.
-4. F12: host-side approval and run-record writes vs data/vaults. Gates the kill switch AND the rehearsal.
-5. F14: Compose failures reported as "nothing was mutated". Gates the kill switch.
-6. F16: audit the other host-side tools for container-path defaults (F16's pattern).
+4. F14: Compose failures reported as "nothing was mutated". Gates the kill switch. The
+   rehearsal gate no longer needs F12 (fixed, PR #<N>) — its remaining prerequisite is
+   `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
+5. F16: audit the other host-side tools for container-path defaults (F16's pattern).

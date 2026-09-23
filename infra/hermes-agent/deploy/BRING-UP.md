@@ -412,15 +412,17 @@ directories as root.
 ## Gate: First Approved Request (Rehearsal)
 
 This gate is not run by this runbook. It sits between Phase 6 and anything that touches the
-kill switch. **It needs:** F9 (landed), F12 (a working approval writer: `approve-changeset.py`
-cannot reach `data/vaults` as `hermes-broker` today), `.env.gaw` with the write credential, and
-Phase 6 passed.
+kill switch. **It needs:** F9 (landed), F12 (landed — approvals are written `hermes-broker:hermes`
+and run records go to `<store>/records/`), `.env.gaw` carrying the WRITE Google Ads credential,
+and Phase 6 passed. After pulling F12, run README step 2's layout commands again so `records/` is
+created (`init-host-layout.py --apply`, then `--check` as `hermes-broker`); no unit changes, so
+nothing restarts.
 
 **The proof:** with the kill switch **absent**, a human-approved request goes broker → proxy →
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
-**Still required before the kill switch can be created:** F12, F14 (a Compose failure is
+**Still required before the kill switch can be created:** F14 (a Compose failure is
 reported as "refused, nothing was mutated", which could be false mid-run), and the §6
 hardening gates.
 
