@@ -446,7 +446,7 @@ it. No unit files change, so nothing restarts on its own account.
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
-**Still required before the kill switch can be created:** audit-log truncation (§6 part B). (F14 —
+**Still required before the kill switch can be created:** audit-log truncation (§6 part B) and F18 — the proxy's attach pass-through, which after one allowed request stops inspecting the connection (findings record). (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
 now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
 hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —

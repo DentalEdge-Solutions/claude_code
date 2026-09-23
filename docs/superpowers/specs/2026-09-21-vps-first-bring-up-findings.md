@@ -253,9 +253,9 @@ group inheritance at all (BSD vs System V), which is the mechanism the records d
 governance is unaffected (the fsynced audit log is the authoritative record). Revisit as its own
 design if the analyst is shown to need it.
 
-**Still open:** audit-log truncation (§6 part B). The framing hardening and `UMask=0077` (§6
-part A) landed in PR #48. F14 (a Compose failure reported as "nothing was mutated") is fixed
-(PR #46).
+**Still open:** audit-log truncation (§6 part B) and F18 (the attach pass-through bypass). The
+framing hardening and `UMask=0077` (§6 part A) are in PR #48. F14 (a Compose failure reported as
+"nothing was mutated") is fixed (PR #46).
 
 **Applied to the box, 2026-09-23.** Pulled `da2a0ae..9df03d4` (fast-forward, no mode conflict).
 Firing control first: `sudo -u hermes-broker init-host-layout.py --check` exited **2**, naming
@@ -353,6 +353,33 @@ the store is `root:hermes 2750` and `hermesops` is by design only in `sudo` and 
   means "could not look". A distinct `unreadable` action (still non-zero) would say so. Does not
   gate anything.
 
+### F18: the proxy's attach pass-through skips inspection for the rest of the connection (recorded, not fixed)
+
+**Found in the whole-branch review of PR #48.** `docker-create-proxy.py`'s `_handle`: after
+`decide()` allows a request, `if "/attach" in path:` — a substring test over the WHOLE target,
+query string included — switches the connection to raw two-way pumping. Nothing after that
+passes `_parse_head` or `decide()` again. Three routes reach it: (a) any allowed request with
+`/attach` in its query, e.g. `GET /_ping?x=/attach`; (b) an allowed path whose container id is
+literally `attach` (`_ID` accepts it), e.g. `DELETE /v1.55/containers/attach`; (c) a real
+`POST /containers/<id>/attach` that dockerd answers with an error (e.g. 404) instead of
+hijacking — dockerd keeps the connection, so the next bytes are parsed as a fresh request.
+
+**Measured 2026-09-23** on a scratch copy with a keep-alive fake upstream (whole-branch review
+of PR #48): after `GET /_ping?x=/attach`, and after an attach answered 404, a following
+privileged `POST /containers/create` reached the upstream with no ALLOW/DENY logged. Not
+measured against a real dockerd.
+
+Pre-existing (predates PR #48); not caused by the framing hardening. Reachable by anything that
+can connect to the proxy socket (hermes-rail, i.e. the broker) — the adversary the proxy exists
+to contain. Gates the kill switch. Not the rehearsal (the kill switch is absent, nothing can
+mutate).
+
+**Open: its own spec.** Pump only for `POST` whose `_path_only(path)` fullmatches the attach
+allow-list pattern AND whose upstream response is `101 Switching Protocols` (Compose sends
+`Upgrade: tcp`); otherwise relay normally and keep inspecting; forward any already-read client
+bytes (`buf`) explicitly. Tests need a keep-alive fake upstream (TestPlumbing's closes after
+each reply, so this was never exercised).
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -374,3 +401,4 @@ the store is `root:hermes 2750` and `hermesops` is by design only in `sudo` and 
    prerequisite is `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
+7. F18: the attach pass-through bypass. Gates the kill switch.

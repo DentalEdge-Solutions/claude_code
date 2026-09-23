@@ -465,7 +465,7 @@ def _handle(conn, upstream_path):
             # there is no bypass; it can only refuse a few extra non-create paths early.
             is_create = "/containers/create" in path
             # A create can no longer reach here with Transfer-Encoding set (chunked
-            # or otherwise) — the `has_te` check above already refused it. What's
+            # or otherwise) — `_parse_head` already refused any Transfer-Encoding. What's
             # left to catch is a create with NEITHER header, where `clen` defaults
             # to 0: decide() cannot safely run against a body of unknown length.
             if is_create and clen == 0:

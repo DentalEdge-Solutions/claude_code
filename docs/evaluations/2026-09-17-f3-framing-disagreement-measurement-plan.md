@@ -292,7 +292,7 @@ This removes the dependency on dockerd's strictness instead of documenting it. C
 - Prove each new guard by making it fail. Three assertions in this wave passed for reasons
   unrelated to their claims, and reading found none of them.
 
-**Applied 2026-09-23 (PR #48), without the §5 measurement, as §6 allows.** `_parse_head`
+**Implemented 2026-09-23 (PR #48), without the §5 measurement, as §6 allows.** `_parse_head`
 enforces all three rules above plus a fourth — no bare CR, LF or NUL anywhere in the head
 (form 4) — and also requires exactly `HTTP/1.1` and printable-ASCII header values, and bounds
 `Content-Length` to 19 digits (Go's `ParseUint` 63-bit maximum). The positive
