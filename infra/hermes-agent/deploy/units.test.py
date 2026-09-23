@@ -162,6 +162,35 @@ class TestUnits(unittest.TestCase):
             self.assertNotIn("data/spool", l)
 
 
+class TestUMask(unittest.TestCase):
+    """The §6 hardening (spec 2026-09-23 §3.3): both units run with UMask=0077, in [Service].
+    systemd applies it only there; a UMask in [Unit] or [Install] is ignored silently."""
+
+    @staticmethod
+    def _service_umasks(body):
+        section, found = None, []
+        for line in live_lines(body):
+            if line.startswith("[") and line.endswith("]"):
+                section = line
+            elif line.startswith("UMask="):
+                found.append((section, line))
+        return found
+
+    def test_both_units_set_umask_0077_in_service(self):
+        for name in ("hermes-docker-proxy.service", "hermes-broker.service"):
+            self.assertEqual(self._service_umasks(unit(name)),
+                             [("[Service]", "UMask=0077")], name)
+
+    def test_control_a_unit_without_the_line_fails(self):
+        body = unit("hermes-docker-proxy.service")
+        stripped = "\n".join(l for l in body.splitlines() if not l.strip().startswith("UMask="))
+        self.assertNotEqual(self._service_umasks(stripped), [("[Service]", "UMask=0077")])
+
+    def test_control_a_umask_in_the_wrong_section_fails(self):
+        body = "[Unit]\nUMask=0077\n[Service]\nType=simple\n"
+        self.assertNotEqual(self._service_umasks(body), [("[Service]", "UMask=0077")])
+
+
 class TestSpoolPathContract(unittest.TestCase):
     """F10b. The unit, .env.example, the compose mount and host_layout must name one
     spool path, and compose must have no fallback to a path under data/."""

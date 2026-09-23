@@ -580,6 +580,9 @@ def serve(listen, upstream):
     if os.path.exists(listen):
         os.remove(listen)
     srv = Server(listen, Handler)
+    # Under the unit's UMask=0077 the socket is created 0600; this chmod is what opens it to
+    # the hermes-rail group. Containment no longer rests only on RuntimeDirectoryMode=0750 —
+    # the socket is private from the instant it exists (2026-09-17 handoff §6).
     os.chmod(listen, 0o660)
     srv.serve_forever()
 
