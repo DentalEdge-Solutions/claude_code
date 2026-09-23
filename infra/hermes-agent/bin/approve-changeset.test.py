@@ -1,4 +1,5 @@
-import datetime, hashlib, importlib.util, json, os, subprocess, sys, tempfile, unittest
+import contextlib, datetime, hashlib, importlib.util, io, json, os, subprocess, sys, tempfile, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -13,6 +14,7 @@ def _load(name, filename):
 P = _load("propose_changeset", "propose-changeset.py")
 A = _load("approve_changeset", "approve-changeset.py")
 NOW = datetime.datetime(2026, 8, 12, 10, 15, 0, tzinfo=datetime.timezone.utc)
+CID = "20260824-101500-abcdef01"
 
 REG = """version: 1
 
@@ -230,6 +232,43 @@ class TestExpectShaIsRequired(T):
         out = self._cli("--expect-sha256", "b" * 64)
         self.assertEqual(out.returncode, 2)
         self.assertIn("mismatch", out.stderr)
+
+
+class TestRootRequirement(unittest.TestCase):
+    """F12 (spec 2.3): on Linux the proposal lives in the gateway-owned vault (data/ is
+    700 uid 10000), so reading it needs root; and a non-root writer leaves artifacts the
+    broker cannot reserve. Refusing up front beats failing hours later at apply time,
+    where it would look like a governance refusal rather than a setup mistake."""
+
+    def setUp(self):
+        # Own tmp dir, deliberately with NO client registry written into it: the
+        # darwin control test is expected to fail later for that unrelated reason —
+        # it asserts only that the ROOT refusal specifically did not fire.
+        self.tmp = tempfile.mkdtemp()
+        os.environ["VAULT_ROOT"] = self.tmp
+        os.environ["HERMES_GOVERNANCE_ROOT"] = self.tmp
+
+    def test_it_refuses_without_root_on_linux(self):
+        with mock.patch.object(A.sys, "platform", "linux"), \
+             mock.patch.object(A.os, "geteuid", return_value=1000):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = A.main(["--client", "acme-dental", "--changeset", CID,
+                             "--operator", "operator"])
+        self.assertEqual(rc, 2)
+        self.assertIn("sudo", err.getvalue())
+
+    def test_control_it_does_not_refuse_on_darwin(self):
+        """The dev flow on a laptop has no uid separation to honour. This call fails
+        anyway (no client registry set up in this test's tmp dir) — that failure is
+        expected and irrelevant; only the ROOT-refusal message is asserted absent."""
+        with mock.patch.object(A.sys, "platform", "darwin"), \
+             mock.patch.object(A.os, "geteuid", return_value=1000):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = A.main(["--client", "acme-dental", "--changeset", CID,
+                             "--operator", "operator"])
+        self.assertNotIn("must run as root", err.getvalue())
 
 
 if __name__ == "__main__":

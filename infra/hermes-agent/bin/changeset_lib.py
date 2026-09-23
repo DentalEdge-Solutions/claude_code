@@ -432,10 +432,13 @@ APPROVAL_OWNER_GROUP = "hermes"
 def _apply_owner_mode(fd, mode):
     """Set MODE on FD, and (as root, on Linux) owner hermes-broker:hermes.
 
-    Non-root callers still get the explicit mode; ownership is left alone, because a
-    non-root approve cannot produce broker-owned files and approve-changeset.py refuses
-    that case on Linux anyway. Groups are resolved BY NAME — a missing group is a refusal,
-    never a guessed gid.
+    Non-root callers still get the explicit mode; ownership is left alone. On Linux this
+    branch is unreachable from approve-changeset.py: its main() refuses to run unless
+    root, before any of these writes happen, so a non-root writer never gets here in the
+    first place (F12, spec 2.3). On darwin there is no such guard — there is no uid
+    separation to honour there, so the dev flow keeps running non-root by design, and
+    ownership is left alone as a deliberate no-op, not a gap. Groups are resolved BY
+    NAME — a missing group is a refusal, never a guessed gid.
     """
     os.fchmod(fd, mode)
     if not sys.platform.startswith("linux") or os.geteuid() != 0:

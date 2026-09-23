@@ -107,6 +107,13 @@ def summarise(rec):
 
 
 def main(argv=None):
+    if sys.platform.startswith("linux") and os.geteuid() != 0:
+        print("approve-changeset: must run as root on Linux. The proposal lives in the "
+              "gateway-owned vault (data/ is 700 uid 10000), and the approval must be left "
+              "owned by hermes-broker so the broker can reserve it. Use: "
+              "sudo ./changeset.sh approve --client <slug> --changeset <id> "
+              "--operator <name> --expect-sha256 <hex>", file=sys.stderr)
+        return 2
     ap = argparse.ArgumentParser()
     ap.add_argument("--client", required=True)
     ap.add_argument("--changeset", required=True)
