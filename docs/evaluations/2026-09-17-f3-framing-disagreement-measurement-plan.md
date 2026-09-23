@@ -26,7 +26,7 @@ the upstream socket:
 | 1 | `X-Pad: pad\r\n\tTransfer-Encoding: chunked` | obs-fold continuation line; `startswith(b"transfer-encoding:")` is false for a line beginning with a tab |
 | 2 | `Transfer-Encoding : chunked` | space before the colon; same prefix test fails |
 | 3 | `Content-Length: 5` + `Content-Length: 77` | the parse loop keeps the **last** value |
-| 4 | `X-Pad: a\nTransfer-Encoding: chunked` (bare LF) | a split on CRLF sees one header; Go's textproto treats bare LF as a line end | **inferred 2026-09-23, not measured** |
+| 4 | `X-Pad: a\nTransfer-Encoding: chunked` (bare LF) | a split on CRLF sees one header; Go's textproto treats bare LF as a line end — **inferred 2026-09-23, not measured** |
 
 **What was measured is that the bytes arrive. What was NOT measured is whether dockerd
 parses them as a second request** — which is the only thing that makes any of them a
