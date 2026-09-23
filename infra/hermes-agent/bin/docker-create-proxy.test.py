@@ -848,12 +848,23 @@ class TestPlumbing(unittest.TestCase):
                 b"Content-Length: 2\r\n\r\n{}")
     WAIT = b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
 
+    def _assert_never_reached_upstream(self, marker=b"/containers/create", settle=0.5):
+        """Non-receipt, race-free: the fake upstream appends on its own thread, so poll for
+        `settle` seconds and fail the moment the marker appears. Absence for the whole window
+        is the pass."""
+        deadline = time.monotonic() + settle
+        while True:
+            if any(marker in b for b in self.upstream_raw):
+                self.fail("smuggled create reached the upstream socket: %r" % self.upstream_raw)
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.01)
+
     def _assert_smuggle_refused(self, req, reason):
         resp = self._send(req)
+        self._assert_never_reached_upstream()
         self.assertIn(b"403", resp)
         self.assertIn(reason.encode(), resp)
-        self.assertFalse(any(b"/containers/create" in b for b in self.upstream_raw),
-                         "smuggled create reached the upstream socket: %r" % self.upstream_raw)
 
     def test_an_obs_fold_smuggled_create_is_refused(self):
         tail = b"0\r\n\r\n" + self.SMUGGLED
