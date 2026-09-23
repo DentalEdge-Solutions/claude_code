@@ -31,6 +31,12 @@ EXECUTOR_GID = 10000
 LOG_DIR_MODE = 0o2750
 LOG_FILE_MODE = 0o660
 
+# F12: the broker writes run records here. Setgid (like approvals/ and log/) keeps group
+# hermes on the per-client directories; no group write, because write on a directory grants
+# unlink. NOT mounted into any container — the executor never sees records/, which is why
+# preflight-governance-access.py must not list it (spec 2026-09-23 §2.5).
+RECORDS_DIR_MODE = 0o2750
+
 # One definition, shared, so the two cannot drift (vault_lib.py's rule, applied here
 # too). This is the STRICT lowercase-only class — the pattern spool_lib enforces on
 # what a request file's own name and body may claim, and the only one that can
@@ -89,6 +95,18 @@ def log_path(slug, root=None):
 
 def seen_path(slug, root=None):
     return os.path.join(_root(root), "seen", "%s.jsonl" % _slug(slug))
+
+
+def records_dir(slug, root=None):
+    return os.path.join(_root(root), "records", _slug(slug))
+
+
+def record_path(slug, cid, root=None):
+    return os.path.join(records_dir(slug, root), "%s.result.json" % _cid(cid))
+
+
+def records_timeline_path(slug, root=None):
+    return os.path.join(records_dir(slug, root), "timeline.md")
 
 
 def lock_path(slug, root=None):

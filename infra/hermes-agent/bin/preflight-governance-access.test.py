@@ -552,6 +552,23 @@ class TestScope(Base):
             PF.check(self.root, self.other_uid, self.gid, platform="darwin"), [])
 
 
+class TestRecordsIsNotTheExecutorsBusiness(unittest.TestCase):
+    """F12/spec §2.5. READ_WRITE_DIRS and READ_ONLY_DIRS describe what the EXECUTOR needs
+    inside the container. records/ is host-side only and has no bind — docker-compose.yml's
+    ads-mutator mounts four governance directories and records/ is not one of them. Listing
+    it here would make the pre-flight demand access to a path that does not exist in the
+    container and false-refuse every run, the mirror of the seen/ coupling F10 fixed."""
+
+    def test_records_is_not_declared(self):
+        self.assertNotIn("records", PF.READ_WRITE_DIRS)
+        self.assertNotIn("records", PF.READ_ONLY_DIRS)
+
+    def test_control_the_dirs_it_does_declare(self):
+        """Without this, the assertion above would pass against empty tuples."""
+        self.assertIn("log", PF.READ_WRITE_DIRS)
+        self.assertIn("approvals", PF.READ_ONLY_DIRS)
+
+
 class TestCli(Base):
     def _main(self, argv):
         err = io.StringIO()

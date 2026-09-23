@@ -64,6 +64,7 @@ class TestTable(unittest.TestCase):
             ("store", "registry"): ("dir", "root", "hermes", 0o2750),
             ("store", "registry/clients.json"): ("file", "root", "hermes", 0o640),
             ("store", "log"): ("dir", "root", "hermes", 0o2750),
+            ("store", "records"): ("dir", "hermes-broker", "hermes", 0o2750),
             ("store", "seen"): ("dir", "hermes-broker", "hermes-broker", 0o700),
             ("spool", ""): ("dir", "root", "hermes", 0o750),
             ("spool", "requests"): ("dir", "hermes-broker", "hermes", 0o3770),
@@ -74,6 +75,10 @@ class TestTable(unittest.TestCase):
     def test_log_dir_mode_is_the_governance_lib_constant(self):
         log = [e for e in H.LAYOUT if e.relpath == "log"][0]
         self.assertEqual(log.mode, H.governance_lib.LOG_DIR_MODE)
+
+    def test_records_dir_mode_is_the_governance_lib_constant(self):
+        rec = [e for e in H.LAYOUT if e.relpath == "records"][0]
+        self.assertEqual(rec.mode, H.governance_lib.RECORDS_DIR_MODE)
 
     def test_the_registry_starts_as_zero_clients(self):
         reg = [e for e in H.LAYOUT if e.relpath == "registry/clients.json"][0]
@@ -119,6 +124,12 @@ class TestCheck(Base):
         problems = self.check()
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("mode 0750", problems[0])
+        self.assertIn("expected hermes-broker:hermes 2750", problems[0])
+
+    def test_a_wrong_mode_on_records_is_reported(self):
+        os.chmod(os.path.join(self.store, "records"), 0o770)
+        problems = self.check()
+        self.assertEqual(len(problems), 1, problems)
         self.assertIn("expected hermes-broker:hermes 2750", problems[0])
 
     def test_a_missing_sticky_bit_is_caught(self):

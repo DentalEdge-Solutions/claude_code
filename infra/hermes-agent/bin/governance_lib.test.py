@@ -44,6 +44,27 @@ class TestPaths(unittest.TestCase):
         self.assertEqual(G.seen_path("acme-dental", self.R),
                          "/tmp/gov/seen/acme-dental.jsonl")
 
+    def test_records_dir(self):
+        self.assertEqual(G.records_dir("acme-dental", self.R),
+                         "/tmp/gov/records/acme-dental")
+
+    def test_record_path(self):
+        self.assertEqual(G.record_path("acme-dental", "20260824-101500-abcdef01", self.R),
+                         "/tmp/gov/records/acme-dental/20260824-101500-abcdef01.result.json")
+
+    def test_records_timeline_path(self):
+        self.assertEqual(G.records_timeline_path("acme-dental", self.R),
+                         "/tmp/gov/records/acme-dental/timeline.md")
+
+    def test_a_bad_slug_is_refused_like_every_other_helper(self):
+        for bad in ("../escape", "acme/dental", "acme\n", ""):
+            with self.assertRaises(ValueError):
+                G.records_dir(bad, self.R)
+
+    def test_a_bad_changeset_id_is_refused(self):
+        with self.assertRaises(ValueError):
+            G.record_path("acme-dental", "not-a-changeset-id", self.R)
+
 
 class TestValidation(unittest.TestCase):
     """A path helper that accepts junk is a path-traversal primitive. These are the
