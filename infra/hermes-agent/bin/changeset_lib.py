@@ -370,7 +370,7 @@ def write_snapshot_bytes(slug, cid, data):
         out.write(data)
         out.flush()
         os.fsync(out.fileno())
-        _apply_owner_mode(out.fileno(), APPROVAL_ARTIFACT_MODE)
+        _apply_owner_mode(out.fileno(), APPROVAL_ARTIFACT_MODE, tmp)
     os.replace(tmp, dst)
     # fsync the directory too — same reasoning as _atomic_write_json and append_log.
     # write_snapshot is a fourth writer of a newly-named file in this tier; a caller
@@ -438,18 +438,43 @@ APPROVAL_OWNER_GROUP = "hermes"
 APPROVALS_DIR_MODE = 0o2750
 
 
-def _apply_owner_mode(fd, mode):
-    """Set MODE on FD, and (as root, on Linux) owner hermes-broker:hermes.
+def _apply_owner_mode(fd, mode, path):
+    """Set MODE on FD, and (as root, on Linux) owner hermes-broker:hermes. PATH is used
+    only for actionable error messages — the fd is what every fchmod/fchown call below
+    actually acts on.
 
     Non-root callers still get the explicit mode; ownership is left alone. On Linux this
-    branch is unreachable from approve-changeset.py: its main() refuses to run unless
-    root, before any of these writes happen, so a non-root writer never gets here in the
-    first place (F12, spec 2.3). On darwin there is no such guard — there is no uid
-    separation to honour there, so the dev flow keeps running non-root by design, and
-    ownership is left alone as a deliberate no-op, not a gap. Groups are resolved BY
-    NAME — a missing group is a refusal, never a guessed gid.
+    branch is unreachable from approve-changeset.py on the SHIPPED path: its main()
+    refuses to run unless root, before any of these writes happen, so a non-root writer
+    never gets here in the first place (F12, spec 2.3). On darwin there is no such guard —
+    there is no uid separation to honour there, so the dev flow keeps running non-root by
+    design, and ownership is left alone as a deliberate no-op, not a gap. Groups are
+    resolved BY NAME — a missing group is a refusal, never a guessed gid.
+
+    MINOR 5 (F12 R2 review): "non-root caller" and "root caller" are not exhaustive of who
+    can reach this function — two reachable third cases were traced that are neither the
+    happy non-root path nor the happy root path:
+      (a) darwin after a single `sudo approve` (or a shared dev box with two users): root
+          creates the artifact/directory once, and every later NON-sudo approve is then
+          neither root nor that file's owner — fchmod itself raises EPERM, before ownership
+          is even considered.
+      (b) euid 0 without privilege — a user-namespaced container root lacking
+          CAP_FOWNER/CAP_CHOWN, or an NFS mount with root_squash: os.geteuid() == 0 is
+          true, so the code takes the root branch, and fchown raises EPERM there instead.
+    Both used to surface as a bare OSError with no indication of what Hermes expected or
+    how to recover — unlike the sibling KeyError branch below, which already named the
+    remediation. Both fchmod and fchown are now wrapped the same way: an actionable
+    RuntimeError naming PATH, the mode/owner Hermes needed, and what to do about it. This
+    is a REFUSAL, not a swallow — the exception still propagates, just no longer bare.
     """
-    os.fchmod(fd, mode)
+    try:
+        os.fchmod(fd, mode)
+    except OSError as e:
+        raise RuntimeError(
+            "F12: cannot set mode %04o on %s — %s. This process must own %s (or be root) "
+            "to chmod it; if an earlier `sudo` approve created it, either chown it back to "
+            "the current user/root or delete it and let approve recreate it cleanly." %
+            (mode, path, e, path)) from e
     if not sys.platform.startswith("linux") or os.geteuid() != 0:
         return
     try:
@@ -458,13 +483,25 @@ def _apply_owner_mode(fd, mode):
     except KeyError as e:
         raise RuntimeError(
             "F12: cannot set approval ownership — %s. Create the users and groups first "
-            "(README 'VPS deploy sequence' step 1)." % e)
-    os.fchown(fd, uid, gid)
+            "(README 'VPS deploy sequence' step 1)." % e) from e
+    try:
+        os.fchown(fd, uid, gid)
+    except OSError as e:
+        raise RuntimeError(
+            "F12: cannot chown %s to %s:%s — %s. Running as root but lacking the "
+            "CAP_CHOWN/CAP_FOWNER capability (a user-namespaced container) or writing to a "
+            "root_squash NFS mount cannot set ownership here; grant that capability or "
+            "point HERMES_GOVERNANCE_ROOT at a filesystem that honours root's chown." %
+            (path, APPROVAL_OWNER_USER, APPROVAL_OWNER_GROUP, e)) from e
 
 
 def _ensure_approvals_dir(slug):
-    """Create approvals/<slug>/ if needed and pin its owner/mode. Called from BOTH
-    write_snapshot_bytes and write_approval -- factored here so the two cannot drift.
+    """Create approvals/<slug>/ if needed and pin its owner/mode. Called from THREE sites
+    -- write_snapshot_bytes and write_approval unconditionally, and _approval_lock only
+    when the directory does not already exist (see its call site: calling this
+    unconditionally there re-applies the mode on every lock acquisition, not just at
+    creation, which turned out to silently undo a caller's deliberate permission change) --
+    factored here so none of the three duplicate the creation logic and drift apart.
 
     os.makedirs alone is not enough (F12 R2): as root it leaves the directory root-owned,
     and the broker -- a group member, not the owner -- cannot write inside it. Applied on
@@ -476,15 +513,15 @@ def _ensure_approvals_dir(slug):
     directory already exists. Re-applying the same owner/mode is a no-op in effect,
     whether the caller is root (always permitted) or the non-root owner of a directory it
     already created (chmod/chown-of-self is permitted). A caller that is neither root nor
-    the owner would get EPERM from fchown/fchmod -- that should never happen on the
-    approve path (§2.3 requires root on Linux; darwin has no such separation), so it is
-    left to raise rather than being swallowed.
+    the owner of an existing directory -- e.g. darwin after a single `sudo` approve, or a
+    shared dev box with two users -- gets an actionable RuntimeError out of
+    _apply_owner_mode, not a bare EPERM; see MINOR 5 in that function's docstring.
     """
     path = governance_lib.approvals_dir(slug)
     os.makedirs(path, exist_ok=True)
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        _apply_owner_mode(fd, APPROVALS_DIR_MODE)
+        _apply_owner_mode(fd, APPROVALS_DIR_MODE, path)
     finally:
         os.close(fd)
 
@@ -496,7 +533,7 @@ def _atomic_write_json(path, obj):
         f.write("\n")
         f.flush()
         os.fsync(f.fileno())
-        _apply_owner_mode(f.fileno(), APPROVAL_ARTIFACT_MODE)
+        _apply_owner_mode(f.fileno(), APPROVAL_ARTIFACT_MODE, tmp)
     os.replace(tmp, path)
     # fsync the directory so the rename itself is durable — same reasoning as
     # append_log and propose. All three writers of a newly-named file in this tier
@@ -838,9 +875,30 @@ def _approval_lock(slug, cid):
     can never deadlock against itself.
     """
     p = governance_lib.approval_lock_path(slug, cid)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
+    d = os.path.dirname(p)
+    # THIRD creator of approvals/<slug> (MINOR 6, F12 R2 review): write_snapshot_bytes and
+    # write_approval normally create and mode this directory first via
+    # _ensure_approvals_dir before either ever reaches this lock, so on the shipped
+    # approve path this call finds the directory already there. reserve_approval also
+    # reaches this lock BEFORE _load_approval checks the approval record exists (see its
+    # own docstring: "the entire read-check-write runs inside _approval_lock"), so an
+    # unknown (slug, cid) can hit this line with the directory genuinely absent — the
+    # scenario the planned UMask=0077 would turn into 0o2700 from a bare os.makedirs
+    # (the executor, group hermes but not owner, would lose even traversal).
+    #
+    # So creation goes through the same helper as the other two -- but ONLY when the
+    # directory does not already exist. Calling the full _ensure_approvals_dir
+    # unconditionally here (tried first, reverted) re-applies 0o2750 on every single lock
+    # acquisition, including ones where the directory already exists with permissions a
+    # caller deliberately changed -- which silently "healed" hermes-broker.test.py's own
+    # fault-injection fixture (a chmod 0o500 meant to force reserve_approval's write to
+    # fail) before _atomic_write_json ever ran, breaking a real leak-detection test. This
+    # function's job is narrowly "make sure the directory EXISTS with the right shape",
+    # not "re-enforce the shape on every acquisition regardless of what's already there".
+    if not os.path.isdir(d):
+        _ensure_approvals_dir(slug)
     fd = os.open(p, os.O_CREAT | os.O_RDWR, 0o600)
-    _apply_owner_mode(fd, APPROVAL_LOCK_MODE)
+    _apply_owner_mode(fd, APPROVAL_LOCK_MODE, p)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:

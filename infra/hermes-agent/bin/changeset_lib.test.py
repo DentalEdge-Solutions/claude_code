@@ -1186,20 +1186,42 @@ class TestApprovalsDirOwnershipAndMode(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o2750, d)
 
     def test_control_a_bare_makedirs_would_not_have_landed_on_0o2750(self):
-        """Firing control -- WITHOUT mutating any tracked file. Builds a THROWAWAY sibling
-        directory with a bare os.makedirs (the exact call the pre-fix code made, no
-        explicit chmod/chown) under the identical hostile umask, and shows it does NOT
-        land on 0o2750. os.makedirs's default mode is 0o777, which the umask can only
-        narrow -- it can never SET the setgid bit -- so a bare makedirs can never produce
-        0o2750 on its own under a hostile umask. This is what proves the assertion above
-        is discriminating: against the pre-fix code (a bare os.makedirs at the same call
-        site) it would have failed exactly like this, not passed by accident of a lenient
-        default umask (the sibling control in TestApprovalArtifactModes already rules that
-        half out)."""
+        """Firing control -- WITHOUT mutating any tracked file.
+
+        CORRECTED (F12 R2 review, IMPORTANT 3): the first version of this control built
+        its throwaway directory under a PLAIN (non-setgid) tempdir and argued "the umask
+        can only narrow permission bits, it can never SET the setgid bit, so a bare
+        makedirs can never land 0o2750" -- true as far as it goes, but unsound as an
+        account of the real bug: in production approvals/ IS setgid 0o2750
+        (host_layout.py), and on Linux a directory created under a setgid PARENT inherits
+        the setgid bit itself via System V semantics -- independent of umask entirely, not
+        narrowed by it, not granted by it. That inheritance, not a lenient umask, is
+        exactly how the R2 defect happens: a bare os.makedirs there lands 0o2755 (setgid
+        intact from the parent, permission bits masked to 0o755 by even a hostile umask),
+        which still gives group hermes only r-x -- never write -- so the broker cannot
+        create its .tmp file or the lock sidecar inside it.
+
+        So this control now reproduces the real PARENT shape instead of a blank tempdir:
+        it chmods a throwaway "approvals" directory to 0o2750 (setgid) BEFORE the bare
+        makedirs, so the child is created under a genuinely setgid parent, matching
+        production. On Linux this reliably yields 0o2755, discriminating the defect this
+        control exists to catch. This sandbox is darwin, though, where a bare mkdir does
+        NOT propagate S_ISGID to a new child at all -- BSD semantics, not System V ('Darwin
+        proves nothing about group inheritance', the standing R1 lesson elsewhere in this
+        file) -- verified directly against this filesystem rather than assumed: the same
+        setup here lands 0o700 (umask alone, no setgid survives). The two platforms
+        disagree on the RESULTING mode (0o2755 on Linux vs. 0o700 here), so the assertion
+        below only checks inequality to 0o2750, not a specific hardcoded value -- asserting
+        "0o2755" as if it held everywhere would be exactly the same class of unsound,
+        platform-blind claim this docstring was rewritten to stop making. Only Linux CI
+        (Task 5, Tier 2) can show the actual 0o2755 shape."""
         old = os.umask(0o077)
         try:
-            bare = os.path.join(self.tmp, "approvals", "a-bare-client")
-            os.makedirs(bare, exist_ok=True)
+            parent = os.path.join(self.tmp, "approvals")
+            os.makedirs(parent, exist_ok=True)
+            os.chmod(parent, 0o2750)      # reproduce host_layout.py's real parent shape
+            bare = os.path.join(parent, "a-bare-client")
+            os.makedirs(bare)
             self.assertNotEqual(stat.S_IMODE(os.stat(bare).st_mode), 0o2750, bare)
         finally:
             os.umask(old)
