@@ -1,7 +1,8 @@
 # F12 — Approvals and run records vs `data/vaults` (design)
 
-> **Status:** design approved in brainstorming, 2026-09-23. Implementation plan follows via
-> `superpowers:writing-plans`.
+> **Status:** design approved in brainstorming, 2026-09-23; amended during execution
+> (R1: §2.4's per-client directory mode is `0o2750`, not `0750` — see the correction there).
+> Plan: `docs/superpowers/plans/2026-09-23-f12-approvals-and-run-records.md`.
 > **Finding:** F12 in `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`
 > **Predecessors:** F10 (`2026-09-21-f10-governance-store-and-spool-layout-design.md`) laid the
 > store this design extends; F9 (`2026-09-22-f9-bind-paths-and-proxy-allow-list-design.md`)
@@ -107,9 +108,19 @@ Following F10's table exactly (`bin/host_layout.py:35-46`):
 Entry("store", "records", DIR, "hermes-broker", "hermes", 0o2750, None)
 ```
 
-Per-client directories `records/<slug>/` are created by the writer at `0750`; `records/`'s setgid
-bit makes them inherit group `hermes`, so an operator in that group reads them without root.
-`init-host-layout.py` creates and verifies the row like every other entry, and never repairs.
+Per-client directories `records/<slug>/` are created by the writer at **`0o2750`** — the same
+mode as `records/` itself, setgid included. `init-host-layout.py` creates and verifies the row
+like every other entry, and never repairs.
+
+**CORRECTION (R1, 2026-09-23, found in Task 2's review).** This section originally said `0750`,
+which is wrong and self-defeating on Linux: `records/` is setgid, so `os.mkdir` gives the new
+directory group `hermes` AND an inherited `S_ISGID`, and a subsequent `fchmod(0o750)` strips that
+bit. Files created afterwards then take the writer's egid — `hermes-broker`, since the broker runs
+`Group=hermes-broker` with `hermes` only supplementary — so the records land
+`hermes-broker:hermes-broker` and an operator in group `hermes` cannot read them, which is the
+exact outcome this row's setgid bit exists to prevent and what §3.2's Tier 2 assertion checks.
+Darwin inherits groups from the parent directory regardless, so a green darwin suite proves
+nothing here. Keep the setgid bit: `0o2750`.
 
 ### 2.5 The pre-flight deliberately does not change
 
