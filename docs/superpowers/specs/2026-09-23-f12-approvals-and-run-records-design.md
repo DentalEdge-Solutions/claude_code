@@ -197,7 +197,7 @@ No CI wiring changes: `layout-integration.test.py` is already its own step, and 
 ```bash
 sudo git -C /opt/projects/claude_code pull --ff-only
 cd /opt/hermes-agent
-python3 bin/init-host-layout.py                                   # dry run: "create records"
+sudo python3 bin/init-host-layout.py                              # dry run: one "create records", the rest "ok"
 sudo python3 bin/init-host-layout.py --apply
 sudo -u hermes-broker python3 bin/init-host-layout.py --check     # must exit 0
 ```

@@ -256,7 +256,13 @@ design if the analyst is shown to need it.
 **Still open:** F14 (a Compose failure reported as "nothing was mutated") and the §6 hardening
 gates, including `UMask=0077`, which this fix makes safe to land but does not land.
 
-**One gap remains.** Nothing has run on the VPS: no `init-host-layout.py --apply`, no `records/` directory, no approval written by the new code there. CI has now run (see the result above) and proves the Linux uid/gid behaviour darwin cannot; the box confirmation is still outstanding.
+**Applied to the box, 2026-09-23.** Pulled `da2a0ae..9df03d4` (fast-forward, no mode conflict).
+Firing control first: `sudo -u hermes-broker init-host-layout.py --check` exited **2**, naming
+only `/var/lib/hermes/governance/records: missing, expected dir hermes-broker:hermes 2750`.
+Then `--apply` printed `created /var/lib/hermes/governance/records` and `layout OK`; the same
+`--check` exited **0**; `stat` showed `hermes-broker:hermes 2750`; both units `active`,
+`NRestarts=0` on the broker; a `sudo` dry run showed all 13 rows `ok`. **Still unexercised on the
+box:** an approval written by the new code, and a run record — both wait for the rehearsal gate.
 
 ### F14: a Compose failure is reported as "refused, nothing was mutated" (recorded, not fixed)
 
@@ -309,6 +315,22 @@ sequence" step 3 and the step near README:992 both invoke `--bootstrap-logs` wit
 same omission pattern (host tool, container default) is worth checking in the other
 host-side tools.
 
+### F17: an unreadable path is reported as `mismatch` (recorded, not fixed)
+
+**Measured on the VPS, 2026-09-23.** The post-F12 dry run (`python3 bin/init-host-layout.py`, as
+BRING-UP then wrote it — no `sudo`) run as `hermesops` printed `mismatch … cannot lstat ([Errno
+13] Permission denied …)` for all 11 rows below the two roots, and exited 2. Nothing was wrong:
+the store is `root:hermes 2750` and `hermesops` is by design only in `sudo` and `users`
+(BRING-UP Phase 1). With `sudo`, every row was `ok`. Two parts:
+
+- **Docs (fixed in this PR).** BRING-UP's post-F12 block, the F12 spec §4 and the post-F12
+  handoff now run the dry run with `sudo`. README step 2's first-install dry run is correct
+  without it — the store does not exist yet.
+- **Tool (open, low priority).** `host_layout.py`'s state probe maps any `OSError` from `lstat` other than `ENOENT`
+  to `mismatch`. It fails closed, so it is safe, but it reads as "the layout is wrong" when it
+  means "could not look". A distinct `unreadable` action (still non-zero) would say so. Does not
+  gate anything.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -329,3 +351,4 @@ host-side tools.
    rehearsal gate no longer needs F12 (fixed, PR #42) — its remaining prerequisite is
    `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
+6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
