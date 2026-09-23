@@ -211,12 +211,24 @@ class TestResult(Base):
         tests above while breaking the client's whole purpose — surfacing the broker's
         verdict unchanged."""
         for code, expected in ((0, K.EXIT_OK), (2, K.EXIT_REFUSED),
-                               (3, K.EXIT_FAILED_AFTER_MUTATION)):
+                               (3, K.EXIT_FAILED_AFTER_MUTATION),
+                               (4, K.EXIT_FAILED_AFTER_MUTATION)):
             self._result({"request_id": self.RID, "status": "ok",
                           "classification": "accepted_applied",
                           "exit_code": code, "finished_at": "2026-08-24T10:15:00Z"})
             rc, _, _ = self.run_cli(["result", "--request-id", self.RID])
             self.assertEqual(rc, expected, "code %r" % code)
+
+    def test_an_unverified_exit_reaches_the_agent_as_possibly_modified(self):
+        """F14. Broker exit_code 4 must not fall through to the EXIT_REFUSED default:
+        that tells the agent "refused" about a run that may have changed the account."""
+        self._result({"request_id": self.RID, "status": "failed",
+                      "classification": "failed_unverified_exit",
+                      "exit_code": 4, "finished_at": "2026-08-24T10:15:00Z"})
+        rc, out, _ = self.run_cli(["result", "--request-id", self.RID])
+        self.assertEqual(rc, K.EXIT_FAILED_AFTER_MUTATION)
+        self.assertNotEqual(rc, K.EXIT_REFUSED)
+        self.assertIn("failed_unverified_exit", out)
 
     def test_the_planted_value_is_still_shown_to_the_operator(self):
         """This client surfaces the broker's record verbatim; the guard changes the

@@ -40,6 +40,8 @@ def _load(name, filename):
 
 
 PF = _load("preflight_governance_access", "preflight-governance-access.py")
+B = _load("hermes_broker", "hermes-broker.py")
+K = _load("hermes_syscall", "hermes-syscall.py")
 
 # PLATFORM GATE. The wrapper runs the pre-flight (run-ads-mutate.sh:34) before it does
 # anything else, and the pre-flight is a NO-OP off Linux by design (PF.applies()), because
@@ -400,6 +402,25 @@ class TestAttestationFiringControls(Base):
         os.chmod(cat, 0o755)
         p = self._run(executor_rc=2)
         self.assertEqual(p.returncode, 1, "control did not fire:\n" + p.stderr)
+
+
+class TestTheF14ChainEndToEnd(Base):
+    """F14 on the laptop, across the real seam: a Compose failure with no executor line
+    becomes wrapper 4 → broker failed_unverified_exit → agent EXIT_FAILED_AFTER_MUTATION.
+    Nowhere on the chain may it read as "nothing was mutated"."""
+
+    def test_a_compose_failure_is_possibly_modified_all_the_way_to_the_agent(self):
+        p = self._run(executor_rc=1, attest_rc=None)
+        classification, status = B.CLASSIFICATION_BY_RC.get(p.returncode, B.UNKNOWN_RC)
+        self.assertEqual((classification, status), ("failed_unverified_exit", "failed"))
+        self.assertNotIn("nothing was mutated", B.DETAIL_BY_CLASSIFICATION[classification])
+        self.assertEqual(K._EXIT_BY_CODE.get(p.returncode), K.EXIT_FAILED_AFTER_MUTATION)
+
+    def test_control_an_attested_usage_exit_is_still_a_refusal(self):
+        """Discriminating control: an attested 1 must still read as refused_usage, or the
+        test above would pass against a chain that turned everything into a failure."""
+        p = self._run(executor_rc=1)
+        self.assertEqual(B.CLASSIFICATION_BY_RC[p.returncode][0], "refused_usage")
 
 
 if __name__ == "__main__":

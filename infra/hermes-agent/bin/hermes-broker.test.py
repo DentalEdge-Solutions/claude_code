@@ -810,7 +810,8 @@ class TestExecution(Base):
         cases = {0: ("accepted_applied", "applied"),
                  1: ("refused_usage", "refused"),
                  2: ("refused_preflight", "refused"),
-                 3: ("failed_after_mutation", "failed")}
+                 3: ("failed_after_mutation", "failed"),
+                 4: ("failed_unverified_exit", "failed")}
         for rc, (classification, status) in cases.items():
             C.write_approval(SLUG, CID, DIGEST, "operator", NOW, 24)
             rid = self.file_request()
@@ -819,6 +820,18 @@ class TestExecution(Base):
             self.assertEqual(got["classification"], classification, "rc=%d" % rc)
             self.assertEqual(got["status"], status, "rc=%d" % rc)
             self.assertEqual(got["exit_code"], rc)
+
+    def test_an_unverified_exit_is_possibly_modified_never_nothing_mutated(self):
+        """F14. Wrapper status 4: the executor's exit could not be verified. The detail
+        must say "possibly modified" and must never carry the refusal promise."""
+        rid = self.file_request()
+        self.drain(RecordingRunner(rc=4))
+        got = self.result_for(rid)
+        self.assertEqual(got["classification"], "failed_unverified_exit")
+        self.assertEqual(got["status"], "failed")
+        self.assertEqual(got["exit_code"], 4)
+        self.assertIn("possibly modified", got["detail"])
+        self.assertNotIn("nothing was mutated", got["detail"])
 
     def test_an_unknown_exit_code_is_treated_as_failure_not_success(self):
         rid = self.file_request()
