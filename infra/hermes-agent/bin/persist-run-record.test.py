@@ -140,6 +140,55 @@ class TestPersist(_RecordsBase):
                          governance_lib.RECORDS_DIR_MODE)
 
 
+class TestRecordsRootIsAPrerequisiteNotSomethingPersistCreates(_RecordsBase):
+    """C2 (final whole-branch review). persist() REFUSES when <store>/records is absent
+    rather than creating it: a defensive os.makedirs there would build the tree
+    path-based, with a umask-derived mode and no setgid bit — exactly the wrong-moded
+    tree the layout row exists to prevent (spec §2.4, correction R1) — and
+    init-host-layout.py verifies that row but deliberately never repairs it.
+
+    Nothing exercised that refusal. Worse, it had been absorbed rather than tested:
+    _RecordsBase.setUp always builds the tree, and both TestMain.setUp and
+    run-ads-mutate.test.py's Base were CHANGED to create records/ so they would keep
+    passing. Three fixtures satisfying a check is not the same as one test firing it,
+    and the branch's standing constraint is that every new check needs a firing control.
+
+    This is also the refusal an operator meets FIRST — before any approval, before any
+    apply — if they pull and forget `init-host-layout.py --apply`. If its message ever
+    stops naming that command, they are left staring at a path that does not exist with
+    no instruction attached.
+    """
+
+    def test_a_missing_records_root_is_refused_and_names_the_remediation(self):
+        records_root = os.path.dirname(self.records)
+        shutil.rmtree(records_root)
+        self.assertFalse(os.path.exists(records_root), "fixture bug: still there")
+        with self.assertRaises(P.PersistRefused) as cm:
+            P.persist(self.records, RESULT)
+        msg = str(cm.exception)
+        self.assertIn(records_root, msg)
+        self.assertIn("init-host-layout.py --apply", msg)
+
+    def test_the_refusal_creates_nothing_at_all(self):
+        """A refusal that had already made the directory would be the auto-create this
+        check exists to forbid, just arriving one step later."""
+        records_root = os.path.dirname(self.records)
+        shutil.rmtree(records_root)
+        with self.assertRaises(P.PersistRefused):
+            P.persist(self.records, RESULT)
+        self.assertFalse(os.path.exists(records_root),
+                         "persist created the records root it just refused over")
+
+    def test_control_the_same_call_succeeds_once_the_root_exists(self):
+        """THE CONTROL for both tests above. Without it they would be satisfied by a
+        persist() that refused unconditionally. The only difference between this case
+        and those is the presence of <store>/records, which _RecordsBase.setUp lays
+        down — i.e. exactly what `init-host-layout.py --apply` lays down on the box."""
+        self.assertTrue(os.path.isdir(os.path.dirname(self.records)))
+        path = P.persist(self.records, RESULT)
+        self.assertTrue(os.path.isfile(path))
+
+
 class TestSymlinkEscape(_RecordsBase):
     """C1 (final whole-branch review, F12-updated). persist() runs HOST-SIDE and writes
     into records/<slug>/ in the governance store. That tree is not mounted into any

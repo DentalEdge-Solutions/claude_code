@@ -6,10 +6,17 @@ account. The test asserts the wrapper's own control flow — which status it exi
 with, and what it says on stderr — not anything about mutation.
 
 S1-M2 is the reason this file exists. persist-run-record.py exits 2 for a
-PersistRefused: a destination that could not be proven to stay inside the client
-vault, i.e. a symlink or hardlink pointing out of it. That is an ATTACK DETECTION,
-and it was swallowed by `|| true` — status discarded, stdout to /dev/null, leaving
-one line of stderr buried in the executor's own output.
+PersistRefused: a destination that could not be proven to stay inside the governance
+store's records/ tree (F12 — it used to be the client vault), i.e. a symlink or
+hardlink pointing out of it. That is an ATTACK DETECTION, and it was swallowed by
+`|| true` — status discarded, stdout to /dev/null, leaving one line of stderr buried
+in the executor's own output.
+
+F12 review (I1): exit 2 now ALSO covers a plain setup mistake — a records/ tree that
+`init-host-layout.py --apply` has not created yet. The banner therefore no longer
+asserts an attack as fact; it names both causes and points at the
+`persist-run-record:` line above it, which says which one fired.
+TestPersistRefusalIsLoud below pins that wording.
 
 The two properties are in tension and both matter, so both are pinned here:
   * the executor's status must still win (an exit-2 refusal is a promise the account
@@ -202,6 +209,27 @@ class TestPersistRefusalIsLoud(Base):
         # sending an operator to the wrong tree mid-incident costs real time.
         self.assertIn("records/<client>", p.stderr)
         self.assertIn("governance audit log", p.stderr)
+
+    def test_the_banner_does_not_assert_an_attack_as_the_only_cause(self):
+        """F12 review (I1). Exit 2 covers TWO causes now: a records/ tree that
+        `init-host-layout.py --apply` has not created yet (the likeliest one, right
+        after a pull) and a genuine containment refusal. The banner used to state the
+        second as fact — "treat it as an attempt to make this step write outside
+        records/" with no alternative offered — which hands an operator a security
+        incident for a setup mistake. It must now name the setup cause, name the
+        remediation, and point at the `persist-run-record:` line that distinguishes
+        them."""
+        self._poison_the_records_dir()
+        p = self._run(executor_rc=0)
+        self.assertIn("init-host-layout.py --apply", p.stderr)
+        # The QUOTED form, not a bare "persist-run-record:" — the tool prints its own
+        # prefixed line on this path anyway, so a bare substring would pass against a
+        # banner that never mentioned it.
+        self.assertIn("'persist-run-record:' line", p.stderr)
+        self.assertIn("SETUP", p.stderr)
+        # And it must not have become vague in the process: the containment reading is
+        # still spelled out, it is just no longer the only one on offer.
+        self.assertIn("symlink or hardlink", p.stderr)
 
     def test_the_refusal_does_not_hijack_the_executor_status(self):
         """The other half, and the reason `|| true` was there in the first place. A

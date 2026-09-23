@@ -400,6 +400,28 @@ def persist(record_dir, result, root=None):
             # the row's setgid bit exists to prevent. Darwin has no such uid/gid
             # separation to expose this, which is why it was missed at first: the
             # spec briefly said plain 0750 too, corrected 2026-09-23 (R1).
+            #
+            # UNCONDITIONAL — re-applied on EVERY persist, not only at creation, and
+            # deliberately the opposite of changeset_lib._approval_lock, which calls
+            # _ensure_approvals_dir only `if not os.path.isdir(d)`. The asymmetry is
+            # real and worth stating (MINOR 5, final whole-branch review), because
+            # reading either site alone makes the other look like a mistake:
+            #   * approvals/<slug>/ is created by approve-changeset as ROOT and is then
+            #     written by TWO different identities. Re-moding it on every lock
+            #     acquisition means a deliberate permission change by an operator — or
+            #     by a test's fault-injection fixture — is silently undone by the next
+            #     lock, which is exactly the regression that made it conditional.
+            #   * records/<slug>/ has ONE writer, ONE identity (hermes-broker, inside
+            #     the broker's sandbox) and no legitimate reason for its mode ever to be
+            #     anything but RECORDS_DIR_MODE. There is nothing here for an idempotent
+            #     re-apply to trample, and the run record is written on the far side of
+            #     a live mutation — a directory that has drifted (an interrupted earlier
+            #     persist, a manual mkdir) must be corrected NOW rather than silently
+            #     accepted, because the alternative is a run record group-owned
+            #     hermes-broker that an operator in group `hermes` cannot read.
+            # Different number of writers, different default. If records/<slug>/ ever
+            # gains a second writer, this line inherits _approval_lock's problem and
+            # should inherit its conditional too.
             os.fchmod(rfd, governance_lib.RECORDS_DIR_MODE)
 
             path = os.path.join(records_real, base)

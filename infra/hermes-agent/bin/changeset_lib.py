@@ -370,7 +370,10 @@ def write_snapshot_bytes(slug, cid, data):
         out.write(data)
         out.flush()
         os.fsync(out.fileno())
-        _apply_owner_mode(out.fileno(), APPROVAL_ARTIFACT_MODE, tmp)
+        # MINOR 4: name DST, not TMP. The fd is the staging file either way; the path is
+        # only ever rendered into a refusal message, and the operator repairs the
+        # destination. See _apply_owner_mode's "PATH IS THE FINAL DESTINATION".
+        _apply_owner_mode(out.fileno(), APPROVAL_ARTIFACT_MODE, dst)
     os.replace(tmp, dst)
     # fsync the directory too — same reasoning as _atomic_write_json and append_log.
     # write_snapshot is a fourth writer of a newly-named file in this tier; a caller
@@ -386,6 +389,21 @@ def write_snapshot_bytes(slug, cid, data):
 
 
 def result_path(vault, cid):
+    """The vault path a run result USED to be written to. NOTHING WRITES THIS ANY MORE.
+
+    MINOR 2 (final whole-branch review). F12 moved the run record into the governance
+    store — governance_lib.record_path(slug, cid) is now the only place a result file is
+    created, and persist_run_record_shim is its only writer. This function has no
+    production caller left. It is kept, not deleted, because it is the name of the
+    ABSENCE that F12's move has to keep proving: apply-changeset.test.py:250 asserts
+    `not os.path.exists(C.result_path(...))`, i.e. that the mutation path never
+    resurrects a vault writer. Deleting it would delete that assertion's vocabulary and
+    leave the test re-deriving the old layout by hand, which is how a convention quietly
+    drifts back.
+
+    So: audit/assertion path only. If you are looking for where a result IS written,
+    it is governance_lib.record_path; do not add a caller here.
+    """
     return os.path.join(changes_dir(vault), f"{cid}.result.json")
 
 
@@ -443,6 +461,29 @@ def _apply_owner_mode(fd, mode, path):
     only for actionable error messages — the fd is what every fchmod/fchown call below
     actually acts on.
 
+    PATH IS THE FINAL DESTINATION, never the `.tmp` staging name (MINOR 4, final
+    whole-branch review). The two atomic writers below (_atomic_write_json,
+    write_snapshot_bytes) fchmod the staging fd and then os.replace it into place, so a
+    message naming the staging file sends the operator after a path that either no
+    longer exists (the rename succeeded later) or that they have no reason to recognise.
+    The artifact they can see, reason about and repair is the destination, so that is
+    what these refusals name; the "and any leftover .tmp beside it" clause covers the
+    staging file without making it the headline.
+
+    ORDER: fchmod BEFORE fchown here, the opposite of host_layout.py:281-282, which
+    carries an explicit "after fchown, which can clear setgid" comment. That hazard is
+    real but does not reach this function, and the asymmetry is deliberate rather than an
+    oversight (MINOR 1, final whole-branch review):
+      - Linux's ATTR_KILL_SGID (which is what strips setgid on a chown by a non-owner)
+        is applied to regular FILES, not directories — and the only setgid caller here
+        is _ensure_approvals_dir, whose target is a directory.
+      - The two file modes this function is ever given (APPROVAL_ARTIFACT_MODE 0o640,
+        APPROVAL_LOCK_MODE 0o660) have no S_IXGRP, and the kernel only clears S_ISGID on
+        a group-executable file in the first place.
+    So neither order can lose a bit here. host_layout.py's order is still the one to copy
+    if a setgid REGULAR file ever shows up on either side; this note exists so the next
+    reader who spots the two files disagreeing does not have to re-derive that.
+
     Non-root callers still get the explicit mode; ownership is left alone. On Linux this
     branch is unreachable from approve-changeset.py on the SHIPPED path: its main()
     refuses to run unless root, before any of these writes happen, so a non-root writer
@@ -473,8 +514,8 @@ def _apply_owner_mode(fd, mode, path):
         raise RuntimeError(
             "F12: cannot set mode %04o on %s — %s. This process must own %s (or be root) "
             "to chmod it; if an earlier `sudo` approve created it, either chown it back to "
-            "the current user/root or delete it and let approve recreate it cleanly." %
-            (mode, path, e, path)) from e
+            "the current user/root or delete it (and any leftover .tmp beside it) and let "
+            "approve recreate it cleanly." % (mode, path, e, path)) from e
     if not sys.platform.startswith("linux") or os.geteuid() != 0:
         return
     try:
@@ -533,7 +574,8 @@ def _atomic_write_json(path, obj):
         f.write("\n")
         f.flush()
         os.fsync(f.fileno())
-        _apply_owner_mode(f.fileno(), APPROVAL_ARTIFACT_MODE, tmp)
+        # MINOR 4: name PATH, not TMP — same reasoning as write_snapshot_bytes above.
+        _apply_owner_mode(f.fileno(), APPROVAL_ARTIFACT_MODE, path)
     os.replace(tmp, path)
     # fsync the directory so the rename itself is durable — same reasoning as
     # append_log and propose. All three writers of a newly-named file in this tier

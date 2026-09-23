@@ -1196,25 +1196,37 @@ class TestApprovalsDirOwnershipAndMode(unittest.TestCase):
         (host_layout.py), and on Linux a directory created under a setgid PARENT inherits
         the setgid bit itself via System V semantics -- independent of umask entirely, not
         narrowed by it, not granted by it. That inheritance, not a lenient umask, is
-        exactly how the R2 defect happens: a bare os.makedirs there lands 0o2755 (setgid
-        intact from the parent, permission bits masked to 0o755 by even a hostile umask),
-        which still gives group hermes only r-x -- never write -- so the broker cannot
-        create its .tmp file or the lock sidecar inside it.
+        exactly how the R2 defect happens: in production approve runs as root under the
+        ordinary umask 022, so a bare os.makedirs there lands 0o2755 -- setgid intact
+        from the parent, permission bits masked to 0o755 -- which still gives group
+        hermes only r-x, never write, so the broker cannot create its .tmp file or the
+        lock sidecar inside it.
 
         So this control now reproduces the real PARENT shape instead of a blank tempdir:
         it chmods a throwaway "approvals" directory to 0o2750 (setgid) BEFORE the bare
         makedirs, so the child is created under a genuinely setgid parent, matching
-        production. On Linux this reliably yields 0o2755, discriminating the defect this
-        control exists to catch. This sandbox is darwin, though, where a bare mkdir does
-        NOT propagate S_ISGID to a new child at all -- BSD semantics, not System V ('Darwin
-        proves nothing about group inheritance', the standing R1 lesson elsewhere in this
-        file) -- verified directly against this filesystem rather than assumed: the same
-        setup here lands 0o700 (umask alone, no setgid survives). The two platforms
-        disagree on the RESULTING mode (0o2755 on Linux vs. 0o700 here), so the assertion
-        below only checks inequality to 0o2750, not a specific hardcoded value -- asserting
-        "0o2755" as if it held everywhere would be exactly the same class of unsound,
-        platform-blind claim this docstring was rewritten to stop making. Only Linux CI
-        (Task 5, Tier 2) can show the actual 0o2755 shape."""
+        production.
+
+        WHAT THIS TEST ACTUALLY PRODUCES IS NOT 0o2755 (corrected, final whole-branch
+        review -- the deferred minor). This test runs under the hostile umask 0o077 it
+        sets three lines down, not production's root umask 022, so on Linux the bare
+        makedirs here lands 0o2700: setgid inherited from the parent, permission bits
+        masked all the way to 0o700 by THIS umask. 0o2755 is the shape the REAL root
+        approve produces, and the shape Tier 2 (layout-integration.test.py, root on
+        Linux CI) can show -- it is not the shape reachable from inside this suite. The
+        two are different numbers for the same defect: neither one is 0o2750, and in
+        neither one does group hermes get write.
+
+        This sandbox is darwin, where a bare mkdir does NOT propagate S_ISGID to a new
+        child at all -- BSD semantics, not System V ('Darwin proves nothing about group
+        inheritance', the standing R1 lesson elsewhere in this file) -- verified directly
+        against this filesystem rather than assumed: the same setup here lands 0o700
+        (umask alone, no setgid survives). So three platforms/privilege combinations
+        produce three different modes (0o2755 real-root-on-Linux, 0o2700 this test on
+        Linux, 0o700 this test on darwin), which is exactly why the assertion below
+        checks only inequality to 0o2750 rather than any hardcoded value. Pinning a
+        number here would be the same class of unsound, platform-blind claim this
+        docstring has now twice been rewritten to stop making."""
         old = os.umask(0o077)
         try:
             parent = os.path.join(self.tmp, "approvals")
