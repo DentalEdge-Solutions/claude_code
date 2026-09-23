@@ -202,8 +202,30 @@ sudo python3 bin/init-host-layout.py --apply
 sudo -u hermes-broker python3 bin/init-host-layout.py --check     # must exit 0
 ```
 
-**Nothing to migrate:** the kill switch has never existed, so no apply has ever run, so no run
-records exist anywhere.
+**Run `--apply` promptly after the pull — the broker will not start until you do.** The broker
+unit's `ExecStartPre=init-host-layout.py --check` now covers the `records` row, so any restart in
+the window between the pull and the `--apply` (a reboot, `Restart=on-failure`, a manual
+`systemctl restart`) fails that pre-condition, and with `RestartSec=5` becomes a restart loop.
+That is correct fail-closed behaviour — the refusal names `records`, and `--apply` clears it —
+but it is a trap if it is not expected. Nothing restarts on its own account: no unit file changes.
+
+**Nothing to migrate — for RUN RECORDS.** The kill switch has never existed, so no apply has ever
+run, so no run records exist anywhere.
+
+**Approvals are a different story: any change-set approved BEFORE this change must be
+re-approved.** The fix does not repair existing artifacts and deliberately does not try to.
+Nothing on the broker's own path re-modes what it finds: `_approval_lock` calls
+`_ensure_approvals_dir` only when `approvals/<slug>/` does not already exist (deliberate — calling
+it unconditionally re-applies `0o2750` on every lock acquisition and silently undoes a caller's
+deliberate permission change), and the approval, snapshot and sidecar themselves are only ever
+written by `approve`. So a store holding a pre-F12 approval keeps its root-owned `02755`
+directory, its root-owned `0600` lock sidecar and its umask-derived approval and snapshot — and
+the first `reserve_approval` against it fails exactly the way F12 records, on a branch labelled
+"fixed" (as of the final review it fails as an actionable refusal rather than a bare `EPERM`,
+which makes it legible, not absent). Re-running `sudo ./changeset.sh approve …` rewrites all three
+artifacts and re-modes the directory through the fd-based helper, which repairs everything. There is
+no migration script and should not be: the approval is a human act with an expiry, and silently
+re-moding an old one server-side would mean repairing an artifact nobody re-confirmed.
 
 **Changed command:** approvals are now `sudo ./changeset.sh approve …` on Linux.
 

@@ -534,6 +534,15 @@ sudo ./changeset.sh approve --client <slug> --changeset <id> --operator <name> \
 `hermes-broker:hermes` so the broker can reserve them. The tool refuses non-root on Linux
 rather than writing artifacts that fail later, at apply time (F12).
 
+> **Any change-set approved BEFORE F12 must be re-approved.** The fix applies owner and
+> mode as the artifacts are written; it does **not** go back and repair artifacts that
+> already exist, and deliberately has no migration script — an approval is a human act
+> with an expiry, and silently re-moding an old one would repair something nobody
+> re-confirmed. A pre-F12 approval keeps its root-owned `0600` lock sidecar and
+> `02755` per-client directory, and the first apply against it fails to reserve, exactly
+> as F12 describes. Re-run `sudo ./changeset.sh approve …` for it: that rewrites the
+> approval, the snapshot and the sidecar, and re-modes `approvals/<slug>/`.
+
 **Run them through the wrappers, not the scripts directly.** `bin/propose-changeset.py`
 and `bin/approve-changeset.py` default to the **container** paths
 (`/opt/governance/registry/clients.json`, `/opt/data/vaults`), which on the host fail
@@ -919,7 +928,7 @@ directory you own. Compose does not expand `~`, so write the path in full
 **Who mounts what:**
 
 | Container | approvals/ control/ registry/ | log/ | seen/ | records/ |
-|---|---|---|---|---|---|
+|---|---|---|---|---|
 | `hermes-agent` (the gateway — where Hermes runs) | not mounted at all | not mounted | not mounted | not mounted |
 | `ads-mutator` (one-shot executor, no shell) | `:ro` | read-write | **not mounted** | **not mounted** |
 | `ads-credential-audit` (one-shot, no shell) | not mounted | not mounted | not mounted | not mounted |

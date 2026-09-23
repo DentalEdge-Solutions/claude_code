@@ -414,9 +414,27 @@ directories as root.
 This gate is not run by this runbook. It sits between Phase 6 and anything that touches the
 kill switch. **It needs:** F9 (landed), F12 (landed — approvals are written `hermes-broker:hermes`
 and run records go to `<store>/records/`), `.env.gaw` carrying the WRITE Google Ads credential,
-and Phase 6 passed. After pulling F12, run README step 2's layout commands again so `records/` is
-created (`init-host-layout.py --apply`, then `--check` as `hermes-broker`); no unit changes, so
-nothing restarts.
+and Phase 6 passed.
+
+**After pulling F12, lay down the new `records/` row** — these three commands and nothing else
+(spec §4). They are flag-less: `init-host-layout.py` already defaults to the right store and spool
+roots. Do **not** "run README step 2's layout commands again", which this runbook used to say:
+step 2 opens with `.env` edits, `sudo docker compose down` and an `rmdir` of the live store, none
+of which is self-guarding and none of which this needs.
+
+```bash
+cd /opt/hermes-agent
+python3 bin/init-host-layout.py                                   # dry run: "create records"
+sudo python3 bin/init-host-layout.py --apply
+sudo -u hermes-broker python3 bin/init-host-layout.py --check     # must exit 0
+```
+
+**Run `--apply` promptly after the pull — the broker will not start until you do.** Its
+`ExecStartPre=` is `init-host-layout.py --check`, which now covers the `records` row, so any
+restart in the window between the pull and the `--apply` (a reboot, `Restart=on-failure`, a manual
+`systemctl restart`) fails the pre-condition, and with `RestartSec=5` that becomes a restart loop.
+This is correct fail-closed behaviour, not a bug: the refusal names `records`, and `--apply` clears
+it. No unit files change, so nothing restarts on its own account.
 
 **The proof:** with the kill switch **absent**, a human-approved request goes broker → proxy →
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
