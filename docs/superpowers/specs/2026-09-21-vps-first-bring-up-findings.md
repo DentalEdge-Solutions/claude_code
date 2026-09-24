@@ -253,7 +253,8 @@ group inheritance at all (BSD vs System V), which is the mechanism the records d
 governance is unaffected (the fsynced audit log is the authoritative record). Revisit as its own
 design if the analyst is shown to need it.
 
-**Still open:** audit-log truncation (§6 part B) and F18 (the attach pass-through bypass). The
+**Still open:** audit-log truncation (§6 part B) and F19 (attach may target any container; to be
+assessed). F18 is fixed (PR #50). The
 framing hardening and `UMask=0077` (§6 part A) are in PR #48. F14 (a Compose failure reported as
 "nothing was mutated") is fixed (PR #46).
 
@@ -363,7 +364,7 @@ the store is `root:hermes 2750` and `hermesops` is by design only in `sudo` and 
   means "could not look". A distinct `unreadable` action (still non-zero) would say so. Does not
   gate anything.
 
-### F18: the proxy's attach pass-through skips inspection for the rest of the connection (recorded, not fixed)
+### F18: the proxy's attach pass-through skips inspection for the rest of the connection — fixed (PR #50)
 
 **Found in the whole-branch review of PR #48.** `docker-create-proxy.py`'s `_handle`: after
 `decide()` allows a request, `if "/attach" in path:` — a substring test over the WHOLE target,
@@ -390,6 +391,25 @@ allow-list pattern AND whose upstream response is `101 Switching Protocols` (Com
 bytes (`buf`) explicitly. Tests need a keep-alive fake upstream (TestPlumbing's closes after
 each reply, so this was never exercised).
 
+**Fix (PR #50, spec `2026-09-23-f18-attach-pass-through-design.md`).** Attach is defined once
+(`_ATTACH_RE`, used by both the allow-list and `_is_attach`: POST, query string stripped,
+fullmatch). `_handle` now reads dockerd's response head before deciding: only an attach answered
+exactly `101` is passed through (forwarding the 101 head, any stream bytes read with it, and any
+client bytes already read past the request); any other answer to an attach is relayed and the
+connection closed; non-attach requests are unchanged. Tested with a keep-alive fake upstream (all
+three routes let a smuggled create through before the fix and not after). **Measured on Linux CI**
+(run 35999764190): the real Compose attach is logged `UPGRADE POST …/attach… (101)`.
+
+### F19: attach may target any container (recorded, not fixed)
+
+**Found 2026-09-23 while designing the F18 fix.** The allow-list's attach entry matches any
+container id (`_ID = [A-Za-z0-9_.-]+`), so the broker — the adversary the proxy exists to contain —
+can `POST /containers/<id>/attach` to **any** container, including the Hermes gateway, and with
+`stdin=1` write to its input once dockerd upgrades the connection. Unlike F18 this is not a parsing
+or pass-through defect; it is a policy gap in `decide()`. Closing it needs a way for the proxy to
+know which container ids are ads-mutator runs (not measured). **Whether it gates the kill switch is
+assessed in its own cycle; it is listed as a gate until then.**
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -411,4 +431,5 @@ each reply, so this was never exercised).
    prerequisite is `.env.gaw` carrying the WRITE Google Ads credential, plus Phase 6 passed.
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
-7. F18: the attach pass-through bypass. Gates the kill switch.
+7. F18: the attach pass-through bypass — fixed (PR #50).
+8. F19: attach may target any container. Listed as a kill-switch gate until assessed.
