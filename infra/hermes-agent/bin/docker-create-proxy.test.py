@@ -439,6 +439,44 @@ class TestParseHead(unittest.TestCase):
             self.assertNotIn(marker.decode(), ctx.exception.reason)
 
 
+class TestAttachHelpers(unittest.TestCase):
+    """F18 (spec 2026-09-23). Attach is defined ONCE — the allow-list entry and the
+    pass-through decision use the same pattern — and the upstream status is read strictly,
+    so a garbled status line can never be mistaken for 101."""
+
+    def test_a_real_attach_is_an_attach(self):
+        self.assertTrue(PX._is_attach(
+            "POST", "/v1.55/containers/abc/attach?stream=1&stdout=1&stderr=1"))
+        self.assertTrue(PX._is_attach("POST", "/containers/abc/attach"))
+
+    def test_look_alikes_are_not_attaches(self):
+        for method, path in (("GET", "/_ping?x=/attach"),
+                             ("DELETE", "/v1.55/containers/attach"),
+                             ("GET", "/v1.55/containers/attach/json"),
+                             ("POST", "/v1.55/containers/abc/attachx"),
+                             ("POST", "/v1.55/containers/abc/attach/../../create"),
+                             ("GET", "/v1.55/containers/abc/attach")):
+            self.assertFalse(PX._is_attach(method, path), (method, path))
+
+    def test_the_allow_list_uses_the_same_attach_pattern(self):
+        # IDENTITY, not equality: re.Pattern compares equal to a separately compiled copy of
+        # the same pattern, so `in` would pass even if the two definitions drifted apart.
+        self.assertTrue(any(m == "POST" and pat is PX._ATTACH_RE for m, pat in PX.ALLOWED))
+
+    def test_status_codes_are_read_strictly(self):
+        cases = [(b"HTTP/1.1 101 UPGRADED\r\nUpgrade: tcp", 101),
+                 (b"HTTP/1.1 404 Not Found", 404),
+                 (b"HTTP/1.1 200 OK\r\nContent-Length: 2", 200),
+                 (b"HTTP/1.1  101 x", None),
+                 (b"HTTP/1.1 1O1 x", None),
+                 (b"HTTP/1.1 1010 x", None),
+                 (b"HTTP/1.1", None),
+                 (b"garbage", None),
+                 (b"", None)]
+        for rhead, want in cases:
+            self.assertEqual(PX._status_code(rhead), want, rhead)
+
+
 class TestPlumbing(unittest.TestCase):
     """The socket half. These use a fake upstream so no Docker daemon is needed."""
 

@@ -85,6 +85,11 @@ import argparse, json, os, re, socket, socketserver, sys, threading
 _V = r"(?:/v[0-9]+\.[0-9]+)?"          # optional API version prefix, e.g. /v1.55
 _ID = r"[A-Za-z0-9_.-]+"
 
+# F18: attach is defined ONCE. The allow-list entry below and _is_attach() use this same
+# object, so "what may be requested" and "what may switch a connection to raw pass-through"
+# cannot drift apart.
+_ATTACH_RE = re.compile(_V + r"/containers/" + _ID + r"/attach")
+
 # (method, compiled path pattern). Fullmatch only — a prefix match would let
 # /containers/create/../../build through.
 ALLOWED = [
@@ -97,7 +102,7 @@ ALLOWED = [
     ("GET",    re.compile(_V + r"/containers/json")),
     ("POST",   re.compile(_V + r"/containers/create")),
     ("POST",   re.compile(_V + r"/containers/" + _ID + r"/start")),
-    ("POST",   re.compile(_V + r"/containers/" + _ID + r"/attach")),
+    ("POST",   _ATTACH_RE),
     ("POST",   re.compile(_V + r"/containers/" + _ID + r"/wait")),
     ("GET",    re.compile(_V + r"/containers/" + _ID + r"/json")),
     ("DELETE", re.compile(_V + r"/containers/" + _ID)),
@@ -156,6 +161,23 @@ def _path_only(path):
     if ".." in p or "//" in p:
         return None
     return p
+
+
+def _is_attach(method, path):
+    """True only for a real attach: POST, and the path WITHOUT its query string fullmatches
+    the attach pattern. A substring test over the whole target was F18: `GET /_ping?x=/attach`
+    and `DELETE /containers/attach` both switched the connection to uninspected pass-through."""
+    return method == "POST" and bool(_ATTACH_RE.fullmatch(_path_only(path) or ""))
+
+
+def _status_code(rhead):
+    """The upstream response's status as an int when it is exactly three ASCII digits in the
+    second space-separated field of the status line, else None. Only an exact 101 may switch
+    a connection to pass-through, so anything unusual reads as None, never as 101."""
+    parts = rhead.split(b"\r\n", 1)[0].split(b" ")
+    if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
+        return int(parts[1])
+    return None
 
 
 def _check_cmd(cmd):
