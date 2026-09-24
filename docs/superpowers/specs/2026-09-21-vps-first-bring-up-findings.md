@@ -409,7 +409,7 @@ proxy logged `ALLOW POST /v1.55/containers/create?name=hermes-agent-ads-mutator-
 `DENY-FOLLOWUP` and no `malformed` refusal — the first real-dockerd measurement of the fixed attach
 path on the box. Kill switch: absent (checked with `sudo test`).
 
-### F19: container-scoped calls accept any container id — fixed in PR #53 (merge-commit CI and box rollout pending)
+### F19: container-scoped calls accept any container id — fixed (PR #53), applied to the box
 
 **Found 2026-09-23/24 (F18 design + F18 whole-branch review).** The allow-list's container-scoped
 entries — inspect (`GET /containers/<id>/json`), start, wait, delete, and attach — all match any
@@ -444,9 +444,21 @@ pinned entrypoint. An earlier RED attempt (run 36019974966) failed for the wrong
 probe pinned `/v1.55` and CI's dockerd 28.0.4 caps at API 1.48 — and was discarded once the probe
 was changed to unversioned paths. CI: RED on today's proxy (run 36020681939: the decoy's sentinel
 was read), then `bind-agreement: executed 7, skipped 0` on the PR (run 36024366720) and on the
-merge commit (run pending). **Residual, accepted:** the list call still enumerates
+merge commit (run 36031116861). **Residual, accepted:** the list call still enumerates
 containers (names, labels, image, mounts — no environment); every non-mutator id it reveals is
 now refused.
+
+**Applied to the box, 2026-09-24.** The box pulled `5acee36..d4fbb29` and restarted
+`hermes-docker-proxy` only (no unit changes); both units `active`, `NRestarts=0`. The same probe
+— as `hermes-broker`, through the proxy socket, an inspect of the gateway's full id, printing
+only the status code — returned **`200` before the pull and `403` after**, with exactly one
+`target is not an ads-mutator run: entrypoint mismatch` line in the proxy journal. That measures
+the gateway's entrypoint as different from the pinned one on the real image (previously inferred).
+BRING-UP Phase 6 then gave `rc=2` (`mutation is disabled`), `ALLOW POST
+/v1.55/containers/create?name=hermes-agent-ads-mutator-run-…` and `UPGRADE POST
+/v1.55/containers/<id>/attach?stderr=1&stdin=1&stdout=1&stream=1 (101)`, and **no `DENY` line of
+any kind** — the box's Compose does not send the `GET /info` / `GET /networks/<name>` calls CI's
+does. Kill switch: absent (checked with `sudo test`).
 
 **Measured on CI, run 36028287007:** the real rail's proxy log showed all five id-scoped calls
 allowed by the target check (`ALLOW … (target is an ads-mutator run)`), and two pre-existing
@@ -475,5 +487,5 @@ allow-list refusals Compose tolerates — `DENY GET /v1.48/info` and `DENY GET
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
 7. F18: the attach pass-through bypass — fixed (PR #50).
-8. F19: container-scoped calls accept any container id — fixed in PR #53 (merge-commit CI and
-   box rollout pending).
+8. F19: container-scoped calls accept any container id — fixed (PR #53), applied to the box
+   2026-09-24.
