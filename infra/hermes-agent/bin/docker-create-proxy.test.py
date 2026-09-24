@@ -41,6 +41,19 @@ def _await_accepting(path, timeout=5.0):
     raise AssertionError("proxy never began accepting on %s within %ss" % (path, timeout))
 
 
+def _poll_never_received(tc, raw, marker=b"/containers/create", settle=0.5):
+    """Non-receipt, race-free: fake upstreams append on their own threads, so poll `raw` for
+    `settle` seconds and fail the moment `marker` appears. Absence for the whole window is
+    the pass."""
+    deadline = time.monotonic() + settle
+    while True:
+        if any(marker in b for b in raw):
+            tc.fail("smuggled create reached the upstream socket: %r" % raw)
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
+
+
 def _load(name, filename):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
     mod = importlib.util.module_from_spec(spec)
@@ -437,6 +450,44 @@ class TestParseHead(unittest.TestCase):
             with self.assertRaises(PX.HeadRefused) as ctx:
                 PX._parse_head(head)
             self.assertNotIn(marker.decode(), ctx.exception.reason)
+
+
+class TestAttachHelpers(unittest.TestCase):
+    """F18 (spec 2026-09-23). Attach is defined ONCE — the allow-list entry and the
+    pass-through decision use the same pattern — and the upstream status is read strictly,
+    so a garbled status line can never be mistaken for 101."""
+
+    def test_a_real_attach_is_an_attach(self):
+        self.assertTrue(PX._is_attach(
+            "POST", "/v1.55/containers/abc/attach?stream=1&stdout=1&stderr=1"))
+        self.assertTrue(PX._is_attach("POST", "/containers/abc/attach"))
+
+    def test_look_alikes_are_not_attaches(self):
+        for method, path in (("GET", "/_ping?x=/attach"),
+                             ("DELETE", "/v1.55/containers/attach"),
+                             ("GET", "/v1.55/containers/attach/json"),
+                             ("POST", "/v1.55/containers/abc/attachx"),
+                             ("POST", "/v1.55/containers/abc/attach/../../create"),
+                             ("GET", "/v1.55/containers/abc/attach")):
+            self.assertFalse(PX._is_attach(method, path), (method, path))
+
+    def test_the_allow_list_uses_the_same_attach_pattern(self):
+        # IDENTITY, not equality: re.Pattern compares equal to a separately compiled copy of
+        # the same pattern, so `in` would pass even if the two definitions drifted apart.
+        self.assertTrue(any(m == "POST" and pat is PX._ATTACH_RE for m, pat in PX.ALLOWED))
+
+    def test_status_codes_are_read_strictly(self):
+        cases = [(b"HTTP/1.1 101 UPGRADED\r\nUpgrade: tcp", 101),
+                 (b"HTTP/1.1 404 Not Found", 404),
+                 (b"HTTP/1.1 200 OK\r\nContent-Length: 2", 200),
+                 (b"HTTP/1.1  101 x", None),
+                 (b"HTTP/1.1 1O1 x", None),
+                 (b"HTTP/1.1 1010 x", None),
+                 (b"HTTP/1.1", None),
+                 (b"garbage", None),
+                 (b"", None)]
+        for rhead, want in cases:
+            self.assertEqual(PX._status_code(rhead), want, rhead)
 
 
 class TestPlumbing(unittest.TestCase):
@@ -852,13 +903,7 @@ class TestPlumbing(unittest.TestCase):
         """Non-receipt, race-free: the fake upstream appends on its own thread, so poll for
         `settle` seconds and fail the moment the marker appears. Absence for the whole window
         is the pass."""
-        deadline = time.monotonic() + settle
-        while True:
-            if any(marker in b for b in self.upstream_raw):
-                self.fail("smuggled create reached the upstream socket: %r" % self.upstream_raw)
-            if time.monotonic() >= deadline:
-                return
-            time.sleep(0.01)
+        _poll_never_received(self, self.upstream_raw, marker, settle)
 
     def _assert_smuggle_refused(self, req, reason):
         resp = self._send(req)
@@ -929,6 +974,244 @@ class TestPlumbing(unittest.TestCase):
         self.assertIn("HEAD /_ping HTTP/1.1", self.upstream_saw)
         self.assertTrue(any(l.startswith("POST /v1.55/containers/deadbeef/wait")
                             for l in self.upstream_saw), self.upstream_saw)
+
+
+class TestAttachPassThrough(unittest.TestCase):
+    """F18 (spec 2026-09-23). The fake upstream here KEEPS each connection open and answers
+    requests in order, like dockerd — TestPlumbing's fake closes after every reply, which is
+    exactly why a bypass that needs a second request on the same connection was never
+    exercised. An attach is answered with `self.attach_reply`; after a 101 the fake records
+    what it receives in `self.upgraded_rx` and echoes it back prefixed `ECHO:`."""
+
+    SMUGGLED = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
+                b"Content-Length: 2\r\n\r\n{}")
+    UPGRADE_101 = (b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\n"
+                   b"Connection: Upgrade\r\nUpgrade: tcp\r\n\r\nSTREAM-HELLO")
+    NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\n{}"
+    ATTACH = (b"POST /v1.55/containers/abc/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\n"
+              b"Host: d\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+
+    def setUp(self):
+        import threading, socket as _s
+        PX.configure(image="hermes-agent-claude", binds=BINDS,
+                     governance_root="/opt/governance", network="hermes-agent_default")
+        n = next(_SOCK_SEQ)
+        self.up_path = "/tmp/pxkaup-%d-%d.sock" % (os.getpid(), n)
+        self.li_path = "/tmp/pxkali-%d-%d.sock" % (os.getpid(), n)
+        for p in (self.up_path, self.li_path):
+            if os.path.exists(p):
+                os.remove(p)
+        self.upstream_raw, self.upgraded_rx = [], []
+        self.attach_reply = self.NOT_FOUND
+        srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        srv.bind(self.up_path)
+        srv.listen(8)
+
+        def serve_conn(c):
+            buf, upgraded = b"", False
+            while True:
+                try:
+                    d = c.recv(65536)
+                except OSError:
+                    return
+                if not d:
+                    return
+                self.upstream_raw.append(d)
+                if upgraded:
+                    self.upgraded_rx.append(d)
+                    c.sendall(b"ECHO:" + d)
+                    continue
+                buf += d
+                while b"\r\n\r\n" in buf:
+                    head, rest = buf.split(b"\r\n\r\n", 1)
+                    clen = 0
+                    for h in head.split(b"\r\n")[1:]:
+                        if h.lower().startswith(b"content-length:"):
+                            clen = int(h.split(b":", 1)[1])
+                    if len(rest) < clen:
+                        break
+                    buf = rest[clen:]
+                    method, target = head.split(b"\r\n")[0].split(b" ")[:2]
+                    if method == b"POST" and target.split(b"?")[0].endswith(b"/attach"):
+                        c.sendall(self.attach_reply)
+                        if self.attach_reply.startswith(b"HTTP/1.1 101"):
+                            upgraded = True
+                            if buf:
+                                self.upgraded_rx.append(buf)
+                                buf = b""
+                            break
+                    else:
+                        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+
+        def accept_loop():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    return
+                threading.Thread(target=serve_conn, args=(c,), daemon=True).start()
+
+        threading.Thread(target=accept_loop, daemon=True).start()
+        self.addCleanup(srv.close)
+        for p in (self.up_path, self.li_path):
+            self.addCleanup(lambda q=p: os.path.exists(q) and os.remove(q))
+        threading.Thread(target=PX.serve,
+                         kwargs=dict(listen=self.li_path, upstream=self.up_path),
+                         daemon=True).start()
+        _await_accepting(self.li_path)
+
+    def _connect(self):
+        import socket as _s
+        c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        c.connect(self.li_path)
+        c.settimeout(2)
+        self.addCleanup(c.close)
+        return c
+
+    def _recv_until(self, c, needle, timeout=2.0):
+        """Everything received until `needle` appears, the peer closes, or `timeout`."""
+        got, deadline = b"", time.monotonic() + timeout
+        while needle not in got and time.monotonic() < deadline:
+            try:
+                d = c.recv(65536)
+            except OSError:
+                break
+            if not d:
+                break
+            got += d
+        return got
+
+    def _send_then_smuggle(self, first, first_needle=b"{}"):
+        """Send `first`, read its whole response, then send the smuggled create on the SAME
+        connection. Returns (first_response, response_to_smuggled_or_b"")."""
+        c = self._connect()
+        c.sendall(first)
+        r1 = self._recv_until(c, first_needle)
+        try:
+            c.sendall(self.SMUGGLED)
+            r2 = self._recv_until(c, b"\r\n\r\n", timeout=1.0)
+        except OSError:
+            r2 = b""
+        return r1, r2
+
+    # ---- the three routes (all must let the create through BEFORE the fix) ------------
+
+    def test_route_a_attach_in_the_query_string(self):
+        r1, r2 = self._send_then_smuggle(b"GET /_ping?x=/attach HTTP/1.1\r\nHost: d\r\n\r\n")
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"200 OK", r1)
+        self.assertIn(b"403", r2, "the smuggled create was not inspected")
+
+    def test_route_b_a_container_literally_named_attach(self):
+        r1, r2 = self._send_then_smuggle(
+            b"DELETE /v1.55/containers/attach HTTP/1.1\r\nHost: d\r\n\r\n")
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"200 OK", r1)
+        self.assertIn(b"403", r2, "the smuggled create was not inspected")
+
+    def test_route_c_an_attach_answered_404(self):
+        self.attach_reply = self.NOT_FOUND
+        r1, r2 = self._send_then_smuggle(self.ATTACH)
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"404 Not Found", r1)
+        self.assertEqual(r2, b"", "the connection stayed open after a non-upgraded attach")
+
+    # ---- a genuine attach still works ----------------------------------------------------
+
+    def test_a_101_attach_streams_both_ways(self):
+        self.attach_reply = self.UPGRADE_101
+        c = self._connect()
+        c.sendall(self.ATTACH)
+        got = self._recv_until(c, b"STREAM-HELLO")
+        self.assertIn(b"101 UPGRADED", got)
+        self.assertIn(b"STREAM-HELLO", got, "stream bytes sent with the 101 head were lost")
+        c.sendall(b"PING-IN")
+        self.assertIn(b"ECHO:PING-IN", self._recv_until(c, b"ECHO:PING-IN"))
+        self.assertIn(b"PING-IN", b"".join(self.upgraded_rx))
+
+    def test_client_bytes_read_with_the_attach_are_forwarded_after_the_upgrade(self):
+        self.attach_reply = self.UPGRADE_101
+        c = self._connect()
+        c.sendall(self.ATTACH + b"EARLY-STDIN")
+        self._recv_until(c, b"STREAM-HELLO")
+        deadline = time.monotonic() + 1.0
+        while b"EARLY-STDIN" not in b"".join(self.upgraded_rx) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIn(b"EARLY-STDIN", b"".join(self.upgraded_rx),
+                      "bytes already read past the attach request were dropped")
+
+    def test_an_attach_after_a_ping_on_one_connection_still_upgrades(self):
+        self.attach_reply = self.UPGRADE_101
+        c = self._connect()
+        c.sendall(b"GET /_ping HTTP/1.1\r\nHost: d\r\n\r\n")
+        self.assertIn(b"200 OK", self._recv_until(c, b"{}"))
+        c.sendall(self.ATTACH)
+        self.assertIn(b"STREAM-HELLO", self._recv_until(c, b"STREAM-HELLO"))
+
+    # ---- any other answer to an attach: relay, then close --------------------------------
+
+    def test_an_attach_answered_200_is_relayed_then_closed(self):
+        self.attach_reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
+        r1, r2 = self._send_then_smuggle(self.ATTACH)
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"200 OK", r1)
+        self.assertEqual(r2, b"")
+
+    def test_an_attach_answered_with_a_garbled_status_is_relayed_then_closed(self):
+        self.attach_reply = b"HTTP/1.1 1O1 X\r\nContent-Length: 2\r\n\r\n{}"
+        r1, r2 = self._send_then_smuggle(self.ATTACH)
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"1O1", r1)
+        self.assertEqual(r2, b"")
+
+    def test_a_chunked_error_to_an_attach_is_relayed_then_closed(self):
+        self.attach_reply = (b"HTTP/1.1 409 Conflict\r\nTransfer-Encoding: chunked\r\n\r\n"
+                             b"2\r\n{}\r\n0\r\n\r\n")
+        r1, r2 = self._send_then_smuggle(self.ATTACH, first_needle=b"0\r\n\r\n")
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"409 Conflict", r1)
+        self.assertEqual(r2, b"")
+
+    def test_a_garbled_status_is_logged_as_none(self):
+        import contextlib, io
+        self.attach_reply = b"HTTP/1.1 1O1 ZZ-UPSTREAM-MARKER\r\nContent-Length: 2\r\n\r\n{}"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            c = self._connect()
+            c.sendall(self.ATTACH)
+            self._recv_until(c, b"{}")
+            deadline = time.monotonic() + 1.0
+            while "DENY-FOLLOWUP" not in err.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        log = err.getvalue()
+        self.assertIn("attach answered None, not upgraded; connection closed", log)
+        self.assertNotIn("ZZ-UPSTREAM-MARKER", log)
+
+    def test_pipelined_bytes_after_a_non_upgraded_attach_are_never_forwarded(self):
+        """`buf` may be forwarded only AFTER dockerd upgraded the connection. Sent in ONE
+        write with an attach answered 404, the smuggled create must never reach dockerd."""
+        self.attach_reply = self.NOT_FOUND
+        c = self._connect()
+        c.sendall(self.ATTACH + self.SMUGGLED)
+        r1 = self._recv_until(c, b"{}")
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"404 Not Found", r1)
+
+    def test_a_malformed_content_length_on_an_attach_response_logs_deny_followup(self):
+        """M1: the malformed-Content-Length early return, when it fires for an attach, must
+        also log DENY-FOLLOWUP so the box's journal always shows why an attach connection
+        closed — not just the reason the response itself couldn't be relayed."""
+        import contextlib, io
+        self.attach_reply = b"HTTP/1.1 404 Not Found\r\nContent-Length: abc\r\n\r\n"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            c = self._connect()
+            c.sendall(self.ATTACH)
+            deadline = time.monotonic() + 1.0
+            while "DENY-FOLLOWUP" not in err.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        log = err.getvalue()
+        self.assertIn("attach answered 404, not upgraded; connection closed", log)
 
 
 if __name__ == "__main__":

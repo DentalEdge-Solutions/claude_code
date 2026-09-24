@@ -85,6 +85,11 @@ import argparse, json, os, re, socket, socketserver, sys, threading
 _V = r"(?:/v[0-9]+\.[0-9]+)?"          # optional API version prefix, e.g. /v1.55
 _ID = r"[A-Za-z0-9_.-]+"
 
+# F18: attach is defined ONCE. The allow-list entry below and _is_attach() use this same
+# object, so "what may be requested" and "what may switch a connection to raw pass-through"
+# cannot drift apart.
+_ATTACH_RE = re.compile(_V + r"/containers/" + _ID + r"/attach")
+
 # (method, compiled path pattern). Fullmatch only — a prefix match would let
 # /containers/create/../../build through.
 ALLOWED = [
@@ -97,7 +102,7 @@ ALLOWED = [
     ("GET",    re.compile(_V + r"/containers/json")),
     ("POST",   re.compile(_V + r"/containers/create")),
     ("POST",   re.compile(_V + r"/containers/" + _ID + r"/start")),
-    ("POST",   re.compile(_V + r"/containers/" + _ID + r"/attach")),
+    ("POST",   _ATTACH_RE),
     ("POST",   re.compile(_V + r"/containers/" + _ID + r"/wait")),
     ("GET",    re.compile(_V + r"/containers/" + _ID + r"/json")),
     ("DELETE", re.compile(_V + r"/containers/" + _ID)),
@@ -156,6 +161,25 @@ def _path_only(path):
     if ".." in p or "//" in p:
         return None
     return p
+
+
+def _is_attach(method, path):
+    """True only for a real attach: POST, and the path WITHOUT its query string fullmatches
+    the attach pattern. A substring test over the whole target was F18: `GET /_ping?x=/attach`
+    and `DELETE /containers/attach` both switched the connection to uninspected pass-through."""
+    return method == "POST" and bool(_ATTACH_RE.fullmatch(_path_only(path) or ""))
+
+
+def _status_code(rhead):
+    """The upstream response's status as an int when it is exactly three ASCII digits in the
+    second space-separated field of the status line, else None. Only an exact 101 may switch
+    a connection to pass-through, so anything unusual reads as None, never as 101. The
+    protocol token (e.g. "HTTP/1.1") is not checked, because the upstream is dockerd, which
+    is trusted — only the exact status matters."""
+    parts = rhead.split(b"\r\n", 1)[0].split(b" ")
+    if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
+        return int(parts[1])
+    return None
 
 
 def _check_cmd(cmd):
@@ -439,6 +463,23 @@ def _relay_chunked(conn, up, buf):
         buf = buf[needed:]
 
 
+def _pump_both(conn, up):
+    """Raw two-way relay for an UPGRADED attach, until either side closes. Only ever entered
+    after dockerd answered 101 to a real attach — after that the connection carries the
+    container's stdio stream, not the Docker API, so there is nothing left to inspect."""
+    def pump(a, b):
+        try:
+            while True:
+                d = a.recv(65536)
+                if not d:
+                    break
+                b.sendall(d)
+        except OSError:
+            pass
+    threading.Thread(target=pump, args=(conn, up), daemon=True).start()
+    pump(up, conn)
+
+
 def _handle(conn, upstream_path):
     up = None
     buf = b""
@@ -494,22 +535,23 @@ def _handle(conn, upstream_path):
                 up.connect(upstream_path)
             up.sendall(head + b"\r\n\r\n" + body)
 
-            if "/attach" in path:
-                def pump(a, b):
-                    try:
-                        while True:
-                            d = a.recv(65536)
-                            if not d:
-                                break
-                            b.sendall(d)
-                    except OSError:
-                        pass
-                threading.Thread(target=pump, args=(conn, up), daemon=True).start()
-                pump(up, conn)
-                return
-
             rhead, rrest = _read_until_headers(up, b"")
             if rhead is None:
+                return
+            # F18: decide on pass-through only AFTER dockerd has answered, and only for a real
+            # attach it upgraded. Any other answer to an attach is relayed below and then the
+            # connection is closed — after an attach there are exactly two outcomes, upgraded or
+            # closed, and no request can follow one on the same connection.
+            attach = _is_attach(method, path)
+            status = _status_code(rhead)
+            if attach and status == 101:
+                conn.sendall(rhead + b"\r\n\r\n" + rrest)
+                if buf:
+                    # Client bytes already read past the attach request are the start of the
+                    # stream (stdin); forward them rather than silently dropping them.
+                    up.sendall(buf)
+                print("UPGRADE %s %s (101)" % (method, path), file=sys.stderr)
+                _pump_both(conn, up)
                 return
             rclen, rchunk = 0, False
             for h in rhead.split(b"\r\n")[1:]:
@@ -524,6 +566,9 @@ def _handle(conn, upstream_path):
                         # way the oversized-response path just below does.
                         print("upstream sent a malformed Content-Length: %r; closing"
                               % raw, file=sys.stderr)
+                        if attach:
+                            print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; "
+                                  "connection closed)" % (method, path, status), file=sys.stderr)
                         return
                     rclen = int(raw)
                 if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
@@ -534,6 +579,9 @@ def _handle(conn, upstream_path):
                 # so there is nothing to buffer and combine with them.
                 conn.sendall(rhead + b"\r\n\r\n")
                 _relay_chunked(conn, up, rrest)
+                if attach:
+                    print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; connection "
+                          "closed)" % (method, path, status), file=sys.stderr)
                 return
             # Buffer the FULL body before sending anything, then send headers + body
             # in ONE write. MEASURED: sending headers immediately and the body in a
@@ -556,8 +604,15 @@ def _handle(conn, upstream_path):
                     # it like the other decisions.
                     print("DENY %s %s (upstream response exceeds %d bytes; closing)"
                           % (method, path, MAX_BODY), file=sys.stderr)
+                    if attach:
+                        print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; "
+                              "connection closed)" % (method, path, status), file=sys.stderr)
                     return
             conn.sendall(rhead + b"\r\n\r\n" + rrest[:rclen])
+            if attach:
+                print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; connection "
+                      "closed)" % (method, path, status), file=sys.stderr)
+                return
     except OSError:
         return
     finally:

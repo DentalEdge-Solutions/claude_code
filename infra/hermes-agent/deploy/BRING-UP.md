@@ -447,7 +447,9 @@ it. No unit files change, so nothing restarts on its own account.
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
-**Still required before the kill switch can be created:** audit-log truncation (§6 part B) and F18 — the proxy's attach pass-through, which after one allowed request stops inspecting the connection (findings record). (F14 —
+**Still required before the kill switch can be created:** audit-log truncation (§6 part B), and
+F19 — container-scoped calls accept any container id (including inspect, which exposes a
+container's environment) — until it is assessed (findings record). (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
 now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
 hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —
@@ -475,6 +477,17 @@ systemctl show -p NRestarts hermes-docker-proxy hermes-broker      # not climbin
 Then re-run Phase 6's pasted create: `rc=2`, `mutation is disabled`, and `ALLOW POST
 /v…/containers/create` in `journalctl -u hermes-docker-proxy`. A `DENY … (malformed …)` there is
 a finding — identify the client and the header before touching the grammar.
+
+**After pulling F18** — no unit changes; the proxy runs its script from the repo:
+
+```bash
+sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it
+systemctl is-active hermes-docker-proxy hermes-broker
+```
+
+Then re-run Phase 6: besides `rc=2` and `ALLOW POST …/containers/create`, the proxy journal must
+show `UPGRADE POST /v…/containers/…/attach… (101)`. A `DENY-FOLLOWUP` for the real attach is a
+finding (the rail failed closed) — understand it before changing anything.
 
 ---
 
