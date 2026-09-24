@@ -253,8 +253,7 @@ group inheritance at all (BSD vs System V), which is the mechanism the records d
 governance is unaffected (the fsynced audit log is the authoritative record). Revisit as its own
 design if the analyst is shown to need it.
 
-**Still open:** audit-log truncation (§6 part B) and F19 (container-scoped calls accept any
-container id, including inspect, which exposes a container's environment; to be assessed). F18 is
+**Still open:** audit-log truncation (§6 part B). F18 is
 fixed (PR #50). The
 framing hardening and `UMask=0077` (§6 part A) are in PR #48. F14 (a Compose failure reported as
 "nothing was mutated") is fixed (PR #46).
@@ -410,7 +409,7 @@ proxy logged `ALLOW POST /v1.55/containers/create?name=hermes-agent-ads-mutator-
 `DENY-FOLLOWUP` and no `malformed` refusal — the first real-dockerd measurement of the fixed attach
 path on the box. Kill switch: absent (checked with `sudo test`).
 
-### F19: container-scoped calls accept any container id (recorded, not fixed)
+### F19: container-scoped calls accept any container id — fixed (PR #53)
 
 **Found 2026-09-23/24 (F18 design + F18 whole-branch review).** The allow-list's container-scoped
 entries — inspect (`GET /containers/<id>/json`), start, wait, delete, and attach — all match any
@@ -434,6 +433,20 @@ Recorded, not fixed. **Not measured.** Closing it needs the proxy to know which 
 ads-mutator runs. **Whether it gates the kill switch is assessed in its own cycle; it is listed
 as a gate until then.**
 
+**Assessed 2026-09-24: a real gap; it gated the kill switch.** Two allowed calls reached the
+gateway's environment: `GET /containers/json` for its id, then `GET /containers/<id>/json`.
+
+**Fixed (PR #53, spec `2026-09-24-f19-container-scope-design.md`).** Container-scoped entries take
+only a full 64-hex id — measured as the only form the rail sends (box journal, 2026-09-24:
+`3 GET /json`, `2 POST /attach`, `1 POST /start`, `1 POST /wait`, all 64 hex). Before forwarding,
+the proxy inspects the target on its own connection and allows only the pinned image **and** the
+pinned entrypoint. An earlier RED attempt (run 36019974966) failed for the wrong reason — the
+probe pinned `/v1.55` and CI's dockerd 28.0.4 caps at API 1.48 — and was discarded once the probe
+was changed to unversioned paths. CI: RED on today's proxy (run 36020681939: the decoy's sentinel
+was read), then `bind-agreement: executed 7, skipped 0` on the PR (run 36024366720) and the merge
+commit (merge-commit run: pending). **Residual, accepted:** the list call still enumerates
+containers (names, labels, image, mounts — no environment); every id it reveals is now refused.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -456,5 +469,4 @@ as a gate until then.**
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
 7. F18: the attach pass-through bypass — fixed (PR #50).
-8. F19: container-scoped calls accept any container id (including inspect, which exposes a
-   container's environment). Listed as a kill-switch gate until assessed.
+8. F19: container-scoped calls accept any container id — fixed (PR #53).

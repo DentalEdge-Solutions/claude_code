@@ -49,6 +49,12 @@ Phase B). Adding an endpoint is a re-measurement, never a guess.
     VPS, which is the worse failure. Adding an endpoint is a re-measurement, never a
     guess.
 
+F19 (spec 2026-09-24): every container-scoped entry takes a FULL 64-hex id, and before such a
+call is forwarded the proxy asks dockerd, on its own connection, what the target is. Only a
+container with the pinned image AND the pinned entrypoint — an ads-mutator run — passes. The
+gateway shares the image, so the image alone would not do. The list call /containers/json is
+left open on purpose: it reveals no environment, and every id it reveals is now refused.
+
 DENY BY DEFAULT. Anything not matched below is refused.
 
 THREE SOCKET-PLUMBING TRAPS, each measured against the real daemon and each costly to
