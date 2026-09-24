@@ -54,6 +54,8 @@ CMD = ["--client", "slug-1", "--changeset", "20260922-120000-abcdef01",
 BIN_PIN = "%s/bin:/opt/cc-bin:ro" % AGENT_DIR
 CREATE_ALLOWED = re.compile(r"ALLOW POST /v[0-9.]+/containers/create")
 CREATE_DENIED = re.compile(r"DENY POST /v[0-9.]+/containers/create")
+# F18: the real Compose attach is answered 101 and goes through the upgraded pass-through.
+ATTACH_UPGRADED = re.compile(r"UPGRADE POST /v[0-9.]+/containers/[^ ]+/attach[^ ]* \(101\)")
 # F14: the real executor's attested exit line, nonce-bound (spec 2026-09-23 §3.1).
 ATTESTED_2 = re.compile(r"^HERMES-EXIT [0-9a-f]{32} 2$", re.MULTILINE)
 PROXIES = []
@@ -255,6 +257,9 @@ class TestTheBrokerPath(BrokerPath):
         self.assertFalse(os.path.lexists(os.path.join(STORE, "control", "mutation-enabled")))
         r, out, plog = self.wrapper(self.sock, self.log)
         self.assertRegex(plog, CREATE_ALLOWED, "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
+        # F18, MEASURED: real attach traffic is answered 101 and streams through the fixed
+        # path — the executor's "mutation is disabled" below only reaches us through it.
+        self.assertRegex(plog, ATTACH_UPGRADED, "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
         self.assertEqual(r.returncode, 2, out)
         self.assertIn("mutation is disabled", out)
         # F14: the nonce crossed `docker compose run -e` and the real proxy, and the real
