@@ -49,6 +49,13 @@ Phase B). Adding an endpoint is a re-measurement, never a guess.
     VPS, which is the worse failure. Adding an endpoint is a re-measurement, never a
     guess.
 
+F19 (spec 2026-09-24): every container-scoped entry takes a FULL 64-hex id, and before such a
+call is forwarded the proxy asks dockerd, on its own connection, what the target is. Only a
+container with the pinned image AND the pinned entrypoint — an ads-mutator run — passes. The
+gateway shares the image, so the image alone would not do. The list call /containers/json is
+left open on purpose: it reveals no environment, and every non-mutator id it reveals is now
+refused.
+
 DENY BY DEFAULT. Anything not matched below is refused.
 
 THREE SOCKET-PLUMBING TRAPS, each measured against the real daemon and each costly to
@@ -80,15 +87,20 @@ find. Function docstrings below carry the detail; this is the index.
        chunked` with no `Content-Length` and no connection close. This is why
        `_relay_chunked` parses the chunk framing itself to find the real end of the body.
 """
-import argparse, json, os, re, socket, socketserver, sys, threading
+import argparse, http.client, json, os, re, socket, socketserver, sys, threading
 
 _V = r"(?:/v[0-9]+\.[0-9]+)?"          # optional API version prefix, e.g. /v1.55
-_ID = r"[A-Za-z0-9_.-]+"
+_ID = r"[A-Za-z0-9_.-]+"               # image names only: GET /images/<name>/json
+# F19 (spec 2026-09-24): every container-scoped entry takes a FULL container id — 64
+# lowercase hex, measured as the only form the real rail sends (box journal, 2026-09-24).
+# A name or a short prefix could come to mean a different container between the target
+# check and the forward; a full id cannot.
+_CID = r"[0-9a-f]{64}"
 
 # F18: attach is defined ONCE. The allow-list entry below and _is_attach() use this same
 # object, so "what may be requested" and "what may switch a connection to raw pass-through"
 # cannot drift apart.
-_ATTACH_RE = re.compile(_V + r"/containers/" + _ID + r"/attach")
+_ATTACH_RE = re.compile(_V + r"/containers/" + _CID + r"/attach")
 
 # (method, compiled path pattern). Fullmatch only — a prefix match would let
 # /containers/create/../../build through.
@@ -101,11 +113,11 @@ ALLOWED = [
     ("GET",    re.compile(_V + r"/volumes")),
     ("GET",    re.compile(_V + r"/containers/json")),
     ("POST",   re.compile(_V + r"/containers/create")),
-    ("POST",   re.compile(_V + r"/containers/" + _ID + r"/start")),
+    ("POST",   re.compile(_V + r"/containers/" + _CID + r"/start")),
     ("POST",   _ATTACH_RE),
-    ("POST",   re.compile(_V + r"/containers/" + _ID + r"/wait")),
-    ("GET",    re.compile(_V + r"/containers/" + _ID + r"/json")),
-    ("DELETE", re.compile(_V + r"/containers/" + _ID)),
+    ("POST",   re.compile(_V + r"/containers/" + _CID + r"/wait")),
+    ("GET",    re.compile(_V + r"/containers/" + _CID + r"/json")),
+    ("DELETE", re.compile(_V + r"/containers/" + _CID)),
 ]
 
 # HostConfig keys that hand back what the proxy exists to withhold. "Mounts" is here
@@ -480,6 +492,105 @@ def _pump_both(conn, up):
     pump(up, conn)
 
 
+# ---- F19 (spec 2026-09-24): a container-scoped call may target only an ads-mutator run ----
+
+# PREFIX match, deliberately wider than ALLOWED: every allowed path that BEGINS with a
+# container id is checked, including any id-scoped entry added later. The list call
+# /containers/json never matches (`json` is not 64 hex).
+# Named _CONTAINER_TARGET_RE, not _TARGET_RE: that name is already taken by the bytes pattern
+# _parse_head uses for the raw HTTP request-line target, in the framing-hardening section
+# above — a same-name module global here would silently overwrite it at import time and break
+# request-line parsing.
+_CONTAINER_TARGET_RE = re.compile(_V + r"/containers/(" + _CID + r")(?=/|\Z)")
+_NOT_MUTATOR = "target is not an ads-mutator run: "
+
+
+def container_target(path):
+    """The full container id a request acts on, or None when it names no container."""
+    p = _path_only(path)
+    if p is None:
+        return None
+    m = _CONTAINER_TARGET_RE.match(p)
+    return m.group(1) if m else None
+
+
+def is_mutator_shaped(doc, cid):
+    """Pure. (True, reason) only when the proxy is configured AND dockerd's inspect of `cid`
+    shows the pinned image AND the pinned entrypoint — the two values create already enforces.
+    The image alone is not enough: claude-auth-init, the gateway and ads-mutator all run
+    `hermes-agent-claude`. Reasons are fixed strings; nothing from `doc` is ever quoted, because
+    the gateway's inspect carries its API keys.
+
+    `doc["Id"] == cid` is itself a security element, not a sanity check to "simplify" away:
+    dockerd resolves an id by exact id, then by name, then by prefix, so without this check a
+    mutator-shaped container NAMED with 64 hex characters could satisfy a lookup issued for a
+    different id."""
+    if PINNED_IMAGE is None:
+        return False, _NOT_MUTATOR + "proxy not configured"
+    if not isinstance(doc, dict):
+        return False, _NOT_MUTATOR + "malformed inspect"
+    if doc.get("Id") != cid:
+        return False, _NOT_MUTATOR + "id mismatch"
+    cfg = doc.get("Config")
+    if not isinstance(cfg, dict):
+        return False, _NOT_MUTATOR + "malformed inspect"
+    if cfg.get("Image") != PINNED_IMAGE:
+        return False, _NOT_MUTATOR + "image mismatch"
+    if cfg.get("Entrypoint") != PINNED_ENTRYPOINT:
+        return False, _NOT_MUTATOR + "entrypoint mismatch"
+    return True, "target is an ads-mutator run"
+
+
+LOOKUP_TIMEOUT = 5          # seconds, per socket operation; tests lower it
+LOOKUP_UA = "hermes-docker-create-proxy-target-check"
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """http.client over an AF_UNIX socket. http.client does the response framing
+    (Content-Length and chunked) — exactly the code this file must not hand-roll twice."""
+
+    def __init__(self, unix_path, timeout):
+        super().__init__("localhost", timeout=timeout)
+        self._unix_path = unix_path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        try:
+            s.connect(self._unix_path)
+        except BaseException:
+            s.close()
+            raise
+        self.sock = s
+
+
+def lookup_target(upstream_path, cid):
+    """Ask dockerd what `cid` is, on a FRESH connection — never the client's, whose keep-alive
+    stream the relay is framing (the F18 bug class). `cid` has already fullmatched 64 hex and
+    the path is unversioned, so nothing the client sent reaches this request.
+
+    Returns (doc, "") on 200, (None, "target not found") on 404, and (None, "target lookup
+    failed") on anything else. `except Exception` is deliberate and confined to this unit:
+    an error nobody foresaw must become a refusal, never a crash someone later "fixes" by
+    skipping the check. The reply is returned to the caller only; it is never logged."""
+    c = _UnixHTTPConnection(upstream_path, LOOKUP_TIMEOUT)
+    try:
+        c.request("GET", "/containers/%s/json" % cid, headers={"User-Agent": LOOKUP_UA})
+        r = c.getresponse()
+        if r.status == 404:
+            return None, "target not found"
+        if r.status != 200:
+            return None, "target lookup failed"
+        raw = r.read(MAX_BODY + 1)
+        if len(raw) > MAX_BODY:
+            return None, "target lookup failed"
+        return json.loads(raw.decode("utf-8")), ""
+    except Exception:
+        return None, "target lookup failed"
+    finally:
+        c.close()
+
+
 def _handle(conn, upstream_path):
     up = None
     buf = b""
@@ -524,6 +635,16 @@ def _handle(conn, upstream_path):
             body, buf = rest[:clen], rest[clen:]
 
             ok, reason = decide(method, path, body)
+            if ok:
+                # F19 (spec 2026-09-24): a container-scoped call may target only an
+                # ads-mutator run. Checked per REQUEST — a kept-alive connection can name a
+                # different id each time — and before any byte of it goes upstream. ALLOW is
+                # printed only after this, so it always means "forwarded".
+                cid = container_target(path)
+                if cid:
+                    doc, reason = lookup_target(upstream_path, cid)
+                    ok, reason = (is_mutator_shaped(doc, cid) if doc is not None
+                                  else (False, reason))
             print("%s %s %s (%s)" % ("ALLOW" if ok else "DENY", method, path, reason),
                   file=sys.stderr)
             if not ok:

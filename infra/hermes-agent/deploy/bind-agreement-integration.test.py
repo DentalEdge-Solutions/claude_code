@@ -58,6 +58,29 @@ CREATE_DENIED = re.compile(r"DENY POST /v[0-9.]+/containers/create")
 ATTACH_UPGRADED = re.compile(r"UPGRADE POST /v[0-9.]+/containers/[^ ]+/attach[^ ]* \(101\)")
 # F14: the real executor's attested exit line, nonce-bound (spec 2026-09-23 §3.1).
 ATTESTED_2 = re.compile(r"^HERMES-EXIT [0-9a-f]{32} 2$", re.MULTILINE)
+# F19: one raw request through the proxy socket, run AS hermes-broker (the adversary the
+# proxy contains). Prints the whole response. A plain socket, not curl: no new dependency.
+PROBE = r'''
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(10)
+s.connect(sys.argv[1])
+s.sendall(("%s %s HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
+           % (sys.argv[2], sys.argv[3])).encode())
+out = b""
+while True:
+    try:
+        d = s.recv(65536)
+    except OSError:
+        break
+    if not d:
+        break
+    out += d
+sys.stdout.write(out.decode("latin1"))
+'''
+# F19: the refusal the target check logs for a container that is not an ads-mutator run.
+TARGET_REFUSED = re.compile(r"DENY (?:GET|DELETE) (?:/v[0-9.]+)?/containers/[0-9a-f]{64}[^ ]* "
+                            r"\(target is not an ads-mutator run: entrypoint mismatch\)")
 PROXIES = []
 _UNIT_PROXY = []
 
@@ -260,6 +283,12 @@ class TestTheBrokerPath(BrokerPath):
         # F18, MEASURED: real attach traffic is answered 101 and streams through the fixed
         # path — the executor's "mutation is disabled" below only reaches us through it.
         self.assertRegex(plog, ATTACH_UPGRADED, "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
+        # F19: the claim is that no call of the REAL RAIL is refused by the TARGET check —
+        # BRING-UP's "no DENY … target" on the box, measured here first. Pre-existing
+        # allow-list refusals Compose tolerates (measured on CI 2026-09-24: `GET /info`,
+        # `GET /networks/<name>`) are out of F19's scope and are never allow-listed to
+        # silence them — a broad `^DENY` here would fail on those, unrelated to F19.
+        self.assertNotRegex(plog, re.compile(r"^DENY .*\(target ", re.MULTILINE), "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
         self.assertEqual(r.returncode, 2, out)
         self.assertIn("mutation is disabled", out)
         # F14: the nonce crossed `docker compose run -e` and the real proxy, and the real
@@ -284,6 +313,43 @@ class TestTheBrokerPath(BrokerPath):
         compose_text = open(os.path.join(AGENT_DIR, "docker-compose.yml"), encoding="utf-8").read()
         self.assertEqual(real, sorted(BA.compose_binds(compose_text, UNIT_ENV)))
         self.assertEqual(real, sorted(BA.allow_binds(PROXY_UNIT)))
+
+
+class TestTheTargetCheck(BrokerPath):
+    """F19 (spec 2026-09-24): through the real proxy and the real dockerd, a container that is
+    NOT an ads-mutator run — the same image with a different entrypoint, exactly the gateway's
+    situation on the box — can be neither inspected nor deleted by the broker. The decoy
+    carries a sentinel in its environment in place of the gateway's API keys."""
+
+    def test_a_non_mutator_container_cannot_be_inspected_or_deleted(self):
+        name = "hermes-f19-decoy"
+        run(["docker", "rm", "-f", name], env=root_env())
+        r = run(["docker", "run", "-d", "--name", name, "--entrypoint", "sleep",
+                 "-e", "F19_DECOY=F19-SENTINEL", IMAGE, "600"], env=root_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.addCleanup(run, ["docker", "rm", "-f", name], env=root_env())
+        cid = r.stdout.strip()
+        self.assertRegex(cid, r"^[0-9a-f]{64}$")
+        offset = os.path.getsize(self.log)
+        env = broker_env(self.sock)
+        # Paths are unversioned on purpose: the CI runner's dockerd (28.0.4) caps at API 1.48,
+        # and a pinned /v1.55 was answered 400 on version, which made the security assertions
+        # pass vacuously (run 36019974966). The proxy's grammar makes the version prefix optional;
+        # dockerd serves unversioned paths at its own max version.
+        inspect = run(BROKER + ["python3", "-c", PROBE, self.sock, "GET",
+                                "/containers/%s/json" % cid], env=env, timeout=60)
+        delete = run(BROKER + ["python3", "-c", PROBE, self.sock, "DELETE",
+                               "/containers/%s?force=1" % cid], env=env, timeout=60)
+        plog = log_after(self.log, offset)
+        # The security properties FIRST: the decoy's environment never reached the broker, and
+        # the decoy is still running.
+        self.assertNotIn("F19-SENTINEL", inspect.stdout,
+                         "the broker read a non-mutator container's environment")
+        running = run(["docker", "inspect", "-f", "{{.State.Running}}", cid], env=root_env())
+        self.assertEqual(running.stdout.strip(), "true", "the broker deleted a non-mutator container")
+        self.assertTrue(inspect.stdout.startswith("HTTP/1.1 403"), inspect.stdout[:200])
+        self.assertTrue(delete.stdout.startswith("HTTP/1.1 403"), delete.stdout[:200])
+        self.assertEqual(len(TARGET_REFUSED.findall(plog)), 2, plog)
 
 
 class TestFiringControls(BrokerPath):

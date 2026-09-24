@@ -447,9 +447,9 @@ it. No unit files change, so nothing restarts on its own account.
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
-**Still required before the kill switch can be created:** audit-log truncation (§6 part B), and
-F19 — container-scoped calls accept any container id (including inspect, which exposes a
-container's environment) — until it is assessed (findings record). (F14 —
+**Still required before the kill switch can be created:** audit-log truncation (§6 part B). (F19 —
+container-scoped calls accepted any container id — fixed in PR #53; it closes on the box when
+"After pulling F19" passes.) (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
 now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
 hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —
@@ -488,6 +488,50 @@ systemctl is-active hermes-docker-proxy hermes-broker
 Then re-run Phase 6: besides `rc=2` and `ALLOW POST …/containers/create`, the proxy journal must
 show `UPGRADE POST /v…/containers/…/attach… (101)`. A `DENY-FOLLOWUP` for the real attach is a
 finding (the rail failed closed) — understand it before changing anything.
+
+**After pulling F19** — no unit changes; the proxy runs its script from the repo. **Before
+pulling**, see today's gap with the instrument that will prove it closed (prints only a status
+code, never a body):
+
+```bash
+command -v curl                                                    # a path
+GW=$(sudo docker ps -q --no-trunc --filter label=com.docker.compose.service=hermes-agent); echo "${#GW}"   # 64
+sudo -u hermes-broker curl -s -o /dev/null -w '%{http_code}\n' \
+  --unix-socket /run/hermes/docker-proxy.sock "http://d/v1.55/containers/$GW/json"          # 200 — the gap
+```
+
+Then:
+
+```bash
+sudo test ! -e /var/lib/hermes/governance/control/mutation-enabled && echo "kill switch absent"
+sudo git -C /opt/projects/claude_code pull --ff-only
+sudo git -C /opt/projects/claude_code log -1 --oneline                                   # the merge commit of PR #53
+sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it
+systemctl is-active hermes-docker-proxy hermes-broker                                    # active, active
+systemctl show -p NRestarts hermes-docker-proxy hermes-broker                            # 0, 0
+sudo -u hermes-broker curl -s -o /dev/null -w '%{http_code}\n' \
+  --unix-socket /run/hermes/docker-proxy.sock "http://d/v1.55/containers/$GW/json"          # 403
+sudo journalctl -u hermes-docker-proxy --since "-5 min" --no-pager \
+  | grep -c 'target is not an ads-mutator run: entrypoint mismatch'                          # 1 per probe run since the restart
+sleep 1                                                            # journalctl --since includes the whole
+                                                                    # second; the 403 probe's own DENY must
+                                                                    # fall before T0, not land in the same
+                                                                    # second as it
+T0=$(date '+%F %T')
+```
+
+Then re-run Phase 6 and check the proxy journal:
+
+```bash
+sudo journalctl -u hermes-docker-proxy --since "$T0" --no-pager | grep -E 'ALLOW POST .*/containers/create|UPGRADE|DENY'
+```
+
+Expected: one `ALLOW POST …/containers/create…`, one `UPGRADE POST …/attach… (101)`, and **no
+`DENY` whose reason starts with `target`**. A `target` DENY for the mutator's own calls is a
+finding — never widen the check. Other `DENY … not on the allow-list` lines (CI's Compose sends
+`GET /info` and `GET /networks/<name>` and tolerates their refusal) predate F19 — record any you
+see; never widen the allow-list to silence them. The grep above still shows every `DENY` line
+(not filtered to `target` ones) so the operator can record whichever kind appears.
 
 ---
 
