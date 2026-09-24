@@ -429,9 +429,8 @@ whole id-scoped family, not just attach:
   in the query string; the query string is never inspected on these entries.
 
 Unlike F18 this is not a parsing or pass-through defect; it is a policy gap in `decide()`.
-Recorded, not fixed. **Not measured.** Closing it needs the proxy to know which ids are
-ads-mutator runs. **Whether it gates the kill switch is assessed in its own cycle; it is listed
-as a gate until then.**
+Recorded 2026-09-24 as a kill-switch gate pending assessment; closing it needed the proxy to know
+which ids are ads-mutator runs. Assessed and fixed the same day — below.
 
 **Assessed 2026-09-24: a real gap; it gated the kill switch.** Two allowed calls reached the
 gateway's environment: `GET /containers/json` for its id, then `GET /containers/<id>/json`.
@@ -443,8 +442,8 @@ the proxy inspects the target on its own connection and allows only the pinned i
 pinned entrypoint. An earlier RED attempt (run 36019974966) failed for the wrong reason — the
 probe pinned `/v1.55` and CI's dockerd 28.0.4 caps at API 1.48 — and was discarded once the probe
 was changed to unversioned paths. CI: RED on today's proxy (run 36020681939: the decoy's sentinel
-was read), then `bind-agreement: executed 7, skipped 0` on the PR (run 36024366720) and the merge
-commit (merge-commit run: pending). **Residual, accepted:** the list call still enumerates
+was read), then `bind-agreement: executed 7, skipped 0` on the PR (run 36024366720) and on the
+merge commit (run pending). **Residual, accepted:** the list call still enumerates
 containers (names, labels, image, mounts — no environment); every id it reveals is now refused.
 
 ## Final state of the box (end of session)
