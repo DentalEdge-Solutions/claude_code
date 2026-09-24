@@ -253,8 +253,9 @@ group inheritance at all (BSD vs System V), which is the mechanism the records d
 governance is unaffected (the fsynced audit log is the authoritative record). Revisit as its own
 design if the analyst is shown to need it.
 
-**Still open:** audit-log truncation (§6 part B) and F19 (attach may target any container; to be
-assessed). F18 is fixed (PR #50). The
+**Still open:** audit-log truncation (§6 part B) and F19 (container-scoped calls accept any
+container id, including inspect, which exposes a container's environment; to be assessed). F18 is
+fixed (PR #50). The
 framing hardening and `UMask=0077` (§6 part A) are in PR #48. F14 (a Compose failure reported as
 "nothing was mutated") is fixed (PR #46).
 
@@ -382,8 +383,8 @@ measured against a real dockerd.
 
 Pre-existing (predates PR #48); not caused by the framing hardening. Reachable by anything that
 can connect to the proxy socket (hermes-rail, i.e. the broker) — the adversary the proxy exists
-to contain. Gates the kill switch. Not the rehearsal (the kill switch is absent, nothing can
-mutate).
+to contain. At the time: gates the kill switch. Not the rehearsal (the kill switch is absent,
+nothing can mutate).
 
 **Open: its own spec.** Pump only for `POST` whose `_path_only(path)` fullmatches the attach
 allow-list pattern AND whose upstream response is `101 Switching Protocols` (Compose sends
@@ -400,15 +401,26 @@ connection closed; non-attach requests are unchanged. Tested with a keep-alive f
 three routes let a smuggled create through before the fix and not after). **Measured on Linux CI**
 (run 35999764190): the real Compose attach is logged `UPGRADE POST …/attach… (101)`.
 
-### F19: attach may target any container (recorded, not fixed)
+### F19: container-scoped calls accept any container id (recorded, not fixed)
 
-**Found 2026-09-23 while designing the F18 fix.** The allow-list's attach entry matches any
-container id (`_ID = [A-Za-z0-9_.-]+`), so the broker — the adversary the proxy exists to contain —
-can `POST /containers/<id>/attach` to **any** container, including the Hermes gateway, and with
-`stdin=1` write to its input once dockerd upgrades the connection. Unlike F18 this is not a parsing
-or pass-through defect; it is a policy gap in `decide()`. Closing it needs a way for the proxy to
-know which container ids are ads-mutator runs (not measured). **Whether it gates the kill switch is
-assessed in its own cycle; it is listed as a gate until then.**
+**Found 2026-09-23/24 (F18 design + F18 whole-branch review).** The allow-list's container-scoped
+entries — inspect (`GET /containers/<id>/json`), start, wait, delete, and attach — all match any
+container id (`_ID = [A-Za-z0-9_.-]+`), so the broker — the adversary the proxy exists to
+contain — can direct any of them at **any** container, not just an ads-mutator run. This is the
+whole id-scoped family, not just attach:
+
+- **inspect returns another container's config, including its environment.** The Hermes gateway
+  is started with `env_file: .env` (`docker-compose.yml`, gateway service), which holds the
+  Anthropic/provider API keys — so a compromised broker could read them through the proxy.
+- **attach can read another container's output** (and its log history with `logs=1`), **and write
+  its stdin** with `stdin=1` if the target keeps stdin open.
+- **start/wait/delete act on any container** — e.g. stop the gateway by deleting it with `force`
+  in the query string; the query string is never inspected on these entries.
+
+Unlike F18 this is not a parsing or pass-through defect; it is a policy gap in `decide()`.
+Recorded, not fixed. **Not measured.** Closing it needs the proxy to know which ids are
+ads-mutator runs. **Whether it gates the kill switch is assessed in its own cycle; it is listed
+as a gate until then.**
 
 ## Final state of the box (end of session)
 
@@ -432,4 +444,5 @@ assessed in its own cycle; it is listed as a gate until then.**
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
 7. F18: the attach pass-through bypass — fixed (PR #50).
-8. F19: attach may target any container. Listed as a kill-switch gate until assessed.
+8. F19: container-scoped calls accept any container id (including inspect, which exposes a
+   container's environment). Listed as a kill-switch gate until assessed.

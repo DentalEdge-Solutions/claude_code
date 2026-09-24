@@ -448,7 +448,8 @@ container and comes back `refused_preflight` ("mutation is disabled"). That exer
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
 **Still required before the kill switch can be created:** audit-log truncation (§6 part B), and
-F19 — attach may target any container — until it is assessed (findings record). (F14 —
+F19 — container-scoped calls accept any container id (including inspect, which exposes a
+container's environment) — until it is assessed (findings record). (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
 now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
 hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —

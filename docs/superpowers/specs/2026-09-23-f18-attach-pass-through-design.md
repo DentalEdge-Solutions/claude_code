@@ -1,6 +1,6 @@
 # F18 — The proxy's attach pass-through (design)
 
-**Status:** approved in conversation 2026-09-23, awaiting written-spec review.
+**Status:** approved 2026-09-23; implemented in PR #50.
 **Finding:** F18 in `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md` (found by the
 whole-branch review of PR #48). **Gates the kill switch.**
 **Scope:** narrow — only when the proxy switches a connection to raw pass-through. The separate
@@ -149,6 +149,10 @@ F19; `wait`/`start` handling; Ruling 18 (chunked-response relay closes); respons
   closed; Compose loses the output; the wrapper reports **4 (unverified)**. Fails closed; CI's new
   `UPGRADE` assertion and the box's journal line surface it.
 - **A genuine `101` attach still opens a raw stream to whatever container the id names** — F19.
+- **An attach sent WITHOUT `Upgrade: tcp`** is answered by dockerd with a `200` hijack, not a
+  `101`; the proxy relays the head and closes (fail-safe — same path as the `200` risk above).
+  The Docker CLI and Compose always send `Upgrade: tcp`, and Linux CI measured the `101` path
+  (run 35999764190).
 
 ## 9. Order of work
 
