@@ -663,6 +663,62 @@ class TestAuditLogsAreAppendOnly(Layout):
         self.assertNotIn(self.SLUG, r.stderr)          # counts, never slugs
 
 
+class TestAppendOnlyHelper(Layout):
+    """§6B Tier 2 (1): governance_lib's ioctl numbers and 4-byte buffer against the real
+    kernel, cross-checked with lsattr — the same tool the box measurement used."""
+
+    def g(self, code, path):
+        """Run `code` with G = the copied governance_lib, as root. Returns the result."""
+        return run(["python3", "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); import governance_lib as G; "
+                    + code, self.bin, path], env=self.env)
+
+    def fresh(self, name):
+        p = os.path.join(self.base, name)
+        open(p, "w").close()
+        self.addCleanup(run, ["chattr", "-a", p])      # before Layout's rmtree (LIFO)
+        return p
+
+    def lsattr_flags(self, path):
+        return run(["lsattr", path], check=True).stdout.split()[0]
+
+    def test_set_then_read_agrees_with_lsattr(self):
+        p = self.fresh("sealed")
+        r = self.g("G.set_append_only(sys.argv[2]); print(G.is_append_only(sys.argv[2]))", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "True")
+        self.assertIn("a", self.lsattr_flags(p))
+
+    def test_a_plain_file_reads_false(self):
+        p = self.fresh("plain")
+        r = self.g("print(G.is_append_only(sys.argv[2]))", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "False")
+        self.assertNotIn("a", self.lsattr_flags(p))
+
+    def test_a_symlink_is_refused(self):
+        target = self.fresh("target")
+        run(["chattr", "+a", target], check=True)
+        link = os.path.join(self.base, "link")
+        os.symlink(target, link)
+        r = self.g("G.is_append_only(sys.argv[2])", link)
+        self.assertNotEqual(r.returncode, 0)
+        # O_NOFOLLOW -> ELOOP; the traceback prints its strerror.
+        self.assertIn("Too many levels of symbolic links", r.stderr)
+
+    def test_control_a_wrong_flag_constant_is_caught_only_by_lsattr(self):
+        """FIRING CONTROL for the lsattr cross-check. With the constant set to NODUMP (0x40,
+        harmless) the helper sets and "verifies" the wrong bit and reports success — only
+        lsattr shows the file is not append-only. This is why test_set_then_read_agrees_
+        with_lsattr asserts lsattr and not just the helper's own answer."""
+        p = self.fresh("wrong-constant")
+        r = self.g("G.LOG_APPEND_ONLY_FL = 0x40; G.set_append_only(sys.argv[2]); "
+                   "print(G.is_append_only(sys.argv[2]))", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "True")      # the helper is fooled
+        self.assertNotIn("a", self.lsattr_flags(p))     # lsattr is not
+
+
 if __name__ == "__main__":
     why = why_not_runnable()
     if why:

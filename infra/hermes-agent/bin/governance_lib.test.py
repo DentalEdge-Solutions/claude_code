@@ -1,4 +1,5 @@
-import os, sys, unittest
+import array, errno, os, shutil, sys, tempfile, unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib as G
 
@@ -167,6 +168,100 @@ class TestApprovalLockPath(unittest.TestCase):
                     "a/b", "", None, 7):
             with self.assertRaises(ValueError):
                 G.approval_lock_path(self.SLUG, bad, self.R)
+
+
+class FakeKernel:
+    """Stands in for one inode's flags. ioctl(GET) writes them into the int buffer;
+    ioctl(SET) stores the buffer's value (unless honour_set is False)."""
+
+    def __init__(self, flags=0, honour_set=True, error=None):
+        self.flags, self.honour_set, self.error, self.calls = flags, honour_set, error, []
+
+    def ioctl(self, fd, req, buf, mutate=True):
+        self.calls.append(req)
+        if self.error is not None:
+            raise OSError(self.error, os.strerror(self.error))
+        if req == G._FS_IOC_GETFLAGS:
+            buf[0] = self.flags
+        elif req == G._FS_IOC_SETFLAGS and self.honour_set:
+            self.flags = buf[0]
+        return 0
+
+
+class TestAppendOnlyFlag(unittest.TestCase):
+    """§6B helper logic, with the kernel faked. The real kernel is Tier 2's job
+    (deploy/layout-integration.test.py TestAppendOnlyHelper)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="s6b-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.file = os.path.join(self.dir, "acme.jsonl")
+        open(self.file, "w").close()
+
+    def _with(self, kernel, platform="linux"):
+        for p in (mock.patch.object(G.sys, "platform", platform),
+                  mock.patch.object(G.fcntl, "ioctl", kernel.ioctl)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_sealed_file_reads_true(self):
+        self._with(FakeKernel(flags=0x80000 | G.LOG_APPEND_ONLY_FL))
+        self.assertTrue(G.is_append_only(self.file))
+
+    def test_an_unsealed_file_reads_false(self):
+        self._with(FakeKernel(flags=0x80000))
+        self.assertFalse(G.is_append_only(self.file))
+
+    def test_set_adds_the_flag_and_keeps_the_others(self):
+        k = FakeKernel(flags=0x80000)
+        self._with(k)
+        G.set_append_only(self.file)
+        self.assertEqual(k.flags, 0x80000 | G.LOG_APPEND_ONLY_FL)
+        self.assertEqual(k.calls, [G._FS_IOC_GETFLAGS, G._FS_IOC_SETFLAGS,
+                                   G._FS_IOC_GETFLAGS])
+
+    def test_set_raises_when_the_flag_does_not_take(self):
+        self._with(FakeKernel(flags=0, honour_set=False))
+        with self.assertRaises(OSError) as cm:
+            G.set_append_only(self.file)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+
+    def test_an_ioctl_error_raises_and_is_never_read_as_false(self):
+        self._with(FakeKernel(error=errno.ENOTTY))
+        with self.assertRaises(OSError) as cm:
+            G.is_append_only(self.file)
+        self.assertEqual(cm.exception.errno, errno.ENOTTY)
+
+    def test_off_linux_both_raise_without_touching_the_kernel(self):
+        k = FakeKernel()
+        self._with(k, platform="darwin")
+        for fn in (G.is_append_only, G.set_append_only):
+            with self.assertRaises(OSError) as cm:
+                fn(self.file)
+            self.assertEqual(cm.exception.errno, errno.ENOTSUP)
+        self.assertEqual(k.calls, [])
+
+    def test_a_symlink_is_refused_before_the_kernel_is_asked(self):
+        """Review Focus 1: never report a symlink's TARGET as the log's state."""
+        k = FakeKernel(flags=G.LOG_APPEND_ONLY_FL)
+        self._with(k)
+        link = os.path.join(self.dir, "link.jsonl")
+        os.symlink(self.file, link)
+        with self.assertRaises(OSError) as cm:
+            G.is_append_only(link)
+        self.assertEqual(cm.exception.errno, errno.ELOOP)
+        self.assertEqual(k.calls, [])
+
+    def test_a_directory_and_a_fifo_are_refused(self):
+        k = FakeKernel()
+        self._with(k)
+        fifo = os.path.join(self.dir, "fifo.jsonl")
+        os.mkfifo(fifo)
+        for p in (self.dir, fifo):
+            with self.assertRaises(OSError) as cm:
+                G.is_append_only(p)
+            self.assertEqual(cm.exception.errno, errno.EINVAL)
+        self.assertEqual(k.calls, [])
 
 
 if __name__ == "__main__":
