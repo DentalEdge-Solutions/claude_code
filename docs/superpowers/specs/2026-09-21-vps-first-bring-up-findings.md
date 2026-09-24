@@ -401,6 +401,15 @@ connection closed; non-attach requests are unchanged. Tested with a keep-alive f
 three routes let a smuggled create through before the fix and not after). **Measured on Linux CI**
 (run 35999764190): the real Compose attach is logged `UPGRADE POST …/attach… (101)`.
 
+**Merged and applied to the box, 2026-09-24.** Merge commit `5acee36`: CI run 36004506122,
+`bind-agreement: executed 6, skipped 0`, `layout-integration: executed 30, skipped 0`. The box
+pulled `e1110bb..5acee36` and restarted `hermes-docker-proxy` only (no unit changes); both units
+`active`, `NRestarts=0`. BRING-UP Phase 6 on the box gave `rc=2` (`mutation is disabled`) and the
+proxy logged `ALLOW POST /v1.55/containers/create?name=hermes-agent-ads-mutator-run-…` followed by
+`UPGRADE POST /v1.55/containers/<id>/attach?stderr=1&stdin=1&stdout=1&stream=1 (101)`, with no
+`DENY-FOLLOWUP` and no `malformed` refusal — the first real-dockerd measurement of the fixed attach
+path on the box. Kill switch: absent (checked with `sudo test`).
+
 ### F19: container-scoped calls accept any container id (recorded, not fixed)
 
 **Found 2026-09-23/24 (F18 design + F18 whole-branch review).** The allow-list's container-scoped
@@ -413,7 +422,10 @@ whole id-scoped family, not just attach:
   is started with `env_file: .env` (`docker-compose.yml`, gateway service), which holds the
   Anthropic/provider API keys — so a compromised broker could read them through the proxy.
 - **attach can read another container's output** (and its log history with `logs=1`), **and write
-  its stdin** with `stdin=1` if the target keeps stdin open.
+  its stdin** with `stdin=1` if the target keeps stdin open. **Measured on the box, 2026-09-24:**
+  the legitimate rail's own attach carries `stdin=1` (Compose sends
+  `attach?stderr=1&stdin=1&stdout=1&stream=1` even under `run -T`), so an F19 fix cannot simply
+  refuse `stdin=1` — it has to restrict *which container* an attach may target.
 - **start/wait/delete act on any container** — e.g. stop the gateway by deleting it with `force`
   in the query string; the query string is never inspected on these entries.
 
