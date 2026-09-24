@@ -394,6 +394,40 @@ def _check_registered_logs(root):
             % (root, missing, governance_lib.LOG_DIR_MODE)]
 
 
+def _reported_by_file_walk(path, uid, gid):
+    """True only when `_check_files_in_dir(log/, ...)` would itself have produced a
+    problem line for this exact `path` — i.e. the two checks disagree about NOTHING,
+    so skipping the probe's own report here can never be a silent pass.
+
+    MUST mirror `_check_files_in_dir` step for step, because `_check_registered_logs_sealed`
+    reaches `path` a different way (derived from the registry, `os.path.isfile` which
+    FOLLOWS symlinks) than the walk does (`os.listdir` + `os.lstat`, which does NOT). Found
+    by review: a registered log that is a SYMLINK to a 0600 regular file is never reported
+    by the walk (lstat sees a symlink, not a regular file, and the walk skips it) even
+    though `os.path.isfile`/`_check_file` follow it to the same target — so the old
+    unconditional 'if _check_file(...) reports it, skip' let a real ELOOP fault through as
+    a silent pass. Same failure mode if `os.listdir(log/)` itself fails for this process
+    while `os.stat` on the single file still succeeds. Every one of the four conditions
+    below is required before the skip is safe; if any changes in `_check_files_in_dir`,
+    this must change with it."""
+    dirpath, name = os.path.split(path)
+    try:
+        entries = os.listdir(dirpath)
+    except OSError:
+        return False
+    if name not in entries:
+        return False
+    if not is_client_log_name(name):
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return bool(_check_file(path, uid, gid, need_write=True))
+
+
 def _check_registered_logs_sealed(root, uid, gid):
     """§6B. Every REGISTERED client's existing log must carry the append-only flag.
 
@@ -408,10 +442,12 @@ def _check_registered_logs_sealed(root, uid, gid):
     unreadable -> [] (Ruling 9); unparseable -> [] here, because _check_registered_logs
     already reports it. A MISSING log is _check_registered_logs's; it is not probed here.
 
-    'Cannot tell' is never 'sealed': a probe that raises is counted and refused — unless the
-    file-level check already reports this same file, in which case the store is refused
-    already and a second line would count one fault twice (Ruling 9 / R19b). A log that
-    is merely unsealed is always reported: a different fault with a different remedy.
+    'Cannot tell' is never 'sealed': a probe that raises is counted and refused — unless
+    `_reported_by_file_walk` confirms the file-level walk over log/ WOULD ITSELF have
+    reported this exact path (see its docstring for why an approximate check here was a
+    silent pass), in which case the store is refused already and a second line would
+    count one fault twice (Ruling 9 / R19b). A log that is merely unsealed is always
+    reported: a different fault with a different remedy.
 
     Counts, never slugs (see _check_registered_logs)."""
     reg = governance_lib.clients_registry_path(root)
@@ -433,10 +469,11 @@ def _check_registered_logs_sealed(root, uid, gid):
         try:
             sealed = governance_lib.is_append_only(p)
         except OSError as e:
-            if _check_file(p, uid, gid, need_write=True):
+            if _reported_by_file_walk(p, uid, gid):
                 continue
             unchecked += 1
-            errnos.add(errno.errorcode.get(e.errno, str(e.errno)))
+            errnos.add(errno.errorcode.get(
+                e.errno, "unknown" if e.errno is None else str(e.errno)))
             continue
         if not sealed:
             unsealed += 1

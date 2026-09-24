@@ -797,6 +797,47 @@ class TestRegisteredLogsAreSealed(Base):
         self.assertIn("%s.jsonl" % self.SLUG, problems[0])   # the file-level message
         self.assertNotIn("could not be checked", problems[0])
 
+    def test_a_symlinked_log_is_not_silently_passed_by_the_skip(self):
+        """Fix round 1, Important. The file-level walk lstat()s each log/ entry and skips
+        anything that is not a regular file, so a SYMLINK named <slug>.jsonl is never
+        reported by the walk — but os.path.isfile/_check_file FOLLOW the link. The old,
+        unconditional 'if _check_file(...) reports it, skip' therefore skipped a raising
+        probe on a symlinked log even though nothing else had reported it: a silent
+        pass. The fix must refuse instead."""
+        self._healthy_dirs(); self._register(self.SLUG)
+        target = os.path.join(self.root, "target-outside-log.jsonl")
+        open(target, "w").close()
+        os.chmod(target, 0o600)
+        link = os.path.join(self.root, "log", "%s.jsonl" % self.SLUG)
+        os.symlink(target, link)
+        self._probe(errno.ELOOP)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("could not be checked", problems[0])
+        self.assertIn("ELOOP", problems[0])
+        self.assertNotIn(self.SLUG, problems[0])
+
+    def test_a_listdir_failure_does_not_silently_pass_a_reported_file(self):
+        """Fix round 1, Important, second variant. If os.listdir(log/) itself fails for
+        this process while os.stat on the single registered log still succeeds, the old
+        skip logic still asked _check_file (which reports the 0600 file) and dropped the
+        probe's own report — another silent pass. The fix must refuse instead."""
+        self._healthy_dirs(); self._register(self.SLUG)
+        self._log(self.SLUG, mode=0o600)
+        log_dir = os.path.join(self.root, "log")
+        real_listdir = PF.os.listdir
+
+        def fake_listdir(path):
+            if os.path.abspath(path) == os.path.abspath(log_dir):
+                raise PermissionError(errno.EACCES, "denied", path)
+            return real_listdir(path)
+
+        self._probe(errno.EACCES)
+        with mock.patch.object(PF.os, "listdir", fake_listdir):
+            problems = self._check()
+        self.assertNotEqual(problems, [])
+        self.assertTrue(any("could not be checked" in p for p in problems), problems)
+
     def test_a_missing_registered_log_is_only_the_bootstrap_message(self):
         self._healthy_dirs(); self._register(self.SLUG)
         self._probe(False)
