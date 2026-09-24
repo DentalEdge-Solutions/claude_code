@@ -89,6 +89,64 @@ def _mut(**config_over):
     return doc
 
 
+HANG = object()   # a fake upstream reply that never comes
+
+
+def _json_200(doc):
+    body = json.dumps(doc).encode()
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+            + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+
+def _chunked_200(doc):
+    body = json.dumps(doc).encode()
+    half = len(body) // 2
+    chunks = b"".join(b"%x\r\n%s\r\n" % (len(part), part) for part in (body[:half], body[half:]))
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n" + chunks + b"0\r\n\r\n")
+
+
+def _one_shot_upstream(tc, reply):
+    """A unix-socket server that accepts ONE connection, records the request head in `got`,
+    and sends `reply` (bytes) then closes — or, for HANG, holds the connection open and never
+    answers. Returns (path, got)."""
+    import threading
+    path = "/tmp/pxlk-%d-%d.sock" % (os.getpid(), next(_SOCK_SEQ))
+    if os.path.exists(path):
+        os.remove(path)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+    got, held = [], []
+
+    def run():
+        try:
+            c, _ = srv.accept()
+        except OSError:
+            return
+        data = b""
+        while b"\r\n\r\n" not in data:
+            d = c.recv(65536)
+            if not d:
+                break
+            data += d
+        got.append(data)
+        if reply is HANG:
+            held.append(c)
+            return
+        try:
+            c.sendall(reply)
+        except OSError:
+            pass
+        c.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    tc.addCleanup(srv.close)
+    tc.addCleanup(lambda: [c.close() for c in held])
+    tc.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+    return path, got
+
+
 GOV = "/var/lib/hermes/governance"
 PROJ = "/opt/hermes-agent"
 BINDS = [
@@ -628,6 +686,89 @@ class TestTargetHelpers(Base):
         ok, why = PX.is_mutator_shaped(doc, MUT_ID)
         self.assertFalse(ok)
         self.assertEqual(why, "target is not an ads-mutator run: proxy not configured")
+
+
+class TestLookupTarget(unittest.TestCase):
+    """F19: the proxy's own question to dockerd. A fresh connection per lookup, stdlib
+    http.client framing, and EVERY failure — foreseen or not — is a refusal."""
+
+    def _lookup(self, reply, cid=MUT_ID):
+        path, got = _one_shot_upstream(self, reply)
+        return PX.lookup_target(path, cid), got
+
+    def test_a_200_returns_the_document(self):
+        (doc, why), _ = self._lookup(_json_200(MUTATOR_DOC))
+        self.assertEqual((doc, why), (MUTATOR_DOC, ""))
+
+    def test_the_request_is_unversioned_and_identifies_itself(self):
+        _, got = self._lookup(_json_200(MUTATOR_DOC))
+        head = got[0]
+        self.assertTrue(head.startswith(("GET /containers/%s/json HTTP/1.1\r\n" % MUT_ID).encode()),
+                        head)
+        self.assertIn(b"User-Agent: " + PX.LOOKUP_UA.encode(), head)
+
+    def test_a_chunked_reply_is_read(self):
+        """Review focus: dockerd sends large JSON bodies chunked."""
+        (doc, why), _ = self._lookup(_chunked_200(MUTATOR_DOC))
+        self.assertEqual((doc, why), (MUTATOR_DOC, ""))
+
+    def test_a_404_is_target_not_found(self):
+        (doc, why), _ = self._lookup(b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\n{}")
+        self.assertEqual((doc, why), (None, "target not found"))
+
+    def test_other_statuses_fail(self):
+        for status in (b"500 Internal Server Error", b"301 Moved", b"204 No Content"):
+            (doc, why), _ = self._lookup(b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\n\r\n")
+            self.assertEqual((doc, why), (None, "target lookup failed"), status)
+
+    def test_bad_json_fails(self):
+        (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nnot{j")
+        self.assertEqual((doc, why), (None, "target lookup failed"))
+
+    def test_deeply_nested_json_is_refused(self):
+        """Review focus: RecursionError is not a ValueError — it must still be a refusal.
+
+        DEVIATION from task-4-brief.md Step 2 (documented in task-4-report.md): the brief's
+        depth of 100000 no longer triggers RecursionError under this repo's Python (3.14.6)
+        — CPython's C-accelerated json scanner now parses 100000 levels of [[[...]]] cleanly
+        (measured), so the intended failure mode never fired and the assertion's own failure
+        formatter (pprint on the resulting 100000-deep list) recursed instead, masking the
+        real behavior under test. 350000 was measured to reliably raise RecursionError in
+        ~5ms on this interpreter (floor observed between 100000-200000, so this has a wide
+        margin) while keeping the body (700000 bytes) safely under MAX_BODY (1048576) —
+        an earlier attempt at 1000000 produced a 2000000-byte body that tripped the
+        oversize-reply check BEFORE json.loads ever ran, silently defeating the test's
+        purpose. `lookup_target`'s except Exception clause and MAX_BODY logic are unchanged
+        from the brief."""
+        body = b"[" * 350000 + b"]" * 350000
+        (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                                     + str(len(body)).encode() + b"\r\n\r\n" + body)
+        self.assertEqual((doc, why), (None, "target lookup failed"))
+
+    def test_a_garbled_status_line_is_refused(self):
+        (doc, why), _ = self._lookup(b"HTTP/1.1 2OO OK\r\nContent-Length: 2\r\n\r\n{}")
+        self.assertEqual((doc, why), (None, "target lookup failed"))
+
+    def test_an_oversize_reply_fails(self):
+        old = PX.MAX_BODY
+        self.addCleanup(setattr, PX, "MAX_BODY", old)
+        PX.MAX_BODY = 1000
+        (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n"
+                                     + b" " * 2000)
+        self.assertEqual((doc, why), (None, "target lookup failed"))
+
+    def test_no_answer_fails_within_the_timeout(self):
+        old = PX.LOOKUP_TIMEOUT
+        self.addCleanup(setattr, PX, "LOOKUP_TIMEOUT", old)
+        PX.LOOKUP_TIMEOUT = 0.3
+        t0 = time.monotonic()
+        (doc, why), _ = self._lookup(HANG)
+        self.assertEqual((doc, why), (None, "target lookup failed"))
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_an_unreachable_upstream_fails(self):
+        doc, why = PX.lookup_target("/tmp/pxlk-does-not-exist-%d.sock" % os.getpid(), MUT_ID)
+        self.assertEqual((doc, why), (None, "target lookup failed"))
 
 
 class TestPlumbing(unittest.TestCase):

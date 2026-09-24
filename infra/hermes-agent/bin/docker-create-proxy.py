@@ -80,7 +80,7 @@ find. Function docstrings below carry the detail; this is the index.
        chunked` with no `Content-Length` and no connection close. This is why
        `_relay_chunked` parses the chunk framing itself to find the real end of the body.
 """
-import argparse, json, os, re, socket, socketserver, sys, threading
+import argparse, http.client, json, os, re, socket, socketserver, sys, threading
 
 _V = r"(?:/v[0-9]+\.[0-9]+)?"          # optional API version prefix, e.g. /v1.55
 _ID = r"[A-Za-z0-9_.-]+"               # image names only: GET /images/<name>/json
@@ -526,6 +526,56 @@ def is_mutator_shaped(doc, cid):
     if cfg.get("Entrypoint") != PINNED_ENTRYPOINT:
         return False, _NOT_MUTATOR + "entrypoint mismatch"
     return True, "target is an ads-mutator run"
+
+
+LOOKUP_TIMEOUT = 5          # seconds, per socket operation; tests lower it
+LOOKUP_UA = "hermes-docker-create-proxy-target-check"
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """http.client over an AF_UNIX socket. http.client does the response framing
+    (Content-Length and chunked) — exactly the code this file must not hand-roll twice."""
+
+    def __init__(self, unix_path, timeout):
+        super().__init__("localhost", timeout=timeout)
+        self._unix_path = unix_path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        try:
+            s.connect(self._unix_path)
+        except BaseException:
+            s.close()
+            raise
+        self.sock = s
+
+
+def lookup_target(upstream_path, cid):
+    """Ask dockerd what `cid` is, on a FRESH connection — never the client's, whose keep-alive
+    stream the relay is framing (the F18 bug class). `cid` has already fullmatched 64 hex and
+    the path is unversioned, so nothing the client sent reaches this request.
+
+    Returns (doc, "") on 200, (None, "target not found") on 404, and (None, "target lookup
+    failed") on anything else. `except Exception` is deliberate and confined to this unit:
+    an error nobody foresaw must become a refusal, never a crash someone later "fixes" by
+    skipping the check. The reply is returned to the caller only; it is never logged."""
+    c = _UnixHTTPConnection(upstream_path, LOOKUP_TIMEOUT)
+    try:
+        c.request("GET", "/containers/%s/json" % cid, headers={"User-Agent": LOOKUP_UA})
+        r = c.getresponse()
+        if r.status == 404:
+            return None, "target not found"
+        if r.status != 200:
+            return None, "target lookup failed"
+        raw = r.read(MAX_BODY + 1)
+        if len(raw) > MAX_BODY:
+            return None, "target lookup failed"
+        return json.loads(raw.decode("utf-8")), ""
+    except Exception:
+        return None, "target lookup failed"
+    finally:
+        c.close()
 
 
 def _handle(conn, upstream_path):
