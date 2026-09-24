@@ -68,6 +68,27 @@ PX = _load("docker_create_proxy", "docker-create-proxy.py")
 MUT_ID = "deadbeef" * 8
 GW_ID = "0badc0de" * 8
 
+SENTINEL = "F19-SENTINEL"
+# Synthetic inspect documents — never captured from a real gateway. The gateway's shares the
+# mutator's image: only the entrypoint tells them apart (docker-compose.yml).
+MUTATOR_DOC = {"Id": MUT_ID, "Config": {
+    "Image": "hermes-agent-claude",
+    "Entrypoint": ["python3", "/opt/cc-bin/apply-changeset.py"],
+    "Env": ["HERMES_GOVERNANCE_ROOT=/opt/governance"]}}
+GATEWAY_DOC = {"Id": GW_ID, "Config": {
+    "Image": "hermes-agent-claude",
+    "Entrypoint": ["/opt/hermes/docker/entrypoint.sh"],
+    "Cmd": ["gateway", "run"],
+    "Env": ["SECRET=" + SENTINEL]}}
+
+
+def _mut(**config_over):
+    """MUTATOR_DOC with Config fields overridden (a deep copy)."""
+    doc = json.loads(json.dumps(MUTATOR_DOC))
+    doc["Config"].update(config_over)
+    return doc
+
+
 GOV = "/var/lib/hermes/governance"
 PROJ = "/opt/hermes-agent"
 BINDS = [
@@ -521,6 +542,92 @@ class TestAttachHelpers(unittest.TestCase):
                  (b"", None)]
         for rhead, want in cases:
             self.assertEqual(PX._status_code(rhead), want, rhead)
+
+
+class TestTargetHelpers(Base):
+    """F19 (spec 2026-09-24). Which container a request acts on, and whether dockerd's
+    description of it is an ads-mutator run. Pure — no sockets."""
+
+    def test_container_target_extracts_the_full_id(self):
+        for path in ("/v1.55/containers/%s/json" % MUT_ID,
+                     "/containers/%s/start" % MUT_ID,
+                     "/v1.55/containers/%s/wait?condition=removed" % MUT_ID,
+                     "/v1.55/containers/%s/attach?stderr=1&stdin=1&stdout=1&stream=1" % MUT_ID,
+                     "/v1.55/containers/%s?force=1" % MUT_ID,
+                     "/v1.55/containers/%s" % MUT_ID):
+            self.assertEqual(PX.container_target(path), MUT_ID, path)
+
+    def test_container_target_is_none_for_calls_that_name_no_container(self):
+        for path in ("/v1.55/containers/json", "/v1.55/containers/json?all=1&filters=x",
+                     "/v1.55/containers/create?name=hermes-agent-ads-mutator-run-1a2b",
+                     "/_ping", "/v1.55/version", "/v1.55/networks", "/v1.55/volumes",
+                     "/v1.55/images/hermes-agent-claude/json",
+                     "/v1.55/containers/%sx/json" % MUT_ID,
+                     "/v1.55/containers/%s/../x" % MUT_ID):
+            self.assertIsNone(PX.container_target(path), path)
+
+    def test_every_container_scoped_allow_list_entry_is_target_checked(self):
+        """Iterates ALLOWED itself, so a future id-scoped entry cannot skip the check."""
+        scoped = [(m, pat) for m, pat in PX.ALLOWED if PX._CID in pat.pattern]
+        self.assertEqual(len(scoped), 5, scoped)
+        for m, pat in scoped:
+            sample = pat.pattern.replace(PX._V, "/v1.55").replace(PX._CID, MUT_ID)
+            self.assertTrue(pat.fullmatch(sample), sample)
+            self.assertEqual(PX.container_target(sample), MUT_ID, (m, sample))
+
+    def test_no_container_entry_accepts_a_loose_id(self):
+        for m, pat in PX.ALLOWED:
+            p = pat.pattern
+            self.assertNotIn("/containers/" + PX._ID, p, (m, p))
+            if "/containers/" in p and not p.endswith(("/containers/create", "/containers/json")):
+                self.assertIn(PX._CID, p, (m, p))
+
+    def test_a_mutator_run_is_mutator_shaped(self):
+        ok, why = PX.is_mutator_shaped(MUTATOR_DOC, MUT_ID)
+        self.assertTrue(ok, why)
+
+    def test_look_alikes_are_refused_with_a_fixed_reason(self):
+        cases = [
+            ("gateway: same image, other entrypoint", GATEWAY_DOC, GW_ID, "entrypoint mismatch"),
+            ("claude-auth-init", {"Id": GW_ID, "Config": {
+                "Image": "hermes-agent-claude",
+                "Entrypoint": ["/usr/local/bin/bootstrap-claude-auth.sh"]}}, GW_ID,
+             "entrypoint mismatch"),
+            ("entrypoint as a string",
+             _mut(Entrypoint="python3 /opt/cc-bin/apply-changeset.py"), MUT_ID,
+             "entrypoint mismatch"),
+            ("entrypoint null", _mut(Entrypoint=None), MUT_ID, "entrypoint mismatch"),
+            ("entrypoint with an extra element",
+             _mut(Entrypoint=["python3", "/opt/cc-bin/apply-changeset.py", "-x"]), MUT_ID,
+             "entrypoint mismatch"),
+            ("image with a tag", _mut(Image="hermes-agent-claude:latest"), MUT_ID,
+             "image mismatch"),
+            ("other image", _mut(Image="alpine"), MUT_ID, "image mismatch"),
+            ("Config missing", {"Id": MUT_ID}, MUT_ID, "malformed inspect"),
+            ("Config not an object", {"Id": MUT_ID, "Config": []}, MUT_ID, "malformed inspect"),
+            ("id mismatch", MUTATOR_DOC, GW_ID, "id mismatch"),
+            ("doc not an object", [MUTATOR_DOC], MUT_ID, "malformed inspect"),
+            ("doc None", None, MUT_ID, "malformed inspect"),
+        ]
+        for label, doc, cid, want in cases:
+            ok, why = PX.is_mutator_shaped(doc, cid)
+            self.assertFalse(ok, label)
+            self.assertEqual(why, "target is not an ads-mutator run: " + want, label)
+
+    def test_a_reason_never_quotes_the_document(self):
+        _, why = PX.is_mutator_shaped(GATEWAY_DOC, GW_ID)
+        self.assertNotIn(SENTINEL, why)
+        self.assertNotIn("entrypoint.sh", why)
+
+    def test_an_unconfigured_proxy_refuses_everything(self):
+        """Review focus: with PINNED_IMAGE unset, a doc with no Image must not match None."""
+        self.addCleanup(PX.configure, image="hermes-agent-claude", binds=BINDS,
+                        governance_root="/opt/governance", network="hermes-agent_default")
+        PX.PINNED_IMAGE = None
+        doc = {"Id": MUT_ID, "Config": {"Entrypoint": ["python3", "/opt/cc-bin/apply-changeset.py"]}}
+        ok, why = PX.is_mutator_shaped(doc, MUT_ID)
+        self.assertFalse(ok)
+        self.assertEqual(why, "target is not an ads-mutator run: proxy not configured")
 
 
 class TestPlumbing(unittest.TestCase):

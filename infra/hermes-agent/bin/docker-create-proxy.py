@@ -485,6 +485,49 @@ def _pump_both(conn, up):
     pump(up, conn)
 
 
+# ---- F19 (spec 2026-09-24): a container-scoped call may target only an ads-mutator run ----
+
+# PREFIX match, deliberately wider than ALLOWED: every allowed path that BEGINS with a
+# container id is checked, including any id-scoped entry added later. The list call
+# /containers/json never matches (`json` is not 64 hex).
+# Named _CONTAINER_TARGET_RE, not _TARGET_RE: that name is already taken (line ~298) by the
+# bytes pattern _parse_head uses for the raw HTTP request-line target — a same-name module
+# global here would silently overwrite it at import time and break request-line parsing.
+_CONTAINER_TARGET_RE = re.compile(_V + r"/containers/(" + _CID + r")(?=/|\Z)")
+_NOT_MUTATOR = "target is not an ads-mutator run: "
+
+
+def container_target(path):
+    """The full container id a request acts on, or None when it names no container."""
+    p = _path_only(path)
+    if p is None:
+        return None
+    m = _CONTAINER_TARGET_RE.match(p)
+    return m.group(1) if m else None
+
+
+def is_mutator_shaped(doc, cid):
+    """Pure. (True, reason) only when dockerd's inspect of `cid` shows the pinned image AND
+    the pinned entrypoint — the two values create already enforces. The image alone is not
+    enough: claude-auth-init, the gateway and ads-mutator all run `hermes-agent-claude`.
+    Reasons are fixed strings; nothing from `doc` is ever quoted, because the gateway's
+    inspect carries its API keys."""
+    if PINNED_IMAGE is None:
+        return False, _NOT_MUTATOR + "proxy not configured"
+    if not isinstance(doc, dict):
+        return False, _NOT_MUTATOR + "malformed inspect"
+    if doc.get("Id") != cid:
+        return False, _NOT_MUTATOR + "id mismatch"
+    cfg = doc.get("Config")
+    if not isinstance(cfg, dict):
+        return False, _NOT_MUTATOR + "malformed inspect"
+    if cfg.get("Image") != PINNED_IMAGE:
+        return False, _NOT_MUTATOR + "image mismatch"
+    if cfg.get("Entrypoint") != PINNED_ENTRYPOINT:
+        return False, _NOT_MUTATOR + "entrypoint mismatch"
+    return True, "target is an ads-mutator run"
+
+
 def _handle(conn, upstream_path):
     up = None
     buf = b""
