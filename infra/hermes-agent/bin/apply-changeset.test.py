@@ -149,6 +149,13 @@ class Base(unittest.TestCase):
                 "project": "claude_google_ads", "customer_id": "1234567890",
                 "status": "active"}}}, f)
         os.makedirs(os.path.join(self.tmp, "log"), mode=0o2750)
+        # §6B: sealing needs root; Tier 2 seals for real. governance_lib is already
+        # imported (and used above in this setUp) at module scope — a local `import
+        # governance_lib` here would shadow it for the whole function and make the
+        # earlier `governance_lib.kill_switch_path` reference raise UnboundLocalError.
+        _p = mock.patch.object(governance_lib, "set_append_only", lambda path: None)
+        _p.start()
+        self.addCleanup(_p.stop)
         M.bootstrap_logs(self.tmp, dry_run=False, expected_gid=os.getgid())
 
     def _actions(self, n=1):

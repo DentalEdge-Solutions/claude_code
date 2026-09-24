@@ -1,4 +1,4 @@
-import importlib.util, json, os, shutil, stat, sys, tempfile, unittest
+import errno, importlib.util, json, os, shutil, stat, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import migrate_governance_shim as M  # see Step 3 note on the module name
@@ -42,6 +42,13 @@ class TestMigration(unittest.TestCase):
             for i in range(3):
                 f.write(json.dumps({"changeset_id": "20260812-101500-abcd1234",
                                     "action_index": i, "status": "applied"}) + "\n")
+        # §6B: sealing needs root on Linux; this suite runs unprivileged everywhere. Record
+        # what WOULD be sealed. Tier 2 (deploy/layout-integration.test.py) seals for real.
+        import governance_lib
+        self.sealed = []
+        _p = mock.patch.object(governance_lib, "set_append_only", self.sealed.append)
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def test_registry_moves(self):
         M.migrate(self.vault, self.gov)
@@ -180,6 +187,27 @@ class TestMigration(unittest.TestCase):
             "a log/ this call created and then refused must not be left behind")
 
 
+    def test_a_migrated_log_is_sealed_after_the_rename(self):
+        M.migrate(self.vault, self.gov)
+        self.assertEqual(self.sealed, [os.path.join(self.gov, "log", "acme-dental.jsonl")])
+
+    def test_a_sealing_failure_removes_the_copy_and_keeps_the_vault_original(self):
+        import governance_lib
+        def refuse(path):
+            raise OSError(errno.EPERM, "Operation not permitted", path)
+        src = os.path.join(self.vault, "acme-dental", "changes", "log.jsonl")
+        dst = os.path.join(self.gov, "log", "acme-dental.jsonl")
+        with mock.patch.object(governance_lib, "set_append_only", refuse):
+            with self.assertRaises(OSError):
+                M.migrate(self.vault, self.gov)
+        self.assertFalse(os.path.exists(dst))
+        with open(src) as f:
+            self.assertEqual(len(f.read().splitlines()), 3)
+        M.migrate(self.vault, self.gov)                 # a retry reproduces the result
+        self.assertTrue(os.path.isfile(dst))
+        self.assertEqual(self.sealed, [dst])
+
+
 class TestCountLines(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.mkdtemp(prefix="count-lines-")
@@ -230,6 +258,13 @@ class TestBootstrapLogs(unittest.TestCase):
                 "acme-dental": {"customer_id": "1234567890", "status": "active"},
                 "other-clinic": {"customer_id": "9998887776", "status": "dormant_pilot"},
             }}, f)
+        # §6B: sealing needs root on Linux; this suite runs unprivileged everywhere. Record
+        # what WOULD be sealed. Tier 2 (deploy/layout-integration.test.py) seals for real.
+        import governance_lib
+        self.sealed = []
+        _p = mock.patch.object(governance_lib, "set_append_only", self.sealed.append)
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _log(self, slug):
         return os.path.join(self.gov, "log", "%s.jsonl" % slug)
@@ -305,6 +340,48 @@ class TestBootstrapLogs(unittest.TestCase):
             M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
         self.assertIn("group-writable", str(cm.exception))
         self.assertFalse(os.path.exists(self._log("acme-dental")))
+
+    def test_apply_seals_each_log_it_creates(self):
+        M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertEqual(self.sealed, [self._log("acme-dental"), self._log("other-clinic")])
+
+    def test_dry_run_seals_nothing(self):
+        M.bootstrap_logs(self.gov, dry_run=True, expected_gid=os.getgid())
+        self.assertEqual(self.sealed, [])
+
+    def test_an_existing_log_is_never_sealed(self):
+        """Spec D3 / Review Focus 2: a log that already exists may have been emptied while
+        unsealed; a person inspects it and seals it by hand. Re-running is still exit-0."""
+        with open(self._log("acme-dental"), "w") as f:
+            f.write('{"status": "applied"}\n')
+        M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertEqual(self.sealed, [self._log("other-clinic")])
+        M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        self.assertEqual(self.sealed, [self._log("other-clinic")])   # second run: nothing
+
+    def test_a_sealing_failure_removes_the_created_log_and_refuses(self):
+        import governance_lib
+        def refuse(path):
+            raise OSError(errno.EPERM, "Operation not permitted", path)
+        with mock.patch.object(governance_lib, "set_append_only", refuse):
+            with self.assertRaises(OSError):
+                M.bootstrap_logs(self.gov, dry_run=False, expected_gid=os.getgid())
+        # Sorted order: acme-dental is attempted first, fails, and is removed — never left
+        # behind unsealed. other-clinic is never attempted.
+        self.assertFalse(os.path.exists(self._log("acme-dental")))
+        self.assertFalse(os.path.exists(self._log("other-clinic")))
+
+    def test_cli_returns_2_when_sealing_fails(self):
+        import governance_lib
+        CLI = _load_cli()
+        real = governance_lib.EXECUTOR_GID
+        governance_lib.EXECUTOR_GID = os.getgid()
+        self.addCleanup(setattr, governance_lib, "EXECUTOR_GID", real)
+        def refuse(path):
+            raise OSError(errno.EPERM, "Operation not permitted", path)
+        with mock.patch.object(governance_lib, "set_append_only", refuse):
+            self.assertEqual(
+                CLI.main(["--bootstrap-logs", "--governance-root", self.gov, "--apply"]), 2)
 
     def test_control_the_same_call_with_the_real_gid_succeeds(self):
         """POSITIVE CONTROL for the two tests above — without it, either refusal would

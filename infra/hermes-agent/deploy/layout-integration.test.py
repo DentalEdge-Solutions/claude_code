@@ -651,6 +651,22 @@ class TestAuditLogsAreAppendOnly(Layout):
         with open(self.log(), "rb") as f:
             self.assertEqual(f.read().count(b"\n"), 1)
 
+    def test_control_without_the_seal_call_the_executor_truncates(self):
+        """FIRING CONTROL for the property tests: the same bootstrap with the seal call
+        removed from THIS TEST'S COPY of bin/ (never the tracked file) leaves truncation
+        open — so those tests fail when the seal is missing, not by accident."""
+        shim = os.path.join(self.bin, "migrate_governance_shim.py")
+        with open(shim) as f:
+            src = f.read()
+        needle = "governance_lib.set_append_only(dst)\n"
+        self.assertEqual(src.count(needle), 1)
+        with open(shim, "w") as f:
+            f.write(src.replace(needle, "pass\n"))
+        self.bootstrap()
+        out = self.probe(GATEWAY)
+        self.assertEqual(out["o_trunc"], "OK", out)
+        self.assertNotIn("a", self.lsattr_flags(self.log()))
+
     def test_the_preflight_refuses_a_log_whose_flag_was_cleared(self):
         self.bootstrap()
         pf = ("python3", self.py("preflight-governance-access.py"), "--root", self.store)
