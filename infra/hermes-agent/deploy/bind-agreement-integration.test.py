@@ -79,7 +79,7 @@ while True:
 sys.stdout.write(out.decode("latin1"))
 '''
 # F19: the refusal the target check logs for a container that is not an ads-mutator run.
-TARGET_REFUSED = re.compile(r"DENY (?:GET|DELETE) /v1\.55/containers/[0-9a-f]{64}[^ ]* "
+TARGET_REFUSED = re.compile(r"DENY (?:GET|DELETE) (?:/v[0-9.]+)?/containers/[0-9a-f]{64}[^ ]* "
                             r"\(target is not an ads-mutator run: entrypoint mismatch\)")
 PROXIES = []
 _UNIT_PROXY = []
@@ -326,10 +326,14 @@ class TestTheTargetCheck(BrokerPath):
         self.assertRegex(cid, r"^[0-9a-f]{64}$")
         offset = os.path.getsize(self.log)
         env = broker_env(self.sock)
+        # Paths are unversioned on purpose: the CI runner's dockerd (28.0.4) caps at API 1.48,
+        # and a pinned /v1.55 was answered 400 on version, which made the security assertions
+        # pass vacuously (run 36019974966). The proxy's grammar makes the version prefix optional;
+        # dockerd serves unversioned paths at its own max version.
         inspect = run(BROKER + ["python3", "-c", PROBE, self.sock, "GET",
-                                "/v1.55/containers/%s/json" % cid], env=env, timeout=60)
+                                "/containers/%s/json" % cid], env=env, timeout=60)
         delete = run(BROKER + ["python3", "-c", PROBE, self.sock, "DELETE",
-                               "/v1.55/containers/%s?force=1" % cid], env=env, timeout=60)
+                               "/containers/%s?force=1" % cid], env=env, timeout=60)
         plog = log_after(self.log, offset)
         # The security properties FIRST: the decoy's environment never reached the broker, and
         # the decoy is still running.
