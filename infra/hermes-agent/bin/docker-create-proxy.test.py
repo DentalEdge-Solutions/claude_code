@@ -1,4 +1,4 @@
-import importlib.util, itertools, json, os, socket, sys, time, unittest
+import importlib.util, itertools, json, os, re, socket, sys, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -145,6 +145,22 @@ def _one_shot_upstream(tc, reply):
     tc.addCleanup(lambda: [c.close() for c in held])
     tc.addCleanup(lambda: os.path.exists(path) and os.remove(path))
     return path, got
+
+
+_INSPECT_HEAD = re.compile(rb"GET (?:/v[0-9]+\.[0-9]+)?/containers/([0-9a-f]{64})/json[ ?]")
+
+
+def _lookup_reply(head, table):
+    """The fake upstream's answer to an inspect `GET [/vX.Y]/containers/<id>/json` — the
+    proxy's own lookup or a forwarded client inspect — from `table` (id -> doc dict, raw
+    reply bytes, or HANG). An id not in the table gets a 404. None for any other request."""
+    m = _INSPECT_HEAD.match(head)
+    if not m:
+        return None
+    entry = table.get(m.group(1).decode(), b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\n{}")
+    if isinstance(entry, dict):
+        return _json_200(entry)
+    return entry
 
 
 GOV = "/var/lib/hermes/governance"
@@ -809,7 +825,10 @@ class TestPlumbing(unittest.TestCase):
                 data = conn.recv(65536)
                 self.upstream_raw.append(data)
                 self.upstream_saw.append(data.split(b"\r\n")[0].decode("latin1"))
-                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                # F19: the proxy's target-check lookup arrives on its own connection first.
+                reply = _lookup_reply(data, {MUT_ID: MUTATOR_DOC})
+                conn.sendall(reply if reply is not None
+                             else b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
                 conn.close()
 
         threading.Thread(target=fake_upstream, daemon=True).start()
@@ -1257,19 +1276,20 @@ class TestPlumbing(unittest.TestCase):
                             for l in self.upstream_saw), self.upstream_saw)
 
 
-class TestAttachPassThrough(unittest.TestCase):
-    """F18 (spec 2026-09-23). The fake upstream here KEEPS each connection open and answers
-    requests in order, like dockerd — TestPlumbing's fake closes after every reply, which is
-    exactly why a bypass that needs a second request on the same connection was never
-    exercised. An attach is answered with `self.attach_reply`; after a 101 the fake records
-    what it receives in `self.upgraded_rx` and echoes it back prefixed `ECHO:`."""
+class _KeepAliveFakeMixin:
+    """A fake upstream that KEEPS each connection open and answers requests in order, like
+    dockerd (F18). An attach is answered with `self.attach_reply`; after a 101 the fake
+    records what it receives in `self.upgraded_rx` and echoes it back prefixed `ECHO:`.
+    F19: inspect requests are answered from `self.inspect_table`, and every parsed request
+    head is recorded in `self.heads`."""
 
     SMUGGLED = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
                 b"Content-Length: 2\r\n\r\n{}")
     UPGRADE_101 = (b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\n"
                    b"Connection: Upgrade\r\nUpgrade: tcp\r\n\r\nSTREAM-HELLO")
     NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\n{}"
-    ATTACH = (b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\n"
+    ATTACH = (b"POST /v1.55/containers/" + MUT_ID.encode()
+              + b"/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\n"
               b"Host: d\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
 
     def setUp(self):
@@ -1283,6 +1303,8 @@ class TestAttachPassThrough(unittest.TestCase):
             if os.path.exists(p):
                 os.remove(p)
         self.upstream_raw, self.upgraded_rx = [], []
+        self.heads = []                                      # F19
+        self.inspect_table = {MUT_ID: MUTATOR_DOC}           # F19
         self.attach_reply = self.NOT_FOUND
         srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         srv.bind(self.up_path)
@@ -1312,6 +1334,13 @@ class TestAttachPassThrough(unittest.TestCase):
                     if len(rest) < clen:
                         break
                     buf = rest[clen:]
+                    self.heads.append(head)                  # F19
+                    reply = _lookup_reply(head, self.inspect_table)   # F19
+                    if reply is HANG:
+                        continue
+                    if reply is not None:
+                        c.sendall(reply)
+                        continue
                     method, target = head.split(b"\r\n")[0].split(b" ")[:2]
                     if method == b"POST" and target.split(b"?")[0].endswith(b"/attach"):
                         c.sendall(self.attach_reply)
@@ -1374,6 +1403,14 @@ class TestAttachPassThrough(unittest.TestCase):
         except OSError:
             r2 = b""
         return r1, r2
+
+
+class TestAttachPassThrough(_KeepAliveFakeMixin, unittest.TestCase):
+    """F18 (spec 2026-09-23). The fake upstream here KEEPS each connection open and answers
+    requests in order, like dockerd — TestPlumbing's fake closes after every reply, which is
+    exactly why a bypass that needs a second request on the same connection was never
+    exercised. An attach is answered with `self.attach_reply`; after a 101 the fake records
+    what it receives in `self.upgraded_rx` and echoes it back prefixed `ECHO:`."""
 
     # ---- the three routes (all must let the create through BEFORE the fix) ------------
 
@@ -1497,6 +1534,165 @@ class TestAttachPassThrough(unittest.TestCase):
                 time.sleep(0.01)
         log = err.getvalue()
         self.assertIn("attach answered 404, not upgraded; connection closed", log)
+
+
+class TestTargetCheck(_KeepAliveFakeMixin, unittest.TestCase):
+    """F19 (spec 2026-09-24). A container-scoped call is forwarded only when dockerd says the
+    target is an ads-mutator run. The proxy's lookup and a client inspect share a PATH, so
+    "never reached upstream" is judged by the lookup's User-Agent (heads) and by the /v1.55
+    prefix only client requests carry (raw bytes)."""
+
+    CALLS = (("GET", "/json"), ("POST", "/start"), ("POST", "/wait?condition=removed"),
+             ("POST", "/attach?stderr=1&stdin=1&stdout=1&stream=1"), ("DELETE", "?force=1"))
+
+    def setUp(self):
+        super().setUp()
+        self.inspect_table[GW_ID] = GATEWAY_DOC
+        self.attach_reply = self.UPGRADE_101
+
+    def _req(self, method, cid, tail):
+        extra = b"Connection: Upgrade\r\nUpgrade: tcp\r\n" if "/attach" in tail else b""
+        return (("%s /v1.55/containers/%s%s HTTP/1.1\r\nHost: d\r\n" % (method, cid, tail))
+                .encode() + extra + b"\r\n")
+
+    def _client_heads_naming(self, cid):
+        return [h for h in list(self.heads)
+                if cid.encode() in h and PX.LOOKUP_UA.encode() not in h]
+
+    def _assert_client_never_reached_upstream(self, cid, settle=0.5):
+        deadline = time.monotonic() + settle
+        while True:
+            leaked = self._client_heads_naming(cid)
+            if leaked:
+                self.fail("a refused request reached the upstream: %r" % leaked)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        _poll_never_received(self, self.upstream_raw, ("/v1.55/containers/" + cid).encode(), 0)
+
+    def _await_client_head(self, method, cid, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(h.startswith(method.encode()) for h in self._client_heads_naming(cid)):
+                return True
+            time.sleep(0.01)
+        return False
+
+    # ---- the gateway: every container-scoped call is refused before upstream -----------
+
+    def test_every_container_scoped_call_at_the_gateway_is_refused(self):
+        for method, tail in self.CALLS:
+            with self.subTest(call=method + " " + tail):
+                c = self._connect()
+                c.sendall(self._req(method, GW_ID, tail))
+                resp = self._recv_until(c, b"}")
+                self._assert_client_never_reached_upstream(GW_ID)
+                self.assertIn(b"403", resp)
+                self.assertIn(b"target is not an ads-mutator run: entrypoint mismatch", resp)
+                self.assertNotIn(b"101", resp)
+                self.assertNotIn(SENTINEL.encode(), resp)
+
+    # ---- a mutator run: every call is forwarded, and attach still upgrades -------------
+
+    def test_every_container_scoped_call_at_a_mutator_run_is_forwarded(self):
+        for method, tail in self.CALLS:
+            with self.subTest(call=method + " " + tail):
+                c = self._connect()
+                c.sendall(self._req(method, MUT_ID, tail))
+                needle = b"STREAM-HELLO" if "/attach" in tail else b"}"
+                resp = self._recv_until(c, needle)
+                self.assertNotIn(b"403", resp)
+                self.assertIn(needle, resp)
+                self.assertTrue(self._await_client_head(method, MUT_ID),
+                                "the allowed %s never reached the upstream" % method)
+
+    # ---- per request, not per connection -----------------------------------------------
+
+    def test_a_gateway_inspect_after_a_mutator_inspect_on_one_connection_is_refused(self):
+        c = self._connect()
+        c.sendall(self._req("GET", MUT_ID, "/json"))
+        r1 = self._recv_until(c, b"]}}")
+        c.sendall(self._req("GET", GW_ID, "/json"))
+        r2 = self._recv_until(c, b"}")
+        self._assert_client_never_reached_upstream(GW_ID)
+        self.assertIn(b"200 OK", r1)
+        self.assertIn(b"403", r2)
+        self.assertNotIn(SENTINEL.encode(), r1 + r2)
+
+    # ---- the lookup fails: refused, nothing forwarded ----------------------------------
+
+    def test_every_lookup_failure_is_a_refusal(self):
+        old_to, old_max = PX.LOOKUP_TIMEOUT, PX.MAX_BODY
+        self.addCleanup(setattr, PX, "LOOKUP_TIMEOUT", old_to)
+        self.addCleanup(setattr, PX, "MAX_BODY", old_max)
+        PX.LOOKUP_TIMEOUT = 0.3
+        PX.MAX_BODY = 1000
+        cases = {
+            "1" * 64: (b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}",
+                       b"target lookup failed"),
+            "2" * 64: (HANG, b"target lookup failed"),
+            "3" * 64: (b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nnot{j",
+                       b"target lookup failed"),
+            "4" * 64: (b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n" + b" " * 2000,
+                       b"target lookup failed"),
+            "5" * 64: (None, b"target not found"),        # not in the table: the fake 404s
+        }
+        for cid, (reply, reason) in cases.items():
+            if reply is not None:
+                self.inspect_table[cid] = reply
+        for cid, (_, reason) in cases.items():
+            with self.subTest(cid=cid[:4]):
+                c = self._connect()
+                c.sendall(self._req("GET", cid, "/json"))
+                resp = self._recv_until(c, b"}")
+                self._assert_client_never_reached_upstream(cid)
+                self.assertIn(b"403", resp)
+                self.assertIn(reason, resp)
+
+    # ---- the log: fixed reasons, no ALLOW for a refused call, no sentinel --------------
+
+    def test_the_log_carries_a_fixed_reason_and_never_the_inspect(self):
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for method, tail in (("GET", "/json"), ("POST", "/attach?stdin=1&stream=1")):
+                c = self._connect()
+                c.sendall(self._req(method, GW_ID, tail))
+                self._recv_until(c, b"}")
+            deadline = time.monotonic() + 1.0
+            while err.getvalue().count("entrypoint mismatch") < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        log = err.getvalue()
+        self.assertEqual(log.count("(target is not an ads-mutator run: entrypoint mismatch)"), 2, log)
+        self.assertNotIn("ALLOW GET /v1.55/containers/" + GW_ID, log)
+        self.assertNotIn("ALLOW POST /v1.55/containers/" + GW_ID, log)
+        self.assertNotIn(SENTINEL, log)
+
+    # ---- Compose's three parallel connections -------------------------------------------
+
+    def test_compose_s_three_parallel_connections_all_pass(self):
+        """Review focus: attach, start and wait arrive on three connections at once
+        (docker-create-proxy.py header, trap 2); each does its own lookup."""
+        import threading
+        results = {}
+
+        def one(method, tail, needle):
+            c = self._connect()
+            c.sendall(self._req(method, MUT_ID, tail))
+            results[method + tail] = self._recv_until(c, needle)
+
+        threads = [threading.Thread(target=one, args=a) for a in (
+            ("POST", "/attach?stderr=1&stdin=1&stdout=1&stream=1", b"STREAM-HELLO"),
+            ("POST", "/wait?condition=removed", b"}"),
+            ("POST", "/start", b"}"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        self.assertEqual(len(results), 3, results)
+        for k, resp in results.items():
+            self.assertNotIn(b"403", resp, k)
+        self.assertIn(b"STREAM-HELLO", results["POST/attach?stderr=1&stdin=1&stdout=1&stream=1"])
 
 
 if __name__ == "__main__":

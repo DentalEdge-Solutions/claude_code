@@ -622,6 +622,16 @@ def _handle(conn, upstream_path):
             body, buf = rest[:clen], rest[clen:]
 
             ok, reason = decide(method, path, body)
+            if ok:
+                # F19 (spec 2026-09-24): a container-scoped call may target only an
+                # ads-mutator run. Checked per REQUEST — a kept-alive connection can name a
+                # different id each time — and before any byte of it goes upstream. ALLOW is
+                # printed only after this, so it always means "forwarded".
+                cid = container_target(path)
+                if cid:
+                    doc, reason = lookup_target(upstream_path, cid)
+                    ok, reason = (is_mutator_shaped(doc, cid) if doc is not None
+                                  else (False, reason))
             print("%s %s %s (%s)" % ("ALLOW" if ok else "DENY", method, path, reason),
                   file=sys.stderr)
             if not ok:
