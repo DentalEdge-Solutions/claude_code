@@ -476,6 +476,14 @@ makes `_undo_targets` skip it — reversibility lost as surely as by truncation.
 The real fix is a host-side writer or signed records — new code on the security path, its own
 design. **Deliberately deferred by the operator 2026-09-24; does not gate the kill switch.**
 
+### F21: the pre-flight's file-level messages name per-log paths — recorded, not fixed
+
+**Found 2026-09-24 by the §6B final review.** The R19 file-level walk (`_check_files_in_dir`)
+prints the path of a log whose mode is wrong, i.e. `log/<slug>.jsonl`, and that stderr reaches
+the journal — the same client-privacy concern the registered-log checks answer with counts
+only (D6). Predates §6B; fixing it changes pre-flight output outside §6B's scope. Does not
+gate the kill switch.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -502,3 +510,4 @@ design. **Deliberately deferred by the operator 2026-09-24; does not gate the ki
    2026-09-24.
 9. §6B: audit logs append-only — see "After pulling §6B" in BRING-UP (fill from the PR).
 10. F20: forged appends — deferred; needs its own design (host-side writer or signed records).
+11. F21: count-only file-level pre-flight messages (client slugs reach the journal today).

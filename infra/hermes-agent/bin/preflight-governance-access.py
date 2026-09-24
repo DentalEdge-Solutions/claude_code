@@ -449,7 +449,12 @@ def _check_registered_logs_sealed(root, uid, gid):
     count one fault twice (Ruling 9 / R19b). A log that is merely unsealed is always
     reported: a different fault with a different remedy.
 
-    Counts, never slugs (see _check_registered_logs)."""
+    Counts, never slugs (see _check_registered_logs).
+
+    Residual: if THIS process cannot read clients.json, Ruling 9 resolves that as zero
+    registered clients and the seal check is skipped entirely — unlike the missing-log
+    case above, there is no mid-apply backstop for an unreadable registry here, so the
+    broker must keep group read on the registry (it does, via gid 10000)."""
     reg = governance_lib.clients_registry_path(root)
     try:
         with open(reg, encoding="utf-8") as f:
@@ -604,7 +609,11 @@ with:
 
 Do NOT `chmod 777`. The store is the one place Hermes cannot reach; making it
 world-writable hands it to every process on the host and removes the isolation this
-whole tier is built on."""
+whole tier is built on.
+
+Per-client logs are append-only (§6B): fixing a log's mode or owner (chmod/chown/chgrp)
+needs `sudo chattr -a <log>` first, and `sudo chattr +a <log>` again once you're done —
+a sealed log refuses those changes even for root."""
 
 
 def main(argv=None):

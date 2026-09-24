@@ -140,16 +140,17 @@ def is_append_only(path):
 
 
 def set_append_only(path):
-    """Add the append-only flag, keeping every other flag, then read it back. Root only
+    """Add the append-only flag, keeping every other flag, then read it back — on the SAME
+    fd the SETFLAGS ioctl used, so a rename in between cannot fool it. Root only
     (CAP_LINUX_IMMUTABLE). Raises on any failure, and EIO if the flag did not take."""
     fd = _open_regular(path)
     try:
         buf = array.array("i", [_get_flags(fd) | LOG_APPEND_ONLY_FL])
         fcntl.ioctl(fd, _FS_IOC_SETFLAGS, buf, True)
+        if not (_get_flags(fd) & LOG_APPEND_ONLY_FL):
+            raise OSError(errno.EIO, "the append-only flag did not take", path)
     finally:
         os.close(fd)
-    if not is_append_only(path):
-        raise OSError(errno.EIO, "the append-only flag did not take", path)
 
 
 def seen_path(slug, root=None):

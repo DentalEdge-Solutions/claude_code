@@ -1039,9 +1039,16 @@ Create the per-client logs. This is required for every registered client, and id
 ```bash
 # --governance-root is REQUIRED on the host (F16): the tool defaults to the CONTAINER
 # path /opt/governance, so without it these address the wrong tree.
-infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs            # dry run
-infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs --apply
+sudo python3 infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs            # dry run
+sudo python3 infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs --apply
 ```
+
+`--apply` seals each log it creates with the Linux append-only flag, which is root-only
+and Linux-only (`set_append_only` raises ENOTSUP off Linux, EPERM without root) — so this
+runs only on Linux as root (`sudo`, as above). Off Linux, such as a laptop, `--apply`
+always exits 2 by design; there is no code skip. Create a registered client's log by hand
+there instead: `touch` it under `log/` and set mode `0660` — the pre-flight's seal check is
+a no-op off Linux, so an unsealed log there does not block anything.
 
 Every created log is sealed. Check it:
 
@@ -1059,7 +1066,9 @@ caps can be reset. The pre-flight refuses a registered client's log that is not 
 start and before every mutation run. Nothing seals a log that already exists: inspect it
 (`sudo lsattr`, and read it yourself), then `sudo chattr +a` it. Deleting or restoring a log
 needs `sudo chattr -a` first, and a restored copy does not carry the flag — re-seal it after
-inspection.
+inspection. The same is true of changing a log's mode or owner (`chmod`/`chown`/`chgrp`): a
+sealed log refuses those too, even for root, so `sudo chattr -a` it first and `sudo chattr +a`
+it again once you're done inspecting.
 
 **Accepted residual (F20).** Whoever can append can still append a fabricated record — the
 executor, and `hermes-broker` through gid 10000, which it needs to read `clients.json`. A forged
@@ -1085,6 +1094,11 @@ python3 infra/hermes-agent/bin/migrate-governance.py \
   --vault-root infra/hermes-agent/data/vaults \
   --governance-root "$HERMES_GOVERNANCE_DIR"        # dry run; add --apply to execute
 ```
+
+`--apply` seals each migrated log the same way `--bootstrap-logs --apply` does, so it is
+subject to the same restriction: Linux and root only, and off Linux (a laptop) it always
+exits 2 by design rather than silently skipping the seal. There is nothing to hand-create
+here, though — a dry run is still useful off Linux to see what would move.
 
 ## VPS deploy sequence
 

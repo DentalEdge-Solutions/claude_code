@@ -320,6 +320,12 @@ def migrate(vault_root, governance_root, dry_run=False):
             except OSError:
                 pass
             raise
+        # §6B: shutil.copy2 above carried the VAULT file's mode, not the store's — a log
+        # that predates §6B, or was hand-edited, can land at anything. Force it to the
+        # store's LOG_FILE_MODE before the rename, so the log that gets sealed below is
+        # one the executor can actually append to (0660 with setgid'd log/, not whatever
+        # the vault copy happened to carry).
+        os.chmod(tmp_log, governance_lib.LOG_FILE_MODE)
         os.replace(tmp_log, dst_log)
         # §6B: seal AFTER the rename — Linux refuses to rename an append-only file (EPERM,
         # even for root; measured on the box 2026-09-24). On failure remove the copy: the

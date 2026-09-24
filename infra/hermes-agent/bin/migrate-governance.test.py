@@ -191,6 +191,18 @@ class TestMigration(unittest.TestCase):
         M.migrate(self.vault, self.gov)
         self.assertEqual(self.sealed, [os.path.join(self.gov, "log", "acme-dental.jsonl")])
 
+    def test_migrated_log_lands_at_the_store_mode_regardless_of_the_vault_files_mode(self):
+        """shutil.copy2 copies the SOURCE file's mode along with its bytes, so a vault log
+        that predates §6B (or was hand-edited to something restrictive) can carry any mode
+        at all. The migrated copy must land at the store's LOG_FILE_MODE (0660) regardless —
+        the same guarantee bootstrap_logs already gives a freshly created log."""
+        src = os.path.join(self.vault, "acme-dental", "changes", "log.jsonl")
+        os.chmod(src, 0o600)
+        M.migrate(self.vault, self.gov)
+        dst = os.path.join(self.gov, "log", "acme-dental.jsonl")
+        mode = stat.S_IMODE(os.stat(dst).st_mode)
+        self.assertEqual(mode, M.governance_lib.LOG_FILE_MODE)
+
     def test_a_sealing_failure_removes_the_copy_and_keeps_the_vault_original(self):
         import governance_lib
         def refuse(path):
