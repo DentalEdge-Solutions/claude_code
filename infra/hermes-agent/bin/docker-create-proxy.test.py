@@ -1081,12 +1081,12 @@ class TestAttachPassThrough(unittest.TestCase):
             got += d
         return got
 
-    def _send_then_smuggle(self, first):
+    def _send_then_smuggle(self, first, first_needle=b"{}"):
         """Send `first`, read its whole response, then send the smuggled create on the SAME
         connection. Returns (first_response, response_to_smuggled_or_b"")."""
         c = self._connect()
         c.sendall(first)
-        r1 = self._recv_until(c, b"{}")
+        r1 = self._recv_until(c, first_needle)
         try:
             c.sendall(self.SMUGGLED)
             r2 = self._recv_until(c, b"\r\n\r\n", timeout=1.0)
@@ -1167,7 +1167,7 @@ class TestAttachPassThrough(unittest.TestCase):
     def test_a_chunked_error_to_an_attach_is_relayed_then_closed(self):
         self.attach_reply = (b"HTTP/1.1 409 Conflict\r\nTransfer-Encoding: chunked\r\n\r\n"
                              b"2\r\n{}\r\n0\r\n\r\n")
-        r1, r2 = self._send_then_smuggle(self.ATTACH)
+        r1, r2 = self._send_then_smuggle(self.ATTACH, first_needle=b"0\r\n\r\n")
         _poll_never_received(self, self.upstream_raw)
         self.assertIn(b"409 Conflict", r1)
         self.assertEqual(r2, b"")
@@ -1186,6 +1186,16 @@ class TestAttachPassThrough(unittest.TestCase):
         log = err.getvalue()
         self.assertIn("attach answered None, not upgraded; connection closed", log)
         self.assertNotIn("ZZ-UPSTREAM-MARKER", log)
+
+    def test_pipelined_bytes_after_a_non_upgraded_attach_are_never_forwarded(self):
+        """`buf` may be forwarded only AFTER dockerd upgraded the connection. Sent in ONE
+        write with an attach answered 404, the smuggled create must never reach dockerd."""
+        self.attach_reply = self.NOT_FOUND
+        c = self._connect()
+        c.sendall(self.ATTACH + self.SMUGGLED)
+        r1 = self._recv_until(c, b"{}")
+        _poll_never_received(self, self.upstream_raw)
+        self.assertIn(b"404 Not Found", r1)
 
 
 if __name__ == "__main__":
