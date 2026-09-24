@@ -448,6 +448,11 @@ merge commit (run pending). **Residual, accepted:** the list call still enumerat
 containers (names, labels, image, mounts — no environment); every non-mutator id it reveals is
 now refused.
 
+**Measured on CI, run 36028287007:** the real rail's proxy log showed all five id-scoped calls
+allowed by the target check (`ALLOW … (target is an ads-mutator run)`), and two pre-existing
+allow-list refusals Compose tolerates — `DENY GET /v1.48/info` and `DENY GET
+/v1.48/networks/hermes-agent_default` — recorded here, not allow-listed.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,

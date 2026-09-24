@@ -283,9 +283,12 @@ class TestTheBrokerPath(BrokerPath):
         # F18, MEASURED: real attach traffic is answered 101 and streams through the fixed
         # path — the executor's "mutation is disabled" below only reaches us through it.
         self.assertRegex(plog, ATTACH_UPGRADED, "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
-        # F19: the real rail's every call passes the target check — BRING-UP's "no DENY" on the box,
-        # measured here first. (A late Compose call on a removed container would now be a proxy DENY.)
-        self.assertNotRegex(plog, re.compile(r"^DENY", re.MULTILINE), "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
+        # F19: the claim is that no call of the REAL RAIL is refused by the TARGET check —
+        # BRING-UP's "no DENY … target" on the box, measured here first. Pre-existing
+        # allow-list refusals Compose tolerates (measured on CI 2026-09-24: `GET /info`,
+        # `GET /networks/<name>`) are out of F19's scope and are never allow-listed to
+        # silence them — a broad `^DENY` here would fail on those, unrelated to F19.
+        self.assertNotRegex(plog, re.compile(r"^DENY .*\(target ", re.MULTILINE), "proxy log:\n%s\nwrapper:\n%s" % (plog, out))
         self.assertEqual(r.returncode, 2, out)
         self.assertIn("mutation is disabled", out)
         # F14: the nonce crossed `docker compose run -e` and the real proxy, and the real

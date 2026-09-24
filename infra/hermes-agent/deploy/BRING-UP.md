@@ -513,6 +513,10 @@ sudo -u hermes-broker curl -s -o /dev/null -w '%{http_code}\n' \
   --unix-socket /run/hermes/docker-proxy.sock "http://d/v1.55/containers/$GW/json"          # 403
 sudo journalctl -u hermes-docker-proxy --since "-5 min" --no-pager \
   | grep -c 'target is not an ads-mutator run: entrypoint mismatch'                          # 1 per probe run since the restart
+sleep 1                                                            # journalctl --since includes the whole
+                                                                    # second; the 403 probe's own DENY must
+                                                                    # fall before T0, not land in the same
+                                                                    # second as it
 T0=$(date '+%F %T')
 ```
 
@@ -522,8 +526,12 @@ Then re-run Phase 6 and check the proxy journal:
 sudo journalctl -u hermes-docker-proxy --since "$T0" --no-pager | grep -E 'ALLOW POST .*/containers/create|UPGRADE|DENY'
 ```
 
-Expected: one `ALLOW POST …/containers/create…`, one `UPGRADE POST …/attach… (101)`, and **no**
-`DENY` line. A `target` DENY for the mutator's own calls is a finding — never widen the check.
+Expected: one `ALLOW POST …/containers/create…`, one `UPGRADE POST …/attach… (101)`, and **no
+`DENY` whose reason starts with `target`**. A `target` DENY for the mutator's own calls is a
+finding — never widen the check. Other `DENY … not on the allow-list` lines (CI's Compose sends
+`GET /info` and `GET /networks/<name>` and tolerates their refusal) predate F19 — record any you
+see; never widen the allow-list to silence them. The grep above still shows every `DENY` line
+(not filtered to `target` ones) so the operator can record whichever kind appears.
 
 ---
 

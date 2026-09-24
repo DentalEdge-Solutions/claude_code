@@ -763,15 +763,25 @@ class TestLookupTarget(unittest.TestCase):
         self.assertEqual((doc, why), (None, "target lookup failed"))
 
     def test_an_oversize_reply_fails(self):
+        """A padded but otherwise VALID JSON body, not raw filler bytes: an invalid body would
+        also be refused by json.loads on its own, which would leave this test passing even with
+        both size guards removed. Measured (scratch copy, both the read bound and the length
+        check removed together): the padded doc then parses successfully and this test reds
+        out — see the final fix report's firing control for B2/this test."""
         old = PX.MAX_BODY
         self.addCleanup(setattr, PX, "MAX_BODY", old)
         PX.MAX_BODY = 1000
-        (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n"
-                                     + b" " * 2000)
+        body = json.dumps(dict(MUTATOR_DOC, Pad="x" * 2000)).encode()
+        (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                                     + str(len(body)).encode() + b"\r\n\r\n" + body)
         self.assertEqual((doc, why), (None, "target lookup failed"))
 
     def test_an_oversize_chunked_reply_fails(self):
-        """dockerd sends large inspect bodies chunked; read(MAX_BODY + 1) must bound that path too."""
+        """dockerd sends large inspect bodies chunked. Pins that an oversize chunked reply is
+        refused — the read bound and the length check acting together, same as the
+        Content-Length sibling above. Does not by itself prove either guard alone bounds memory
+        use; see the firing controls in the final fix report for what each guard does and does
+        not discriminate."""
         old = PX.MAX_BODY
         self.addCleanup(setattr, PX, "MAX_BODY", old)
         PX.MAX_BODY = 1000
