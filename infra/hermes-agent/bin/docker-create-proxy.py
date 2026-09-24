@@ -461,6 +461,23 @@ def _relay_chunked(conn, up, buf):
         buf = buf[needed:]
 
 
+def _pump_both(conn, up):
+    """Raw two-way relay for an UPGRADED attach, until either side closes. Only ever entered
+    after dockerd answered 101 to a real attach — after that the connection carries the
+    container's stdio stream, not the Docker API, so there is nothing left to inspect."""
+    def pump(a, b):
+        try:
+            while True:
+                d = a.recv(65536)
+                if not d:
+                    break
+                b.sendall(d)
+        except OSError:
+            pass
+    threading.Thread(target=pump, args=(conn, up), daemon=True).start()
+    pump(up, conn)
+
+
 def _handle(conn, upstream_path):
     up = None
     buf = b""
@@ -516,22 +533,23 @@ def _handle(conn, upstream_path):
                 up.connect(upstream_path)
             up.sendall(head + b"\r\n\r\n" + body)
 
-            if "/attach" in path:
-                def pump(a, b):
-                    try:
-                        while True:
-                            d = a.recv(65536)
-                            if not d:
-                                break
-                            b.sendall(d)
-                    except OSError:
-                        pass
-                threading.Thread(target=pump, args=(conn, up), daemon=True).start()
-                pump(up, conn)
-                return
-
             rhead, rrest = _read_until_headers(up, b"")
             if rhead is None:
+                return
+            # F18: decide on pass-through only AFTER dockerd has answered, and only for a real
+            # attach it upgraded. Any other answer to an attach is relayed below and then the
+            # connection is closed — after an attach there are exactly two outcomes, upgraded or
+            # closed, and no request can follow one on the same connection.
+            attach = _is_attach(method, path)
+            status = _status_code(rhead)
+            if attach and status == 101:
+                conn.sendall(rhead + b"\r\n\r\n" + rrest)
+                if buf:
+                    # Client bytes already read past the attach request are the start of the
+                    # stream (stdin); forward them rather than silently dropping them.
+                    up.sendall(buf)
+                print("UPGRADE %s %s (101)" % (method, path), file=sys.stderr)
+                _pump_both(conn, up)
                 return
             rclen, rchunk = 0, False
             for h in rhead.split(b"\r\n")[1:]:
@@ -556,6 +574,9 @@ def _handle(conn, upstream_path):
                 # so there is nothing to buffer and combine with them.
                 conn.sendall(rhead + b"\r\n\r\n")
                 _relay_chunked(conn, up, rrest)
+                if attach:
+                    print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; connection "
+                          "closed)" % (method, path, status), file=sys.stderr)
                 return
             # Buffer the FULL body before sending anything, then send headers + body
             # in ONE write. MEASURED: sending headers immediately and the body in a
@@ -580,6 +601,10 @@ def _handle(conn, upstream_path):
                           % (method, path, MAX_BODY), file=sys.stderr)
                     return
             conn.sendall(rhead + b"\r\n\r\n" + rrest[:rclen])
+            if attach:
+                print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; connection "
+                      "closed)" % (method, path, status), file=sys.stderr)
+                return
     except OSError:
         return
     finally:
