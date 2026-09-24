@@ -448,8 +448,8 @@ container and comes back `refused_preflight` ("mutation is disabled"). That exer
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
 **Still required before the kill switch can be created:** audit-log truncation (§6 part B). (F19 —
-container-scoped calls accepted any container id — fixed in PR #53; it closes on the box when
-"After pulling F19" passes.) (F14 —
+container-scoped calls accepted any container id — fixed in PR #53 and applied to the box
+2026-09-24; see "After pulling F19".) (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
 now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
 hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —
@@ -532,6 +532,12 @@ finding — never widen the check. Other `DENY … not on the allow-list` lines 
 `GET /info` and `GET /networks/<name>` and tolerates their refusal) predate F19 — record any you
 see; never widen the allow-list to silence them. The grep above still shows every `DENY` line
 (not filtered to `target` ones) so the operator can record whichever kind appears.
+
+**RESULT, 2026-09-24 — PASSED on the box** (`5acee36..d4fbb29`, proxy restarted only; both units
+`active`, `NRestarts=0`). Probe: **`200` before the pull, `403` after**, one `entrypoint mismatch`
+line. Phase 6: `rc=2`, `mutation is disabled`, `ALLOW POST …/containers/create…`, `UPGRADE POST
+…/attach?stderr=1&stdin=1&stdout=1&stream=1 (101)`, and no `DENY` line of any kind. Kill switch:
+absent.
 
 ---
 
