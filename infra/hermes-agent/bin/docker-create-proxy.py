@@ -173,7 +173,9 @@ def _is_attach(method, path):
 def _status_code(rhead):
     """The upstream response's status as an int when it is exactly three ASCII digits in the
     second space-separated field of the status line, else None. Only an exact 101 may switch
-    a connection to pass-through, so anything unusual reads as None, never as 101."""
+    a connection to pass-through, so anything unusual reads as None, never as 101. The
+    protocol token (e.g. "HTTP/1.1") is not checked, because the upstream is dockerd, which
+    is trusted — only the exact status matters."""
     parts = rhead.split(b"\r\n", 1)[0].split(b" ")
     if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isdigit():
         return int(parts[1])
@@ -564,6 +566,9 @@ def _handle(conn, upstream_path):
                         # way the oversized-response path just below does.
                         print("upstream sent a malformed Content-Length: %r; closing"
                               % raw, file=sys.stderr)
+                        if attach:
+                            print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; "
+                                  "connection closed)" % (method, path, status), file=sys.stderr)
                         return
                     rclen = int(raw)
                 if lo.startswith(b"transfer-encoding:") and b"chunked" in lo:
@@ -599,6 +604,9 @@ def _handle(conn, upstream_path):
                     # it like the other decisions.
                     print("DENY %s %s (upstream response exceeds %d bytes; closing)"
                           % (method, path, MAX_BODY), file=sys.stderr)
+                    if attach:
+                        print("DENY-FOLLOWUP %s %s (attach answered %s, not upgraded; "
+                              "connection closed)" % (method, path, status), file=sys.stderr)
                     return
             conn.sendall(rhead + b"\r\n\r\n" + rrest[:rclen])
             if attach:

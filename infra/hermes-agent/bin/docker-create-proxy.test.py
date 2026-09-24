@@ -1197,6 +1197,22 @@ class TestAttachPassThrough(unittest.TestCase):
         _poll_never_received(self, self.upstream_raw)
         self.assertIn(b"404 Not Found", r1)
 
+    def test_a_malformed_content_length_on_an_attach_response_logs_deny_followup(self):
+        """M1: the malformed-Content-Length early return, when it fires for an attach, must
+        also log DENY-FOLLOWUP so the box's journal always shows why an attach connection
+        closed — not just the reason the response itself couldn't be relayed."""
+        import contextlib, io
+        self.attach_reply = b"HTTP/1.1 404 Not Found\r\nContent-Length: abc\r\n\r\n"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            c = self._connect()
+            c.sendall(self.ATTACH)
+            deadline = time.monotonic() + 1.0
+            while "DENY-FOLLOWUP" not in err.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        log = err.getvalue()
+        self.assertIn("attach answered 404, not upgraded; connection closed", log)
+
 
 if __name__ == "__main__":
     unittest.main()
