@@ -465,6 +465,17 @@ allowed by the target check (`ALLOW … (target is an ads-mutator run)`), and tw
 allow-list refusals Compose tolerates — `DENY GET /v1.48/info` and `DENY GET
 /v1.48/networks/hermes-agent_default` — recorded here, not allow-listed.
 
+### F20: whoever can append to an audit log can append a forged record — deferred, named
+
+**Found 2026-09-24 (§6B assessment).** §6B seals every `log/<slug>.jsonl` append-only, which
+stops truncation and overwrite — but not appending. The executor must append, and anything
+running in its container as uid 10000 (including the ads-repo mutator subprocess) can; so can
+`hermes-broker`, through gid 10000. A fabricated `status: "undone"` record for a real resource
+makes `_undo_targets` skip it — reversibility lost as surely as by truncation. Fabricated
+`"applied"` records only exhaust the daily caps (fail-safe). No file mode can deny the executor.
+The real fix is a host-side writer or signed records — new code on the security path, its own
+design. **Deliberately deferred by the operator 2026-09-24; does not gate the kill switch.**
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -489,3 +500,5 @@ allow-list refusals Compose tolerates — `DENY GET /v1.48/info` and `DENY GET
 7. F18: the attach pass-through bypass — fixed (PR #50).
 8. F19: container-scoped calls accept any container id — fixed (PR #53), applied to the box
    2026-09-24.
+9. §6B: audit logs append-only — see "After pulling §6B" in BRING-UP (fill from the PR).
+10. F20: forged appends — deferred; needs its own design (host-side writer or signed records).

@@ -762,8 +762,10 @@ def append_log(slug, rec):
 # DIRECTORY is what grants unlink, so an executor that could write log/ could always
 # delete log/<slug>.jsonl outright. It no longer can: S3-b moved log/ to host-owned
 # 2750, so the executor holds append on a pre-created 0660 file and has neither create
-# nor unlink on the directory. Per R22 that is measured on Linux and UNMEASURED on the
-# VPS — Phase B owns the bind-mount semantics there.
+# nor unlink on the directory. §6B then sealed each log append-only (chattr +a), which
+# closes truncation and overwrite too — for the executor, the broker and root; measured
+# through the bind mount on the box 2026-09-24. Appending a FABRICATED record is still
+# possible for whoever can append (F20).
 
 def append_seen(slug, request_id, now):
     """Record an accepted request_id, fsynced before returning.

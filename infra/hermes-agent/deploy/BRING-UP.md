@@ -539,6 +539,95 @@ line. Phase 6: `rc=2`, `mutation is disabled`, `ALLOW POST …/containers/create
 …/attach?stderr=1&stdin=1&stdout=1&stream=1 (101)`, and no `DENY` line of any kind. Kill switch:
 absent.
 
+**After pulling §6B** — no unit changes; the broker and pre-flight run their scripts from the
+repo. The box has no registered clients, so the new pre-flight check is **vacuous on the real
+store** — the proof uses a **scratch store** on the same disk. The real store, the real
+registry and the kill switch are never touched. Stop at the first mismatch, but always run the
+cleanup block.
+
+Setup (same shell throughout; from `/opt/hermes-agent`):
+
+```bash
+cd /opt/hermes-agent
+B=/var/lib/hermes-s6b-scratch; SG=$B/governance; SS=$B/spool; L=$SG/log/s6b-probe.jsonl
+sudo test -e /var/lib/hermes/governance/control/mutation-enabled && echo PRESENT || echo ABSENT   # ABSENT
+PROBE=$(cat <<'EOF'
+import errno, os, sys
+p = sys.argv[1]
+def n():
+    with open(p, 'rb') as f: return f.read().count(b'\n')
+def t(label, fn):
+    try: fn(); print('%-9s OK' % label)
+    except OSError as e: print('%-9s DENIED (%s)' % (label, errno.errorcode.get(e.errno, e.errno)))
+def app():
+    with open(p, 'a') as f: f.write('{}\n')
+print('uid=%d gid=%d' % (os.getuid(), os.getgid()))
+t('append', app)
+t('o_trunc', lambda: os.close(os.open(p, os.O_WRONLY | os.O_TRUNC)))
+t('truncate', lambda: os.truncate(p, 0))
+print('lines    ', n())
+EOF
+)
+as_broker() { sudo systemd-run --quiet --pipe --wait --collect \
+  -p User=hermes-broker -p Group=hermes-broker -p SupplementaryGroups="hermes-rail hermes" \
+  -p NoNewPrivileges=true -p ProtectSystem=strict -p ProtectHome=true -p PrivateTmp=true \
+  -p ReadWritePaths="$SG" /usr/bin/python3 -c "$PROBE" "$L"; }
+as_executor() { sudo docker run --rm --network none --entrypoint python3 \
+  -v $SG/log:/opt/governance/log hermes-agent-claude -c "$PROBE" /opt/governance/log/s6b-probe.jsonl; }
+build_scratch() {
+  sudo mkdir -m 0755 $B
+  sudo python3 bin/init-host-layout.py --store-root $SG --spool-root $SS --apply
+  sudo sh -c "printf '%s\n' '{\"clients\": {\"s6b-probe\": {\"status\": \"active\"}}}' > $SG/registry/clients.json"
+  sudo python3 bin/migrate-governance.py --governance-root $SG --bootstrap-logs --apply
+}
+teardown_scratch() { sudo chattr -a $L 2>/dev/null; sudo rm -rf $B; sudo test -e $B && echo STILL-THERE || echo GONE; }
+```
+
+**Before the pull** (today's code):
+
+```bash
+build_scratch                                   # ends with a JSON result naming s6b-probe in "created"
+sudo lsattr $L                                  # NO "a" in the flags
+as_broker                                       # append OK · o_trunc OK · truncate OK · lines 0  ← the gap
+sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $SG; echo rc=$?   # rc=0
+teardown_scratch                                # GONE
+```
+
+**Pull** (the broker restarts with the proxy):
+
+```bash
+sudo git -C /opt/projects/claude_code pull --ff-only
+sudo git -C /opt/projects/claude_code log -1 --oneline          # the §6B merge commit
+sudo systemctl restart hermes-docker-proxy
+systemctl is-active hermes-docker-proxy hermes-broker           # active, active
+systemctl show -p NRestarts hermes-docker-proxy hermes-broker   # 0, 0
+```
+
+**After:**
+
+```bash
+build_scratch
+sudo lsattr $L                                  # an "a" in the flags
+as_broker                                       # append OK · o_trunc DENIED (EPERM) · truncate DENIED (EPERM) · lines 1
+as_executor                                     # uid=10000 · append OK · o_trunc DENIED (EPERM) · truncate DENIED (EPERM) · lines 2
+sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $SG; echo rc=$?   # rc=0
+sudo chattr -a $L
+sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $SG; echo rc=$?   # rc=2, "1 registered client log(s) are not append-only"
+```
+
+**Cleanup — always:**
+
+```bash
+teardown_scratch                                                                          # GONE
+sudo python3 bin/init-host-layout.py --check --store-root /var/lib/hermes/governance --spool-root /var/lib/hermes/spool; echo rc=$?   # layout OK, rc=0
+sudo python3 bin/preflight-governance-access.py --root /var/lib/hermes/governance; echo rc=$?   # rc=0
+systemctl is-active hermes-docker-proxy hermes-broker                                     # active, active
+sudo test -e /var/lib/hermes/governance/control/mutation-enabled && echo PRESENT || echo ABSENT   # ABSENT
+```
+
+**When the first real client is registered:** `--bootstrap-logs --apply` seals its log; confirm
+with `sudo lsattr /var/lib/hermes/governance/log/*.jsonl` (an `a` on every line).
+
 ---
 
 ## Phase 7: Reach the Dashboard From the Laptop
