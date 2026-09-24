@@ -19,7 +19,7 @@ locally is a check operators learn to bypass.
 The remedy is ownership, never `chmod 777`: making the store world-readable hands it
 back to every process on the host and deletes the isolation the store exists for.
 """
-import argparse, json, os, stat, sys
+import argparse, errno, json, os, stat, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib                      # SLUG_RE, shared not restated
@@ -394,6 +394,67 @@ def _check_registered_logs(root):
             % (root, missing, governance_lib.LOG_DIR_MODE)]
 
 
+def _check_registered_logs_sealed(root, uid, gid):
+    """§6B. Every REGISTERED client's existing log must carry the append-only flag.
+
+    Without it, the executor (uid 10000) and the broker (gid 10000) can truncate the file —
+    measured on the box 2026-09-24 — which erases the reversibility record --undo reads AND
+    resets the daily caps day_counts reads from the same file. The flag is set when the log
+    is created (migrate_governance_shim.bootstrap_logs / migrate); nothing sets it on a log
+    that already exists, because a log that was ever unsealed may have been emptied and a
+    person must look first (spec D3).
+
+    Same slug list, same registry handling as _check_registered_logs: missing or
+    unreadable -> [] (Ruling 9); unparseable -> [] here, because _check_registered_logs
+    already reports it. A MISSING log is _check_registered_logs's; it is not probed here.
+
+    'Cannot tell' is never 'sealed': a probe that raises is counted and refused — unless the
+    file-level check already reports this same file, in which case the store is refused
+    already and a second line would count one fault twice (Ruling 9 / R19b). A log that
+    is merely unsealed is always reported: a different fault with a different remedy.
+
+    Counts, never slugs (see _check_registered_logs)."""
+    reg = governance_lib.clients_registry_path(root)
+    try:
+        with open(reg, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    clients = data.get("clients", {}) if isinstance(data, dict) else None
+    if not isinstance(clients, dict):
+        return []
+    unsealed, unchecked, errnos = 0, 0, set()
+    for slug in clients:
+        if not isinstance(slug, str) or not governance_lib.SLUG_RE.fullmatch(slug):
+            continue
+        p = governance_lib.log_path(slug, root)
+        if not os.path.isfile(p):
+            continue
+        try:
+            sealed = governance_lib.is_append_only(p)
+        except OSError as e:
+            if _check_file(p, uid, gid, need_write=True):
+                continue
+            unchecked += 1
+            errnos.add(errno.errorcode.get(e.errno, str(e.errno)))
+            continue
+        if not sealed:
+            unsealed += 1
+    problems = []
+    if unsealed:
+        problems.append(
+            "%s/log: %d registered client log(s) are not append-only, so their records and "
+            "the daily caps can be erased by truncation. Inspect with: sudo lsattr %s/log/*.jsonl"
+            " — then, for each log you have checked, run: sudo chattr +a %s/log/<slug>.jsonl"
+            % (root, unsealed, root, root))
+    if unchecked:
+        problems.append(
+            "%s/log: %d registered client log(s) could not be checked for the append-only "
+            "flag (%s) — refusing, because an unverifiable log is not a sealed one"
+            % (root, unchecked, ", ".join(sorted(errnos))))
+    return problems
+
+
 def _root_problem(root):
     """F10: when THIS PROCESS cannot reach the root, every per-child check below it fails
     the same way, and the cascade reads as N permission faults — with a remedy that
@@ -479,6 +540,7 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
 
     problems.extend(_check_approvals(root, uid, gid))
     problems.extend(_check_registered_logs(root))
+    problems.extend(_check_registered_logs_sealed(root, uid, gid))
 
     return problems
 

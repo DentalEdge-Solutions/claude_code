@@ -678,6 +678,18 @@ class TestAuditLogsAreAppendOnly(Layout):
         self.assertIn("not append-only", r.stderr)
         self.assertNotIn(self.SLUG, r.stderr)          # counts, never slugs
 
+    def test_control_a_probe_that_always_says_sealed_passes_an_unsealed_log(self):
+        """FIRING CONTROL for test_the_preflight_refuses_a_log_whose_flag_was_cleared: with
+        is_append_only replaced in THIS TEST'S COPY of bin/ by one that always answers True,
+        the pre-flight passes a cleared log — so the real test depends on the real flag."""
+        self.bootstrap()
+        with open(os.path.join(self.bin, "governance_lib.py"), "a") as f:
+            f.write("\n\ndef is_append_only(path):\n    return True\n")
+        run(["chattr", "-a", self.log()], check=True)
+        r = self.broker("python3", self.py("preflight-governance-access.py"),
+                        "--root", self.store)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 class TestAppendOnlyHelper(Layout):
     """§6B Tier 2 (1): governance_lib's ioctl numbers and 4-byte buffer against the real
