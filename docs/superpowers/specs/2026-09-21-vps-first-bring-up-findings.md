@@ -409,7 +409,7 @@ proxy logged `ALLOW POST /v1.55/containers/create?name=hermes-agent-ads-mutator-
 `DENY-FOLLOWUP` and no `malformed` refusal — the first real-dockerd measurement of the fixed attach
 path on the box. Kill switch: absent (checked with `sudo test`).
 
-### F19: container-scoped calls accept any container id — fixed (PR #53)
+### F19: container-scoped calls accept any container id — fixed in PR #53 (merge-commit CI and box rollout pending)
 
 **Found 2026-09-23/24 (F18 design + F18 whole-branch review).** The allow-list's container-scoped
 entries — inspect (`GET /containers/<id>/json`), start, wait, delete, and attach — all match any
@@ -432,8 +432,9 @@ Unlike F18 this is not a parsing or pass-through defect; it is a policy gap in `
 Recorded 2026-09-24 as a kill-switch gate pending assessment; closing it needed the proxy to know
 which ids are ads-mutator runs. Assessed and fixed the same day — below.
 
-**Assessed 2026-09-24: a real gap; it gated the kill switch.** Two allowed calls reached the
-gateway's environment: `GET /containers/json` for its id, then `GET /containers/<id>/json`.
+**Assessed 2026-09-24: a real gap; it gated the kill switch.** Two allowed calls could reach the
+gateway's environment (shown on a decoy in CI RED run 36020681939): `GET /containers/json` for
+its id, then `GET /containers/<id>/json`.
 
 **Fixed (PR #53, spec `2026-09-24-f19-container-scope-design.md`).** Container-scoped entries take
 only a full 64-hex id — measured as the only form the rail sends (box journal, 2026-09-24:
@@ -444,7 +445,8 @@ probe pinned `/v1.55` and CI's dockerd 28.0.4 caps at API 1.48 — and was disca
 was changed to unversioned paths. CI: RED on today's proxy (run 36020681939: the decoy's sentinel
 was read), then `bind-agreement: executed 7, skipped 0` on the PR (run 36024366720) and on the
 merge commit (run pending). **Residual, accepted:** the list call still enumerates
-containers (names, labels, image, mounts — no environment); every id it reveals is now refused.
+containers (names, labels, image, mounts — no environment); every non-mutator id it reveals is
+now refused.
 
 ## Final state of the box (end of session)
 
@@ -468,4 +470,5 @@ containers (names, labels, image, mounts — no environment); every id it reveal
 5. F16: audit the other host-side tools for container-path defaults (F16's pattern).
 6. F17: report an unreadable path as `unreadable`, not `mismatch`. Wording only; does not gate.
 7. F18: the attach pass-through bypass — fixed (PR #50).
-8. F19: container-scoped calls accept any container id — fixed (PR #53).
+8. F19: container-scoped calls accept any container id — fixed in PR #53 (merge-commit CI and
+   box rollout pending).

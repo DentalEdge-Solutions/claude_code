@@ -448,7 +448,8 @@ container and comes back `refused_preflight` ("mutation is disabled"). That exer
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
 **Still required before the kill switch can be created:** audit-log truncation (§6 part B). (F19 —
-container-scoped calls accepted any container id — is fixed; see "After pulling F19".) (F14 —
+container-scoped calls accepted any container id — fixed in PR #53; it closes on the box when
+"After pulling F19" passes.) (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
 now status 4, "possibly modified". After pulling F14, run `sudo systemctl restart
 hermes-broker` so the running broker process loads the `failed_unverified_exit` mapping —
@@ -502,7 +503,9 @@ sudo -u hermes-broker curl -s -o /dev/null -w '%{http_code}\n' \
 Then:
 
 ```bash
+sudo test ! -e /var/lib/hermes/governance/control/mutation-enabled && echo "kill switch absent"
 sudo git -C /opt/projects/claude_code pull --ff-only
+sudo git -C /opt/projects/claude_code log -1 --oneline                                   # the merge commit of PR #53
 sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it
 systemctl is-active hermes-docker-proxy hermes-broker                                    # active, active
 systemctl show -p NRestarts hermes-docker-proxy hermes-broker                            # 0, 0
@@ -510,12 +513,13 @@ sudo -u hermes-broker curl -s -o /dev/null -w '%{http_code}\n' \
   --unix-socket /run/hermes/docker-proxy.sock "http://d/v1.55/containers/$GW/json"          # 403
 sudo journalctl -u hermes-docker-proxy --since "-5 min" --no-pager \
   | grep -c 'target is not an ads-mutator run: entrypoint mismatch'                          # 1 per probe run since the restart
+T0=$(date '+%F %T')
 ```
 
 Then re-run Phase 6 and check the proxy journal:
 
 ```bash
-sudo journalctl -u hermes-docker-proxy --since "-2 min" --no-pager | grep -E 'ALLOW POST .*/containers/create|UPGRADE|DENY'
+sudo journalctl -u hermes-docker-proxy --since "$T0" --no-pager | grep -E 'ALLOW POST .*/containers/create|UPGRADE|DENY'
 ```
 
 Expected: one `ALLOW POST …/containers/create…`, one `UPGRADE POST …/attach… (101)`, and **no**
