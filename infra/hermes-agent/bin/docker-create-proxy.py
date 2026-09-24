@@ -53,7 +53,8 @@ F19 (spec 2026-09-24): every container-scoped entry takes a FULL 64-hex id, and 
 call is forwarded the proxy asks dockerd, on its own connection, what the target is. Only a
 container with the pinned image AND the pinned entrypoint — an ads-mutator run — passes. The
 gateway shares the image, so the image alone would not do. The list call /containers/json is
-left open on purpose: it reveals no environment, and every id it reveals is now refused.
+left open on purpose: it reveals no environment, and every non-mutator id it reveals is now
+refused.
 
 DENY BY DEFAULT. Anything not matched below is refused.
 
@@ -496,9 +497,10 @@ def _pump_both(conn, up):
 # PREFIX match, deliberately wider than ALLOWED: every allowed path that BEGINS with a
 # container id is checked, including any id-scoped entry added later. The list call
 # /containers/json never matches (`json` is not 64 hex).
-# Named _CONTAINER_TARGET_RE, not _TARGET_RE: that name is already taken (line ~298) by the
-# bytes pattern _parse_head uses for the raw HTTP request-line target — a same-name module
-# global here would silently overwrite it at import time and break request-line parsing.
+# Named _CONTAINER_TARGET_RE, not _TARGET_RE: that name is already taken by the bytes pattern
+# _parse_head uses for the raw HTTP request-line target, in the framing-hardening section
+# above — a same-name module global here would silently overwrite it at import time and break
+# request-line parsing.
 _CONTAINER_TARGET_RE = re.compile(_V + r"/containers/(" + _CID + r")(?=/|\Z)")
 _NOT_MUTATOR = "target is not an ads-mutator run: "
 
@@ -513,11 +515,16 @@ def container_target(path):
 
 
 def is_mutator_shaped(doc, cid):
-    """Pure. (True, reason) only when dockerd's inspect of `cid` shows the pinned image AND
-    the pinned entrypoint — the two values create already enforces. The image alone is not
-    enough: claude-auth-init, the gateway and ads-mutator all run `hermes-agent-claude`.
-    Reasons are fixed strings; nothing from `doc` is ever quoted, because the gateway's
-    inspect carries its API keys."""
+    """Pure. (True, reason) only when the proxy is configured AND dockerd's inspect of `cid`
+    shows the pinned image AND the pinned entrypoint — the two values create already enforces.
+    The image alone is not enough: claude-auth-init, the gateway and ads-mutator all run
+    `hermes-agent-claude`. Reasons are fixed strings; nothing from `doc` is ever quoted, because
+    the gateway's inspect carries its API keys.
+
+    `doc["Id"] == cid` is itself a security element, not a sanity check to "simplify" away:
+    dockerd resolves an id by exact id, then by name, then by prefix, so without this check a
+    mutator-shaped container NAMED with 64 hex characters could satisfy a lookup issued for a
+    different id."""
     if PINNED_IMAGE is None:
         return False, _NOT_MUTATOR + "proxy not configured"
     if not isinstance(doc, dict):

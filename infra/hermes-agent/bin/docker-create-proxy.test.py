@@ -741,24 +741,21 @@ class TestLookupTarget(unittest.TestCase):
         (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nnot{j")
         self.assertEqual((doc, why), (None, "target lookup failed"))
 
-    def test_deeply_nested_json_is_refused(self):
-        """Review focus: RecursionError is not a ValueError — it must still be a refusal.
+    def test_an_unforeseen_exception_is_refused(self):
+        """Review focus: an error nobody foresaw (not OSError/ValueError/HTTPException) must still be
+        a refusal. Deterministic on every interpreter: the proxy's json.loads is swapped, scoped and
+        restored, for one that raises a type nothing else raises."""
+        import types
 
-        DEVIATION from task-4-brief.md Step 2 (documented in task-4-report.md): the brief's
-        depth of 100000 no longer triggers RecursionError under this repo's Python (3.14.6)
-        — CPython's C-accelerated json scanner now parses 100000 levels of [[[...]]] cleanly
-        (measured), so the intended failure mode never fired and the assertion's own failure
-        formatter (pprint on the resulting 100000-deep list) recursed instead, masking the
-        real behavior under test. 350000 was measured to reliably raise RecursionError in
-        ~5ms on this interpreter (floor observed between 100000-200000, so this has a wide
-        margin) while keeping the body (700000 bytes) safely under MAX_BODY (1048576) —
-        an earlier attempt at 1000000 produced a 2000000-byte body that tripped the
-        oversize-reply check BEFORE json.loads ever ran, silently defeating the test's
-        purpose. `lookup_target`'s except Exception clause and MAX_BODY logic are unchanged
-        from the brief."""
-        body = b"[" * 350000 + b"]" * 350000
-        (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: "
-                                     + str(len(body)).encode() + b"\r\n\r\n" + body)
+        class _Unforeseen(Exception):
+            pass
+
+        def boom(_s):
+            raise _Unforeseen()
+
+        self.addCleanup(setattr, PX, "json", PX.json)
+        PX.json = types.SimpleNamespace(loads=boom, dumps=json.dumps)
+        (doc, why), _ = self._lookup(_json_200(MUTATOR_DOC))
         self.assertEqual((doc, why), (None, "target lookup failed"))
 
     def test_a_garbled_status_line_is_refused(self):
@@ -771,6 +768,15 @@ class TestLookupTarget(unittest.TestCase):
         PX.MAX_BODY = 1000
         (doc, why), _ = self._lookup(b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n"
                                      + b" " * 2000)
+        self.assertEqual((doc, why), (None, "target lookup failed"))
+
+    def test_an_oversize_chunked_reply_fails(self):
+        """dockerd sends large inspect bodies chunked; read(MAX_BODY + 1) must bound that path too."""
+        old = PX.MAX_BODY
+        self.addCleanup(setattr, PX, "MAX_BODY", old)
+        PX.MAX_BODY = 1000
+        big = dict(MUTATOR_DOC, Pad="x" * 2000)
+        (doc, why), _ = self._lookup(_chunked_200(big))
         self.assertEqual((doc, why), (None, "target lookup failed"))
 
     def test_no_answer_fails_within_the_timeout(self):
@@ -1570,10 +1576,11 @@ class TestTargetCheck(_KeepAliveFakeMixin, unittest.TestCase):
             time.sleep(0.01)
         _poll_never_received(self, self.upstream_raw, ("/v1.55/containers/" + cid).encode(), 0)
 
-    def _await_client_head(self, method, cid, timeout=2.0):
+    def _await_client_head(self, method, cid, tail, timeout=2.0):
+        want = ("%s /v1.55/containers/%s%s " % (method, cid, tail)).encode()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if any(h.startswith(method.encode()) for h in self._client_heads_naming(cid)):
+            if any(h.startswith(want) for h in self._client_heads_naming(cid)):
                 return True
             time.sleep(0.01)
         return False
@@ -1592,6 +1599,28 @@ class TestTargetCheck(_KeepAliveFakeMixin, unittest.TestCase):
                 self.assertNotIn(b"101", resp)
                 self.assertNotIn(SENTINEL.encode(), resp)
 
+    def test_a_request_pipelined_behind_a_refused_target_never_reaches_upstream(self):
+        """A target refusal must CLOSE the connection. Pipelined behind a refused gateway call, an
+        otherwise-ALLOWED mutator inspect must never be forwarded (a `continue` instead of `return`
+        would forward it)."""
+        c = self._connect()
+        c.sendall(self._req("POST", GW_ID, "/start") + self._req("GET", MUT_ID, "/json"))
+        resp = self._recv_until(c, b"}")
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            self.assertFalse(any(h.startswith(("GET /v1.55/containers/%s/json " % MUT_ID).encode())
+                                 for h in self._client_heads_naming(MUT_ID)),
+                             "a request pipelined behind a refusal reached the upstream")
+            time.sleep(0.01)
+        self._assert_client_never_reached_upstream(GW_ID, settle=0)
+        self.assertIn(b"403", resp)
+        try:
+            c.sendall(b"GET /_ping HTTP/1.1\r\nHost: d\r\n\r\n")
+            more = self._recv_until(c, b"\r\n\r\n", timeout=1.0)
+        except OSError:
+            more = b""
+        self.assertEqual(more, b"", "the connection stayed open after a target refusal")
+
     # ---- a mutator run: every call is forwarded, and attach still upgrades -------------
 
     def test_every_container_scoped_call_at_a_mutator_run_is_forwarded(self):
@@ -1603,7 +1632,7 @@ class TestTargetCheck(_KeepAliveFakeMixin, unittest.TestCase):
                 resp = self._recv_until(c, needle)
                 self.assertNotIn(b"403", resp)
                 self.assertIn(needle, resp)
-                self.assertTrue(self._await_client_head(method, MUT_ID),
+                self.assertTrue(self._await_client_head(method, MUT_ID, tail),
                                 "the allowed %s never reached the upstream" % method)
 
     # ---- per request, not per connection -----------------------------------------------
