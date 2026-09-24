@@ -63,6 +63,11 @@ def _load(name, filename):
 
 PX = _load("docker_create_proxy", "docker-create-proxy.py")
 
+# F19: container ids are FULL 64-hex ids — the only form the real rail sends (box journal,
+# 2026-09-24). MUT_ID is an ads-mutator run; GW_ID stands for the Hermes gateway.
+MUT_ID = "deadbeef" * 8
+GW_ID = "0badc0de" * 8
+
 GOV = "/var/lib/hermes/governance"
 PROJ = "/opt/hermes-agent"
 BINDS = [
@@ -121,12 +126,12 @@ class TestPositiveControls(Base):
             ("HEAD", "/_ping"),
             ("GET", "/v1.55/version"),
             ("GET", "/v1.55/images/hermes-agent-claude/json"),
-            ("POST", "/v1.55/containers/abc123/start"),
-            ("POST", "/v1.55/containers/abc123/attach"),
-            ("POST", "/v1.55/containers/abc123/wait"),
-            ("GET", "/v1.55/containers/abc123/json"),
+            ("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/start"),
+            ("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach"),
+            ("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait"),
+            ("GET", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/json"),
             ("GET", "/v1.55/containers/json"),
-            ("DELETE", "/v1.55/containers/abc123"),
+            ("DELETE", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
         ):
             ok, why = PX.decide(method, path, b"")
             self.assertTrue(ok, "%s %s refused: %s" % (method, path, why))
@@ -141,13 +146,37 @@ class TestEndpointAllowList(Base):
     def test_exec_create_is_refused(self):
         """docker exec into the running executor would be arbitrary code with the
         rail's own mounts."""
-        ok, _ = PX.decide("POST", "/v1.55/containers/abc123/exec", b"")
+        ok, _ = PX.decide("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/exec", b"")
         self.assertFalse(ok)
 
     def test_a_traversal_path_is_refused(self):
         ok, why = PX.decide("POST", "/v1.55/containers/create/../../build", b"")
         self.assertFalse(ok)
         self.assertIn("traversal", why)
+
+    def test_container_scoped_entries_refuse_anything_but_a_full_id(self):
+        """F19: names and short prefixes can come to mean a different container between the
+        target check and the forward. Only the full 64-hex id is accepted."""
+        bad_ids = ("hermes-agent-ads-mutator-run-1a2b", "deadbeefdead", ("DEADBEEF" * 8),
+                   "deadbeef" * 8 + "d", ("deadbeef" * 8)[:63], "json2")
+        for bad in bad_ids:
+            for method, tail in (("GET", "/json"), ("POST", "/start"), ("POST", "/wait"),
+                                 ("POST", "/attach"), ("DELETE", "")):
+                path = "/v1.55/containers/%s%s" % (bad, tail)
+                ok, why = PX.decide(method, path, b"")
+                self.assertFalse(ok, "%s %s was allowed" % (method, path))
+                self.assertIn("allow-list", why)
+
+    def test_a_trailing_slash_after_the_id_is_refused(self):
+        ok, _ = PX.decide("DELETE", "/v1.55/containers/%s/" % MUT_ID, b"")
+        self.assertFalse(ok)
+
+    def test_the_list_and_image_inspect_are_unchanged(self):
+        for method, path in (("GET", "/v1.55/containers/json"),
+                             ("GET", "/v1.55/containers/json?all=1&filters=x"),
+                             ("GET", "/v1.55/images/hermes-agent-claude/json")):
+            ok, why = PX.decide(method, path, b"")
+            self.assertTrue(ok, "%s %s refused: %s" % (method, path, why))
 
 
 class TestImageAndEntrypoint(Base):
@@ -337,12 +366,12 @@ class TestParseHead(unittest.TestCase):
              b"Host: api.moby.localhost\r\nUser-Agent: compose/v2.38.2\r\n"
              b"Content-Type: application/json\r\nContent-Length: 812",
              ("POST", "/v1.55/containers/create?name=hermes-agent-ads-mutator-run-1", 812)),
-            (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+            (b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed HTTP/1.1\r\n"
              b"Host: d\r\nContent-Length: 0",
-             ("POST", "/v1.55/containers/deadbeef/wait?condition=removed", 0)),
-            (b"POST /v1.55/containers/deadbeef/attach?stream=1&stdout=1 HTTP/1.1\r\n"
+             ("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed", 0)),
+            (b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach?stream=1&stdout=1 HTTP/1.1\r\n"
              b"Host: d\r\nConnection: Upgrade\r\nUpgrade: tcp",
-             ("POST", "/v1.55/containers/deadbeef/attach?stream=1&stdout=1", 0)),
+             ("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach?stream=1&stdout=1", 0)),
             (b"HEAD /_ping HTTP/1.1", ("HEAD", "/_ping", 0)),
         ]
         for head, want in cases:
@@ -459,17 +488,21 @@ class TestAttachHelpers(unittest.TestCase):
 
     def test_a_real_attach_is_an_attach(self):
         self.assertTrue(PX._is_attach(
-            "POST", "/v1.55/containers/abc/attach?stream=1&stdout=1&stderr=1"))
-        self.assertTrue(PX._is_attach("POST", "/containers/abc/attach"))
+            "POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach?stream=1&stdout=1&stderr=1"))
+        self.assertTrue(PX._is_attach("POST", "/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach"))
 
     def test_look_alikes_are_not_attaches(self):
         for method, path in (("GET", "/_ping?x=/attach"),
                              ("DELETE", "/v1.55/containers/attach"),
                              ("GET", "/v1.55/containers/attach/json"),
-                             ("POST", "/v1.55/containers/abc/attachx"),
-                             ("POST", "/v1.55/containers/abc/attach/../../create"),
-                             ("GET", "/v1.55/containers/abc/attach")):
+                             ("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attachx"),
+                             ("POST", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach/../../create"),
+                             ("GET", "/v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach")):
             self.assertFalse(PX._is_attach(method, path), (method, path))
+
+    def test_an_attach_needs_a_full_id(self):
+        self.assertFalse(PX._is_attach("POST", "/v1.55/containers/abc/attach?stream=1"))
+        self.assertTrue(PX._is_attach("POST", "/v1.55/containers/%s/attach?stream=1" % MUT_ID))
 
     def test_the_allow_list_uses_the_same_attach_pattern(self):
         # IDENTITY, not equality: re.Pattern compares equal to a separately compiled copy of
@@ -675,7 +708,7 @@ class TestPlumbing(unittest.TestCase):
                     b"Content-Length: 2\r\n\r\n{}")
         chunked_terminator = b"0\r\n\r\n"
         tail = chunked_terminator + smuggled
-        req = (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+        req = (b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed HTTP/1.1\r\n"
                b"Host: d\r\nTransfer-Encoding: chunked\r\n"
                b"Content-Length: " + str(len(tail)).encode() + b"\r\n\r\n" + tail)
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
@@ -716,7 +749,7 @@ class TestPlumbing(unittest.TestCase):
         presence on a request, not just the CL+TE combination."""
         import socket as _s
         self._start_proxy()
-        req = (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+        req = (b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed HTTP/1.1\r\n"
                b"Host: d\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         c.connect(self.li_path)
@@ -734,7 +767,7 @@ class TestPlumbing(unittest.TestCase):
         S4)."""
         import socket as _s
         self._start_proxy()
-        req = (b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+        req = (b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed HTTP/1.1\r\n"
                b"Host: d\r\nContent-Length: 0\r\n\r\n")
         c = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
         c.connect(self.li_path)
@@ -743,7 +776,7 @@ class TestPlumbing(unittest.TestCase):
         c.close()
         self.assertNotIn(b"403", resp)
         self.assertTrue(
-            any(line.startswith("POST /v1.55/containers/deadbeef/wait")
+            any(line.startswith("POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait")
                 for line in self.upstream_saw),
             "an ordinary allowed request never reached the upstream: %r" % self.upstream_saw)
 
@@ -771,7 +804,7 @@ class TestPlumbing(unittest.TestCase):
         rather than with a traceback, and any client on the proxy socket could fill
         the journal with them. A 403 is the observable difference: before, the client
         got nothing at all."""
-        resp = self._send(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+        resp = self._send(b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed "
                           b"HTTP/1.1\r\nHost: d\r\nContent-Length: abc\r\n\r\n")
         self.assertIn(b"403", resp)
         self.assertIn(b"Content-Length", resp)
@@ -784,7 +817,7 @@ class TestPlumbing(unittest.TestCase):
         the tail is re-parsed as a request line. Go rejects a negative Content-Length
         outright, so this is the proxy disagreeing with its own upstream about where a
         request ends, which is the exact shape of the Critical this file already closed."""
-        resp = self._send(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+        resp = self._send(b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed "
                           b"HTTP/1.1\r\nHost: d\r\nContent-Length: -5\r\n\r\nXXXXX")
         self.assertIn(b"403", resp)
 
@@ -798,7 +831,7 @@ class TestPlumbing(unittest.TestCase):
         smuggled = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
                     b"Content-Length: 2\r\n\r\n{}")
         tail = b"0\r\n\r\n" + smuggled
-        resp = self._send(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+        resp = self._send(b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed "
                           b"HTTP/1.1\r\nHost: d\r\nContent-Length: 7_7\r\n\r\n" + tail)
         self.assertIn(b"403", resp)
         self.assertFalse(
@@ -882,7 +915,7 @@ class TestPlumbing(unittest.TestCase):
 
         with self.assertRaises(OSError):
             for _ in range(50):
-                c.sendall(b"POST /v1.55/containers/deadbeef/wait?condition=removed "
+                c.sendall(b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed "
                          b"HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n")
                 time.sleep(0.02)
         c.close()
@@ -897,7 +930,7 @@ class TestPlumbing(unittest.TestCase):
 
     SMUGGLED = (b"POST /v1.55/containers/create HTTP/1.1\r\nHost: d\r\n"
                 b"Content-Length: 2\r\n\r\n{}")
-    WAIT = b"POST /v1.55/containers/deadbeef/wait?condition=removed HTTP/1.1\r\n"
+    WAIT = b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait?condition=removed HTTP/1.1\r\n"
 
     def _assert_never_reached_upstream(self, marker=b"/containers/create", settle=0.5):
         """Non-receipt, race-free: the fake upstream appends on its own thread, so poll for
@@ -972,7 +1005,7 @@ class TestPlumbing(unittest.TestCase):
             self.assertNotIn(b"403", c.recv(65536), req)
             c.close()
         self.assertIn("HEAD /_ping HTTP/1.1", self.upstream_saw)
-        self.assertTrue(any(l.startswith("POST /v1.55/containers/deadbeef/wait")
+        self.assertTrue(any(l.startswith("POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/wait")
                             for l in self.upstream_saw), self.upstream_saw)
 
 
@@ -988,7 +1021,7 @@ class TestAttachPassThrough(unittest.TestCase):
     UPGRADE_101 = (b"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\n"
                    b"Connection: Upgrade\r\nUpgrade: tcp\r\n\r\nSTREAM-HELLO")
     NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\n{}"
-    ATTACH = (b"POST /v1.55/containers/abc/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\n"
+    ATTACH = (b"POST /v1.55/containers/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\n"
               b"Host: d\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
 
     def setUp(self):
@@ -1103,11 +1136,15 @@ class TestAttachPassThrough(unittest.TestCase):
         self.assertIn(b"403", r2, "the smuggled create was not inspected")
 
     def test_route_b_a_container_literally_named_attach(self):
+        """Since F19 the grammar refuses this before anything is forwarded: `attach` is not a
+        64-hex id. The connection closes after the refusal, so the create cannot follow."""
         r1, r2 = self._send_then_smuggle(
-            b"DELETE /v1.55/containers/attach HTTP/1.1\r\nHost: d\r\n\r\n")
+            b"DELETE /v1.55/containers/attach HTTP/1.1\r\nHost: d\r\n\r\n",
+            first_needle=b"}")
         _poll_never_received(self, self.upstream_raw)
-        self.assertIn(b"200 OK", r1)
-        self.assertIn(b"403", r2, "the smuggled create was not inspected")
+        self.assertIn(b"403", r1)
+        self.assertIn(b"allow-list", r1)
+        self.assertEqual(r2, b"", "the connection stayed open after a refusal")
 
     def test_route_c_an_attach_answered_404(self):
         self.attach_reply = self.NOT_FOUND

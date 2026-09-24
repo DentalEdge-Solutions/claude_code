@@ -83,12 +83,17 @@ find. Function docstrings below carry the detail; this is the index.
 import argparse, json, os, re, socket, socketserver, sys, threading
 
 _V = r"(?:/v[0-9]+\.[0-9]+)?"          # optional API version prefix, e.g. /v1.55
-_ID = r"[A-Za-z0-9_.-]+"
+_ID = r"[A-Za-z0-9_.-]+"               # image names only: GET /images/<name>/json
+# F19 (spec 2026-09-24): every container-scoped entry takes a FULL container id — 64
+# lowercase hex, measured as the only form the real rail sends (box journal, 2026-09-24).
+# A name or a short prefix could come to mean a different container between the target
+# check and the forward; a full id cannot.
+_CID = r"[0-9a-f]{64}"
 
 # F18: attach is defined ONCE. The allow-list entry below and _is_attach() use this same
 # object, so "what may be requested" and "what may switch a connection to raw pass-through"
 # cannot drift apart.
-_ATTACH_RE = re.compile(_V + r"/containers/" + _ID + r"/attach")
+_ATTACH_RE = re.compile(_V + r"/containers/" + _CID + r"/attach")
 
 # (method, compiled path pattern). Fullmatch only — a prefix match would let
 # /containers/create/../../build through.
@@ -101,11 +106,11 @@ ALLOWED = [
     ("GET",    re.compile(_V + r"/volumes")),
     ("GET",    re.compile(_V + r"/containers/json")),
     ("POST",   re.compile(_V + r"/containers/create")),
-    ("POST",   re.compile(_V + r"/containers/" + _ID + r"/start")),
+    ("POST",   re.compile(_V + r"/containers/" + _CID + r"/start")),
     ("POST",   _ATTACH_RE),
-    ("POST",   re.compile(_V + r"/containers/" + _ID + r"/wait")),
-    ("GET",    re.compile(_V + r"/containers/" + _ID + r"/json")),
-    ("DELETE", re.compile(_V + r"/containers/" + _ID)),
+    ("POST",   re.compile(_V + r"/containers/" + _CID + r"/wait")),
+    ("GET",    re.compile(_V + r"/containers/" + _CID + r"/json")),
+    ("DELETE", re.compile(_V + r"/containers/" + _CID)),
 ]
 
 # HostConfig keys that hand back what the proxy exists to withhold. "Mounts" is here
