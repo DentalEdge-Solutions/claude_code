@@ -747,6 +747,70 @@ class TestAppendOnlyHelper(Layout):
         self.assertNotIn("a", self.lsattr_flags(p))     # lsattr is not
 
 
+# F22. The broker unit's sandbox directives, applied by systemd-run exactly as the unit sets
+# them. Only directives that shape what the broker's processes can see or do are carried —
+# ReadWritePaths, WorkingDirectory and the ExecStart* lines name box paths CI does not have,
+# and none of them affects how the Docker client finds its plugins.
+BROKER_SANDBOX_KEYS = ("User", "Group", "SupplementaryGroups", "UMask", "NoNewPrivileges",
+                       "PrivateTmp", "ProtectSystem", "ProtectHome", "RestrictAddressFamilies")
+
+
+def broker_sandbox(overrides=None):
+    """[(key, value)] for BROKER_SANDBOX_KEYS, read from the REAL unit file's [Service]
+    section — so this test follows the unit, and any future directive that breaks the
+    Docker client inside the sandbox fails here instead of on the box."""
+    path = os.path.join(AGENT, "deploy", "hermes-broker.service")
+    found, section = {}, None
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line
+                continue
+            key, sep, value = line.partition("=")
+            if section == "[Service]" and sep and key in BROKER_SANDBOX_KEYS:
+                found[key] = value
+    found.update(overrides or {})
+    return [(k, found[k]) for k in BROKER_SANDBOX_KEYS if k in found]
+
+
+class TestComposeRunsInsideTheBrokerSandbox(unittest.TestCase):
+    """F22 (findings record, 2026-09-25). The first rehearsal on the box failed before any
+    container existed: under the unit's ProtectHome=true the broker's home is unreadable,
+    and the Docker client — which scans ~/.docker/cli-plugins — gives up on plugin
+    discovery on EACCES, so `docker compose` became `unknown command`. Phase 6 and
+    bind-agreement run Compose from an ordinary shell, and units.test.py only reads the
+    unit's text; nothing ran Compose under the sandbox the broker really gets."""
+
+    def compose_version(self, sandbox):
+        props = []
+        for k, v in sandbox:
+            props += ["-p", "%s=%s" % (k, v)]
+        return run(["systemd-run", "--quiet", "--pipe", "--wait", "--collect"] + props
+                   + ["docker", "compose", "version"])
+
+    def test_the_unit_carries_every_sandbox_directive_this_test_applies(self):
+        """Guards the parser: a directive the parser silently missed would make the main
+        test run in a weaker sandbox than the broker's, and pass for the wrong reason."""
+        keys = [k for k, _ in broker_sandbox()]
+        self.assertEqual(keys, list(BROKER_SANDBOX_KEYS))
+
+    def test_docker_compose_is_found_inside_the_brokers_sandbox(self):
+        r = self.compose_version(broker_sandbox())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Docker Compose version", r.stdout)
+
+    def test_control_protecthome_true_hides_the_compose_plugin(self):
+        """FIRING CONTROL: the pre-F22 setting, substituted in memory (never in the tracked
+        unit), must reproduce the box's failure — so the test above is shown to catch it."""
+        r = self.compose_version(broker_sandbox({"ProtectHome": "true"}))
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("compose", (r.stdout + r.stderr).lower())
+        self.assertNotIn("Docker Compose version", r.stdout)
+
+
 if __name__ == "__main__":
     why = why_not_runnable()
     if why:
