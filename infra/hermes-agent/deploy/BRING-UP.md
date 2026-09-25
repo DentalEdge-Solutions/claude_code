@@ -418,10 +418,15 @@ directories as root.
 
 ## Gate: First Approved Request (Rehearsal)
 
-This gate is not run by this runbook. It sits between Phase 6 and anything that touches the
-kill switch. **It needs:** F9 (landed), F12 (landed — approvals are written `hermes-broker:hermes`
-and run records go to `<store>/records/`), `.env.gaw` carrying the WRITE Google Ads credential,
-and Phase 6 passed.
+It sits between Phase 6 and anything that touches the kill switch. **It needs:** F9 (landed),
+F12 (landed — approvals are written `hermes-broker:hermes` and run records go to
+`<store>/records/`), Phase 6 passed, and a `.env.gaw` the wrapper accepts. **Operator decision
+2026-09-25:** the rehearsal uses a **dummy** `.env.gaw` (`GOOGLE_ADS_CREDENTIAL_ROLE=write`,
+placeholders elsewhere) and a dedicated **`rehearsal`** client. With the kill switch absent the
+executor refuses at its first guard, the kill switch (`apply-changeset.py:105-106`), before it
+resolves the client or reads a credential (its guard 8), so the real WRITE credential would prove nothing here. It goes
+in later, deliberately — see "Before creating the kill switch" below. The procedure is "Running
+the rehearsal", after the F12/F14/§6 notes.
 
 **After pulling F12, lay down the new `records/` row** — these three commands and nothing else
 (spec §4). They are flag-less: `init-host-layout.py` already defaults to the right store and spool
@@ -451,7 +456,9 @@ it. No unit files change, so nothing restarts on its own account.
 
 **The proof:** with the kill switch **absent**, a human-approved request goes broker → proxy →
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
-broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
+broker's own path (reservation, the wrapper, persistence), which Phase 6 does not. A refusal
+emits no `HERMES-RESULT-JSON`, so `persist-run-record.py` writes **no** run record for it
+(`persist-run-record.py:18-20`) — the broker's outcome is recorded on the approval instead.
 
 **No further code gate stands before the kill switch** — audit-log truncation (§6 part B) is
 closed (PR #57, applied to the box 2026-09-25; see "After pulling §6B"). (F19 —
@@ -651,6 +658,164 @@ were still running; ten seconds later it was `active`/`running`, `NRestarts=0`, 
 showing `layout OK` then `Started`. And the refusal's headline still says the executor "cannot
 use the governance store", which is wrong-footed for an unsealed log (the executor can do too
 much, not too little) — the cosmetic wording left by the §6B final review.
+
+### Running the rehearsal
+
+**Mutation stays disabled throughout; nothing here creates the kill switch.** One dedicated,
+plainly fake client — `rehearsal`, customer id `0000000000` — goes through the whole approved
+path once and is then retired. Nothing here can reach an account: the kill switch is absent,
+the executor checks it first, and the credential is a dummy. Registering `rehearsal` is
+permanent by design: its sealed log and its approval stay in the store as the record of this
+run, and step 8 retires it so the executor refuses it (`client status … not 'active'`) even
+once a kill switch exists. Run **every block in the same shell session**, from
+`/opt/hermes-agent` — later blocks use `G`, `P`, `CID`, `RID` and `T0` from earlier ones, and
+each block starts with a guard that stops it if they are missing. Stop at the first mismatch
+and paste what you have, then, before leaving the box:
+
+- **Stopped before step 2 printed `rc=0`:** put the empty registry back, or the broker's
+  start-up pre-flight refuses the log-less `rehearsal` and restart-loops on its next restart:
+  `printf '%s\n' '{"clients": {}}' > /tmp/r.json && sudo install -o root -g hermes -m 0640 /tmp/r.json $G/registry/clients.json && rm /tmp/r.json`
+- **Got past step 3:** run step 8 (retire `rehearsal`, remove the dummy `.env.gaw`).
+
+**0. Preconditions.**
+
+```bash
+cd /opt/hermes-agent
+G=/var/lib/hermes/governance
+sudo test -e $G/control/mutation-enabled && echo PRESENT || echo ABSENT              # ABSENT
+systemctl is-active hermes-docker-proxy hermes-broker                                # active, active
+sudo python3 -c "import json;print(len(json.load(open('$G/registry/clients.json')).get('clients',{})))"   # 0
+sudo test -e .env.gaw && echo "env.gaw PRESENT" || echo "env.gaw absent"             # env.gaw absent
+```
+
+**Stop if the client count is not `0`** — step 1 replaces the registry file, and this runbook
+is written for a store with no real clients yet.
+
+**1. Register `rehearsal`** (the README's `install` pattern, so the file keeps `root:hermes 0640`):
+
+```bash
+: "${G:?run step 0 first}"
+printf '%s\n' '{"clients": {"rehearsal": {"project": "claude_google_ads", "customer_id": "0000000000", "status": "active"}}}' > /tmp/rehearsal-clients.json
+sudo install -o root -g hermes -m 0640 /tmp/rehearsal-clients.json $G/registry/clients.json
+rm /tmp/rehearsal-clients.json
+sudo stat -c '%U:%G %a' $G/registry/clients.json                                     # root:hermes 640
+```
+
+**2. Its audit log — sealed at creation (§6B) — and the pre-flight on the real store.** This is
+the first time the §6B check runs against a registered log rather than an empty registry.
+
+```bash
+: "${G:?run step 0 first}"
+sudo python3 bin/migrate-governance.py --governance-root $G --bootstrap-logs --apply  # {"created": ["rehearsal"], "skipped": []} (over several lines)
+sudo lsattr $G/log/rehearsal.jsonl                                                   # an "a" in the flags
+sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $G; echo rc=$?   # rc=0
+```
+
+**3. The dummy `.env.gaw`** — the wrapper reads only `GOOGLE_ADS_CREDENTIAL_ROLE` before the
+container runs; the executor refuses before it reads the rest. Owned by the broker, which runs
+the wrapper. Gitignored.
+
+```bash
+: "${G:?run step 0 first}"
+printf '%s\n' GOOGLE_ADS_CREDENTIAL_ROLE=write \
+  GOOGLE_ADS_DEVELOPER_TOKEN=REHEARSAL-NOT-A-CREDENTIAL GOOGLE_ADS_CLIENT_ID=REHEARSAL-NOT-A-CREDENTIAL \
+  GOOGLE_ADS_CLIENT_SECRET=REHEARSAL-NOT-A-CREDENTIAL GOOGLE_ADS_REFRESH_TOKEN=REHEARSAL-NOT-A-CREDENTIAL \
+  GOOGLE_ADS_LOGIN_CUSTOMER_ID=0000000000 GOOGLE_ADS_CUSTOMER_ID=0000000000 > /tmp/rehearsal-env.gaw
+sudo install -o hermes-broker -g hermes-broker -m 0600 /tmp/rehearsal-env.gaw .env.gaw
+rm /tmp/rehearsal-env.gaw
+sudo stat -c '%U:%G %a' .env.gaw                                                     # hermes-broker:hermes-broker 600
+```
+
+**4. Propose one action** (credential-free, no network). The actions file is in `/tmp` and
+removed after.
+
+```bash
+: "${G:?run step 0 first}"
+# propose runs as root: keep the gateway's vault tree owned by the gateway (uid 10000), or it
+# could never create a real client's vault later.
+sudo test -d data/vaults || sudo install -d -o 10000 -g 10000 -m 700 data/vaults
+sudo stat -c '%u:%g %a' data/vaults                                                  # 10000:10000 700
+printf '%s\n' '{"actions": [{"type": "add_campaign_negative", "campaign_id": "1", "keyword": "rehearsal-not-a-real-keyword", "match_type": "EXACT"}]}' > /tmp/rehearsal-actions.json
+P=$(sudo env HERMES_GOVERNANCE_DIR=$G HERMES_AGENT_DIR=/opt/hermes-agent HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads HERMES_SPOOL_DIR=/var/lib/hermes/spool ./changeset.sh propose --client rehearsal --from /tmp/rehearsal-actions.json); echo "$P"   # …/data/vaults/rehearsal/changes/<cid>.json
+rm /tmp/rehearsal-actions.json
+sudo chown -R 10000:10000 data/vaults/rehearsal
+CID=$(basename "$P" .json); echo "$CID"                                              # YYYYMMDD-HHMMSS-<8 hex>
+```
+
+**5. Approve it** — first without `--expect-sha256`, which prints the action and the digest and
+refuses (`rc=2`); read the action; then approve with that digest.
+
+```bash
+: "${G:?run step 0 first}" "${P:?run step 4 first}" "${CID:?run step 4 first}"
+sudo env HERMES_GOVERNANCE_DIR=$G HERMES_AGENT_DIR=/opt/hermes-agent HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads HERMES_SPOOL_DIR=/var/lib/hermes/spool ./changeset.sh approve --client rehearsal --changeset "$CID" --operator hermesops; echo rc=$?
+#   1. add_campaign_negative  campaign 1  EXACT  'rehearsal-not-a-real-keyword'
+#   sha256 <64 hex> … rc=2
+SHA=$(sudo sha256sum "$P" | cut -d' ' -f1); echo "$SHA"                              # the same 64 hex as above
+sudo env HERMES_GOVERNANCE_DIR=$G HERMES_AGENT_DIR=/opt/hermes-agent HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads HERMES_SPOOL_DIR=/var/lib/hermes/spool ./changeset.sh approve --client rehearsal --changeset "$CID" --operator hermesops --expect-sha256 "$SHA"; echo rc=$?
+#   approved <cid> by hermesops (expires <+24h>) … 1 action(s) bound … rc=0
+```
+
+**6. File the request from inside the gateway** — the same client Hermes itself uses — and wait
+for the broker (it polls every 5 s).
+
+```bash
+: "${CID:?run step 4 first}"
+GW=$(sudo docker ps -q --no-trunc --filter label=com.docker.compose.service=hermes-agent); echo "${#GW}"   # 64
+sleep 1; T0=$(date '+%F %T')
+RID=$(sudo docker exec "$GW" python3 /opt/cc-bin/hermes-syscall.py apply --client rehearsal --changeset "$CID"); echo "$RID"   # a 36-character request id
+for i in $(seq 1 24); do
+  out=$(sudo docker exec "$GW" python3 /opt/cc-bin/hermes-syscall.py result --request-id "$RID")
+  case "$out" in pending*) sleep 5 ;; *) break ;; esac
+done; echo "$out"
+```
+
+Expected: `status refused`, `classification refused_preflight`, `exit_code 2`. Still `pending`
+after two minutes is a finding — check `systemctl is-active hermes-broker` and its journal.
+`exit_code 4` (`failed_unverified_exit`) is also a finding, not a hazard: this is the first time
+the wrapper runs Compose inside the broker unit's sandbox (Phase 6 ran it from a shell), and the
+kill switch is absent either way. Record it with step 7's journal output; change nothing.
+
+**7. What the broker, the proxy and the store recorded.**
+
+```bash
+: "${G:?run step 0 first}" "${CID:?run step 4 first}" "${RID:?run step 6 first}" "${T0:?run step 6 first}"
+sudo journalctl -u hermes-broker --since "$T0" --no-pager | grep -E "request $RID|mutation is disabled|NOT PERSISTED|NOT VERIFIED"
+#   broker: request <rid> client rehearsal changeset <cid> rc=2
+#   apply-changeset: mutation is disabled (kill switch absent or unreadable) — this is the safe default
+#   (no "RUN RECORD NOT PERSISTED", no "EXECUTOR EXIT NOT VERIFIED")
+sudo journalctl -u hermes-docker-proxy --since "$T0" --no-pager | grep -E 'ALLOW POST .*/containers/create|UPGRADE|DENY'
+#   one ALLOW POST …/containers/create…, one UPGRADE POST …/attach… (101), no DENY whose reason starts "target"
+sudo python3 -c "import json,sys;r=json.load(open(sys.argv[1]));print({k:r.get(k) for k in ('request_id','reserved_at','outcome','finished_at')})" $G/approvals/rehearsal/$CID.approval.json
+#   request_id == $RID, outcome 'refused_preflight', reserved_at and finished_at set
+sudo sh -c "wc -l < $G/log/rehearsal.jsonl"                                          # 0 — refused before any action
+sudo find $G/records -mindepth 1 | wc -l                                             # 0 — a refusal writes no run record
+```
+
+**8. Retire `rehearsal` and remove the dummy credential — always.**
+
+```bash
+: "${G:?run step 0 first}"
+printf '%s\n' '{"clients": {"rehearsal": {"project": "claude_google_ads", "customer_id": "0000000000", "status": "retired"}}}' > /tmp/rehearsal-clients.json
+sudo install -o root -g hermes -m 0640 /tmp/rehearsal-clients.json $G/registry/clients.json
+rm /tmp/rehearsal-clients.json
+sudo rm -f .env.gaw; sudo test -e .env.gaw && echo "env.gaw PRESENT" || echo "env.gaw absent"   # env.gaw absent
+sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $G; echo rc=$?   # rc=0 (the sealed log stays registered)
+systemctl is-active hermes-docker-proxy hermes-broker                                # active, active
+sudo test -e $G/control/mutation-enabled && echo PRESENT || echo ABSENT              # ABSENT
+```
+
+When pasting output off the box, `rehearsal` is not a real client and needs no redaction; any
+other slug does (F21).
+
+### Before creating the kill switch
+
+The rehearsal never checked the credential. Before `control/mutation-enabled` is ever created:
+put the **real** WRITE credential in `/opt/hermes-agent/.env.gaw` as its own deliberate step
+(`install -o hermes-broker -g hermes-broker -m 0600`, never pasted into a chat or a doc), and
+register the first real client with `--bootstrap-logs --apply` so its log is sealed (§6B). When
+adding that client, **merge** it into `clients.json` and keep the `rehearsal` entry (status
+`retired`) — do not reuse the rehearsal's replace-the-whole-file commands.
+Creating the kill switch itself remains the operator's decision.
 
 ---
 
