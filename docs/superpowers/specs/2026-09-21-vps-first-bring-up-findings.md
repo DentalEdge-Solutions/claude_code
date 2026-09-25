@@ -508,6 +508,8 @@ gate the kill switch.
 7. F18: the attach pass-through bypass — fixed (PR #50).
 8. F19: container-scoped calls accept any container id — fixed (PR #53), applied to the box
    2026-09-24.
-9. §6B: audit logs append-only — see "After pulling §6B" in BRING-UP (fill from the PR).
+9. §6B: audit logs append-only — fixed (PR #57), applied to the box 2026-09-25 (see "After
+   pulling §6B" in BRING-UP, `RESULT`). The last kill-switch gate is closed; the rehearsal gate
+   (`.env.gaw` with the WRITE credential) remains an operator security decision.
 10. F20: forged appends — deferred; needs its own design (host-side writer or signed records).
 11. F21: count-only file-level pre-flight messages (client slugs reach the journal today).
