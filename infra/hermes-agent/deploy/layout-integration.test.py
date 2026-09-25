@@ -35,6 +35,39 @@ BROKER = ["setpriv", "--reuid", "hermes-broker", "--regid", "hermes-broker",
 CID = "20260921-000000-abcdef01"
 CLIENT = "slug-1"          # sanctioned fixture, deliberately NOT registered
 
+# §6B. Run as GATEWAY or BROKER against one log file. Prints one JSON object: each
+# operation's outcome ("OK" or its errno name) and the line count around them. Only ever
+# pointed at a test fixture's log inside this test's own store.
+PROBE = r'''
+import errno, json, os, sys
+p = sys.argv[1]
+def lines():
+    with open(p, "rb") as f:
+        return f.read().count(b"\n")
+def attempt(fn):
+    try:
+        fn()
+        return "OK"
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+def append():
+    with open(p, "a") as f:
+        f.write("{}\n")
+def overwrite():
+    fd = os.open(p, os.O_WRONLY)
+    try:
+        os.pwrite(fd, b"X", 0)
+    finally:
+        os.close(fd)
+out = {"before": lines(), "append": attempt(append)}
+out["after_append"] = lines()
+out["overwrite"] = attempt(overwrite)
+out["o_trunc"] = attempt(lambda: os.close(os.open(p, os.O_WRONLY | os.O_TRUNC)))
+out["truncate"] = attempt(lambda: os.truncate(p, 0))
+out["after"] = lines()
+print(json.dumps(out))
+'''
+
 
 def why_not_runnable():
     if not sys.platform.startswith("linux"):
@@ -526,6 +559,192 @@ class TestApprovalOwnership(Layout):
         r = self.gateway("python3", "-c",
                          "import sys; open(sys.argv[1]).read()", approval)
         self.assertNotEqual(r.returncode, 0)
+
+
+class TestTheRunnerSupportsAppendOnly(Layout):
+    """Spec §6 Tier 2 (4). Every §6B test below depends on the runner's filesystem holding
+    the append-only flag. If it cannot, that must FAIL — under
+    HERMES_REQUIRE_LINUX_INTEGRATION=1 a skip is already a failure, and this is not a skip:
+    a runner that silently cannot seal would make every EPERM assertion below meaningless."""
+
+    def test_chattr_a_takes_on_this_filesystem(self):
+        p = os.path.join(self.base, "fs-guard")
+        open(p, "w").close()
+        r = run(["chattr", "+a", p])
+        self.addCleanup(run, ["chattr", "-a", p])      # LIFO: runs before Layout's rmtree
+        self.assertEqual(r.returncode, 0, r.stderr)
+        flags = run(["lsattr", p], check=True).stdout.split()[0]
+        self.assertIn("a", flags)
+
+
+class TestAuditLogsAreAppendOnly(Layout):
+    """§6B (spec 2026-09-24-s6b-audit-log-append-only-design.md). A log bootstrapped the
+    documented way (root, migrate-governance.py --bootstrap-logs --apply) must admit
+    appends and refuse truncation and overwrite — for the executor (uid 10000) AND the
+    broker, which is in gid 10000 and so holds group write on the file. Measured on the box
+    2026-09-24: before sealing, both could truncate."""
+
+    SLUG = "s6b-client"
+
+    def setUp(self):
+        super().setUp()
+        self.register_client()
+        # Registered AFTER Layout's rmtree cleanup, so it runs FIRST (LIFO): rmtree cannot
+        # remove an append-only file. A no-op when the file is absent or unsealed.
+        self.addCleanup(run, ["chattr", "-a", self.log()])
+
+    def register_client(self):
+        reg = os.path.join(self.store, "registry", "clients.json")
+        with open(reg, "w") as f:
+            json.dump({"clients": {self.SLUG: {"project": "claude_google_ads",
+                                               "customer_id": "1234567890",
+                                               "status": "active"}}}, f)
+        run(["chown", "root:hermes", reg], check=True)
+        run(["chmod", "0640", reg], check=True)
+
+    def bootstrap(self):
+        r = run(["python3", self.py("migrate-governance.py"), "--bootstrap-logs", "--apply",
+                 "--governance-root", self.store], env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.isfile(self.log()))
+
+    def log(self):
+        return os.path.join(self.store, "log", "%s.jsonl" % self.SLUG)
+
+    def probe(self, who):
+        r = run(list(who) + ["python3", "-c", PROBE, self.log()], env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def lsattr_flags(self, path):
+        return run(["lsattr", path], check=True).stdout.split()[0]
+
+    def _assert_append_only_for(self, who):
+        self.bootstrap()
+        out = self.probe(who)
+        # The security property FIRST (canon lesson "check why a RED is red"): on the
+        # exact errno, not "some error". Truncation is what resets the caps.
+        self.assertEqual(out["o_trunc"], "EPERM", out)
+        self.assertEqual(out["truncate"], "EPERM", out)
+        self.assertEqual(out["overwrite"], "EPERM", out)
+        self.assertEqual(out["after"], out["after_append"], out)
+        # ... and the one legitimate write still works.
+        self.assertEqual(out["append"], "OK", out)
+        self.assertEqual(out["after_append"], out["before"] + 1, out)
+        self.assertIn("a", self.lsattr_flags(self.log()))
+
+    def test_the_executor_cannot_truncate_a_bootstrapped_log(self):
+        self._assert_append_only_for(GATEWAY)
+
+    def test_the_broker_cannot_truncate_a_bootstrapped_log(self):
+        self._assert_append_only_for(BROKER)
+
+    def test_append_log_still_works_on_a_bootstrapped_log_as_the_executor(self):
+        """Review Focus 3. The real writer, not the probe: append_log also fsyncs the log/
+        DIRECTORY fd. A regression guard — it passes on pre-§6B code too."""
+        self.bootstrap()
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import changeset_lib as C; "
+                "C.append_log(sys.argv[2], {'ts': '2026-09-24T00:00:00Z', "
+                "'changeset_id': '20260924-000000-abcdef01', 'status': 'applied'})")
+        r = self.gateway("python3", "-c", code, self.bin, self.SLUG)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.log(), "rb") as f:
+            self.assertEqual(f.read().count(b"\n"), 1)
+
+    def test_control_without_the_seal_call_the_executor_truncates(self):
+        """FIRING CONTROL for the property tests: the same bootstrap with the seal call
+        removed from THIS TEST'S COPY of bin/ (never the tracked file) leaves truncation
+        open — so those tests fail when the seal is missing, not by accident."""
+        shim = os.path.join(self.bin, "migrate_governance_shim.py")
+        with open(shim) as f:
+            src = f.read()
+        needle = "governance_lib.set_append_only(dst)\n"
+        self.assertEqual(src.count(needle), 1)
+        with open(shim, "w") as f:
+            f.write(src.replace(needle, "pass\n"))
+        self.bootstrap()
+        out = self.probe(GATEWAY)
+        self.assertEqual(out["o_trunc"], "OK", out)
+        self.assertNotIn("a", self.lsattr_flags(self.log()))
+
+    def test_the_preflight_refuses_a_log_whose_flag_was_cleared(self):
+        self.bootstrap()
+        pf = ("python3", self.py("preflight-governance-access.py"), "--root", self.store)
+        r = self.broker(*pf)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run(["chattr", "-a", self.log()], check=True)
+        r = self.broker(*pf)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("not append-only", r.stderr)
+        self.assertNotIn(self.SLUG, r.stderr)          # counts, never slugs
+
+    def test_control_a_probe_that_always_says_sealed_passes_an_unsealed_log(self):
+        """FIRING CONTROL for test_the_preflight_refuses_a_log_whose_flag_was_cleared: with
+        is_append_only replaced in THIS TEST'S COPY of bin/ by one that always answers True,
+        the pre-flight passes a cleared log — so the real test depends on the real flag."""
+        self.bootstrap()
+        with open(os.path.join(self.bin, "governance_lib.py"), "a") as f:
+            f.write("\n\ndef is_append_only(path):\n    return True\n")
+        run(["chattr", "-a", self.log()], check=True)
+        r = self.broker("python3", self.py("preflight-governance-access.py"),
+                        "--root", self.store)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestAppendOnlyHelper(Layout):
+    """§6B Tier 2 (1): governance_lib's ioctl numbers and 4-byte buffer against the real
+    kernel, cross-checked with lsattr — the same tool the box measurement used."""
+
+    def g(self, code, path):
+        """Run `code` with G = the copied governance_lib, as root. Returns the result."""
+        return run(["python3", "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); import governance_lib as G; "
+                    + code, self.bin, path], env=self.env)
+
+    def fresh(self, name):
+        p = os.path.join(self.base, name)
+        open(p, "w").close()
+        self.addCleanup(run, ["chattr", "-a", p])      # before Layout's rmtree (LIFO)
+        return p
+
+    def lsattr_flags(self, path):
+        return run(["lsattr", path], check=True).stdout.split()[0]
+
+    def test_set_then_read_agrees_with_lsattr(self):
+        p = self.fresh("sealed")
+        r = self.g("G.set_append_only(sys.argv[2]); print(G.is_append_only(sys.argv[2]))", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "True")
+        self.assertIn("a", self.lsattr_flags(p))
+
+    def test_a_plain_file_reads_false(self):
+        p = self.fresh("plain")
+        r = self.g("print(G.is_append_only(sys.argv[2]))", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "False")
+        self.assertNotIn("a", self.lsattr_flags(p))
+
+    def test_a_symlink_is_refused(self):
+        target = self.fresh("target")
+        run(["chattr", "+a", target], check=True)
+        link = os.path.join(self.base, "link")
+        os.symlink(target, link)
+        r = self.g("G.is_append_only(sys.argv[2])", link)
+        self.assertNotEqual(r.returncode, 0)
+        # O_NOFOLLOW -> ELOOP; the traceback prints its strerror.
+        self.assertIn("Too many levels of symbolic links", r.stderr)
+
+    def test_control_a_wrong_flag_constant_is_caught_only_by_lsattr(self):
+        """FIRING CONTROL for the lsattr cross-check. With the constant set to NODUMP (0x40,
+        harmless) the helper sets and "verifies" the wrong bit and reports success — only
+        lsattr shows the file is not append-only. This is why test_set_then_read_agrees_
+        with_lsattr asserts lsattr and not just the helper's own answer."""
+        p = self.fresh("wrong-constant")
+        r = self.g("G.LOG_APPEND_ONLY_FL = 0x40; G.set_append_only(sys.argv[2]); "
+                   "print(G.is_append_only(sys.argv[2]))", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "True")      # the helper is fooled
+        self.assertNotIn("a", self.lsattr_flags(p))     # lsattr is not
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ in changeset_lib and vault_lib to drift apart.
 Root resolution mirrors vault_lib.vault_root(): a container default that host callers
 override with HERMES_GOVERNANCE_ROOT.
 """
-import os, re
+import array, errno, fcntl, os, re, stat, sys
 
 DEFAULT_ROOT = "/opt/governance"
 
@@ -91,6 +91,66 @@ def snapshot_path(slug, cid, root=None):
 
 def log_path(slug, root=None):
     return os.path.join(_root(root), "log", "%s.jsonl" % _slug(slug))
+
+
+# §6B: every log/<slug>.jsonl carries the Linux append-only inode flag (chattr +a), so the
+# file admits appends only — for the executor, the broker and root alike. Measured on the
+# box 2026-09-24 (spec 2026-09-24-s6b-audit-log-append-only-design.md §2.3).
+#
+# linux/fs.h: FS_APPEND_FL, and FS_IOC_GETFLAGS / FS_IOC_SETFLAGS = _IOR/_IOW('f', 1|2, long)
+# on a 64-bit kernel. The kernel moves an INT through these despite the `long` in the macro,
+# so the buffer is 4 bytes. Not assumed: deploy/layout-integration.test.py cross-checks
+# these numbers against lsattr on a real ext4 file.
+LOG_APPEND_ONLY_FL = 0x00000020
+_FS_IOC_GETFLAGS = 0x80086601
+_FS_IOC_SETFLAGS = 0x40086602
+
+
+def _open_regular(path):
+    """An fd on path itself — never a symlink's target, never a FIFO we would block on."""
+    if not sys.platform.startswith("linux"):
+        raise OSError(errno.ENOTSUP,
+                      "the append-only flag is Linux-only (platform %s)" % sys.platform, path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _get_flags(fd):
+    buf = array.array("i", [0])
+    fcntl.ioctl(fd, _FS_IOC_GETFLAGS, buf, True)
+    return buf[0]
+
+
+def is_append_only(path):
+    """True if path carries the append-only flag. RAISES on every failure — an unsupported
+    filesystem, a symlink, a non-regular file, off Linux — and never returns False for one:
+    'cannot tell' must not read as 'not sealed', and must never read as 'sealed'.
+    Needs no root."""
+    fd = _open_regular(path)
+    try:
+        return bool(_get_flags(fd) & LOG_APPEND_ONLY_FL)
+    finally:
+        os.close(fd)
+
+
+def set_append_only(path):
+    """Add the append-only flag, keeping every other flag, then read it back — on the SAME
+    fd the SETFLAGS ioctl used, so a rename in between cannot fool it. Root only
+    (CAP_LINUX_IMMUTABLE). Raises on any failure, and EIO if the flag did not take."""
+    fd = _open_regular(path)
+    try:
+        buf = array.array("i", [_get_flags(fd) | LOG_APPEND_ONLY_FL])
+        fcntl.ioctl(fd, _FS_IOC_SETFLAGS, buf, True)
+        if not (_get_flags(fd) & LOG_APPEND_ONLY_FL):
+            raise OSError(errno.EIO, "the append-only flag did not take", path)
+    finally:
+        os.close(fd)
 
 
 def seen_path(slug, root=None):

@@ -1,4 +1,4 @@
-import importlib.util, io, os, shutil, sys, tempfile, unittest
+import errno, importlib.util, io, json, os, shutil, sys, tempfile, unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -645,7 +645,12 @@ class TestRegisteredClientLogs(Base):
         with open(p, "w"):
             pass
         os.chmod(p, 0o660)
-        self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+        # §6B: a healthy registered log is now also a SEALED one. The helper is faked
+        # here (this suite runs unprivileged, and off Linux it cannot read flags);
+        # Tier 2 reads real flags.
+        with mock.patch.object(PF.governance_lib, "is_append_only", lambda path: True):
+            self.assertEqual(
+                PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
 
     def test_the_refusal_names_a_count_not_the_slugs(self):
         """Client slugs are client-private and this text reaches stderr, which the
@@ -705,6 +710,168 @@ class TestRegisteredClientLogs(Base):
         self._healthy_dirs()
         self._write_registry('{"clients": {}}')
         self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="linux"), [])
+
+
+class TestRegisteredLogsAreSealed(Base):
+    """§6B. A registered client's log that is not append-only can be truncated by the
+    executor or the broker, which erases the audit trail and resets the daily caps."""
+
+    SLUG = "acme-dental"
+
+    def _healthy_dirs(self):
+        os.chmod(self.root, 0o750)
+        for name in PF.READ_ONLY_DIRS:
+            os.chmod(os.path.join(self.root, name), 0o750)
+        for name in PF.READ_WRITE_DIRS:
+            os.chmod(os.path.join(self.root, name), 0o2750)
+
+    def _register(self, *slugs):
+        reg = os.path.join(self.root, *PF.CLIENTS_REGISTRY_REL)
+        with open(reg, "w") as f:
+            json.dump({"clients": {s: {"status": "active"} for s in slugs}}, f)
+        os.chmod(reg, 0o640)
+
+    def _log(self, slug, mode=0o660):
+        p = os.path.join(self.root, "log", "%s.jsonl" % slug)
+        open(p, "w").close()
+        os.chmod(p, mode)
+        return p
+
+    def _probe(self, answer):
+        """Fake is_append_only: `answer` is a bool, or an errno to raise. Records paths."""
+        self.asked = []
+        def fake(path):
+            self.asked.append(path)
+            if isinstance(answer, bool):
+                return answer
+            raise OSError(answer, os.strerror(answer), path)
+        p = mock.patch.object(PF.governance_lib, "is_append_only", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _check(self):
+        return PF.check(self.root, self.other_uid, self.gid, platform="linux")
+
+    def test_a_sealed_registered_log_is_healthy(self):
+        self._healthy_dirs(); self._register(self.SLUG); self._log(self.SLUG)
+        self._probe(True)
+        self.assertEqual(self._check(), [])
+
+    def test_an_unsealed_registered_log_is_refused_by_count(self):
+        self._healthy_dirs(); self._register(self.SLUG); self._log(self.SLUG)
+        self._probe(False)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("1 registered client log(s) are not append-only", problems[0])
+        self.assertIn("sudo lsattr", problems[0])
+        self.assertIn("sudo chattr +a", problems[0])
+        self.assertNotIn(self.SLUG, problems[0])
+
+    def test_the_count_tracks_the_number_of_unsealed_logs(self):
+        self._healthy_dirs(); self._register(self.SLUG, "other-clinic")
+        self._log(self.SLUG); self._log("other-clinic")
+        self._probe(False)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("2 registered client log(s) are not append-only", problems[0])
+        self.assertNotIn("other-clinic", problems[0])
+
+    def test_an_unsupported_filesystem_is_refused_not_passed(self):
+        """Review Focus 4. 'Cannot tell' is never 'sealed'."""
+        self._healthy_dirs(); self._register(self.SLUG); self._log(self.SLUG)
+        self._probe(errno.ENOTTY)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("1 registered client log(s) could not be checked", problems[0])
+        self.assertIn("ENOTTY", problems[0])
+        self.assertNotIn(self.SLUG, problems[0])
+
+    def test_an_unopenable_log_already_reported_is_not_counted_twice(self):
+        """The §4.3 double-count rule. A 0600 log is refused by the file-level check (the
+        executor cannot append to it); the checker's own open failing on the same file is
+        the same fault, so exactly ONE problem."""
+        self._healthy_dirs(); self._register(self.SLUG); self._log(self.SLUG, mode=0o600)
+        self._probe(errno.EACCES)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("%s.jsonl" % self.SLUG, problems[0])   # the file-level message
+        self.assertNotIn("could not be checked", problems[0])
+
+    def test_a_symlinked_log_is_not_silently_passed_by_the_skip(self):
+        """Fix round 1, Important. The file-level walk lstat()s each log/ entry and skips
+        anything that is not a regular file, so a SYMLINK named <slug>.jsonl is never
+        reported by the walk — but os.path.isfile/_check_file FOLLOW the link. The old,
+        unconditional 'if _check_file(...) reports it, skip' therefore skipped a raising
+        probe on a symlinked log even though nothing else had reported it: a silent
+        pass. The fix must refuse instead."""
+        self._healthy_dirs(); self._register(self.SLUG)
+        target = os.path.join(self.root, "target-outside-log.jsonl")
+        open(target, "w").close()
+        os.chmod(target, 0o600)
+        link = os.path.join(self.root, "log", "%s.jsonl" % self.SLUG)
+        os.symlink(target, link)
+        self._probe(errno.ELOOP)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("could not be checked", problems[0])
+        self.assertIn("ELOOP", problems[0])
+        self.assertNotIn(self.SLUG, problems[0])
+
+    def test_a_listdir_failure_does_not_silently_pass_a_reported_file(self):
+        """Fix round 1, Important, second variant. If os.listdir(log/) itself fails for
+        this process while os.stat on the single registered log still succeeds, the old
+        skip logic still asked _check_file (which reports the 0600 file) and dropped the
+        probe's own report — another silent pass. The fix must refuse instead."""
+        self._healthy_dirs(); self._register(self.SLUG)
+        self._log(self.SLUG, mode=0o600)
+        log_dir = os.path.join(self.root, "log")
+        real_listdir = PF.os.listdir
+
+        def fake_listdir(path):
+            if os.path.abspath(path) == os.path.abspath(log_dir):
+                raise PermissionError(errno.EACCES, "denied", path)
+            return real_listdir(path)
+
+        self._probe(errno.EACCES)
+        with mock.patch.object(PF.os, "listdir", fake_listdir):
+            problems = self._check()
+        self.assertNotEqual(problems, [])
+        self.assertTrue(any("could not be checked" in p for p in problems), problems)
+
+    def test_a_missing_registered_log_is_only_the_bootstrap_message(self):
+        self._healthy_dirs(); self._register(self.SLUG)
+        self._probe(False)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("--bootstrap-logs", problems[0])
+        self.assertEqual(self.asked, [])
+
+    def test_files_that_are_not_registered_logs_are_never_probed(self):
+        """Review Focus 5. Derived from clients.json, never from a listing of log/."""
+        self._healthy_dirs(); self._register(self.SLUG); p = self._log(self.SLUG)
+        self._log("unregistered")
+        with open(os.path.join(self.root, "log", "%s.jsonl.1" % self.SLUG), "w"):
+            pass
+        self._probe(True)
+        self.assertEqual(self._check(), [])
+        self.assertEqual(self.asked, [p])
+
+    def test_an_unparseable_registry_is_reported_once(self):
+        self._healthy_dirs()
+        reg = os.path.join(self.root, *PF.CLIENTS_REGISTRY_REL)
+        with open(reg, "w") as f:
+            f.write("{not json")
+        os.chmod(reg, 0o640)
+        self._probe(False)
+        problems = self._check()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("malformed client registry", problems[0])
+
+    def test_off_linux_the_check_does_not_run(self):
+        self._healthy_dirs(); self._register(self.SLUG); self._log(self.SLUG)
+        self._probe(False)
+        self.assertEqual(PF.check(self.root, self.other_uid, self.gid, platform="darwin"), [])
+        self.assertEqual(self.asked, [])
 
 
 if __name__ == "__main__":

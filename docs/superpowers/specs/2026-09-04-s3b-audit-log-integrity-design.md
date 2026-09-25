@@ -70,6 +70,8 @@ happy path).
   host-side writer the container talks to instead of opening the file itself). Both
   are a real design change, not a mode tweak, and are left for a separate wave.
 
+  **Closed by §6B (2026-09-24):** `docs/superpowers/specs/2026-09-24-s6b-audit-log-append-only-design.md`.
+
 ## 3. Design decisions
 
 ### D1 — the raise in `iter_log_records` is unconditional; no registry lookup

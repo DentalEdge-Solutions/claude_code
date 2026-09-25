@@ -19,7 +19,7 @@ locally is a check operators learn to bypass.
 The remedy is ownership, never `chmod 777`: making the store world-readable hands it
 back to every process on the host and deletes the isolation the store exists for.
 """
-import argparse, json, os, stat, sys
+import argparse, errno, json, os, stat, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib                      # SLUG_RE, shared not restated
@@ -394,6 +394,109 @@ def _check_registered_logs(root):
             % (root, missing, governance_lib.LOG_DIR_MODE)]
 
 
+def _reported_by_file_walk(path, uid, gid):
+    """True only when `_check_files_in_dir(log/, ...)` would itself have produced a
+    problem line for this exact `path` — i.e. the two checks disagree about NOTHING,
+    so skipping the probe's own report here can never be a silent pass.
+
+    MUST mirror `_check_files_in_dir` step for step, because `_check_registered_logs_sealed`
+    reaches `path` a different way (derived from the registry, `os.path.isfile` which
+    FOLLOWS symlinks) than the walk does (`os.listdir` + `os.lstat`, which does NOT). Found
+    by review: a registered log that is a SYMLINK to a 0600 regular file is never reported
+    by the walk (lstat sees a symlink, not a regular file, and the walk skips it) even
+    though `os.path.isfile`/`_check_file` follow it to the same target — so the old
+    unconditional 'if _check_file(...) reports it, skip' let a real ELOOP fault through as
+    a silent pass. Same failure mode if `os.listdir(log/)` itself fails for this process
+    while `os.stat` on the single file still succeeds. Every one of the four conditions
+    below is required before the skip is safe; if any changes in `_check_files_in_dir`,
+    this must change with it."""
+    dirpath, name = os.path.split(path)
+    try:
+        entries = os.listdir(dirpath)
+    except OSError:
+        return False
+    if name not in entries:
+        return False
+    if not is_client_log_name(name):
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return bool(_check_file(path, uid, gid, need_write=True))
+
+
+def _check_registered_logs_sealed(root, uid, gid):
+    """§6B. Every REGISTERED client's existing log must carry the append-only flag.
+
+    Without it, the executor (uid 10000) and the broker (gid 10000) can truncate the file —
+    measured on the box 2026-09-24 — which erases the reversibility record --undo reads AND
+    resets the daily caps day_counts reads from the same file. The flag is set when the log
+    is created (migrate_governance_shim.bootstrap_logs / migrate); nothing sets it on a log
+    that already exists, because a log that was ever unsealed may have been emptied and a
+    person must look first (spec D3).
+
+    Same slug list, same registry handling as _check_registered_logs: missing or
+    unreadable -> [] (Ruling 9); unparseable -> [] here, because _check_registered_logs
+    already reports it. A MISSING log is _check_registered_logs's; it is not probed here.
+
+    'Cannot tell' is never 'sealed': a probe that raises is counted and refused — unless
+    `_reported_by_file_walk` confirms the file-level walk over log/ WOULD ITSELF have
+    reported this exact path (see its docstring for why an approximate check here was a
+    silent pass), in which case the store is refused already and a second line would
+    count one fault twice (Ruling 9 / R19b). A log that is merely unsealed is always
+    reported: a different fault with a different remedy.
+
+    Counts, never slugs (see _check_registered_logs).
+
+    Residual: if THIS process cannot read clients.json, Ruling 9 resolves that as zero
+    registered clients and the seal check is skipped entirely — unlike the missing-log
+    case above, there is no mid-apply backstop for an unreadable registry here, so the
+    broker must keep group read on the registry (it does, via gid 10000)."""
+    reg = governance_lib.clients_registry_path(root)
+    try:
+        with open(reg, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    clients = data.get("clients", {}) if isinstance(data, dict) else None
+    if not isinstance(clients, dict):
+        return []
+    unsealed, unchecked, errnos = 0, 0, set()
+    for slug in clients:
+        if not isinstance(slug, str) or not governance_lib.SLUG_RE.fullmatch(slug):
+            continue
+        p = governance_lib.log_path(slug, root)
+        if not os.path.isfile(p):
+            continue
+        try:
+            sealed = governance_lib.is_append_only(p)
+        except OSError as e:
+            if _reported_by_file_walk(p, uid, gid):
+                continue
+            unchecked += 1
+            errnos.add(errno.errorcode.get(
+                e.errno, "unknown" if e.errno is None else str(e.errno)))
+            continue
+        if not sealed:
+            unsealed += 1
+    problems = []
+    if unsealed:
+        problems.append(
+            "%s/log: %d registered client log(s) are not append-only, so their records and "
+            "the daily caps can be erased by truncation. Inspect with: sudo lsattr %s/log/*.jsonl"
+            " — then, for each log you have checked, run: sudo chattr +a %s/log/<slug>.jsonl"
+            % (root, unsealed, root, root))
+    if unchecked:
+        problems.append(
+            "%s/log: %d registered client log(s) could not be checked for the append-only "
+            "flag (%s) — refusing, because an unverifiable log is not a sealed one"
+            % (root, unchecked, ", ".join(sorted(errnos))))
+    return problems
+
+
 def _root_problem(root):
     """F10: when THIS PROCESS cannot reach the root, every per-child check below it fails
     the same way, and the cascade reads as N permission faults — with a remedy that
@@ -479,6 +582,7 @@ def check(root, uid=EXECUTOR_UID, gid=EXECUTOR_GID, platform=None):
 
     problems.extend(_check_approvals(root, uid, gid))
     problems.extend(_check_registered_logs(root))
+    problems.extend(_check_registered_logs_sealed(root, uid, gid))
 
     return problems
 
@@ -505,7 +609,11 @@ with:
 
 Do NOT `chmod 777`. The store is the one place Hermes cannot reach; making it
 world-writable hands it to every process on the host and removes the isolation this
-whole tier is built on."""
+whole tier is built on.
+
+Per-client logs are append-only (§6B): fixing a log's mode or owner (chmod/chown/chgrp)
+needs `sudo chattr -a <log>` first, and `sudo chattr +a <log>` again once you're done —
+a sealed log refuses those changes even for root."""
 
 
 def main(argv=None):

@@ -1039,17 +1039,41 @@ Create the per-client logs. This is required for every registered client, and id
 ```bash
 # --governance-root is REQUIRED on the host (F16): the tool defaults to the CONTAINER
 # path /opt/governance, so without it these address the wrong tree.
-infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs            # dry run
-infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs --apply
+sudo python3 infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs            # dry run
+sudo python3 infra/hermes-agent/bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs --apply
+```
+
+`--apply` seals each log it creates with the Linux append-only flag, which is root-only
+and Linux-only (`set_append_only` raises ENOTSUP off Linux, EPERM without root) — so this
+runs only on Linux as root (`sudo`, as above). Off Linux, such as a laptop, `--apply`
+always exits 2 by design; there is no code skip. Create a registered client's log by hand
+there instead: `touch` it under `log/` and set mode `0660` — the pre-flight's seal check is
+a no-op off Linux, so an unsealed log there does not block anything.
+
+Every created log is sealed. Check it:
+
+```bash
+sudo lsattr /var/lib/hermes/governance/log/*.jsonl    # every line's flags include an "a"
 ```
 
 `seen/` is not mounted into the executor at all and needs no access for uid 10000.
 Widening it would hand the governed party the replay-protection state again.
 
-**Accepted residual.** `hermes-broker` is in gid 10000 so it can read `clients.json`, which
-also gives it group write on `log/*.jsonl`. It can truncate an audit log, though it cannot
-unlink one. Closing that needs a second, executor-only group. It is not justified now: the
-broker already owns `approvals/` and `seen/`, so a compromised broker is already past it.
+**Audit logs are append-only (§6B).** `--bootstrap-logs` seals every log it creates with the
+Linux append-only flag (`chattr +a`): appends still work, but nobody — the executor, the broker,
+or root — can truncate, overwrite, rename or delete it, so neither the audit trail nor the daily
+caps can be reset. The pre-flight refuses a registered client's log that is not sealed, at broker
+start and before every mutation run. Nothing seals a log that already exists: inspect it
+(`sudo lsattr`, and read it yourself), then `sudo chattr +a` it. Deleting or restoring a log
+needs `sudo chattr -a` first, and a restored copy does not carry the flag — re-seal it after
+inspection. The same is true of changing a log's mode or owner (`chmod`/`chown`/`chgrp`): a
+sealed log refuses those too, even for root, so `sudo chattr -a` it first and `sudo chattr +a`
+it again once you're done inspecting.
+
+**Accepted residual (F20).** Whoever can append can still append a fabricated record — the
+executor, and `hermes-broker` through gid 10000, which it needs to read `clients.json`. A forged
+`"undone"` record would hide a real change from `--undo`. The fix is a host-side writer or signed
+records; see F20 in the findings record.
 
 **Never `chmod 777`**, and never `chown -R` the store to the executor. POSIX selects the owner
 class first, so an executor-owned `log/` is writable by it however tight the mode looks. The
@@ -1070,6 +1094,11 @@ python3 infra/hermes-agent/bin/migrate-governance.py \
   --vault-root infra/hermes-agent/data/vaults \
   --governance-root "$HERMES_GOVERNANCE_DIR"        # dry run; add --apply to execute
 ```
+
+`--apply` seals each migrated log the same way `--bootstrap-logs --apply` does, so it is
+subject to the same restriction: Linux and root only, and off Linux (a laptop) it always
+exits 2 by design rather than silently skipping the seal. There is nothing to hand-create
+here, though — a dry run is still useful off Linux to see what would move.
 
 ## VPS deploy sequence
 
@@ -1185,6 +1214,7 @@ together with "Ownership on a Linux host" above, which it does not duplicate.
    # Run from /opt/hermes-agent. --governance-root is REQUIRED (F16): without it the tool
    # resolves the CONTAINER default /opt/governance, not the host store.
    sudo python3 bin/migrate-governance.py --governance-root /var/lib/hermes/governance --bootstrap-logs --apply
+   sudo lsattr /var/lib/hermes/governance/log/*.jsonl    # §6B: each shows an "a"
    ```
 
    > **Run `--bootstrap-logs` BEFORE enabling the broker.** Since S3-b the pre-flight refuses
