@@ -10,6 +10,11 @@ Spec: `docs/superpowers/specs/2026-09-18-vps-provisioning-and-bring-up-design.md
 First real run (2026-09-21), and every correction below that it earned:
 `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`
 
+> **Pasting output off the box (F21 policy).** Journal, broker and pre-flight output can name
+> real clients. Before pasting any of it into a chat, PR, doc or handoff, replace every real
+> client slug with `<client>`. `RESULT` blocks use scratch slugs only. See README "Client names
+> and the journal".
+
 **Every command is labelled by where it runs.** Read the prompt before pasting:
 `you@laptop` is the laptop, `root@<host>` / `hermesops@<host>` is the VPS. On the first run a
 laptop command was pasted into the VPS web console and the VPS tried to SSH into itself.
@@ -348,8 +353,9 @@ Hand off to:
    handoff sequence)
 
 **Note:** This runbook does not create the kill switch, and mutation stays disabled throughout.
-The handoff's §6 gates (F3 hardening, `UMask=0077`, audit-log truncation) are where the kill
-switch lives.
+The handoff's §6 gates (F3 hardening, `UMask=0077`, audit-log truncation) are all closed: §6
+part A in PR #48, §6 part B in PR #57 (applied to the box 2026-09-25). What remains before the
+kill switch is the rehearsal gate below, then the operator's own decision.
 
 ---
 
@@ -447,7 +453,8 @@ it. No unit files change, so nothing restarts on its own account.
 container and comes back `refused_preflight` ("mutation is disabled"). That exercises the
 broker's own path (reservation, the wrapper, persistence), which Phase 6 does not.
 
-**Still required before the kill switch can be created:** audit-log truncation (§6 part B). (F19 —
+**No further code gate stands before the kill switch** — audit-log truncation (§6 part B) is
+closed (PR #57, applied to the box 2026-09-25; see "After pulling §6B"). (F19 —
 container-scoped calls accepted any container id — fixed in PR #53 and applied to the box
 2026-09-24; see "After pulling F19".) (F14 —
 a Compose failure reported as "nothing was mutated" — is fixed: an unverified executor exit is
