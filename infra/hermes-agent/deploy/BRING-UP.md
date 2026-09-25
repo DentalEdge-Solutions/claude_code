@@ -628,6 +628,23 @@ sudo test -e /var/lib/hermes/governance/control/mutation-enabled && echo PRESENT
 **When the first real client is registered:** `--bootstrap-logs --apply` seals its log; confirm
 with `sudo lsattr /var/lib/hermes/governance/log/*.jsonl` (an `a` on every line).
 
+**RESULT, 2026-09-25 — PASSED on the box** (`d4fbb29..2a4e30e`, proxy restarted only, no unit
+changes; both units `active`, `NRestarts=0`). Scratch store only; the real store, the real
+registry and the kill switch were never written. **Before the pull:** the bootstrapped log had
+no `a` (`--------------e-------`); as the broker (uid 997, the unit's sandboxing via
+`systemd-run`): `append OK · o_trunc OK · truncate OK · lines 0` — the gap; the pre-flight on the
+scratch store `rc=0`. **After:** `-----a--------e-------`; as the broker: `append OK · o_trunc
+DENIED (EPERM) · truncate DENIED (EPERM) · lines 1`; as the executor (uid 10000, the real image,
+through the bind mount): `append OK · o_trunc DENIED (EPERM) · truncate DENIED (EPERM) · lines
+2`; the pre-flight `rc=0`, then, after `chattr -a`, `rc=2` with `1 registered client log(s) are
+not append-only` and no slug. Cleanup: scratch `GONE`; real store `init-host-layout --check`
+`layout OK` `rc=0`, pre-flight `rc=0`; kill switch: absent. Two observations, neither a finding:
+right after the restart `is-active` read the broker as `activating` — its `ExecStartPre` checks
+were still running; ten seconds later it was `active`/`running`, `NRestarts=0`, the journal
+showing `layout OK` then `Started`. And the refusal's headline still says the executor "cannot
+use the governance store", which is wrong-footed for an unsealed log (the executor can do too
+much, not too little) — the cosmetic wording left by the §6B final review.
+
 ---
 
 ## Phase 7: Reach the Dashboard From the Laptop
