@@ -103,7 +103,8 @@ jobs:
       # discovery BY DESIGN — the units live beside their test in deploy/. Invoke it
       # explicitly, or it runs only when a human remembers to. It asserts what the unit
       # FILES SAY; it does not exercise ProtectSystem=strict, NoNewPrivileges,
-      # RestrictAddressFamilies or boot ordering, which stay unproven until the VPS.
+      # RestrictAddressFamilies or boot ordering. (F22: layout-integration applies the
+      # broker unit's own directives under systemd-run, for `docker compose version`.)
       - name: Systemd unit suite
         run: python3 infra/hermes-agent/deploy/units.test.py
       - name: Provisioning script suite

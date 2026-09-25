@@ -26,7 +26,10 @@ class TestUnits(unittest.TestCase):
     behaves that way: nothing here exercises ProtectSystem=strict, NoNewPrivileges,
     RestrictAddressFamilies, or boot ordering. Those stay UNPROVEN until the VPS, and
     the PR body must say so — "the units are tested" would otherwise read as a
-    guarantee this wave does not make.
+    guarantee this wave does not make. (F22: layout-integration's
+    TestComposeRunsInsideTheBrokerSandbox now applies the broker unit's own [Service]
+    directives under systemd-run in Linux CI — for `docker compose version` only;
+    ReadWritePaths and boot ordering remain unexercised in CI.)
 
     Discovery note: run-bin-tests.sh discovers *.test.py under bin/ only, so this
     suite is NOT picked up by that runner. Run it explicitly:
@@ -155,6 +158,15 @@ class TestUnits(unittest.TestCase):
         rw = [l.split("=", 1)[1].split() for l in live_lines(unit("hermes-broker.service"))
               if l.startswith("ReadWritePaths=")]
         self.assertEqual(rw, [[H.DEFAULT_STORE_ROOT, H.DEFAULT_SPOOL_ROOT]])
+
+    def test_the_broker_hides_home_behind_an_empty_tmpfs(self):
+        """F22. `ProtectHome=true` hides the Docker client's Compose plugin (EACCES on
+        ~/.docker aborts plugin discovery); `tmpfs` hides real homes without that. The
+        behaviour is proven in layout-integration TestComposeRunsInsideTheBrokerSandbox;
+        this pins the text so a revert fails fast, before Linux CI."""
+        home = [l for l in live_lines(unit("hermes-broker.service"))
+                if l.startswith("ProtectHome=")]
+        self.assertEqual(home, ["ProtectHome=tmpfs"])
 
     def test_no_live_directive_points_the_broker_at_data_spool(self):
         """F10b: under the gateway-owned data/, the spool is a redirect into the store."""

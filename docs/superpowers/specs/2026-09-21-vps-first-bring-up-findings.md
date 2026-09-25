@@ -497,6 +497,43 @@ often pasted during rollouts). **Considered and not chosen:** a stable short cod
 the slug everywhere the host writes to the journal — it touches the broker and the executor's
 output contract, and makes a failed apply harder to trace to its client. No code change.
 
+### F22: the broker unit's `ProtectHome=true` hides Docker's Compose plugin — fixed (PR #62)
+
+**Found 2026-09-25, rehearsal attempt 1 on the box.** A human-approved request for the
+dedicated `rehearsal` client reached the broker, which reserved the approval and ran
+`run-ads-mutate.sh` — and Compose exited `125` before any container existed:
+
+```
+WARNING: Error loading config file: open /home/hermes-broker/.docker/config.json: permission denied
+unknown flag: --env-file
+```
+
+The broker recorded `failed_unverified_exit` (exit 4) and consumed the approval — F14's
+fail-closed labelling, working as designed. **Nothing could have been touched:** kill switch
+absent, dummy credential, fake customer id; no proxy `ALLOW` (no container), log 0 lines, no run
+record.
+
+**Cause, measured on the box.** The unit's `ProtectHome=true` makes `/home` unreadable. The
+Docker client scans `~/.docker/cli-plugins`, and an `EACCES` there (unlike `ENOENT`) abandons
+plugin discovery, so the system-wide `docker-compose` plugin in `/usr/libexec/docker/cli-plugins/`
+is never found and `compose` is parsed as an unknown command. `docker compose version` as
+`hermes-broker`: plain shell `rc=0`; under the unit's sandbox with `ProtectHome=true`
+`docker: unknown command: docker compose`, `rc=1`; with `ProtectHome=tmpfs` `rc=0`; with
+`DOCKER_CONFIG` pointing at a nonexistent directory `rc=0`. Then Phase 6's exact Compose command
+under **every** unit sandbox directive plus `ProtectHome=tmpfs`: container created,
+`mutation is disabled`, `rc=2`, proxy `ALLOW …/containers/create` and `UPGRADE …/attach (101)`.
+
+**Why nothing caught it.** Phase 6 and `bind-agreement` run Compose from an ordinary shell with a
+readable home; `units.test.py` only reads the unit's text.
+
+**Fix (PR #62):** `ProtectHome=tmpfs` — an empty, read-only private `/home`: real homes stay
+hidden, and `~/.docker` simply does not exist. New Linux CI test
+`TestComposeRunsInsideTheBrokerSandbox` reads the sandbox directives **from the real unit file**
+and runs `docker compose version` under them with `systemd-run`, plus a firing control that
+substitutes `ProtectHome=true` in memory. RED first on the draft PR (run 36175980589): the same
+`permission denied … unknown command: docker compose` as the box. `units.test.py` pins
+`ProtectHome=tmpfs`. The proxy unit keeps `ProtectHome=true` — it never runs the Docker client.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -527,3 +564,5 @@ output contract, and makes a failed apply harder to trace to its client. No code
 10. F20: forged appends — deferred; needs its own design (host-side writer or signed records).
 11. F21: client slugs in the journal — resolved by policy 2026-09-25 (slugs never leave the box;
     see F21 and README "Client names and the journal"). No code change.
+12. F22: broker `ProtectHome=true` hid Docker's Compose plugin — fixed (PR #62); apply per
+    BRING-UP "After pulling F22", then re-run the rehearsal from step 4.
