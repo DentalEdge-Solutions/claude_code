@@ -156,6 +156,15 @@ class TestUnits(unittest.TestCase):
               if l.startswith("ReadWritePaths=")]
         self.assertEqual(rw, [[H.DEFAULT_STORE_ROOT, H.DEFAULT_SPOOL_ROOT]])
 
+    def test_the_broker_hides_home_behind_an_empty_tmpfs(self):
+        """F22. `ProtectHome=true` hides the Docker client's Compose plugin (EACCES on
+        ~/.docker aborts plugin discovery); `tmpfs` hides real homes without that. The
+        behaviour is proven in layout-integration TestComposeRunsInsideTheBrokerSandbox;
+        this pins the text so a revert fails fast, before Linux CI."""
+        home = [l for l in live_lines(unit("hermes-broker.service"))
+                if l.startswith("ProtectHome=")]
+        self.assertEqual(home, ["ProtectHome=tmpfs"])
+
     def test_no_live_directive_points_the_broker_at_data_spool(self):
         """F10b: under the gateway-owned data/, the spool is a redirect into the store."""
         for l in live_lines(unit("hermes-broker.service")):

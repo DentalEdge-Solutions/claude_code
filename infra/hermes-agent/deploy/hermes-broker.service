@@ -53,7 +53,13 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# F22: tmpfs, NOT true. `true` makes /home unreadable, and the Docker client scans
+# ~/.docker/cli-plugins and abandons plugin discovery on EACCES — so run-ads-mutate.sh's
+# `docker compose` became "unknown command" (compose rc=125; the rehearsal's first run on
+# the box, 2026-09-25). tmpfs gives the broker an empty, read-only private /home: real homes
+# stay hidden, and ~/.docker simply does not exist. MEASURED on the box and proven in CI
+# (layout-integration TestComposeRunsInsideTheBrokerSandbox, with a ProtectHome=true control).
+ProtectHome=tmpfs
 ReadWritePaths=/var/lib/hermes/governance /var/lib/hermes/spool
 RestrictAddressFamilies=AF_UNIX
 MemoryMax=256M

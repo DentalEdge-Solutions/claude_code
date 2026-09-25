@@ -584,7 +584,7 @@ EOF
 )
 as_broker() { sudo systemd-run --quiet --pipe --wait --collect \
   -p User=hermes-broker -p Group=hermes-broker -p SupplementaryGroups="hermes-rail hermes" \
-  -p NoNewPrivileges=true -p ProtectSystem=strict -p ProtectHome=true -p PrivateTmp=true \
+  -p NoNewPrivileges=true -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=true \
   -p ReadWritePaths="$SG" /usr/bin/python3 -c "$PROBE" "$L"; }
 as_executor() { sudo docker run --rm --network none --entrypoint python3 \
   -v $SG/log:/opt/governance/log hermes-agent-claude -c "$PROBE" /opt/governance/log/s6b-probe.jsonl; }
@@ -659,7 +659,36 @@ showing `layout OK` then `Started`. And the refusal's headline still says the ex
 use the governance store", which is wrong-footed for an unsealed log (the executor can do too
 much, not too little) — the cosmetic wording left by the §6B final review.
 
+**After pulling F22** — the broker **unit** changes (`ProtectHome=tmpfs`, was `true`), and unit
+files are copies in `/etc/systemd/system/`, so a pull alone does not apply it:
+
+```bash
+sudo test -e /var/lib/hermes/governance/control/mutation-enabled && echo PRESENT || echo ABSENT   # ABSENT
+sudo git -C /opt/projects/claude_code pull --ff-only
+sudo git -C /opt/projects/claude_code log -1 --oneline                                   # the F22 merge commit
+sudo cp /opt/projects/claude_code/infra/hermes-agent/deploy/hermes-broker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it
+sleep 10
+systemctl is-active hermes-docker-proxy hermes-broker                                    # active, active
+systemctl show -p ProtectHome -p NRestarts hermes-broker                                 # ProtectHome=tmpfs, NRestarts=0
+sudo systemd-run --quiet --pipe --wait --collect -p User=hermes-broker -p ProtectHome=tmpfs \
+  docker compose version; echo rc=$?                                                     # Docker Compose version v…, rc=0
+```
+
+Only the broker unit changes; the proxy unit is untouched and needs no `cp`. Then continue the
+rehearsal below **from step 4**: attempt 1's approval is consumed and cannot be reused.
+
 ### Running the rehearsal
+
+**Attempt 1 (2026-09-25) stopped at step 6 — F22.** Steps 0–5 matched; the request came back
+`failed`/`failed_unverified_exit`, exit 4: Compose, run by the broker under its sandbox, could
+not find its own plugin (compose rc=125, no container created). Nothing could have been touched
+(kill switch absent, dummy credential, fake customer id; log 0 lines, no run record). The fix is
+F22 ("After pulling F22" above). After it, re-run **from step 4** in a fresh session: first set
+`cd /opt/hermes-agent; G=/var/lib/hermes/governance` (step 0's first two lines). `rehearsal` is
+already registered and sealed, and the dummy `.env.gaw` is already installed.
+
 
 **Mutation stays disabled throughout; nothing here creates the kill switch.** One dedicated,
 plainly fake client — `rehearsal`, customer id `0000000000` — goes through the whole approved
@@ -736,7 +765,7 @@ removed after.
 sudo test -d data/vaults || sudo install -d -o 10000 -g 10000 -m 700 data/vaults
 sudo stat -c '%u:%g %a' data/vaults                                                  # 10000:10000 700
 printf '%s\n' '{"actions": [{"type": "add_campaign_negative", "campaign_id": "1", "keyword": "rehearsal-not-a-real-keyword", "match_type": "EXACT"}]}' > /tmp/rehearsal-actions.json
-P=$(sudo env HERMES_GOVERNANCE_DIR=$G HERMES_AGENT_DIR=/opt/hermes-agent HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads HERMES_SPOOL_DIR=/var/lib/hermes/spool ./changeset.sh propose --client rehearsal --from /tmp/rehearsal-actions.json); echo "$P"   # …/data/vaults/rehearsal/changes/<cid>.json
+P=$(sudo env HERMES_GOVERNANCE_DIR=$G HERMES_AGENT_DIR=/opt/hermes-agent HERMES_ADS_REPO_DIR=/opt/projects/claude-google-ads HERMES_SPOOL_DIR=/var/lib/hermes/spool ./changeset.sh propose --client rehearsal --from /tmp/rehearsal-actions.json); echo "$P"   # …/data/vaults/rehearsal/changes/<cid>.json (under sudo the wrapper resolves the /opt/hermes-agent symlink, so it prints /opt/projects/claude_code/infra/hermes-agent/… — the same directory)
 rm /tmp/rehearsal-actions.json
 sudo chown -R 10000:10000 data/vaults/rehearsal
 CID=$(basename "$P" .json); echo "$CID"                                              # YYYYMMDD-HHMMSS-<8 hex>
