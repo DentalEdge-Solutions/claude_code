@@ -476,13 +476,26 @@ makes `_undo_targets` skip it — reversibility lost as surely as by truncation.
 The real fix is a host-side writer or signed records — new code on the security path, its own
 design. **Deliberately deferred by the operator 2026-09-24; does not gate the kill switch.**
 
-### F21: the pre-flight's file-level messages name per-log paths — recorded, not fixed
+### F21: client slugs reach the box's journal — resolved by policy (2026-09-25)
 
-**Found 2026-09-24 by the §6B final review.** The R19 file-level walk (`_check_files_in_dir`)
-prints the path of a log whose mode is wrong, i.e. `log/<slug>.jsonl`, and that stderr reaches
-the journal — the same client-privacy concern the registered-log checks answer with counts
-only (D6). Predates §6B; fixing it changes pre-flight output outside §6B's scope. Does not
-gate the kill switch.
+**Found 2026-09-24 by the §6B final review**, as: the R19 file-level walk
+(`_check_files_in_dir`) prints the path of a log whose mode is wrong, i.e. `log/<slug>.jsonl`,
+and that stderr reaches the journal. **Assessed 2026-09-25: that is the minor route.** Slugs
+reach the journal three ways: (1) the broker logs `client <slug>` on every request
+(`hermes-broker.py:617`, `:634`); (2) the executor output it copies into that line can carry
+the slug (the vault path, `HERMES-RESULT-JSON`); (3) the pre-flight's file-level faults name
+`log/<slug>.jsonl` and `approvals/<slug>/…`. Fixing only (3) would change the rarest route and
+leave the other two.
+
+**Decision (operator, 2026-09-25):** the journal is trusted host storage — root-readable only
+on a single-tenant box, and naming the client is what makes a failed apply debuggable. The
+rule governs what **leaves** the box: replace every real client slug with `<client>` before
+pasting journal, broker or pre-flight output into a chat, PR, doc or handoff; `RESULT` blocks
+use scratch slugs only. Written into README "Client names and the journal" and the head of
+BRING-UP. The pre-flight's registered-log messages stay counts-only (they are the output most
+often pasted during rollouts). **Considered and not chosen:** a stable short code in place of
+the slug everywhere the host writes to the journal — it touches the broker and the executor's
+output contract, and makes a failed apply harder to trace to its client. No code change.
 
 ## Final state of the box (end of session)
 
@@ -512,4 +525,5 @@ gate the kill switch.
    pulling §6B" in BRING-UP, `RESULT`). The last kill-switch gate is closed; the rehearsal gate
    (`.env.gaw` with the WRITE credential) remains an operator security decision.
 10. F20: forged appends — deferred; needs its own design (host-side writer or signed records).
-11. F21: count-only file-level pre-flight messages (client slugs reach the journal today).
+11. F21: client slugs in the journal — resolved by policy 2026-09-25 (slugs never leave the box;
+    see F21 and README "Client names and the journal"). No code change.

@@ -449,7 +449,20 @@ store (see "Governance store" below) at `$HERMES_GOVERNANCE_DIR/registry/clients
 The gateway container does not mount it at all; only the one-shot executor Hermes has
 no shell in reads it, read-only. `registry/projects.yaml` stays project-level and
 client-agnostic, still version-controlled and mounted read-only into the gateway as
-before. Shape:
+before.
+
+**Client names and the journal (F21 policy).** Client slugs **do** reach the box's systemd
+journal, and that is accepted: the broker logs `client <slug>` on every request, the executor
+output it copies into that line can carry the slug (the vault path, `HERMES-RESULT-JSON`), and
+the pre-flight's file-level faults name `log/<slug>.jsonl` and `approvals/<slug>/…`. The
+journal is root-readable only (`hermesops` needs `sudo`) on a single-tenant box, and naming the
+client is what makes a failed apply debuggable. The rule is about what **leaves** the box:
+before pasting journal, broker or pre-flight output anywhere else — a chat (including an AI
+session), a PR, a doc, a handoff — replace every real client slug with `<client>`. Runbook
+`RESULT` blocks use scratch slugs only. The pre-flight's registered-log messages stay
+counts-only because they are the output most often pasted during rollouts.
+
+Shape of `clients.json`:
 
 ```json
 { "clients": {

@@ -329,8 +329,10 @@ def _check_registered_logs(root):
     two. An UNPARSEABLE one is: no client resolves through it, so "zero registered
     clients" would be a silent pass over a store that cannot work at all.
 
-    The message carries a COUNT, never the slugs. Client slugs are client-private, this
-    text goes to stderr, and the systemd journal captures stderr under Phase B —
+    The message carries a COUNT, never the slugs. Client slugs are client-private, and
+    this is the output an operator is most often asked to paste off the box during a
+    rollout. (The box's own journal carrying slugs is accepted — F21 policy, README
+    "Client names and the journal"; the rule is that slugs never LEAVE the box.)
     vault_lib.resolve_dormant_pilot refuses to name candidates for the same reason.
     """
     reg = governance_lib.clients_registry_path(root)
