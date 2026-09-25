@@ -26,7 +26,10 @@ class TestUnits(unittest.TestCase):
     behaves that way: nothing here exercises ProtectSystem=strict, NoNewPrivileges,
     RestrictAddressFamilies, or boot ordering. Those stay UNPROVEN until the VPS, and
     the PR body must say so — "the units are tested" would otherwise read as a
-    guarantee this wave does not make.
+    guarantee this wave does not make. (F22: layout-integration's
+    TestComposeRunsInsideTheBrokerSandbox now applies the broker unit's own [Service]
+    directives under systemd-run in Linux CI — for `docker compose version` only;
+    ReadWritePaths and boot ordering remain unexercised in CI.)
 
     Discovery note: run-bin-tests.sh discovers *.test.py under bin/ only, so this
     suite is NOT picked up by that runner. Run it explicitly:

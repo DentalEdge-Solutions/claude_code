@@ -747,33 +747,49 @@ class TestAppendOnlyHelper(Layout):
         self.assertNotIn("a", self.lsattr_flags(p))     # lsattr is not
 
 
-# F22. The broker unit's sandbox directives, applied by systemd-run exactly as the unit sets
-# them. Only directives that shape what the broker's processes can see or do are carried —
-# ReadWritePaths, WorkingDirectory and the ExecStart* lines name box paths CI does not have,
-# and none of them affects how the Docker client finds its plugins.
-BROKER_SANDBOX_KEYS = ("User", "Group", "SupplementaryGroups", "UMask", "NoNewPrivileges",
-                       "PrivateTmp", "ProtectSystem", "ProtectHome", "RestrictAddressFamilies")
+# F22. The broker unit's [Service] directives, applied by systemd-run exactly as the unit
+# sets them. A DENY-list, not an allow-list: every live directive is carried except the ones
+# named here, so a sandbox directive added to the unit later is exercised automatically.
+# Excluded: what the process RUNS and how it is supervised (not what it can see), and
+# ReadWritePaths/WorkingDirectory, which name box paths CI does not have — systemd refuses
+# a missing ReadWritePaths path, and neither affects how the Docker client finds plugins.
+BROKER_UNIT_NOT_CARRIED = ("Type", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecStop",
+                           "ExecReload", "Restart", "RestartSec", "WorkingDirectory",
+                           "ReadWritePaths")
+# The directives F22 is about. The guard test fails if any is ever missing from what the
+# parser carries — a parser bug would otherwise run the main test in a weaker sandbox.
+BROKER_SANDBOX_REQUIRED = ("User", "Group", "SupplementaryGroups", "UMask", "NoNewPrivileges",
+                           "PrivateTmp", "ProtectSystem", "ProtectHome",
+                           "RestrictAddressFamilies")
 
 
 def broker_sandbox(overrides=None):
-    """[(key, value)] for BROKER_SANDBOX_KEYS, read from the REAL unit file's [Service]
-    section — so this test follows the unit, and any future directive that breaks the
-    Docker client inside the sandbox fails here instead of on the box."""
+    """[(key, value), ...] for every live [Service] directive of the REAL unit file except
+    BROKER_UNIT_NOT_CARRIED, in file order. Repeated keys (Environment=, …) are all carried,
+    as systemd accumulates them; an empty assignment resets the earlier ones, as in systemd.
+    Continuation lines are joined first. `overrides` replaces every value of a key."""
     path = os.path.join(AGENT, "deploy", "hermes-broker.service")
-    found, section = {}, None
     with open(path, encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith(("#", ";")):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                section = line
-                continue
-            key, sep, value = line.partition("=")
-            if section == "[Service]" and sep and key in BROKER_SANDBOX_KEYS:
-                found[key] = value
-    found.update(overrides or {})
-    return [(k, found[k]) for k in BROKER_SANDBOX_KEYS if k in found]
+        text = f.read().replace("\\\n", " ")
+    carried, section = [], None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line
+            continue
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if section != "[Service]" or not sep or key in BROKER_UNIT_NOT_CARRIED:
+            continue
+        if value == "":
+            carried = [(k, v) for k, v in carried if k != key]
+            continue
+        carried.append((key, value))
+    for key, value in (overrides or {}).items():
+        carried = [(k, v) for k, v in carried if k != key] + [(key, value)]
+    return carried
 
 
 class TestComposeRunsInsideTheBrokerSandbox(unittest.TestCase):
@@ -782,7 +798,12 @@ class TestComposeRunsInsideTheBrokerSandbox(unittest.TestCase):
     and the Docker client — which scans ~/.docker/cli-plugins — gives up on plugin
     discovery on EACCES, so `docker compose` became `unknown command`. Phase 6 and
     bind-agreement run Compose from an ordinary shell, and units.test.py only reads the
-    unit's text; nothing ran Compose under the sandbox the broker really gets."""
+    unit's text; nothing ran Compose under the sandbox the broker really gets.
+
+    Needs, beyond the module's root + setpriv: systemd as PID 1 (`systemd-run --wait`) and
+    the Docker CLI with its Compose plugin. Absent either, the main test fails — which is the
+    right answer under HERMES_REQUIRE_LINUX_INTEGRATION=1. Scope: `docker compose version`
+    only; ReadWritePaths is not exercised here (box paths)."""
 
     def compose_version(self, sandbox):
         props = []
@@ -791,11 +812,13 @@ class TestComposeRunsInsideTheBrokerSandbox(unittest.TestCase):
         return run(["systemd-run", "--quiet", "--pipe", "--wait", "--collect"] + props
                    + ["docker", "compose", "version"])
 
-    def test_the_unit_carries_every_sandbox_directive_this_test_applies(self):
-        """Guards the parser: a directive the parser silently missed would make the main
-        test run in a weaker sandbox than the broker's, and pass for the wrong reason."""
-        keys = [k for k, _ in broker_sandbox()]
-        self.assertEqual(keys, list(BROKER_SANDBOX_KEYS))
+    def test_the_parser_carries_every_directive_f22_depends_on(self):
+        """Guards the parser: a directive it silently dropped would make the main test run
+        in a weaker sandbox than the broker's, and pass for the wrong reason."""
+        keys = {k for k, _ in broker_sandbox()}
+        self.assertEqual(sorted(set(BROKER_SANDBOX_REQUIRED) - keys), [])
+        self.assertIn(("ProtectHome", "tmpfs"), broker_sandbox())
+        self.assertTrue(any(k == "Environment" for k, _ in broker_sandbox()))
 
     def test_docker_compose_is_found_inside_the_brokers_sandbox(self):
         r = self.compose_version(broker_sandbox())
@@ -804,10 +827,13 @@ class TestComposeRunsInsideTheBrokerSandbox(unittest.TestCase):
 
     def test_control_protecthome_true_hides_the_compose_plugin(self):
         """FIRING CONTROL: the pre-F22 setting, substituted in memory (never in the tracked
-        unit), must reproduce the box's failure — so the test above is shown to catch it."""
+        unit), must reproduce the box's failure — by its mechanism: EACCES on the broker's
+        docker config, then Compose not recognised as a command."""
         r = self.compose_version(broker_sandbox({"ProtectHome": "true"}))
-        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("compose", (r.stdout + r.stderr).lower())
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("permission denied", out)
+        self.assertRegex(out, r"unknown command|is not a docker command")
         self.assertNotIn("Docker Compose version", r.stdout)
 
 

@@ -671,10 +671,14 @@ sudo systemctl daemon-reload
 sudo systemctl restart hermes-docker-proxy     # the broker Requires= it and restarts with it
 sleep 10
 systemctl is-active hermes-docker-proxy hermes-broker                                    # active, active
-systemctl show -p ProtectHome -p NRestarts hermes-broker                                 # ProtectHome=tmpfs, NRestarts=0
-sudo systemd-run --quiet --pipe --wait --collect -p User=hermes-broker -p ProtectHome=tmpfs \
-  docker compose version; echo rc=$?                                                     # Docker Compose version v…, rc=0
+sudo diff /opt/projects/claude_code/infra/hermes-agent/deploy/hermes-broker.service \
+  /etc/systemd/system/hermes-broker.service && echo SAME                                 # SAME
+systemctl show -p ProtectHome hermes-broker                                              # ProtectHome=tmpfs  ("yes" = the old unit is still loaded)
+systemctl show -p NRestarts hermes-broker                                                # NRestarts=0
 ```
+
+The end-to-end proof that Compose now works inside the broker's sandbox is the rehearsal's
+step 6.
 
 Only the broker unit changes; the proxy unit is untouched and needs no `cp`. Then continue the
 rehearsal below **from step 4**: attempt 1's approval is consumed and cannot be reused.
@@ -685,10 +689,21 @@ rehearsal below **from step 4**: attempt 1's approval is consumed and cannot be 
 `failed`/`failed_unverified_exit`, exit 4: Compose, run by the broker under its sandbox, could
 not find its own plugin (compose rc=125, no container created). Nothing could have been touched
 (kill switch absent, dummy credential, fake customer id; log 0 lines, no run record). The fix is
-F22 ("After pulling F22" above). After it, re-run **from step 4** in a fresh session: first set
-`cd /opt/hermes-agent; G=/var/lib/hermes/governance` (step 0's first two lines). `rehearsal` is
-already registered and sealed, and the dummy `.env.gaw` is already installed.
+F22 ("After pulling F22" above). After it, re-run **from step 4** in a fresh session, after
+checking that attempt 1 left the state step 4 needs — the stop protocol above may have run
+step 8:
 
+```bash
+cd /opt/hermes-agent; G=/var/lib/hermes/governance
+sudo test -e $G/control/mutation-enabled && echo PRESENT || echo ABSENT              # ABSENT
+sudo python3 -c "import json;print(json.load(open('$G/registry/clients.json'))['clients']['rehearsal']['status'])"   # active
+sudo lsattr $G/log/rehearsal.jsonl                                                   # an "a" in the flags
+sudo stat -c '%U:%G %a' .env.gaw                                                     # hermes-broker:hermes-broker 600
+```
+
+If the status is `retired`, re-run step 1 (it rewrites the registry with `rehearsal` active;
+step 2 is then unnecessary — the sealed log is still there). If `.env.gaw` is missing, re-run
+step 3. Then continue from step 4.
 
 **Mutation stays disabled throughout; nothing here creates the kill switch.** One dedicated,
 plainly fake client — `rehearsal`, customer id `0000000000` — goes through the whole approved
@@ -800,9 +815,10 @@ done; echo "$out"
 
 Expected: `status refused`, `classification refused_preflight`, `exit_code 2`. Still `pending`
 after two minutes is a finding — check `systemctl is-active hermes-broker` and its journal.
-`exit_code 4` (`failed_unverified_exit`) is also a finding, not a hazard: this is the first time
-the wrapper runs Compose inside the broker unit's sandbox (Phase 6 ran it from a shell), and the
-kill switch is absent either way. Record it with step 7's journal output; change nothing.
+`exit_code 4` (`failed_unverified_exit`) is a finding, not a hazard — the kill switch is absent
+either way. Attempt 1 hit exactly this (F22). After F22, a second one means the unit copy or the
+`daemon-reload` did not take effect (re-check "After pulling F22"), or a new cause. Record it with
+step 7's journal output; change nothing.
 
 **7. What the broker, the proxy and the store recorded.**
 
