@@ -559,10 +559,13 @@ substitutes `ProtectHome=true` in memory. RED first on the draft PR (run 3617598
 8. F19: container-scoped calls accept any container id — fixed (PR #53), applied to the box
    2026-09-24.
 9. §6B: audit logs append-only — fixed (PR #57), applied to the box 2026-09-25 (see "After
-   pulling §6B" in BRING-UP, `RESULT`). The last kill-switch gate is closed; the rehearsal gate
-   (`.env.gaw` with the WRITE credential) remains an operator security decision.
+   pulling §6B" in BRING-UP, `RESULT`). The last kill-switch gate is closed.
 10. F20: forged appends — deferred; needs its own design (host-side writer or signed records).
 11. F21: client slugs in the journal — resolved by policy 2026-09-25 (slugs never leave the box;
     see F21 and README "Client names and the journal"). No code change.
-12. F22: broker `ProtectHome=true` hid Docker's Compose plugin — fixed (PR #62); apply per
-    BRING-UP "After pulling F22", then re-run the rehearsal from step 4.
+12. F22: broker `ProtectHome=true` hid Docker's Compose plugin — fixed (PR #62), applied to the
+    box 2026-09-25.
+13. **Rehearsal gate — PASSED on the box 2026-09-25** (attempt 2, after F22; BRING-UP "Running
+    the rehearsal", `RESULT`). `rehearsal` is retired; the dummy `.env.gaw` is removed. What
+    remains before the kill switch is BRING-UP "Before creating the kill switch" — the real WRITE
+    credential and the first real client — and the operator's own decision.
