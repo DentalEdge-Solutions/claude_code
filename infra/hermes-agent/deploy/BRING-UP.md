@@ -878,6 +878,30 @@ adding that client, **merge** it into `clients.json` and keep the `rehearsal` en
 `retired`) — do not reuse the rehearsal's replace-the-whole-file commands.
 Creating the kill switch itself remains the operator's decision.
 
+**RESULT, 2026-09-25 — real WRITE credential installed on the box.** Measured on the laptop first,
+before the file left it: `./audit-credential-access.sh --cred .env.gaw` → `rc=0`, declared `write`,
+measured `MUTATE_CAPABLE`, `mismatch false`; manager-level ADMIN (expected — the operator's own
+account, per the credential table in the README); the read-only `hermes@` account still `READ_ONLY`
+at both levels; the target customer among the 3 reachable accounts. Copied with `scp` to the deploy
+user's home, then:
+
+```bash
+cd /opt/hermes-agent
+sudo test -e .env.gaw && echo "env.gaw PRESENT" || echo "env.gaw absent"           # absent
+sudo install -o hermes-broker -g hermes-broker -m 0600 ~/env.gaw.incoming .env.gaw
+shred -u ~/env.gaw.incoming; test -e ~/env.gaw.incoming && echo LEFTOVER || echo gone   # gone
+sudo stat -c '%U:%G %a' .env.gaw                                                   # hermes-broker:hermes-broker 600
+sudo grep -c '^GOOGLE_ADS_CREDENTIAL_ROLE=write$' .env.gaw                         # 1
+sudo grep -c 'REHEARSAL' .env.gaw                                                  # 0 — not the dummy
+sudo sed -n 's/^GOOGLE_ADS_REFRESH_TOKEN=//p' .env.gaw | tr -d '\n' | sha1sum | cut -c1-12   # = the audit's refresh_token_sha12
+G=/var/lib/hermes/governance; sudo test -e $G/control/mutation-enabled && echo PRESENT || echo ABSENT   # ABSENT
+```
+
+Every line as expected; the refresh-token fingerprint on the box matched the laptop audit's
+`refresh_token_sha12` (`b5aa4baf3310`, the audit's own sha1-of-the-bare-value convention), so the
+installed file is the audited one. No value was printed on either side. Kill switch absent; no
+real client registered yet — that is the next step.
+
 ---
 
 ## Phase 7: Reach the Dashboard From the Laptop
