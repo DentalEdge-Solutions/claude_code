@@ -852,6 +852,22 @@ sudo test -e $G/control/mutation-enabled && echo PRESENT || echo ABSENT         
 When pasting output off the box, `rehearsal` is not a real client and needs no redaction; any
 other slug does (F21).
 
+**RESULT, 2026-09-25 — PASSED on the box (attempt 2).** F22 applied first (`9cfa681..872ae01`,
+broker unit copied, `daemon-reload`, proxy restarted; `diff` → `SAME`, `ProtectHome=tmpfs`,
+`NRestarts=0`). Pre-check: `rehearsal` `active`, log sealed (`-----a--------e-------`), dummy
+`.env.gaw` `hermes-broker:hermes-broker 600`. New change-set `20260925-191002-c5ad8582`, approved
+`rc=0`. Request `88c6485c-219a-48f4-9285-3d541d89e68a` → `status refused`, `classification
+refused_preflight`, `exit_code 2`, "a guard refused before any mutation; nothing was mutated".
+Broker journal: `rc=2`, container `Creating`/`Created`, `apply-changeset: mutation is disabled (kill
+switch absent or unreadable) — this is the safe default`, and the attested `HERMES-EXIT <nonce> 2`
+(F14's check succeeding) — no `permission denied`, no `unknown command`, no `NOT VERIFIED`, no
+`NOT PERSISTED`. Proxy: every call `ALLOW` — `_ping`, the Compose listing calls, `containers/create`,
+and inspect/attach/wait/start each `(target is an ads-mutator run)` (F19) — plus `UPGRADE …/attach
+(101)`; **no `DENY`**. Approval: `request_id` = the request, `outcome 'refused_preflight'`,
+`reserved_at` and `finished_at` set. Log 0 lines; `records/` empty; kill switch absent. Step 8:
+`rehearsal` → `retired`, `.env.gaw` removed, pre-flight `rc=0`, both units `active`, kill switch
+absent. (Attempt 1, the same day, stopped at step 6 — F22; see above.)
+
 ### Before creating the kill switch
 
 The rehearsal never checked the credential. Before `control/mutation-enabled` is ever created:
