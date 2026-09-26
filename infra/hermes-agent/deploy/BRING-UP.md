@@ -902,6 +902,59 @@ Every line as expected; the refresh-token fingerprint on the box matched the lap
 installed file is the audited one. No value was printed on either side. Kill switch absent; no
 real client registered yet — that is the next step.
 
+**RESULT, 2026-09-26 — first real client registered as the dormant pilot.** Operator decision: the
+first real client is the authorised dormant pilot (spec §13), marked `mutation_target:
+"dormant_pilot"` — the one client `vault_lib.resolve_dormant_pilot()` returns, the live gate's only
+target. It must be the account the WRITE credential is pinned to: `apply-changeset.py` refuses
+unless the client's `customer_id` equals the digits of `GOOGLE_ADS_CUSTOMER_ID` in `.env.gaw`
+(guard 6b). So the id is read from `.env.gaw` on the box, never typed, and the registry is rebuilt
+from the current file — `rehearsal` kept `retired`, as required above:
+
+```bash
+cd /opt/hermes-agent
+G=/var/lib/hermes/governance
+SLUG=<client>                                                                        # stays on the box
+CID=$(sudo sed -n 's/^GOOGLE_ADS_CUSTOMER_ID=//p' .env.gaw | tr -dc 0-9); echo "${#CID}"   # 10
+printf '%s' "$CID" | sha1sum | cut -c1-12                                            # = the laptop audit's customer_id_sha12
+(umask 077; sudo python3 - "$G/registry/clients.json" "$SLUG" "$CID" > /tmp/clients.json.new <<'PY'
+import json, re, sys
+path, slug, cid = sys.argv[1:]
+d = json.load(open(path)); c = d.setdefault("clients", {})
+assert re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", slug), "bad slug"
+assert re.fullmatch(r"\d{10}", cid), "bad customer id"
+assert c.get("rehearsal", {}).get("status") == "retired", "rehearsal entry missing or not retired"
+assert slug not in c, "slug already registered"
+assert not any(isinstance(v, dict) and v.get("mutation_target") == "dormant_pilot" for v in c.values()), "a dormant pilot is already marked"
+c[slug] = {"project": "claude_google_ads", "customer_id": cid,
+           "currency": "USD", "timezone": "America/New_York",
+           "status": "active", "mutation_target": "dormant_pilot"}
+json.dump(d, sys.stdout, indent=2); print()
+PY
+)
+sudo python3 -c "import json,sys;c=json.load(open(sys.argv[1]))['clients'];print(len(c),sorted(v['status'] for v in c.values()),sum(v.get('mutation_target')=='dormant_pilot' for v in c.values()))" /tmp/clients.json.new   # 2 ['active', 'retired'] 1
+sudo install -o root -g hermes -m 0640 /tmp/clients.json.new $G/registry/clients.json && rm /tmp/clients.json.new
+sudo stat -c '%U:%G %a' $G/registry/clients.json                                     # root:hermes 640
+[ "$(sudo python3 bin/vault_lib.py --dormant-pilot --registry $G/registry/clients.json --field customer_id)" = "$CID" ] && echo PILOT_OK || echo PILOT_MISMATCH   # PILOT_OK
+sudo python3 bin/migrate-governance.py --governance-root $G --bootstrap-logs --apply  # created: [<client>], skipped: [rehearsal]
+sudo lsattr $G/log/$SLUG.jsonl                                                       # an "a" in the flags
+sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $G; echo rc=$?   # rc=0
+sudo test -e $G/control/mutation-enabled && echo PRESENT || echo ABSENT               # ABSENT
+```
+
+Every line as expected: id fingerprint matched the audit (`00c17987f3d2`), `2 ['active',
+'retired'] 1`, `root:hermes 640`, `PILOT_OK`, `created: [<client>]` / `skipped: [rehearsal]`, the
+log sealed (`-----a--------e-------`), pre-flight `rc=0`, kill switch absent.
+
+**Gotcha, hit on the first run:** the resolver check was first written as `sudo
+HERMES_GOVERNANCE_DIR=$G python3 bin/vault_lib.py …` and printed `vault-lib: client registry not
+found: /opt/governance/registry/clients.json` → `PILOT_MISMATCH`. The Python library reads
+`HERMES_GOVERNANCE_ROOT` (`governance_lib.py`), and falls back to the container path
+`/opt/governance`; `HERMES_GOVERNANCE_DIR` is the name the host wrappers (`changeset.sh`) take.
+Pass `--registry` explicitly, as above. Nothing on the box was wrong.
+
+Every prerequisite above is now met. Creating `control/mutation-enabled` remains the operator's
+decision — and it is turned off again immediately after the live gate.
+
 ---
 
 ## Phase 7: Reach the Dashboard From the Laptop
