@@ -139,6 +139,52 @@ projects:
         self.assertEqual(result["sha256"], expected["sha256"])
         self.assertEqual(result["files"], expected["files"])
 
+    def test_package_hash_cleans_up_its_scratch_directory(self):
+        # E2: package_hash must not leak the scratch dir build() writes the .tar and
+        # .manifest.json into — it exists only long enough to hash them.
+        repo = tempfile.mkdtemp()
+        git(repo, "init", "-q")
+        os.makedirs(os.path.join(repo, "code"))
+        for rel, body in (("code/app.py", "app\n"), ("notes.md", "n\n")):
+            with open(os.path.join(repo, rel), "w") as f:
+                f.write(body)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "c1")
+        commit = git(repo, "rev-parse", "HEAD")
+
+        reg_dir = tempfile.mkdtemp()
+        projects = os.path.join(reg_dir, "projects.yaml")
+        with open(projects, "w") as f:
+            f.write("""version: 1
+
+projects:
+  p:
+    workdir: /projects/p
+    mutate_execute:
+      runner: /bin/true
+      script_dir: code
+      allow:
+        - app
+    package:
+      include:
+        - notes.md
+""")
+
+        captured = {}
+        real_td = L.tempfile.TemporaryDirectory
+
+        class SpyTD(real_td):
+            def __enter__(inner_self):
+                path = super().__enter__()
+                captured["path"] = path
+                return path
+
+        with mock.patch.object(L.tempfile, "TemporaryDirectory", SpyTD):
+            L.package_hash("p", repo, commit, projects)
+
+        self.assertIn("path", captured)                          # control: it was used
+        self.assertFalse(os.path.exists(captured["path"]))
+
 
 if __name__ == "__main__":
     unittest.main()

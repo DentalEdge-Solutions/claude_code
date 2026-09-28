@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, io, os, stat, sys, tarfile, tempfile, unittest
+import contextlib, importlib.util, io, os, stat, sys, tarfile, tempfile, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -116,6 +116,28 @@ class TestInstall(Base):
                 I.install(self.target, raw, files, chown=False)
         self.assertTrue(os.path.exists(os.path.join(self.target, "PLACEHOLDER")))
         self.assertEqual([n for n in os.listdir(self.d) if ".new-" in n or ".old-" in n], [])
+
+
+class TestMain(Base):
+    def test_success_prints_the_force_recreate_reminder(self):
+        # D1 (final-review): the compose bind does not follow a rename, so the CLI
+        # itself must remind the operator to force-recreate the gateway.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = I.main(["--project", "app", "--package", self.package, "--manifest", self.manifest,
+                        "--target", self.target, "--projects", self.projects, "--no-chown"])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("force-recreate hermes-agent", out)
+        self.assertIn("docker compose ps", out)
+
+    def test_control_a_refused_install_prints_no_reminder(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            rc = I.main(["--project", "app", "--package", self.package, "--manifest", self.manifest + ".missing",
+                        "--target", self.target, "--projects", self.projects, "--no-chown"])
+        self.assertEqual(rc, 1)
+        self.assertNotIn("force-recreate", buf.getvalue())
 
 
 if __name__ == "__main__":

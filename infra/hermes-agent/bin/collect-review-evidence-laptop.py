@@ -66,8 +66,13 @@ def package_hash(project, repo, commit, projects=None):
     B = importlib.util.module_from_spec(spec); spec.loader.exec_module(B)
     if projects is None:
         projects = B.DEFAULT_PROJECTS
-    out = B.build(project, repo, commit, projects, tempfile.mkdtemp())
-    return {"project": project, "commit": commit, "sha256": out["sha256"], "files": out["files"]}
+    # E2 (final-review): B.build() writes a real .tar and .manifest.json into this
+    # directory — only their hash/count is wanted here, so build into a
+    # TemporaryDirectory and let it clean itself up rather than leaking one
+    # mkdtemp() per D6.3 evidence collection.
+    with tempfile.TemporaryDirectory() as scratch:
+        out = B.build(project, repo, commit, projects, scratch)
+        return {"project": project, "commit": commit, "sha256": out["sha256"], "files": out["files"]}
 
 
 ITEMS = {"D3.1": run_audit, "D6.3": package_hash}

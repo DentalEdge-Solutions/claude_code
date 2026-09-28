@@ -12,7 +12,7 @@ in by rename; a failed swap restores the previous tree. Files root:root 0444, di
 0555, an empty 0600 `.env` (docker-compose.yml binds its mask onto it), and the manifest
 as `.hermes-package.json`.
 """
-import argparse, os, shutil, stat, sys, tarfile
+import argparse, os, shutil, sys, tarfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import changeset_lib as C
@@ -130,6 +130,13 @@ def main(argv=None):
         print(f"install-app-package: {e}", file=sys.stderr)
         return 1
     print(f"installed {a.project} package {PK.sha256_bytes(raw)[:12]} ({len(files)} files) at {a.target}")
+    # D1 (final-review): the running gateway keeps its bind to the directory just
+    # replaced — docker-compose's bind mount does not follow a rename. Print the
+    # reminder here too, not only in BRING-UP.md, since this is the command an
+    # operator actually runs.
+    print("reminder: the running gateway keeps its bind to the replaced directory — run "
+          "`cd /opt/hermes-agent && sudo docker compose up -d --force-recreate hermes-agent` "
+          "and confirm `docker compose ps` shows it running")
     return 0
 
 
