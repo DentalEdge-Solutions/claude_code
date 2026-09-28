@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.0
+version: 1.1
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version. Changing this file changes the box fingerprint's `checklist` component,
@@ -133,8 +133,8 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 ### D5.4 — The registry is as expected
 - **source:** box
 - **claim:** client counts match the operator's own list.
-- **expected:** the operator confirms the counts by status, and `dormant_pilots` is `1`.
-- **pass rule:** unexplained clients are a FAIL.
+- **expected:** the operator confirms the counts by status; `dormant_pilots` is `0` or `1` — and exactly `1` before any live gate (`vault_lib.resolve_dormant_pilot` refuses more than one).
+- **pass rule:** unexplained clients, or `dormant_pilots` greater than `1`, are a FAIL.
 
 ## D6 App packages
 
