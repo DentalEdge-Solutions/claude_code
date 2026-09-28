@@ -14,6 +14,21 @@ SECRET_KEYS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_SECRET",
 ROLE_BY_NAME = {".env.ga": "read", ".env.gaw": "write"}
 _MIN_SECRET_LEN = 8
 
+# A value-shaped assignment, or Google's refresh-token prefix. `=//p'` (a sed we ran) and the
+# rehearsal's placeholder are not values and must not count. Moved here from
+# collect-review-evidence.py (final-review Group A) so both the collector and
+# looks_like_credential_text share one definition.
+CRED_TEXT_RE = re.compile(r"GOOGLE_ADS_(?:REFRESH_TOKEN|CLIENT_SECRET|DEVELOPER_TOKEN)="
+                          r"(?!REHEARSAL-NOT-A-CREDENTIAL)[A-Za-z0-9_./-]{16,}|\b1//0[0-9A-Za-z_-]{20,}")
+_CRED_KV_RE = re.compile(r"GOOGLE_ADS_[A-Z_]+=")
+
+
+def looks_like_credential_text(text):
+    """True if `text` looks like it holds (or tries to hold) a Google Ads credential
+    assignment — used only to CLASSIFY a sweep hit the KEY=VALUE parser could not
+    fingerprint (kind: unparsed), never to extract or print a value."""
+    return bool(_CRED_KV_RE.search(text) or CRED_TEXT_RE.search(text))
+
 
 def sha12(value):
     """sha1 of the bare value, first 12 hex — audit-credential-access.py:95's convention."""
@@ -27,12 +42,22 @@ def canon(value):
 class Redactor:
     def __init__(self, slugs, customer_ids):
         self._slugs = sorted({s for s in slugs if s}, key=len, reverse=True)
-        cids = {str(c) for c in customer_ids if c}
+        # Normalise to digits FIRST: a customer_id already stored dashed in
+        # clients.json (e.g. "123-456-7890") must still redact both the dashed and
+        # the plain-digit forms it can appear as elsewhere in evidence, not just its
+        # own literal spelling (final-review Group E4).
+        digits = set()
+        for c in customer_ids:
+            if not c:
+                continue
+            d = "".join(ch for ch in str(c) if ch.isdigit())
+            if d:
+                digits.add(d)
         self._cids = []
-        for c in sorted(cids, key=len, reverse=True):
-            self._cids.append((c, c))
-            if len(c) == 10 and c.isdigit():
-                self._cids.append((f"{c[:3]}-{c[3:6]}-{c[6:]}", c))
+        for d in sorted(digits, key=len, reverse=True):
+            self._cids.append((d, d))
+            if len(d) == 10:
+                self._cids.append((f"{d[:3]}-{d[3:6]}-{d[6:]}", d))
 
     @classmethod
     def from_clients_json(cls, path):
@@ -74,6 +99,8 @@ def parse_credential_file(path):
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
             k, _, v = line.partition("=")
             k, v = k.strip(), v.strip()
             if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":

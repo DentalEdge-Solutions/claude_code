@@ -56,6 +56,18 @@ class TestRedactor(unittest.TestCase):
         with self.assertRaises(ValueError):
             R.Redactor.from_clients_json(self.clients)
 
+    def test_dashed_customer_id_in_registry_redacts_both_forms(self):
+        # E4: clients.json can itself store a dashed customer_id. Both the dashed and
+        # the plain-digit spelling must be redacted, not just the literal one on file.
+        d = tempfile.mkdtemp(); clients = os.path.join(d, "clients.json")
+        with open(clients, "w") as f:
+            json.dump({"clients": {"acme": {"customer_id": "123-456-7890"}}}, f)
+        r = R.Redactor.from_clients_json(clients)
+        out = r.text("id 1234567890 or 123-456-7890")
+        self.assertNotIn("1234567890", out)
+        self.assertNotIn("123-456-7890", out)
+        self.assertEqual(out.count("cid:" + R.sha12("1234567890")), 2)
+
 
 class TestCredentials(unittest.TestCase):
     def setUp(self):
@@ -78,12 +90,32 @@ class TestCredentials(unittest.TestCase):
         b, _ = R.parse_credential_file(cred(self.d, "b.gaw", f'GOOGLE_ADS_REFRESH_TOKEN="{TOKEN}"\r\n'))
         self.assertEqual(a["refresh_token_sha12"], b["refresh_token_sha12"])
 
+    def test_export_prefix_fingerprints_the_same_as_plain(self):
+        # A4: a sourced-shell-style credential file (`export KEY=VALUE`) must fingerprint
+        # identically to the plain `KEY=VALUE` form.
+        plain, _ = R.parse_credential_file(cred(self.d, "plain.gaw", f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n"))
+        exported, _ = R.parse_credential_file(
+            cred(self.d, "exported.gaw", f"export GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n"))
+        self.assertEqual(plain["refresh_token_sha12"], exported["refresh_token_sha12"])
+        self.assertEqual(exported["refresh_token_sha12"], R.sha12(TOKEN))
+
     def test_credential_set_drops_paths_and_sorts(self):
         infos = [{"path": "/b", "role": "write", "refresh_token_sha12": "b", "client_id_sha12": "c"},
                  {"path": "/a", "role": "read", "refresh_token_sha12": "a", "client_id_sha12": "c"}]
         self.assertEqual(R.credential_set(infos),
                          [{"role": "read", "refresh_token_sha12": "a", "client_id_sha12": "c"},
                           {"role": "write", "refresh_token_sha12": "b", "client_id_sha12": "c"}])
+
+
+class TestLooksLikeCredentialText(unittest.TestCase):
+    def test_bare_refresh_token_prefix_matches(self):
+        self.assertTrue(R.looks_like_credential_text(f"leaked: {TOKEN}\n"))
+
+    def test_key_value_shape_matches_without_a_real_value(self):
+        self.assertTrue(R.looks_like_credential_text("GOOGLE_ADS_CLIENT_SECRET=whatever\n"))
+
+    def test_control_ordinary_text_does_not_match(self):
+        self.assertFalse(R.looks_like_credential_text("just some notes about the deploy\n"))
 
 
 class TestFingerprint(unittest.TestCase):

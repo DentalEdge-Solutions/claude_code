@@ -34,10 +34,18 @@ GATEWAY_CONTROL_PATH = "/opt/registry/projects.yaml"
 SWEEP_NAMES = (".env*", "*.ga", "*.gaw", ".git-credentials", "hosts.yml", "credentials.json",
                "application_default_credentials.json", "id_rsa", "id_ecdsa", "id_ed25519")
 HISTORY_FILES = (".bash_history", ".zsh_history", ".python_history")
-# A value-shaped assignment, or Google's refresh-token prefix. `=//p'` (a sed we ran) and the
-# rehearsal's placeholder are not values and must not count.
-CRED_TEXT_RE = re.compile(r"GOOGLE_ADS_(?:REFRESH_TOKEN|CLIENT_SECRET|DEVELOPER_TOKEN)="
-                          r"(?!REHEARSAL-NOT-A-CREDENTIAL)[A-Za-z0-9_./-]{16,}|\b1//0[0-9A-Za-z_-]{20,}")
+# Moved into review_lib.py (final-review Group A4) so both the collector and
+# review_lib.looks_like_credential_text share one definition. Kept as an alias here —
+# the collector's own _count_cred_text still reads it under this name.
+CRED_TEXT_RE = R.CRED_TEXT_RE
+# Real filesystems that do not hold operator-placed credential material: pseudo/virtual
+# mounts, plus the two container-runtime mounts (overlay, squashfs) a Docker/snap host
+# always has and that are not places an operator would drop a credential file (D2.1,
+# final-review A2). Anything else not swept by `find / -xdev` is reported so the
+# reviewer can judge it explicitly, rather than the sweep silently missing it.
+PSEUDO_FSTYPES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "debugfs", "tracefs",
+                  "securityfs", "pstore", "bpf", "configfs", "fusectl", "hugetlbfs", "autofs",
+                  "binfmt_misc", "nsfs", "overlay", "squashfs"}
 CODE_PATHS = ("infra/hermes-agent/bin", "infra/hermes-agent/deploy", "infra/hermes-agent/registry",
               "infra/hermes-agent/docker-compose.yml", "infra/hermes-agent/Dockerfile")
 CHECKLIST = CHECKOUT + "/infra/hermes-agent/deploy/security-review/CHECKLIST.md"
@@ -103,8 +111,17 @@ def context(host):
 
 # ---------------------------------------------------------------- D1 host exposure
 def d1_1(host, ctx):
-    out = _ok(host, ["ss", "-tlnH"])
-    return {"listeners": sorted({line.split()[3] for line in out.splitlines() if len(line.split()) > 3})}
+    # -tulnH: TCP AND UDP (Important #3 — a UDP-only listener was invisible to -tlnH).
+    # With both protocols requested, ss prints the Netid column: protocol at 0, local
+    # address at 4. Prefix the listener with its protocol so tcp/udp on the same port
+    # are two distinct entries, not one that silently shadows the other.
+    out = _ok(host, ["ss", "-tulnH"])
+    listeners = set()
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) > 4:
+            listeners.add(f"{cols[0]} {cols[4]}")
+    return {"listeners": sorted(listeners)}
 
 
 def d1_2(host, ctx):
@@ -171,42 +188,104 @@ def _sweep(host):
         argv += (["-o"] if i else []) + ["-name", n]
     argv += [")"]
     rc, out, err = host.run(argv, timeout=600)
-    if rc not in (0, 1) or (rc == 1 and not out):          # find exits 1 on unreadable subdirs
-        raise CouldNotCheck(f"find exited {rc}: {err.strip()[:200]}")
+    # ANY non-zero exit is could-not-check (Important #1/#2, final-review A1) — an
+    # unreadable subdirectory (find's rc 1) can hide exactly the file we're looking
+    # for, so "rc 1 with some output" is no longer treated as a clean sweep. The
+    # message never carries stderr TEXT, only its shape: the rc and how many lines it
+    # had, so a path fragment in a permission-denied line cannot leak into the report.
+    if rc != 0:
+        raise CouldNotCheck(f"find exited {rc} ({len(err.splitlines())} stderr lines)")
     return sorted(set(line for line in out.splitlines() if line))
 
 
-def installed_credentials(host):
-    infos, secrets = [], []
-    for p in _sweep(host):
+def _not_swept(host):
+    """Mounts `_sweep`'s `find / -xdev` does NOT cross, other than real pseudo/virtual
+    filesystems (final-review A2). Returns a sorted list of targets, or the literal
+    string could-not-check if `findmnt` itself could not be read — the D2.1 item
+    itself stays observed either way; the reviewer judges."""
+    rc, out, _ = host.run(["findmnt", "-rn", "-o", "TARGET,FSTYPE"])
+    if rc != 0:
+        return R.COULD_NOT_CHECK
+    not_swept = []
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) < 2:
+            continue
+        target, fstype = cols[0], cols[1]
+        if target == "/" or fstype in PSEUDO_FSTYPES:
+            continue
+        not_swept.append(target)
+    return sorted(set(not_swept))
+
+
+def _shared_sweep(host, ctx):
+    """One `find` per run (final-review A3): `d2_1` and `installed_credentials` must
+    see the same candidate list, and must not each pay for (or each fail at) their own
+    system-wide sweep. The result — the list, or the CouldNotCheck itself — is cached
+    on ctx so a second caller in the same run gets it back without re-running `find`."""
+    if "sweep" not in ctx:
+        try:
+            ctx["sweep"] = _sweep(host)
+        except CouldNotCheck as e:
+            ctx["sweep"] = e
+    cached = ctx["sweep"]
+    if isinstance(cached, CouldNotCheck):
+        raise cached
+    return cached
+
+
+def installed_credentials(host, sweep=None):
+    """(infos, secrets, unparsed, unreadable). `sweep` lets a caller that already paid
+    for one system-wide sweep (e.g. collect_with_secrets, via _shared_sweep) hand it
+    in rather than triggering a second `find` (final-review A3); omitted, this runs
+    its own — the public signature callers already use is unchanged."""
+    infos, secrets, unparsed, unreadable = [], [], [], []
+    for p in (sweep if sweep is not None else _sweep(host)):
         if p.endswith(".example"):
             continue
         try:
             info, s = R.parse_credential_file(host.path(p))
         except OSError:
+            unreadable.append(p)
             continue
         if info["refresh_token_sha12"] is None:
+            try:
+                with open(host.path(p), encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                unreadable.append(p)
+                continue
+            if R.looks_like_credential_text(text):
+                unparsed.append(p)
             continue                                        # not a Google Ads credential
         info["path"] = p
         infos.append(info); secrets += s
-    return infos, secrets
+    return infos, secrets, unparsed, unreadable
 
 
 def d2_1(host, ctx):
     rows = []
-    for p in _sweep(host):
-        row = {"path": p, "kind": "example" if p.endswith(".example") else "candidate"}
+    for p in _shared_sweep(host, ctx):
+        is_example = p.endswith(".example")
+        row = {"path": p, "kind": "example" if is_example else "candidate"}
         try:
             row.update(_stat(host, p))
-            if not p.endswith(".example"):
+            if not is_example:
                 info, s = R.parse_credential_file(host.path(p))
                 ctx.setdefault("secrets", []).extend(s)
                 if info["refresh_token_sha12"]:
                     row["credential"] = {k: info[k] for k in ("role", "refresh_token_sha12", "client_id_sha12")}
+                else:
+                    with open(host.path(p), encoding="utf-8", errors="replace") as f:
+                        text = f.read()
+                    if R.looks_like_credential_text(text):
+                        row["kind"] = "unparsed"
         except OSError as e:
             row["error"] = type(e).__name__
+            if not is_example:
+                row["kind"] = "unreadable"
         rows.append(row)
-    return {"files": rows}
+    return {"files": rows, "not_swept": _not_swept(host)}
 
 
 def _count_cred_text(text, secrets):
@@ -332,11 +411,11 @@ def d6_1(host, ctx):
 
 
 def d6_2(host, ctx):
-    rc, out, _ = host.run(["find", "/root", "/home", "-xdev", "(", "-name", ".git-credentials", "-o",
-                           "-path", "*/.config/gh/hosts.yml", "-o", "-name", "id_rsa", "-o",
-                           "-name", "id_ecdsa", "-o", "-name", "id_ed25519", ")"])
-    if rc not in (0, 1):
-        raise CouldNotCheck(f"find exited {rc}")
+    rc, out, err = host.run(["find", "/root", "/home", "-xdev", "(", "-name", ".git-credentials", "-o",
+                             "-path", "*/.config/gh/hosts.yml", "-o", "-name", "id_rsa", "-o",
+                             "-name", "id_ecdsa", "-o", "-name", "id_ed25519", ")"])
+    if rc != 0:                                             # final-review A1 — see _sweep
+        raise CouldNotCheck(f"find exited {rc} ({len(err.splitlines())} stderr lines)")
     return {"git_or_ssh_private_credentials": sorted(l for l in out.splitlines() if l)}
 
 
@@ -394,9 +473,20 @@ def box_fingerprint(host, ctx):
         return {"trees": trees, "dirty": bool(dirty)}
 
     def entry_points():
+        # Important #3: fold in the firewall RULESET itself, not just the listener and
+        # ufw-frontend views above — nft first, iptables-save as the fallback on a host
+        # without nftables. If neither can be read, raise so the existing _component()
+        # wrapper marks this whole component could-not-check, which correctly marks
+        # the fingerprint incomplete (final-review B2).
+        rc, out, _ = host.run(["nft", "list", "ruleset"])
+        if rc != 0:
+            rc, out, _ = host.run(["iptables-save"])
+            if rc != 0:
+                raise CouldNotCheck("nft list ruleset and iptables-save both failed")
         return {"listeners": d1_1(host, ctx)["listeners"],
                 "ufw": _ok(host, ["ufw", "status", "verbose"]).splitlines(),
-                "sshd": sorted(_ok(host, ["sshd", "-T"]).splitlines())}
+                "sshd": sorted(_ok(host, ["sshd", "-T"]).splitlines()),
+                "firewall_ruleset_sha256": PK.sha256_bytes(out.encode())}
 
     def checklist():
         with open(host.path(CHECKLIST)) as f:
@@ -422,7 +512,8 @@ def collect_with_secrets(host):
         except (CouldNotCheck, OSError, ValueError, KeyError, IndexError) as e:
             items[iid] = {"status": R.COULD_NOT_CHECK, "reason": f"{type(e).__name__}: {e}"}
     try:
-        infos, secrets = installed_credentials(host)
+        sweep = _shared_sweep(host, ctx)                   # A3: reuse D2.1's sweep, don't re-run find
+        infos, secrets, _unparsed, _unreadable = installed_credentials(host, sweep=sweep)
         creds = R.credential_set(infos)
     except CouldNotCheck as e:
         secrets, creds = [], {R.COULD_NOT_CHECK: str(e)}
@@ -447,17 +538,30 @@ def main(argv=None, host=None):
     except ValueError as e:
         print(f"collect-review-evidence: {e} — refusing to print anything I cannot redact", file=sys.stderr)
         return 2
+    rc = 0
     if a.fingerprint_only:
         out, secrets = box_fingerprint(host, ctx), []
+        if not out["complete"]:                             # E3: still print it, but flag it
+            rc = 2
     elif a.credentials_only:
-        infos, secrets = installed_credentials(host)
+        try:
+            infos, secrets, unparsed, unreadable = installed_credentials(host)
+        except CouldNotCheck as e:
+            print(f"collect-review-evidence: {e} — refusing to certify the installed set",
+                  file=sys.stderr)
+            return 2
+        if unparsed or unreadable:
+            print(f"collect-review-evidence: {len(unparsed)} unparsed and {len(unreadable)} "
+                  "unreadable credential-shaped file(s) found — refusing to certify the "
+                  "installed set", file=sys.stderr)
+            return 2
         out = R.credential_set(infos)
     else:
         out, secrets = collect_with_secrets(host)
     text = json.dumps(ctx["redactor"].obj(out), indent=2, sort_keys=True)
     R.assert_no_secret(text, secrets)
     print(text)
-    return 0
+    return rc
 
 
 if __name__ == "__main__":
