@@ -114,6 +114,11 @@ class TestVerifyInstalled(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not in the installed package manifest"):
             PK.verify_installed(self.wd, self.sha, "code/other.py")
 
+    def test_deleted_file_refused_as_valueerror(self):
+        os.remove(os.path.join(self.wd, "code/mutator.py"))
+        with self.assertRaisesRegex(ValueError, "missing on disk"):
+            PK.verify_installed(self.wd, self.sha, "code/mutator.py")
+
 
 if __name__ == "__main__":
     unittest.main()

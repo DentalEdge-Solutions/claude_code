@@ -131,7 +131,10 @@ def verify_installed(workdir, expected_sha256, rel_path):
     entry = next((e for e in m["files"] if e["path"] == rel_path), None)
     if entry is None:
         raise ValueError(f"{rel_path} is not in the installed package manifest — refusing")
-    actual = sha256_file(os.path.join(workdir, rel_path))
+    try:
+        actual = sha256_file(os.path.join(workdir, rel_path))
+    except FileNotFoundError:
+        raise ValueError(f"{rel_path} is listed in the installed package manifest but missing on disk — refusing")
     if actual != entry["sha256"]:
         raise ValueError(f"{rel_path} does not match the installed package manifest "
                          f"(sha256 {actual[:12]} != {entry['sha256'][:12]}) — refusing")
