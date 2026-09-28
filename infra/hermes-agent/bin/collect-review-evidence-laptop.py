@@ -61,10 +61,12 @@ def run_audit(customer):
                 "stderr_lines_discarded": len(p.stderr.splitlines())}
 
 
-def package_hash(project, repo, commit):
+def package_hash(project, repo, commit, projects=None):
     spec = importlib.util.spec_from_file_location("build_app_package", os.path.join(HERE, "build-app-package.py"))
     B = importlib.util.module_from_spec(spec); spec.loader.exec_module(B)
-    out = B.build(project, repo, commit, B.DEFAULT_PROJECTS, tempfile.mkdtemp())
+    if projects is None:
+        projects = B.DEFAULT_PROJECTS
+    out = B.build(project, repo, commit, projects, tempfile.mkdtemp())
     return {"project": project, "commit": commit, "sha256": out["sha256"], "files": out["files"]}
 
 
