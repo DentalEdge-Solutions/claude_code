@@ -1239,5 +1239,78 @@ class TestApprovalsDirOwnershipAndMode(unittest.TestCase):
             os.umask(old)
 
 
+class TestReadPackage(unittest.TestCase):
+    PIN = "a" * 40
+    SHA = "b" * 64
+
+    def _reg(self, body):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "projects.yaml")
+        with open(p, "w") as f:
+            f.write("version: 1\n\nprojects:\n  app:\n    workdir: /projects/app\n" + body +
+                    "  other:\n    workdir: /projects/other\n")
+        return p
+
+    def _pin(self, extra=""):
+        return (f"    package:\n      commit: {self.PIN}\n      sha256: {self.SHA}\n"
+                "      include:\n        - notes.md\n" + extra)
+
+    def test_parses_commit_sha_and_include(self):
+        got = C.read_package(self._reg(self._pin()), "app")
+        self.assertEqual(got, {"commit": self.PIN, "sha256": self.SHA, "include": ["notes.md"]})
+
+    def test_absent_block_is_none(self):
+        self.assertIsNone(C.read_package(self._reg(""), "app"))
+
+    def test_scope_closes_at_a_sibling_key(self):
+        got = C.read_package(self._reg(self._pin("    mutate_execute:\n      runner: /x\n")), "app")
+        self.assertEqual(got["include"], ["notes.md"])
+
+    def test_other_projects_block_is_not_read(self):
+        self.assertIsNone(C.read_package(self._reg(""), "other"))
+
+    def test_duplicate_block_refuses(self):
+        with self.assertRaisesRegex(ValueError, "duplicate 'package' block"):
+            C.read_package(self._reg(self._pin() + self._pin()), "app")
+
+    def test_duplicate_key_refuses(self):
+        body = f"    package:\n      commit: {self.PIN}\n      commit: {self.PIN}\n      sha256: {self.SHA}\n"
+        with self.assertRaisesRegex(ValueError, "duplicate 'commit' key"):
+            C.read_package(self._reg(body), "app")
+
+    def test_duplicate_include_refuses(self):
+        body = self._pin().replace("        - notes.md\n", "        - notes.md\n        - notes.md\n")
+        with self.assertRaisesRegex(ValueError, "duplicate include"):
+            C.read_package(self._reg(body), "app")
+
+    def test_unknown_key_refuses(self):
+        body = self._pin().replace("      include:", "      extra: 1\n      include:")
+        with self.assertRaisesRegex(ValueError, "unknown key 'extra'"):
+            C.read_package(self._reg(body), "app")
+
+    def test_bad_pin_refuses_when_required(self):
+        body = self._pin().replace(self.SHA, "not-a-sha")
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            C.read_package(self._reg(body), "app")
+
+    def test_missing_pin_allowed_for_the_builder(self):
+        body = "    package:\n      include:\n        - notes.md\n"
+        got = C.read_package(self._reg(body), "app", require_pin=False)
+        self.assertEqual(got["include"], ["notes.md"])
+        with self.assertRaisesRegex(ValueError, "commit"):
+            C.read_package(self._reg(body), "app")          # control: required by default
+
+    def test_unsafe_include_paths_refuse(self):
+        for bad in ("../x.md", "/etc/passwd", "a//b", "a/./b", "a\\b"):
+            body = self._pin().replace("notes.md", bad)
+            with self.assertRaisesRegex(ValueError, "unsafe include", msg=bad):
+                C.read_package(self._reg(body), "app")
+
+    def test_safe_package_path(self):
+        self.assertTrue(C.safe_package_path("code/x.py"))
+        for bad in ("", "/x", "../x", "a/../b", "a//b", "./a", "a\\b"):
+            self.assertFalse(C.safe_package_path(bad), bad)
+
+
 if __name__ == "__main__":
     unittest.main()
