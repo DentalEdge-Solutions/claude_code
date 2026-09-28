@@ -878,6 +878,30 @@ adding that client, **merge** it into `clients.json` and keep the `rehearsal` en
 `retired`) — do not reuse the rehearsal's replace-the-whole-file commands.
 Creating the kill switch itself remains the operator's decision.
 
+**Also required (F23, added 2026-09-26): the real ads repo, not F6's placeholder.** The executor
+runs `code/mutate_campaign_negative.py` from `/opt/projects/claude-google-ads`. That path held the
+placeholder when live gate attempt 1 ran, and guard 7 refused (`mutator not found`). The rehearsal
+could not catch this, because guard 1 refuses before guard 7 looks for the script. F6's clone is
+gated on the **security review**, and so is the real credential (Phase 3). Then check both that
+the mutator exists and that the repo is at the commit the laptop verified. Guard 7 checks
+existence only:
+
+```bash
+A=/opt/projects/claude-google-ads
+sudo test ! -e $A/PLACEHOLDER && sudo test -f $A/code/mutate_campaign_negative.py && echo MUTATOR_OK   # MUTATOR_OK
+sudo git -c safe.directory=$A -C $A rev-parse HEAD                                   # = the commit verified on the laptop
+```
+
+Do not create the kill switch unless both lines are as shown.
+
+**Live gate attempt 1, 2026-09-26 — refused at guard 7, nothing mutated (F23).** Change-set
+`20260926-215204-c332cf8b`, approved `rc=0`; the kill switch was created and removed in one block,
+present for about two seconds. Result: `refused_preflight`, `exit_code 2`, attested; no proxy
+`DENY`; approval consumed; audit log 0 lines. Because guard 7 runs after guards 1–6b, this also
+proved on the box, with the real credential and client, that the kill switch is read, the pilot
+resolves, the approval verifies, the caps pass, and the credential's customer id matches the
+pilot's. Re-run from a **fresh** change-set once the prerequisite above is met.
+
 **RESULT, 2026-09-25 — real WRITE credential installed on the box.** Measured on the laptop first,
 before the file left it: `./audit-credential-access.sh --cred .env.gaw` → `rc=0`, declared `write`,
 measured `MUTATE_CAPABLE`, `mismatch false`; manager-level ADMIN (expected — the operator's own

@@ -534,6 +534,55 @@ substitutes `ProtectHome=true` in memory. RED first on the draft PR (run 3617598
 `permission denied … unknown command: docker compose` as the box. `units.test.py` pins
 `ProtectHome=tmpfs`. The proxy unit keeps `ProtectHome=true` — it never runs the Docker client.
 
+### F23: the pre-kill-switch list omitted F6 — the live gate reached a placeholder ads repo (recorded)
+
+**Found 2026-09-26, live gate attempt 1 on the box.** Every item BRING-UP "Before creating the
+kill switch" listed was done: the real WRITE credential (#64) and the first real client,
+registered as the dormant pilot (#65). Pre-checks passed: kill switch absent, both units
+active, `PILOT_OK`, the pilot's log sealed with 0 lines, and a backup of it (`sha12
+da39a3ee5e6b`, the empty file). Change-set `20260926-215204-c332cf8b` — one
+`add_campaign_negative`, `EXACT`, an obviously synthetic keyword — was approved `rc=0`. Then the
+kill switch was created (`root:hermes 0640`), request `0e01011c-45e7-4d6e-ab9d-0e78ef81b426` was
+filed from inside the gateway, and the same block removed the kill switch unconditionally. It
+was present for about two seconds. Result: `refused`, `refused_preflight`, `exit_code 2`, "a guard
+refused before any mutation; nothing was mutated". Broker journal:
+
+```
+broker: request 0e01011c-… client <client> changeset 20260926-215204-c332cf8b rc=2
+ Container hermes-agent-ads-mutator-run-… Creating / Created
+apply-changeset: mutator not found: /projects/claude_google_ads/code/mutate_campaign_negative.py
+HERMES-EXIT <nonce> 2
+```
+
+No proxy `DENY`. Approval `outcome 'refused_preflight'`, consumed. Audit log 0 lines. **Nothing
+was mutated.**
+
+**Cause.** `/opt/projects/claude-google-ads` on the box is still F6's placeholder (a `PLACEHOLDER`
+marker and an empty `.env`). F6 deferred the real clone "until after the security review", and
+Open items kept it as item 1. But the kill-switch prerequisites in BRING-UP named only the
+credential and the first client, and the gate's pre-checks never tested that the mutator exists.
+The rehearsal could not have caught it: with the kill switch absent, guard 1 refuses before
+guard 7 looks for the script.
+
+**What attempt 1 did prove, live, with the real credential and the real client.** The refusal
+comes from guard 7's script check (`apply-changeset.py:193`), which runs after guards 1–6b and
+the runner check. So on the box: the executor read the kill switch through the governance bind
+(guard 1); the pilot resolved `active` (2); the approved snapshot loaded and matched (3–4); the
+approval verified against the broker's reservation (5); the caps passed (6); the injected
+credential's customer id matched the pilot's (6b); `/opt/ads-venv/bin/python3` exists (7). It
+did **not** reach guard 8 (credential variables and role), `validate_only`, or Google.
+
+**A second gap of the same shape:** the gate needs the ads repo **at the commit the laptop
+verified**, not merely present. Guard 7 checks that the file exists, not which version it is.
+
+**Fix (this PR, docs only):** BRING-UP "Before creating the kill switch" now lists F6 as a
+prerequisite, gated on the security review, and gives a pre-check that must print `MUTATOR_OK`
+before the kill switch is created. The security review that F6, and BRING-UP Phase 3's rule on
+real credentials, both defer to had no definition anywhere. It is now being defined in its own
+document. The real WRITE credential went onto the box on 2026-09-25 without that review on
+record. It stays there, dormant behind the absent kill switch, and the review covers it
+retroactively.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -569,3 +618,7 @@ substitutes `ProtectHome=true` in memory. RED first on the draft PR (run 3617598
     the rehearsal", `RESULT`). `rehearsal` is retired; the dummy `.env.gaw` is removed. What
     remains before the kill switch is BRING-UP "Before creating the kill switch" — the real WRITE
     credential and the first real client — and the operator's own decision.
+14. Real WRITE credential installed (2026-09-25, #64); the dormant pilot registered (2026-09-26, #65).
+15. **F23: live gate attempt 1 refused at guard 7** (`mutator not found`, placeholder ads repo).
+    Nothing mutated. Next, in order: define and run the **security review** → **F6** (a read-only
+    deploy-key clone at the laptop-verified commit) → re-run the gate from a fresh change-set.
