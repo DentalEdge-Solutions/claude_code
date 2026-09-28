@@ -68,7 +68,7 @@ def package_hash(project, repo, commit):
     return {"project": project, "commit": commit, "sha256": out["sha256"], "files": out["files"]}
 
 
-ITEMS = {"D3.1": "run_audit", "D6.3": "package_hash"}
+ITEMS = {"D3.1": run_audit, "D6.3": package_hash}
 
 
 def main(argv=None):
