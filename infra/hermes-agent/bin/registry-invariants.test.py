@@ -125,6 +125,15 @@ class TestAllowListInvariants(unittest.TestCase):
                     self.assertEqual(len(names), len(set(names)),
                                      f"duplicate entry in {block}.allow for {p}")
 
+    def test_every_mutating_project_is_pinned_to_a_package(self):
+        # Guard 7 refuses any unpinned mutator (spec 2026-09-28 §6.5). The registry must
+        # therefore pin every project that can mutate, or it ships a dead rail.
+        for p in self.projects:
+            if C.read_allow_list(REGISTRY, p, "mutate_execute"):
+                with self.subTest(project=p):
+                    self.assertIsNotNone(C.read_package(REGISTRY, p),
+                                         f"{p} has a mutate_execute allow-list but no package pin")
+
 
 class TestMutateTierInvariants(unittest.TestCase):
     def setUp(self):
