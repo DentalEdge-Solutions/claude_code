@@ -139,17 +139,29 @@ def d1_5(host, ctx):
                 shells.append({"user": parts[0], "shell": parts[6]})
     sudo = {}
     for g in ("sudo", "admin", "wheel"):
-        rc, out, _ = host.run(["getent", "group", g])
-        if rc == 0:
-            sudo[g] = [m for m in out.strip().split(":")[-1].split(",") if m]
+        members = _getent_group_members(host, g)
+        if members is not None:
+            sudo[g] = members
     sd = host.path("/etc/sudoers.d")
     return {"login_shells": shells, "sudo_groups": sudo,
             "sudoers_d": sorted(os.listdir(sd)) if os.path.isdir(sd) else []}
 
 
+def _getent_group_members(host, group):
+    """None means the group does not exist (getent's documented rc 2) — a real, observed
+    answer, not a failure. Any other non-zero (including 127, missing binary) is
+    could-not-check: we did not learn whether the group exists."""
+    rc, out, _ = host.run(["getent", "group", group])
+    if rc == 0:
+        return [m for m in out.strip().split(":")[-1].split(",") if m]
+    if rc == 2:
+        return None
+    raise CouldNotCheck(f"getent group {group} exited {rc}")
+
+
 def d1_6(host, ctx):
-    rc, out, _ = host.run(["getent", "group", "docker"])
-    return {"docker_group_members": [m for m in out.strip().split(":")[-1].split(",") if m] if rc == 0 else []}
+    members = _getent_group_members(host, "docker")
+    return {"docker_group_members": members if members is not None else []}
 
 
 # ---------------------------------------------------------------- D2 credential inventory

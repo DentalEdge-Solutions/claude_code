@@ -32,6 +32,10 @@ class TestRedactor(unittest.TestCase):
         self.assertEqual(self.r.text("log/acme-dental.jsonl and acme and acmex"),
                          "log/<client>.jsonl and <client> and acmex")
 
+    def test_slug_joined_by_hyphen_or_underscore_is_redacted(self):
+        self.assertEqual(self.r.text("live-gate-acme-dental-20260901 and x_acme_y"),
+                         "live-gate-<client>-20260901 and x_<client>_y")
+
     def test_customer_ids_plain_and_dashed(self):
         out = self.r.text("id 1234567890 or 123-456-7890")
         self.assertNotIn("1234567890", out); self.assertNotIn("123-456-7890", out)

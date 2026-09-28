@@ -76,6 +76,23 @@ class TestBundle(Base):
         items = CE.collect(self.host())["items"]
         self.assertEqual(sorted(items), sorted(CE.PROBES))
 
+    def test_backup_dir_named_after_a_client_is_redacted(self):
+        self._w("/root/live-gate-acme-dental-20260901/note.txt", "hi")
+        out = json.dumps(CE.collect(self.host()))
+        self.assertNotIn("acme-dental", out)
+        self.assertIn("live-gate-<client>-20260901", out)
+
+    def test_docker_group_absent_is_empty(self):
+        self.outputs[("getent", "group", "docker")] = (2, "", "")
+        items = CE.collect(self.host())["items"]
+        self.assertEqual(items["D1.6"]["status"], R.OBSERVED)
+        self.assertEqual(items["D1.6"]["data"], {"docker_group_members": []})
+
+    def test_getent_failure_is_could_not_check(self):
+        self.outputs[("getent", "group", "docker")] = (1, "", "boom")
+        items = CE.collect(self.host())["items"]
+        self.assertEqual(items["D1.6"]["status"], R.COULD_NOT_CHECK)
+
 
 class TestCredentialsOnly(Base):
     def test_lists_the_installed_set_by_fingerprint(self):

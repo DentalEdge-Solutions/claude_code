@@ -52,7 +52,7 @@ class Redactor:
         for raw, digits in self._cids:
             s = s.replace(raw, "cid:" + sha12(digits))
         for slug in self._slugs:
-            s = re.sub(rf"(?<![A-Za-z0-9_-]){re.escape(slug)}(?![A-Za-z0-9_-])", CLIENT, s)
+            s = re.sub(rf"(?<![A-Za-z0-9]){re.escape(slug)}(?![A-Za-z0-9])", CLIENT, s)
         return s
 
     def obj(self, o):
