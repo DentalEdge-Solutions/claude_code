@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.1
+version: 1.2
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version. Changing this file changes the box fingerprint's `checklist` component,
@@ -16,9 +16,9 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 
 ### D1.1 — Only SSH listens publicly
 - **source:** box
-- **claim:** the only non-loopback listener is `:22`.
-- **expected:** `listeners` contains `0.0.0.0:22` and/or `[::]:22`; every other entry starts with `127.` or `[::1]` (e.g. the dashboard's `127.0.0.1:9119`).
-- **pass rule:** no other non-loopback address.
+- **claim:** the only non-loopback listener, TCP or UDP, is SSH.
+- **expected:** `listeners` contains `tcp 0.0.0.0:22` and/or `tcp [::]:22`; every other entry starts with `127.` or `[::1]` (e.g. the dashboard's `tcp 127.0.0.1:9119`); no non-loopback UDP listener unless the operator explains it.
+- **pass rule:** no other non-loopback address, TCP or UDP.
 
 ### D1.2 — The firewall agrees
 - **source:** box
@@ -55,8 +55,8 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 ### D2.1 — The credential sweep finds exactly the authorised set
 - **source:** box
 - **claim:** a system-wide sweep (not known paths — F24) finds only authorised credentials, each `hermes-broker:hermes-broker 0600` (write) or as the README table says (read).
-- **expected:** every `credential` row matches an entry in the report's authorised set; examples are `kind: example`; nothing else carries a `credential`.
-- **pass rule:** an unexpected credential, or a mode wider than `0600`, is a FAIL.
+- **expected:** every `credential` row matches an entry in the report's authorised set; examples are `kind: example`; nothing else carries a `credential`. `not_swept` is empty or every entry is explained by the operator. No row is `kind: unparsed` or `kind: unreadable` — either is a FAIL until explained.
+- **pass rule:** an unexpected credential, a mode wider than `0600`, an unexplained `not_swept` entry, or an unexplained `unparsed`/`unreadable` row, is a FAIL.
 
 ### D2.2 — No credential text in shell histories
 - **source:** box

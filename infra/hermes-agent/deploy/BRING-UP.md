@@ -241,8 +241,9 @@ reports. Two options:
   echo "PLACEHOLDER: real repo deferred until after the security review" | sudo tee /opt/projects/claude-google-ads/PLACEHOLDER >/dev/null
   sudo install -m 600 /dev/null /opt/projects/claude-google-ads/.env
   ```
-- **Real clone**, only after the review: a read-only deploy key scoped to that one repo,
-  generated on the VPS. Never a token in the clone URL — it lands in `.git/config` in plaintext.
+- **App package** (after the security review — spec 2026-09-28 §6, decision 3): no clone and
+  no GitHub key on the box; build on the laptop with `bin/build-app-package.py`, install with
+  `sudo bin/install-app-package.py`.
 
 **The empty `.env` is required either way.** `docker-compose.yml:70` binds a mask file *onto*
 `/projects/claude_google_ads/.env` inside a `:ro` mount, and the mountpoint has to exist.
@@ -904,8 +905,11 @@ pilot's. Re-run from a **fresh** change-set once the prerequisite above is met.
 **The security review must PASS for the current state (spec 2026-09-28 §5.3).** The ads repo
 now reaches the box as an **app package** (`bin/build-app-package.py` on the laptop,
 `sudo bin/install-app-package.py` here) — not a clone, so `git rev-parse` above does not apply;
-use `D6.1` instead. Three checks against the latest PASS report in `docs/security-reviews/`,
-all of which must hold before the kill switch is created:
+use `D6.1` instead. The running gateway keeps its bind to the *replaced* directory, so after
+installing a package run `cd /opt/hermes-agent && sudo docker compose up -d --force-recreate
+hermes-agent` and confirm `docker compose ps` shows it running. Three checks against the latest
+PASS report in `docs/security-reviews/`, all of which must hold before the kill switch is
+created:
 
 ```bash
 sudo python3 bin/collect-review-evidence.py --fingerprint-only     # "fingerprint" == the report's box fingerprint, "complete": true

@@ -1410,7 +1410,9 @@ is committed. A PASS binds to a box fingerprint; any trigger (§5) voids it.
 
 App code reaches the box as a **package**: the registry allow-lists' files plus
 `package.include`, at a verified commit, pinned by `package.sha256` in `registry/projects.yaml`.
-Guard 7 refuses a mutator whose bytes differ from the pinned manifest.
+Guard 7 refuses a mutator whose bytes differ from the pinned manifest. Consequence: any project
+without a pin, and any workdir without `.hermes-package.json` (a laptop clone, the placeholder),
+now refuses at guard 7 — including `--dry-run`.
 
 ## Provisioning a credential for a new project or role
 

@@ -5,6 +5,7 @@ You are reviewing a production box you did not build. You receive ONLY:
 1. `CHECKLIST.md` (this directory) — cite its `version:`.
 2. The box bundle and the laptop bundle (JSON, redacted by design).
 3. `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`.
+4. This brief (`REVIEWER-BRIEF.md`) and `REPORT-TEMPLATE.md` (this directory).
 
 You do not receive the build conversation. Do not ask for it.
 
