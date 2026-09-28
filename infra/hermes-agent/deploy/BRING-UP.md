@@ -888,11 +888,10 @@ existence only:
 
 ```bash
 A=/opt/projects/claude-google-ads
-sudo test ! -e $A/PLACEHOLDER && sudo test -f $A/code/mutate_campaign_negative.py && echo MUTATOR_OK   # MUTATOR_OK
-sudo git -c safe.directory=$A -C $A rev-parse HEAD                                   # = the commit verified on the laptop
+sudo test ! -e $A/PLACEHOLDER && sudo test -f $A/code/mutate_campaign_negative.py && sudo test -f $A/.hermes-package.json && echo MUTATOR_OK   # MUTATOR_OK
 ```
 
-Do not create the kill switch unless both lines are as shown.
+Do not create the kill switch unless the line is as shown.
 
 **Live gate attempt 1, 2026-09-26 — refused at guard 7, nothing mutated (F23).** Change-set
 `20260926-215204-c332cf8b`, approved `rc=0`; the kill switch was created and removed in one block,
@@ -901,6 +900,18 @@ present for about two seconds. Result: `refused_preflight`, `exit_code 2`, attes
 proved on the box, with the real credential and client, that the kill switch is read, the pilot
 resolves, the approval verifies, the caps pass, and the credential's customer id matches the
 pilot's. Re-run from a **fresh** change-set once the prerequisite above is met.
+
+**The security review must PASS for the current state (spec 2026-09-28 §5.3).** The ads repo
+now reaches the box as an **app package** (`bin/build-app-package.py` on the laptop,
+`sudo bin/install-app-package.py` here) — not a clone, so `git rev-parse` above does not apply;
+use `D6.1` instead. Three checks against the latest PASS report in `docs/security-reviews/`,
+all of which must hold before the kill switch is created:
+
+```bash
+sudo python3 bin/collect-review-evidence.py --fingerprint-only     # "fingerprint" == the report's box fingerprint, "complete": true
+sudo python3 bin/collect-review-evidence.py --credentials-only     # == the report's authorised credential set
+# laptop: python3 bin/collect-review-evidence-laptop.py --customer "$CUST" --access-digest   # == the report's digest
+```
 
 **RESULT, 2026-09-25 — real WRITE credential installed on the box.** Measured on the laptop first,
 before the file left it: `./audit-credential-access.sh --cred .env.gaw` → `rc=0`, declared `write`,
