@@ -299,7 +299,14 @@ def _invoke(plan, args, scratch):
     secret value anywhere in the text, and the mutator's success JSON legitimately
     contains ordinary substrings ("resource_name", "true", ...) that can coincide
     with a short placeholder credential — scrubbing the parse input would corrupt it."""
-    proc = subprocess.run([plan["runner"], plan["script"]] + args,
+    # -I: Python's isolated mode. It drops the script's own directory, PYTHONPATH and
+    # user site from sys.path, so a file dropped into code/ beside the mutator (or
+    # anywhere importable via a poisoned PYTHONPATH) cannot be imported by it — the
+    # ONE credentialed entry point in the mutation tier must not have an import path
+    # an attacker with box-write access could plant into (spec 2026-09-28 §6.5,
+    # final-review Group C / Important #4). Applies to BOTH validate_only and live/undo
+    # invocations, since both go through this one function.
+    proc = subprocess.run([plan["runner"], "-I", plan["script"]] + args,
                           cwd=scratch, env=_child_env(), capture_output=True, text=True)
     return proc.returncode, proc.stdout, proc.stderr
 

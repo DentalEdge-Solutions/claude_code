@@ -39,6 +39,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CALLS = os.path.join(HERE, "calls.jsonl")
 with open(CALLS, "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
+# Group C: prove guard 7's -I (isolated mode) actually keeps this script's own
+# directory off sys.path — written beside calls.jsonl, like the rest of this stub's
+# file-based communication with the test. realpath, not abspath: on macOS the tmp
+# tree this stub runs from is reached through a symlink (/var/folders ->
+# /private/var/folders), and CPython inserts the REALPATH-resolved directory as
+# sys.path[0] — abspath alone would read as "not on sys.path" even without -I,
+# which would make this assertion pass for the wrong reason on that platform.
+_here_real = os.path.dirname(os.path.realpath(__file__))
+with open(os.path.join(HERE, "syspath.jsonl"), "a") as f:
+    f.write(json.dumps({"dir_on_sys_path": _here_real in sys.path}) + "\\n")
 # How many audit-log records existed at the MOMENT this process was spawned. Lets a
 # test prove the per-action log write completed BEFORE the next action started,
 # rather than only that the right number of records exist once the run has finished.
@@ -186,6 +196,13 @@ class Base(unittest.TestCase):
         with open(self.calls) as f:
             return [json.loads(x) for x in f if x.strip()]
 
+    def _syspath_records(self):
+        p = os.path.join(os.path.dirname(self.stub), "syspath.jsonl")
+        if not os.path.exists(p):
+            return []
+        with open(p) as f:
+            return [json.loads(x) for x in f if x.strip()]
+
     def _mode(self, m):
         with open(self.mode_file, "w") as f:
             f.write(m)
@@ -229,6 +246,17 @@ class TestHappyPath(Base):
         self.assertEqual(len(calls), 4)                       # 2 validate + 2 live
         self.assertTrue(all("--validate-only" in c for c in calls[:2]))
         self.assertTrue(all("--validate-only" not in c for c in calls[2:]))
+
+    def test_guard7_runs_the_mutator_in_isolated_mode_off_sys_path(self):
+        """Group C: -I must be on BOTH the validate_only and the live invocation — the
+        stub records whether its own directory is on sys.path every time it is
+        spawned, for every action of a two-action run."""
+        cs = self._approved(2)
+        rc, _ = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        records = self._syspath_records()
+        self.assertEqual(len(records), 4)                     # control: it ran (2 validate + 2 live)
+        self.assertTrue(all(r["dir_on_sys_path"] is False for r in records))
 
     def test_log_records_resource_names(self):
         cs = self._approved(2)
