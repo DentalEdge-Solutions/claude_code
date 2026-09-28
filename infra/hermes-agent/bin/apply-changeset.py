@@ -19,6 +19,7 @@ See docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md
 import argparse, datetime, json, os, re, shutil, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import changeset_lib as C
+import package_lib as PK
 import governance_lib
 import vault_lib
 
@@ -191,6 +192,18 @@ def build_plan(client, changeset_id, now, registry=None, projects=None, undo=Non
         _refuse(f"runner interpreter not found: {cfg['runner']}")
     if not os.path.isfile(script):
         _refuse(f"mutator not found: {script}")
+    # 7b. The mutator's BYTES must be the pinned package's (spec 2026-09-28 §6.5, F23's
+    #     second gap). Existence is not identity: a file edited or swapped on the box would
+    #     otherwise run with the full write credential. Both paths — undo runs the same
+    #     mutator. A project with no pin refuses: there is no unpinned mutation.
+    try:
+        pin = C.read_package(projects_path, rec["project"])
+        if pin is None:
+            raise ValueError(f"no package pin for project {rec['project']!r} in the registry — "
+                             "refusing (spec 2026-09-28 §6.5)")
+        PK.verify_installed(workdir, pin["sha256"], os.path.join(cfg["script_dir"], name + ".py"))
+    except (ValueError, OSError) as e:
+        _refuse(str(e))
 
     # 8. credentials
     missing = [v for v in CRED_VARS if not os.environ.get(v)]

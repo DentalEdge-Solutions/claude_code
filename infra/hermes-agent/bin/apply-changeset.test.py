@@ -6,6 +6,7 @@ APPLY = os.path.join(HERE, "apply-changeset.py")
 sys.path.insert(0, HERE)
 import changeset_lib as C
 import governance_lib
+import package_testutil as PT
 
 def _load(name, filename):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
@@ -80,10 +81,10 @@ class _BrokenStdout:
         pass
 
 
-def _reg_text(tmp, allow="mutate_campaign_negative", caps=None):
+def _reg_text(tmp, allow="mutate_campaign_negative", caps=None, package=None):
     caps = caps or {"actions_per_changeset": 25, "actions_per_client_day": 100,
                     "applies_per_client_day": 5, "approval_ttl_hours": 24}
-    return f"""version: 1
+    text = f"""version: 1
 
 projects:
   claude_google_ads:
@@ -104,6 +105,7 @@ projects:
         applies_per_client_day: {caps['applies_per_client_day']}
         approval_ttl_hours: {caps['approval_ttl_hours']}
 """
+    return text + (PT.package_block(package) if package else "")
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -125,9 +127,11 @@ class Base(unittest.TestCase):
             json.dump({"clients": {"acme-dental": {
                 "project": "claude_google_ads", "customer_id": "1234567890",
                 "status": "active"}}}, f)
+        self.pin = PT.pin_workdir(self.tmp, "claude_google_ads",
+                                  {"code/mutate_campaign_negative.py": STUB.encode()})
         self.projects = os.path.join(self.tmp, "projects.yaml")
         with open(self.projects, "w") as f:
-            f.write(_reg_text(self.tmp))
+            f.write(_reg_text(self.tmp, package=self.pin))
         switch = governance_lib.kill_switch_path(self.tmp)
         os.makedirs(os.path.dirname(switch))
         with open(switch, "w") as f:
@@ -452,7 +456,7 @@ class TestPreflightRefusals(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 100,
                                               "applies_per_client_day": 1,
-                                              "approval_ttl_hours": 24}))
+                                              "approval_ttl_hours": 24}, package=self.pin))
         first = self._approved()
         rc, _ = self._run(first["changeset_id"])
         self.assertEqual(rc, 0)
@@ -465,7 +469,7 @@ class TestPreflightRefusals(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 2,
                                               "applies_per_client_day": 5,
-                                              "approval_ttl_hours": 24}))
+                                              "approval_ttl_hours": 24}, package=self.pin))
         first = self._approved(2)
         rc, _ = self._run(first["changeset_id"])
         self.assertEqual(rc, 0)
@@ -648,7 +652,7 @@ class TestUndo(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 1,
                                               "applies_per_client_day": 1,
-                                              "approval_ttl_hours": 24}))
+                                              "approval_ttl_hours": 24}, package=self.pin))
         cs = self._applied(1)
         self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
 
@@ -823,7 +827,7 @@ class TestRequestIdIsThreadedToTheApproval(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 100,
                                               "applies_per_client_day": 5,
-                                              "approval_ttl_hours": 999999}))
+                                              "approval_ttl_hours": 999999}, package=self.pin))
         cs = self._approved(1)
         request_id = "11111111-2222-3333-4444-555555555555"
         C.reserve_approval("acme-dental", cs["changeset_id"], request_id, NOW)
@@ -960,6 +964,51 @@ class TestAttestedExit(unittest.TestCase):
         r = subprocess.run([sys.executable, APPLY], capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 2)
         self.assertNotIn("HERMES-EXIT", r.stdout)
+
+
+class TestPackagePin(Base):
+    """Guard 7 (spec 2026-09-28 §6.5): the mutator's bytes must be the pinned package's."""
+
+    def _tamper(self):
+        with open(self.stub, "a") as f:
+            f.write("# edited on the box\n")
+
+    def test_untouched_mutator_proceeds(self):                     # control
+        cs = self._approved()
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        self.assertTrue(self._calls())
+
+    def test_edited_mutator_refused(self):
+        cs = self._approved(); self._tamper()
+        self._assert_refused(cs["changeset_id"], because="does not match the installed package manifest")
+
+    def test_missing_manifest_refused(self):
+        cs = self._approved()
+        os.remove(os.path.join(self.tmp, ".hermes-package.json"))
+        self._assert_refused(cs["changeset_id"], because="no installed package manifest")
+
+    def test_manifest_not_matching_the_registry_pin_refused(self):
+        cs = self._approved()
+        with open(self.projects, "w") as f:
+            f.write(_reg_text(self.tmp, package="f" * 64))
+        self._assert_refused(cs["changeset_id"], because="does not match the registry pin")
+
+    def test_no_package_pin_refused(self):
+        cs = self._approved()
+        with open(self.projects, "w") as f:
+            f.write(_reg_text(self.tmp))
+        self._assert_refused(cs["changeset_id"], because="no package pin")
+
+    def test_undo_path_checks_the_pin_too(self):
+        cs = self._approved()
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        os.remove(self.calls); self._tamper()
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(err):
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+        self.assertIn("does not match the installed package manifest", err.getvalue())
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import changeset_lib as C
 import governance_lib
+import package_testutil as PT
 
 import importlib.util
 
@@ -139,9 +140,11 @@ class Base(unittest.TestCase):
             json.dump({"clients": {"acme-dental": {
                 "project": "claude_google_ads", "customer_id": "1234567890",
                 "status": "active"}}}, f)
+        self.pin = PT.pin_workdir(self.tmp, "claude_google_ads",
+                                  {"code/mutate_campaign_negative.py": STUB.encode()})
         self.projects = os.path.join(self.tmp, "projects.yaml")
         with open(self.projects, "w") as f:
-            f.write(_reg_text(self.tmp))
+            f.write(_reg_text(self.tmp) + PT.package_block(self.pin))
 
         switch = governance_lib.kill_switch_path(self.tmp)
         os.makedirs(os.path.dirname(switch))
