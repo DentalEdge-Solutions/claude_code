@@ -581,7 +581,27 @@ before the kill switch is created. The security review that F6, and BRING-UP Pha
 real credentials, both defer to had no definition anywhere. It is now being defined in its own
 document. The real WRITE credential went onto the box on 2026-09-25 without that review on
 record. It stays there, dormant behind the absent kill switch, and the review covers it
-retroactively.
+retroactively. *(Superseded 2026-09-27: the operator removed it until the review passes — see F24
+and `2026-09-28-hermes-security-review-design.md` decision 4.)*
+
+### F24: a stray copy of the WRITE credential in the deploy user's home — shredded (2026-09-27)
+
+**Found 2026-09-27**, while removing the WRITE credential until the security review passes
+(operator decision; the kill switch does not protect against theft of the file, and the credential
+is ADMIN on the manager account). After `/opt/hermes-agent/.env.gaw` was shredded, a system-wide
+`sudo find / -xdev -name '*env.gaw*'` returned a second copy: `/home/hermesops/.env.gaw`. No
+runbook step had created it. The 2026-09-25 transfer went to `~/env.gaw.incoming`, which was
+shredded and checked. It most likely came from an earlier session that was cut off.
+
+**Exposure, measured before removal (canon rule 3):** `hermesops:hermesops 600`, in a `750` home;
+role `write`, not the dummy; refresh-token sha12 `b5aa4baf3310` — **the same token** the laptop
+audit measured. Readable only by `hermesops` and root, so no wider exposure; no revocation needed.
+Its modification time (2026-08-19) is the laptop file's, preserved by the copy, not its arrival
+on the box. Shredded; the sweep then returned only `.env.gaw.example`.
+
+**Why it matters:** checks of known paths could never have found it. Only a system-wide sweep did.
+**Fix:** the security review's D2 is a system-wide credential sweep that must find exactly the
+authorised set (`docs/superpowers/specs/2026-09-28-hermes-security-review-design.md` §3).
 
 ## Final state of the box (end of session)
 
@@ -622,3 +642,8 @@ retroactively.
 15. **F23: live gate attempt 1 refused at guard 7** (`mutator not found`, placeholder ads repo).
     Nothing mutated. Next, in order: define and run the **security review** → **F6** (a read-only
     deploy-key clone at the laptop-verified commit) → re-run the gate from a fresh change-set.
+16. **2026-09-27: the WRITE credential was removed from the box until the review passes; F24, a stray
+    copy in the deploy user's home, was found and shredded.** The security review is defined in
+    `2026-09-28-hermes-security-review-design.md`. **It supersedes item 15's F6 route:** the ads code
+    reaches the box as an **app package** (allow-listed code at a verified commit plus a manifest
+    hash), not as a deploy-key clone. There is no GitHub credential on the box.
