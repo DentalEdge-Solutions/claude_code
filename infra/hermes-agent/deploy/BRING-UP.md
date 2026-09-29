@@ -1061,6 +1061,123 @@ done; echo "name sweep done"                                                    
 sudo grep -rlsI -E 'GOOGLE_ADS_(REFRESH_TOKEN|CLIENT_SECRET|DEVELOPER_TOKEN)=|1//0[0-9A-Za-z_-]{20,}' /dev/shm /run/user 2>/dev/null; echo "content sweep done"   # only "content sweep done"
 ```
 
+### Ads audits on the box (spec 2026-09-29)
+
+`sudo run-client-audit <client>` produces a client's Google Ads trend-audit draft on the box. It
+runs the collectors in the one-shot `ads-collector` container, the analyst in `ads-reader`, and
+writes the draft into the client's vault with `vault-write` (uid 10000). Exit codes: `0` draft
+written, `1` a step failed, `2` a pre-check refused, `3` another audit is running. The read
+credential lives at `/etc/hermes/.env.ga` (`root:root 0400`), is passed to the containers per run
+by variable name, and is never mounted. The orchestrator calls `docker compose` **without**
+`--env-file`, so compose reads `/opt/hermes-agent/.env` for interpolation; that file must keep
+`HERMES_GOVERNANCE_DIR`, `HERMES_SPOOL_DIR`, `HERMES_AGENT_DIR` and `HERMES_ADS_REPO_DIR`.
+
+Do the steps in order. The slug and the customer id never go in the repo; write `<client>` here.
+
+**1. Install the re-pinned package.** The pin is in `registry/projects.yaml`
+(`claude_google_ads` → `commit: 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b`, the scrubbed SOP docs).
+Build on the laptop, copy to the deploy user's home, install on the box. This is the same
+procedure as in "The ads repo" (its **App package** bullet) and in the Gate section paragraph
+"The security review must PASS for the current state"; only the pin changed.
+
+```bash
+# laptop
+python3 bin/build-app-package.py --project claude_google_ads --repo ../claude-google-ads --commit 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b --out-dir /tmp/pkg
+scp /tmp/pkg/claude_google_ads-8087dfa585ca.tar /tmp/pkg/claude_google_ads-8087dfa585ca.manifest.json hermesops@<host>:~/
+# box
+cd /opt/hermes-agent
+sudo python3 bin/install-app-package.py --project claude_google_ads --package ~/claude_google_ads-8087dfa585ca.tar --manifest ~/claude_google_ads-8087dfa585ca.manifest.json --target /opt/projects/claude-google-ads; echo rc=$?   # rc=0: the installer refuses unless the manifest sha256 equals the registry pin and every member matches
+sudo docker compose up -d --force-recreate hermes-agent && sudo docker compose ps hermes-agent   # running
+```
+
+The security review's `D6.1` then reports `installed_sha256 == pin`.
+
+**2. Install the read credential** (operator, from the laptop). Measure it first with
+`./audit-credential-access.sh --cred .env.ga` (declared `read`, measured `READ_ONLY`), then copy it
+to the deploy user's home and install it:
+
+```bash
+# laptop: scp .env.ga hermesops@<host>:~/env.ga.incoming
+sudo install -d -m 0755 /etc/hermes && sudo install -o root -g root -m 0400 ~/env.ga.incoming /etc/hermes/.env.ga && shred -u ~/env.ga.incoming
+sudo stat -c '%U:%G %a' /etc/hermes/.env.ga                                       # root:root 400
+sudo grep -c '^GOOGLE_ADS_CREDENTIAL_ROLE=read$' /etc/hermes/.env.ga              # 1
+sudo python3 /opt/hermes-agent/bin/collect-review-evidence.py --credentials-only  # one row for /etc/hermes/.env.ga, role read, sha12 fd18a3b7d0f4
+ls ~/env.ga.incoming 2>&1                                                         # No such file or directory (F24: no stray copy)
+```
+
+**3. Install the Anthropic key** (operator). The key never enters an assistant session.
+
+1. In the Anthropic Console create the workspace `hermes-box`, set a **monthly spend limit** on it,
+   create a key in that workspace and save it in the password manager.
+2. Delete the legacy `...9wAA` key in the Console.
+3. On the box, replace the dummy value with `sudoedit` (the value stays off the command line):
+
+```bash
+sudoedit /opt/hermes-agent/.env                  # set ANTHROPIC_API_KEY=<the new key>; keep the four HERMES_* directory variables
+sudo sed -nE 's/^ANTHROPIC_API_KEY=//p' /opt/hermes-agent/.env | awk '{print substr($0,1,10), "len="length($0)}'   # sk-ant-api len=<n>  (prefix and length only)
+cd /opt/hermes-agent && sudo docker compose up -d --force-recreate                     # claude-auth-init rewrites the executor's settings
+sudo docker compose ps                                                                  # gateway running
+```
+
+The orchestrator refuses a key that does not start `sk-ant-` (it also refuses the old dummy).
+
+**4. Create the audit-data root.** Per-client directories are created `10000:10000 0700` by the
+tool; the root must be traversable by uid 10000 but not listable.
+
+```bash
+sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-data
+sudo stat -c '%U:%G %a' /var/lib/hermes/audit-data                                 # root:root 711
+```
+
+**5. Register the spending client.** Follow the procedure in the Gate section block "RESULT,
+2026-09-26 — first real client registered as the dormant pilot" (registry entry rebuilt from the
+current file, its log created by `migrate-governance.py --bootstrap-logs --apply` and sealed
+append-only, `preflight-governance-access.py` `rc=0`) with two differences: the entry is
+`"status": "active"` and carries **no** `mutation_target`, and the customer id is the client's own (the operator
+has it from the laptop audit; never typed into the repo, and never the dormant pilot's write target
+unless it is the same account). Keep
+the vault directory `10000:hermes 0700`. The slug and the id stay off the repo (F21).
+
+**6. Install the command.**
+
+```bash
+sudo ln -sf /opt/hermes-agent/deploy/run-client-audit /usr/local/sbin/run-client-audit
+ls -l /usr/local/sbin/run-client-audit                                          # -> /opt/hermes-agent/deploy/run-client-audit
+```
+
+**7. Dry run, then the first audit.**
+
+```bash
+sudo run-client-audit <client> --dry-run; echo rc=$?    # the planned steps: full commands, env var NAMES only, customer id redacted; rc=0
+sudo run-client-audit <client>; echo rc=$?              # every step rc=0; "draft -> /opt/hermes-agent/data/vaults/<client>/audits/<ts>-audit.md"; rc=0
+```
+
+Copy the draft off with `scp`, and record the runtime (the summary the run prints) and the cost
+(the Console's `hermes-box` usage).
+
+Two checks that have never run on real Docker; do them on this first run and write the result down:
+
+- **(a) `-e NAME` pass-through.** The dry run shows names only; confirm compose really receives the
+  values from the calling environment. The first real collect step must either succeed, or fail
+  with an auth error that names **no missing variable**. A `variable is not set` warning or an
+  auth error naming a variable means the pass-through does not work: stop and fix it before
+  another run.
+- **(b) uid 10000 traversal.** `vault-write` runs as uid 10000 via `setpriv`. It must traverse the
+  governance store (`root:hermes 2750`) and `/var/lib/hermes/audit-data` (`0711`). A `vault-write`
+  failure with `EACCES` (Permission denied) is a traversal problem: check the modes on each path
+  component (`sudo namei -m /var/lib/hermes/audit-data/<client>`), not the tool.
+
+**Operator note:** after the first real run, merge and push the ads-repo branch
+`docs/scrub-client-ids` (commit `8087dfa`), so the pin is reproducible from GitHub.
+
+**8. Offboarding.** When a client is retired, set its registry status to `retired`, then remove
+both trees. The review's D7.1 checks that no retired client has either.
+
+```bash
+sudo rm -rf /var/lib/hermes/audit-data/<client> /opt/hermes-agent/data/vaults/<client>
+sudo ls /var/lib/hermes/audit-data /opt/hermes-agent/data/vaults                   # <client> no longer listed
+```
+
 ---
 
 ## Phase 7: Reach the Dashboard From the Laptop
