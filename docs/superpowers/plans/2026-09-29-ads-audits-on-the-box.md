@@ -153,7 +153,7 @@ cd ~/Projects/claude_code/infra/hermes-agent && python3 bin/build-app-package.py
 cd ~/Projects/claude-google-ads && git stash pop -q && git stash list | wc -l      # 0
 ```
 
-Expected: rc 0 and `files: 17`. If the guard refuses a doc, remove that doc from `include` and say so in the PR (don't weaken the guard). Put the printed `sha256` into `claude_google_ads.package.sha256`. `commit` is unchanged.
+Expected: rc 0 and `files: 21` (today's 11 + 4 collectors + 6 docs). If the guard refuses a doc, remove that doc from `include` and say so in the PR (don't weaken the guard). Put the printed `sha256` into `claude_google_ads.package.sha256`. `commit` is unchanged.
 
 - [ ] **Step 7: Run all suites and commit**
 
@@ -170,12 +170,41 @@ git commit -m "feat(hermes): package the audit collectors + SOP docs; refuse cli
 ### Task 2: One-shot `ads-collector` and `ads-reader` services, proven on Linux CI
 
 **Files:**
+- Modify: `infra/hermes-agent/bin/install-app-package.py` (`install()`: create the `audit_data/` mount point)
+- Test: `infra/hermes-agent/bin/install-app-package.test.py`
 - Modify: `infra/hermes-agent/docker-compose.yml` (after the `ads-credential-audit` service)
 - Create: `infra/hermes-agent/deploy/audit-mounts-integration.test.py`
 - Modify: `.github/workflows/ci.yml` ("Bind agreement" job: one more step)
 
 **Interfaces:**
 - Produces: the compose services `ads-collector` (entrypoint `/opt/ads-venv/bin/python3`, working dir `/projects/claude_google_ads`, command `code/<collector>.py`) and `ads-reader` (entrypoint `python3 /opt/cc-bin/run-ads-report.py`, args are the reader's arguments). Both read `HERMES_AUDIT_DATA_DIR` from the caller's environment.
+
+- [ ] **Step 0: The installer creates the `audit_data/` mount point.** The app dir is installed read-only
+(`0555`, root) and bind-mounted `:ro`. Docker can only bind `audit-data/<client>` onto
+`/projects/claude_google_ads/audit_data` if that directory already exists in it. Otherwise it tries to
+create it inside the read-only mount and fails. The installer already does the same for the `.env` mask
+file. Write the failing test first (append to `install-app-package.test.py`, reusing that file's
+existing install fixture; read its first test for the fixture names):
+
+```python
+    def test_install_creates_empty_audit_data_mount_point(self):
+        # after a successful install into `target` (as the file's existing happy-path test does):
+        p = os.path.join(target, "audit_data")
+        self.assertTrue(os.path.isdir(p))
+        self.assertEqual(os.listdir(p), [])
+```
+
+Run it: FAIL (`AssertionError: False is not true`). Then in `install()`, right after the line that writes
+the empty `.env` (`_write_new(os.path.join(new, ".env"), b"", 0o600)`), add:
+
+```python
+        # Mount point for the per-client audit-data bind (spec 2026-09-29 ads-audits-on-the-box §2):
+        # it must pre-exist, because the app dir is bound read-only. Empty; D6.1 lists files only.
+        os.mkdir(os.path.join(new, "audit_data"), 0o755)
+```
+
+The existing post-walk `chmod 0555` and chown then apply to it. Run the test: PASS. Run
+`infra/hermes-agent/bin/run-bin-tests.sh` → `N/N suites passed`.
 
 - [ ] **Step 1: Write the failing integration test** (`deploy/audit-mounts-integration.test.py`)
 
@@ -212,6 +241,8 @@ class TestAuditMounts(unittest.TestCase):
         shutil.copytree(AGENT, cls.agent, ignore=shutil.ignore_patterns("data", "security-reviews", ".env*"))
         app = os.path.join(cls.tmp, "claude-google-ads/code")
         os.makedirs(app)
+        os.makedirs(os.path.join(cls.tmp, "claude-google-ads/audit_data"))   # as install-app-package creates it
+        open(os.path.join(cls.tmp, "claude-google-ads/.env"), "w").close()    # as install-app-package creates it
         with open(os.path.join(app, "stub_write.py"), "w") as f:
             f.write("open('/projects/claude_google_ads/audit_data/out.json','w').write('{}')\n")
         os.chmod(os.path.join(cls.tmp, "claude-google-ads"), 0o755)
@@ -315,7 +346,8 @@ Expected: errors, `no such service: ads-collector`. (If no Linux host is availab
 - [ ] **Step 6: Commit**
 
 ```bash
-git add infra/hermes-agent/docker-compose.yml infra/hermes-agent/deploy/audit-mounts-integration.test.py .github/workflows/ci.yml
+git add infra/hermes-agent/bin/install-app-package.py infra/hermes-agent/bin/install-app-package.test.py \
+        infra/hermes-agent/docker-compose.yml infra/hermes-agent/deploy/audit-mounts-integration.test.py .github/workflows/ci.yml
 git commit -m "feat(hermes): one-shot ads-collector/ads-reader services; Linux CI proves their mounts"
 ```
 
