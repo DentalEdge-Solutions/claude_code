@@ -6,6 +6,7 @@ APPLY = os.path.join(HERE, "apply-changeset.py")
 sys.path.insert(0, HERE)
 import changeset_lib as C
 import governance_lib
+import package_testutil as PT
 
 def _load(name, filename):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
@@ -38,6 +39,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CALLS = os.path.join(HERE, "calls.jsonl")
 with open(CALLS, "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\\n")
+# Group C: prove guard 7's -I (isolated mode) actually keeps this script's own
+# directory off sys.path — written beside calls.jsonl, like the rest of this stub's
+# file-based communication with the test. realpath, not abspath: on macOS the tmp
+# tree this stub runs from is reached through a symlink (/var/folders ->
+# /private/var/folders), and CPython inserts the REALPATH-resolved directory as
+# sys.path[0] — abspath alone would read as "not on sys.path" even without -I,
+# which would make this assertion pass for the wrong reason on that platform.
+_here_real = os.path.dirname(os.path.realpath(__file__))
+with open(os.path.join(HERE, "syspath.jsonl"), "a") as f:
+    f.write(json.dumps({"dir_on_sys_path": _here_real in sys.path}) + "\\n")
 # How many audit-log records existed at the MOMENT this process was spawned. Lets a
 # test prove the per-action log write completed BEFORE the next action started,
 # rather than only that the right number of records exist once the run has finished.
@@ -80,10 +91,10 @@ class _BrokenStdout:
         pass
 
 
-def _reg_text(tmp, allow="mutate_campaign_negative", caps=None):
+def _reg_text(tmp, allow="mutate_campaign_negative", caps=None, package=None):
     caps = caps or {"actions_per_changeset": 25, "actions_per_client_day": 100,
                     "applies_per_client_day": 5, "approval_ttl_hours": 24}
-    return f"""version: 1
+    text = f"""version: 1
 
 projects:
   claude_google_ads:
@@ -104,6 +115,7 @@ projects:
         applies_per_client_day: {caps['applies_per_client_day']}
         approval_ttl_hours: {caps['approval_ttl_hours']}
 """
+    return text + (PT.package_block(package) if package else "")
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -125,9 +137,11 @@ class Base(unittest.TestCase):
             json.dump({"clients": {"acme-dental": {
                 "project": "claude_google_ads", "customer_id": "1234567890",
                 "status": "active"}}}, f)
+        self.pin = PT.pin_workdir(self.tmp, "claude_google_ads",
+                                  {"code/mutate_campaign_negative.py": STUB.encode()})
         self.projects = os.path.join(self.tmp, "projects.yaml")
         with open(self.projects, "w") as f:
-            f.write(_reg_text(self.tmp))
+            f.write(_reg_text(self.tmp, package=self.pin))
         switch = governance_lib.kill_switch_path(self.tmp)
         os.makedirs(os.path.dirname(switch))
         with open(switch, "w") as f:
@@ -182,6 +196,13 @@ class Base(unittest.TestCase):
         with open(self.calls) as f:
             return [json.loads(x) for x in f if x.strip()]
 
+    def _syspath_records(self):
+        p = os.path.join(os.path.dirname(self.stub), "syspath.jsonl")
+        if not os.path.exists(p):
+            return []
+        with open(p) as f:
+            return [json.loads(x) for x in f if x.strip()]
+
     def _mode(self, m):
         with open(self.mode_file, "w") as f:
             f.write(m)
@@ -225,6 +246,17 @@ class TestHappyPath(Base):
         self.assertEqual(len(calls), 4)                       # 2 validate + 2 live
         self.assertTrue(all("--validate-only" in c for c in calls[:2]))
         self.assertTrue(all("--validate-only" not in c for c in calls[2:]))
+
+    def test_guard7_runs_the_mutator_in_isolated_mode_off_sys_path(self):
+        """Group C: -I must be on BOTH the validate_only and the live invocation — the
+        stub records whether its own directory is on sys.path every time it is
+        spawned, for every action of a two-action run."""
+        cs = self._approved(2)
+        rc, _ = self._run(cs["changeset_id"])
+        self.assertEqual(rc, 0)
+        records = self._syspath_records()
+        self.assertEqual(len(records), 4)                     # control: it ran (2 validate + 2 live)
+        self.assertTrue(all(r["dir_on_sys_path"] is False for r in records))
 
     def test_log_records_resource_names(self):
         cs = self._approved(2)
@@ -452,7 +484,7 @@ class TestPreflightRefusals(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 100,
                                               "applies_per_client_day": 1,
-                                              "approval_ttl_hours": 24}))
+                                              "approval_ttl_hours": 24}, package=self.pin))
         first = self._approved()
         rc, _ = self._run(first["changeset_id"])
         self.assertEqual(rc, 0)
@@ -465,7 +497,7 @@ class TestPreflightRefusals(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 2,
                                               "applies_per_client_day": 5,
-                                              "approval_ttl_hours": 24}))
+                                              "approval_ttl_hours": 24}, package=self.pin))
         first = self._approved(2)
         rc, _ = self._run(first["changeset_id"])
         self.assertEqual(rc, 0)
@@ -648,7 +680,7 @@ class TestUndo(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 1,
                                               "applies_per_client_day": 1,
-                                              "approval_ttl_hours": 24}))
+                                              "approval_ttl_hours": 24}, package=self.pin))
         cs = self._applied(1)
         self.assertEqual(self._run(cs["changeset_id"], undo=cs["changeset_id"])[0], 0)
 
@@ -823,7 +855,7 @@ class TestRequestIdIsThreadedToTheApproval(Base):
             f.write(_reg_text(self.tmp, caps={"actions_per_changeset": 25,
                                               "actions_per_client_day": 100,
                                               "applies_per_client_day": 5,
-                                              "approval_ttl_hours": 999999}))
+                                              "approval_ttl_hours": 999999}, package=self.pin))
         cs = self._approved(1)
         request_id = "11111111-2222-3333-4444-555555555555"
         C.reserve_approval("acme-dental", cs["changeset_id"], request_id, NOW)
@@ -960,6 +992,51 @@ class TestAttestedExit(unittest.TestCase):
         r = subprocess.run([sys.executable, APPLY], capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 2)
         self.assertNotIn("HERMES-EXIT", r.stdout)
+
+
+class TestPackagePin(Base):
+    """Guard 7 (spec 2026-09-28 §6.5): the mutator's bytes must be the pinned package's."""
+
+    def _tamper(self):
+        with open(self.stub, "a") as f:
+            f.write("# edited on the box\n")
+
+    def test_untouched_mutator_proceeds(self):                     # control
+        cs = self._approved()
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        self.assertTrue(self._calls())
+
+    def test_edited_mutator_refused(self):
+        cs = self._approved(); self._tamper()
+        self._assert_refused(cs["changeset_id"], because="does not match the installed package manifest")
+
+    def test_missing_manifest_refused(self):
+        cs = self._approved()
+        os.remove(os.path.join(self.tmp, ".hermes-package.json"))
+        self._assert_refused(cs["changeset_id"], because="no installed package manifest")
+
+    def test_manifest_not_matching_the_registry_pin_refused(self):
+        cs = self._approved()
+        with open(self.projects, "w") as f:
+            f.write(_reg_text(self.tmp, package="f" * 64))
+        self._assert_refused(cs["changeset_id"], because="does not match the registry pin")
+
+    def test_no_package_pin_refused(self):
+        cs = self._approved()
+        with open(self.projects, "w") as f:
+            f.write(_reg_text(self.tmp))
+        self._assert_refused(cs["changeset_id"], because="no package pin")
+
+    def test_undo_path_checks_the_pin_too(self):
+        cs = self._approved()
+        self.assertEqual(self._run(cs["changeset_id"])[0], 0)
+        os.remove(self.calls); self._tamper()
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(err):
+            self._run(cs["changeset_id"], undo=cs["changeset_id"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(self._calls(), [])
+        self.assertIn("does not match the installed package manifest", err.getvalue())
 
 
 if __name__ == "__main__":

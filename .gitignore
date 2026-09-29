@@ -30,3 +30,6 @@ infra/hermes-agent/.env.pr
 infra/hermes-agent/.env.ga
 infra/hermes-agent/.env.gaw
 infra/hermes-agent/bin/__pycache__/
+
+# Security-review raw evidence bundles — never committed (spec 2026-09-28 decision 6)
+infra/hermes-agent/security-reviews/

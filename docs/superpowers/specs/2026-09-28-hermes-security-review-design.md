@@ -88,7 +88,7 @@ read-only command that tests it, the expected output, and the pass rule.
    - **An item it cannot run is `could-not-check`, never a pass.** An unreadable path is not
      healthy (F17's lesson).
    - `--fingerprint-only` prints only the box-state fingerprint (§5).
-3. **The laptop collector**, `infra/hermes-agent/bin/collect-review-evidence-laptop.sh`. It runs the
+3. **The laptop collector**, `infra/hermes-agent/bin/collect-review-evidence-laptop.py`. It runs the
    D3 audit with its exit code captured and computes the D6 package hash from the verified commit.
 4. **Evidence storage.** Raw bundles go to a gitignored directory on the laptop
    (`infra/hermes-agent/security-reviews/`, added to `.gitignore`) and to the operator's own
@@ -110,12 +110,21 @@ read-only command that tests it, the expected output, and the pass rule.
 
 ### 5.1 The fingerprint
 
-Hashes only, so it is safe to commit in the report:
+Hashes only, so it is safe to commit in the report. It has **three parts, each checked on its
+own**, because they are measured in different places and at different times:
+
+- **The box fingerprint:** every component in the table below. The box collector computes it
+  alone (`--fingerprint-only`).
+- **The authorised credential set** (§5.2): each credential as {role, refresh-token sha12,
+  client-id sha12}. It is compared as a set against what is installed, not hashed into the box
+  fingerprint, because the installed set is empty during the review and full afterwards.
+- **The measured-access digest:** a hash of the D3 audit's verdicts and access levels, from the
+  laptop collector. It re-triggers on access-level drift (canon: human accounts drift).
+
+The box fingerprint's components:
 
 | Component | Hash of | Re-trigger it represents |
 |---|---|---|
-| Credentials | the set of installed credential files, each as {role, refresh-token sha12, client-id sha12} | a new or re-issued credential |
-| Measured access | the D3 audit's verdicts and access levels (from the laptop bundle) | access-level drift (canon: human accounts drift) |
 | Clients | `registry/clients.json` (whole-file sha256; no slugs printed) | a new client or a status change |
 | App packages | per app: manifest sha256 and source commit | a new package |
 | Security-relevant code | git tree hashes of `infra/hermes-agent/bin/`, `deploy/`, `registry/`, and the blob hashes of `docker-compose.yml` and `Dockerfile`, at the box's checkout | a new action type, a guard change, a unit or image change |
@@ -140,10 +149,16 @@ would change the fingerprint and void the PASS.
 
 ### 5.3 Enforcement
 
-BRING-UP "Before creating the kill switch" gains one check: `collect-review-evidence.py
---fingerprint-only` must equal the fingerprint in the **latest PASS report**, with the installed
-credentials equal to that report's authorised set. Any trigger means the PASS no longer applies:
-no PASS for the current state, no kill switch. A re-run is the full collector; the reviewer is told
+BRING-UP "Before creating the kill switch" gains three checks against the **latest PASS report**.
+All three must hold:
+
+1. **Box:** `collect-review-evidence.py --fingerprint-only` equals the report's box fingerprint.
+2. **Box:** `collect-review-evidence.py --credentials-only` prints the installed credential set
+   (roles and sha12s), which must equal the report's authorised set.
+3. **Laptop:** `collect-review-evidence-laptop.py --access-digest` equals the report's
+   measured-access digest. This runs the same audit the credential reinstall already requires.
+
+Any trigger means the PASS no longer applies: no PASS for the current state, no kill switch. A re-run is the full collector; the reviewer is told
 which components changed and focuses there, but judges every item.
 
 ## 6. App packages

@@ -85,10 +85,18 @@ projects:
         #   add_campaign_negative / add_competitor_negatives / apply_negatives /
         #   attach_audience — mutators. NEVER allow-listed, in this project or
         #   any future one. Guarded at the script via code/injected_credentials.py.
+    # App package (spec 2026-09-28 §6): the allow-listed code of BOTH tiers plus these
+    # static inputs, at a verified commit. Guard 7 refuses a mutator whose bytes differ.
+    package:
+      commit: 5826212d7f7c27ebbb51b7bb108558356286a505
+      sha256: 839b9d68b43157d7b2e3a02e3607c7413ff1baa03fa92a250654973321d2ace7
+      include:
+        - universal-negative-keywords.md
     # MUTATION TIER (Task 2 increment). Separate from read_execute by design: the
     # read allow-list's invariant is "readers only; mutators are never allow-listed",
     # and apply-changeset.py refuses if any name appears in BOTH lists.
-    # Runs under a SEPARATE Standard-access write credential (.env.gaw), injected
+    # Runs under a SEPARATE write credential (.env.gaw) — its account and access
+    # level are recorded in the latest security review (D3.2), injected
     # per-invocation. Never the read-only .env.ga, never the gateway env.
     mutate_execute:
       runner: /opt/ads-venv/bin/python3   # pinned build-time venv, NOT base python

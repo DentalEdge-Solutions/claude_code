@@ -241,6 +241,84 @@ def read_allow_list(path, project, block):
     return read_block(path, project, block)["allow"]
 
 
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA64_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def safe_package_path(p):
+    """A package-relative path: not absolute, no '..' or '.' segment, no empty segment,
+    no backslash. The ONE definition — the registry reader, the builder, the installer
+    and guard 7 all use it, so none of them can drift looser than the others."""
+    if not isinstance(p, str) or not p or p.startswith("/") or "\\" in p:
+        return False
+    return all(seg not in ("", ".", "..") for seg in p.split("/"))
+
+
+def read_package(path, project, require_pin=True):
+    """projects.<project>.package — the pinned app package (spec 2026-09-28 §6.3).
+
+    Returns None when the block is absent: callers decide whether that is a refusal
+    (guard 7, the installer) or nothing to pin. require_pin=False exists for ONE caller,
+    build-app-package.py, which needs `include` before the hash it will produce exists.
+
+    Duplicate keys refuse at every depth, for read_block's reason: in the file that
+    decides which bytes may mutate a live account, a repeated key is a mistake, not an
+    intent. An unknown key refuses too — a typo like `sha265:` must not leave the pin
+    silently unset.
+    """
+    got = None
+    inside = False
+    sub = None
+    seen = set()
+    seen_inc = set()
+    for indent, stripped in _iter_project_lines(path, project):
+        if indent == 4 and stripped == "package:":
+            if got is not None:
+                raise ValueError(f"duplicate 'package' block for project {project!r} — refusing")
+            got = {"commit": None, "sha256": None, "include": []}
+            inside, sub = True, None
+        elif indent <= 4:
+            inside, sub = False, None
+        elif inside and indent == 6:
+            key, _, val = stripped.partition(":")
+            key, val = key.strip(), val.strip()
+            if key in seen:
+                raise ValueError(f"duplicate {key!r} key in package for project {project!r} — "
+                                 "refusing rather than taking the last value")
+            seen.add(key)
+            if key == "include":
+                if val:
+                    raise ValueError(f"package.include for project {project!r} must be a "
+                                     "block list ('- path' lines), not an inline value")
+                sub = "include"
+            elif key in ("commit", "sha256"):
+                sub = None
+                got[key] = val
+            else:
+                raise ValueError(f"unknown key {key!r} in package for project {project!r}")
+        elif inside and indent == 8 and sub == "include":
+            if not stripped.startswith("- "):
+                raise ValueError(f"package.include for project {project!r}: expected '- path', "
+                                 f"got {stripped!r}")
+            item = stripped[2:].strip()
+            if not safe_package_path(item):
+                raise ValueError(f"unsafe include path {item!r} in package for project {project!r}")
+            if item in seen_inc:
+                raise ValueError(f"duplicate include {item!r} in package for project {project!r}")
+            seen_inc.add(item)
+            got["include"].append(item)
+        elif inside:
+            raise ValueError(f"unexpected line in package for project {project!r}: {stripped!r}")
+    if got is None:
+        return None
+    if require_pin:
+        if not _SHA40_RE.fullmatch(got["commit"] or ""):
+            raise ValueError(f"package.commit for project {project!r} must be a 40-hex commit")
+        if not _SHA64_RE.fullmatch(got["sha256"] or ""):
+            raise ValueError(f"package.sha256 for project {project!r} must be 64 hex")
+    return got
+
+
 def _read_positive_int_limits(got, keys, project, label):
     """Validate a set of numeric limits out of a parsed `caps:` block, fail-closed.
 

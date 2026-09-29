@@ -1398,6 +1398,22 @@ actually need.
 (the part where both historical bugs lived). The probes need a live account and
 belong to operator-run verification.
 
+## Security review and app packages
+
+The gate for real credentials and for any app code on the box is the **security review**
+(`docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`): a versioned checklist
+(`deploy/security-review/CHECKLIST.md`), two read-only collectors that redact by design
+(`bin/collect-review-evidence.py` on the box, `bin/collect-review-evidence-laptop.py` on the
+laptop), an independent reviewer (`deploy/security-review/REVIEWER-BRIEF.md`), and the
+operator's sign-off. Raw bundles live in the gitignored `security-reviews/`; only the report
+is committed. A PASS binds to a box fingerprint; any trigger (§5) voids it.
+
+App code reaches the box as a **package**: the registry allow-lists' files plus
+`package.include`, at a verified commit, pinned by `package.sha256` in `registry/projects.yaml`.
+Guard 7 refuses a mutator whose bytes differ from the pinned manifest. Consequence: any project
+without a pin, and any workdir without `.hermes-package.json` (a laptop clone, the placeholder),
+now refuses at guard 7 — including `--dry-run`.
+
 ## Provisioning a credential for a new project or role
 
 The model, stated once so the next project does not have to rediscover it:
