@@ -603,6 +603,27 @@ on the box. Shredded; the sweep then returned only `.env.gaw.example`.
 **Fix:** the security review's D2 is a system-wide credential sweep that must find exactly the
 authorised set (`docs/superpowers/specs/2026-09-28-hermes-security-review-design.md` §3).
 
+### F25: the READ account had been raised to STANDARD — put back to READ_ONLY (2026-09-29)
+
+**Found 2026-09-29**, while deciding D3.2. The operator proposed `hermes@` for the write role
+because it "has STANDARD access". `hermes@` is the **read** account: README requires READ_ONLY
+("Never upgrade this account"), because a read-only account is the platform backstop, where Google refuses every
+mutate server-side. The operator confirmed it had been raised to STANDARD and put it back.
+
+**Exposure:** while it was STANDARD, the box's read credential (sha12 `fd18a3b7d0f4`) was
+mutate-capable, and only the allow-lists stood between a read path and a write. When it was raised
+is not known. Review #1's laptop audit, collected earlier the same day, measured `READ_ONLY`, so
+either the window closed before that run or the drift happened after it.
+
+**After the fix, measured on the laptop** (`audit-credential-access.sh --cred .env.ga`, rc 0): the same
+token `fd18a3b7d0f4`, `measured_verdict READ_ONLY`, `mismatch false`, `admin false`, and the mutate
+probe refused (`ACTION_NOT_PERMITTED`); the roles probe lists `hermes@` READ_ONLY at both the manager
+and the target account.
+
+**Why it matters:** a human changed the access level of a Hermes account in the Google Ads console,
+and none of Hermes's checks run then. Only the access audit sees it. **Fix:** the access audit runs
+on every security review (D3.1) and after any console change to either account.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -647,3 +668,10 @@ authorised set (`docs/superpowers/specs/2026-09-28-hermes-security-review-design
     `2026-09-28-hermes-security-review-design.md`. **It supersedes item 15's F6 route:** the ads code
     reaches the box as an **app package** (allow-listed code at a verified commit plus a manifest
     hash), not as a deploy-key clone. There is no GitHub credential on the box.
+17. **2026-09-29: security review #1 NOT PASS; D3.2 decided — read-only posture.** Hermes holds no
+    write credential. The operator decided not to create another Google account (the ADMIN account is
+    shared with another project; `hermes@` must stay READ_ONLY — F25). Changes to client accounts are
+    made by the apps that join the AI OS, each reviewed with its own credential, not by Hermes core. The old ADMIN write token
+    (sha12 `b5aa4baf3310`) is **not revoked**: revoking a token on the ADMIN account could kill the
+    other project's grant (canon rule 1). Instead every copy is destroyed; this is an accepted risk. The
+    mutation tier and the live gate are parked.

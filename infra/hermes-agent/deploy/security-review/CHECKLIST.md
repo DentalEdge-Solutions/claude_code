@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.4
+version: 1.5
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version. Changing this file changes the box fingerprint's `checklist` component,
@@ -54,7 +54,7 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 
 ### D2.1 — The credential sweep finds exactly the authorised set
 - **source:** box
-- **claim:** a system-wide sweep (not known paths — F24) finds only authorised credentials, each `hermes-broker:hermes-broker 0600` (write) or as the README table says (read).
+- **claim:** a system-wide sweep (not known paths — F24) finds only authorised credentials, each `hermes-broker:hermes-broker 0600` (write) or as the README table says (read). Under the read-only posture (D3.2, v1.5) the authorised set holds **no** write credential, so any `.env.gaw` other than `.env.gaw.example` is a FAIL.
 - **expected:** every `credential` row matches an entry in the report's authorised set; examples are `kind: example`; nothing else carries a `credential`. `not_swept` entries are explained: `/boot`, `/boot/efi` (kernel and bootloader), `/dev` (device nodes) and `/run/lock` (lock files) are pre-explained here and need nothing; `/dev/shm`, `/run` and `/run/user/<uid>` are writable in-memory mounts, so the operator attaches the result of BRING-UP's "Sweep the in-memory mounts" command showing no credential-named file; any other entry must be explained by the operator. No row is `kind: unparsed` or `kind: unreadable` — either is a FAIL until explained.
 - **pass rule:** an unexpected credential, a mode wider than `0600`, an unexplained `not_swept` entry, or an unexplained `unparsed`/`unreadable` row, is a FAIL.
 
@@ -75,13 +75,13 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 ### D3.1 — Every credential measures as declared
 - **source:** laptop
 - **claim:** `audit-credential-access.sh --all --customer` measures each role as declared, with the audit's own exit code.
-- **expected:** `rc 0`; `.env.ga` `READ_ONLY`; `.env.gaw` `MUTATE_CAPABLE`; every `mismatch false`; the fingerprints equal the authorised set.
-- **pass rule:** any mismatch or non-zero `rc` is a FAIL.
+- **expected:** `rc 0`; `.env.ga` `READ_ONLY`; `.env.gaw` `MUTATE_CAPABLE` — or, under the read-only posture (D3.2, v1.5), **no `.env.gaw` row at all**; every `mismatch false`; the fingerprints equal the authorised set. The retired write token's sha12 (`b5aa4baf3310`) appears nowhere in either bundle.
+- **pass rule:** any mismatch or non-zero `rc` is a FAIL. A `.env.gaw` row under the read-only posture is a FAIL, and so is the retired sha12 appearing anywhere.
 
 ### D3.2 — The ADMIN decision is made and recorded
 - **source:** manual
-- **claim:** the operator has decided whether the ADMIN operator account stays the write credential or is replaced by a dedicated STANDARD-access account (spec decision 7).
-- **expected:** the report states the decision and the reason; the `projects.yaml` comment matches it.
+- **claim:** the operator has decided whether the ADMIN operator account stays the write credential, is replaced by a dedicated STANDARD-access account (spec decision 7), or no write credential is held (the read-only posture; v1.5).
+- **expected:** the report states the decision and the reason; the `projects.yaml` comment matches it. Under the read-only posture the report also records what happened to the retired write token: revoked and proved dead (D8.2), or not revoked with every copy destroyed, as an accepted risk with its reason.
 - **pass rule:** no recorded decision is CANNOT-VERIFY.
 
 ## D4 Isolation boundaries
@@ -127,7 +127,7 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 ### D5.3 — The kill switch is absent
 - **source:** box
 - **claim:** mutation is disabled during the review.
-- **expected:** `kill_switch_present false`.
+- **expected:** `kill_switch_present false`. Under the read-only posture this holds permanently, not only during the review.
 - **pass rule:** present is a FAIL.
 
 ### D5.4 — The registry is as expected

@@ -95,9 +95,11 @@ projects:
     # MUTATION TIER (Task 2 increment). Separate from read_execute by design: the
     # read allow-list's invariant is "readers only; mutators are never allow-listed",
     # and apply-changeset.py refuses if any name appears in BOTH lists.
-    # Runs under a SEPARATE write credential (.env.gaw) — its account and access
-    # level are recorded in the latest security review (D3.2), injected
-    # per-invocation. Never the read-only .env.ga, never the gateway env.
+    # Runs under a SEPARATE write credential (.env.gaw), injected per-invocation.
+    # Never the read-only .env.ga, never the gateway env. PARKED since 2026-09-29
+    # (security review D3.2): read-only posture, no .env.gaw exists, so every
+    # mutate run refuses. A new write role needs a dedicated STANDARD account and
+    # a new review (README "Provisioning a credential for a new project or role").
     mutate_execute:
       runner: /opt/ads-venv/bin/python3   # pinned build-time venv, NOT base python
       script_dir: code             # relative to workdir
