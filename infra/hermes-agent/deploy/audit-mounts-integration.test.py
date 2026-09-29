@@ -28,6 +28,8 @@ class TestAuditMounts(unittest.TestCase):
         # so the compose file's ../../../claude-google-ads resolves as it does on the box.
         cls.agent = os.path.join(cls.tmp, "claude_code/infra/hermes-agent")
         shutil.copytree(AGENT, cls.agent, ignore=shutil.ignore_patterns("data", "security-reviews", ".env*"))
+        with open(os.path.join(cls.agent, ".env"), "w"):   # empty stand-in: config resolves every service's env_file
+            pass
         app = os.path.join(cls.tmp, "claude-google-ads/code")
         os.makedirs(app)
         os.makedirs(os.path.join(cls.tmp, "claude-google-ads/audit_data"))   # as install-app-package creates it
@@ -68,7 +70,9 @@ class TestAuditMounts(unittest.TestCase):
         self.assertIn("Read-only file system", r.stderr)
 
     def test_no_audit_service_gets_env_file_or_mounts_etc_hermes(self):
-        cfg = json.loads(sh(*self.compose, "config", "--format", "json", env=self.env).stdout)
+        r = sh(*self.compose, "config", "--format", "json", env=self.env, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cfg = json.loads(r.stdout)
         for name in ("ads-collector", "ads-reader"):
             svc = cfg["services"][name]
             self.assertNotIn("env_file", svc)
