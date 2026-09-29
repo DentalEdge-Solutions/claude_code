@@ -425,5 +425,33 @@ class TestFingerprint(Base):
         self.assertEqual(a, CE.box_fingerprint(h, CE.context(h)))
 
 
+class TestAuditsOnTheBox(Base):
+    def test_gateway_probe_includes_the_box_credential_path(self):
+        self.assertIn("/etc/hermes/.env" + ".ga", CE.GATEWAY_PROBE_PATHS)
+
+    def test_d7_1_reports_audit_data_dirs_by_status_without_slugs(self):
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/acme-dental"))
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/ghost-client"))
+        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults"), exist_ok=True)
+        out = CE.collect(self.host())
+        rows = out["items"]["D7.1"]["data"]["audit_data"]
+        self.assertEqual(sorted(r["status"] for r in rows), ["active", "unregistered"])
+        self.assertNotIn("ghost-client", json.dumps(out))
+
+    def test_d7_1_vault_rows_carry_the_registry_status_without_slugs(self):
+        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {
+            "acme-dental": {"customer_id": "1234567890", "status": "active"},
+            "gone-dental": {"customer_id": "2223334444", "status": "retired"}}}))
+        vaults = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults")
+        for n in ("acme-dental", "gone-dental", "stray-dental"):
+            os.makedirs(os.path.join(vaults, n))
+        out = CE.collect(self.host())
+        rows = out["items"]["D7.1"]["data"]["vaults"]
+        self.assertEqual([r["status"] for r in rows], ["active", "retired", "unregistered"])
+        dump = json.dumps(out)
+        for slug in ("gone-dental", "stray-dental"):
+            self.assertNotIn(slug, dump)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.7
+version: 1.8
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version, so every change to this file must raise it (CI enforces this:
@@ -9,7 +9,7 @@ component hashes the git tree of `deploy/`, which contains this file, and flags 
 edits. The `checklist` component records the version. Either way, the review is
 re-triggered (§5). (v1.6: this paragraph only. The v1.5 header named the wrong fingerprint
 component, and the version-bump rule is new. No item changed.) (v1.7: D2.1 `kind`s and
-`memory_sweep`, D2.2 coverage, D6.1 `.env` rule, bundle `collected_at` — review #3's residuals.)
+`memory_sweep`, D2.2 coverage, D6.1 `.env` rule, bundle `collected_at` — review #3's residuals.) (v1.8: ads audits on the box: the box's read credential, the real Anthropic key, D4.1 probe, D7.1 `audit_data`, vault `status` and `audit-logs`.)
 
 **How to read an item.** `source` says where the evidence comes from: `box` (the box
 bundle, item id as key), `laptop` (the laptop bundle), or `manual` (the operator states it
@@ -61,9 +61,9 @@ bundle must be from the same day as the sign-off.
 
 ### D2.1 — The credential sweep finds exactly the authorised set
 - **source:** box
-- **claim:** a system-wide sweep (not known paths — F24) finds only authorised credentials, each `hermes-broker:hermes-broker 0600` (write) or as the README table says (read). Under the read-only posture (D3.2, v1.5) the authorised set holds **no** write credential, so any `.env.gaw` other than `.env.gaw.example` is a FAIL.
-- **expected:** every row has a `kind`. `credential` rows match the report's authorised set (none on the box under the read-only posture). `example` rows are templates. `empty` rows are 0 bytes. `authorised-other` rows carry a `label` naming the README's non-Google secret (`gateway-env`: the gateway `.env`, `root:root 0600`). No row is `unlisted`, `unparsed` or `unreadable`. `not_swept`: `/boot`, `/boot/efi` (kernel and bootloader), `/dev` (device nodes) and `/run/lock` (lock files) are pre-explained; the writable in-memory mounts are covered by `memory_sweep`, whose `name_hits`, `content_hits` and `unreadable` are all empty; any other entry must be explained by the operator. If `memory_sweep` is `could-not-check`, the operator attaches BRING-UP's manual "Sweep the in-memory mounts" output instead.
-- **pass rule:** an unexpected credential, a mode wider than `0600`, an `unlisted`/`unparsed`/`unreadable` row not explained, any `memory_sweep` hit, or an unexplained `not_swept` entry, is a FAIL.
+- **claim:** a system-wide sweep (not known paths — F24) finds only authorised credentials, each `hermes-broker:hermes-broker 0600` (write, if one is ever held) or, for the read credential, `root:root 0400` as the README table says. Under the read-only posture (D3.2, v1.5) the authorised set holds **no** write credential, so any `.env.gaw` other than `.env.gaw.example` is a FAIL. Since v1.8 the authorised set on the box is exactly one **read** credential at `/etc/hermes/.env.ga`, `root:root 0400`, `kind: credential`, `role: read`, whose `refresh_token_sha12` equals the laptop's `.env.ga` (D3.1).
+- **expected:** every row has a `kind`. The authorised set on the box is exactly ONE `credential` row: path `/etc/hermes/.env.ga`, `role: read`, `owner root`, `group root`, `mode 0o400`, and a `refresh_token_sha12` equal to the laptop's `.env.ga` row (D3.1). Any other `credential` row is a FAIL; under the read-only posture no write credential exists. `example` rows are templates. `empty` rows are 0 bytes. `authorised-other` rows carry a `label` naming the README's non-Google secret (`gateway-env`: the gateway `.env`, `root:root 0600`). No row is `unlisted`, `unparsed` or `unreadable`. `not_swept`: `/boot`, `/boot/efi` (kernel and bootloader), `/dev` (device nodes) and `/run/lock` (lock files) are pre-explained; the writable in-memory mounts are covered by `memory_sweep`, whose `name_hits`, `content_hits` and `unreadable` are all empty; any other entry must be explained by the operator. If `memory_sweep` is `could-not-check`, the operator attaches BRING-UP's manual "Sweep the in-memory mounts" output instead. The operator states in the report that the gateway `.env`'s `ANTHROPIC_API_KEY` is real (workspace `hermes-box`, monthly spend limit stated); missing that statement is CANNOT-VERIFY.
+- **pass rule:** an unexpected credential, a mode wider than `0600` for any future write credential, the authorised read row with any owner, group or mode other than `root`, `root`, `0o400`, an `unlisted`/`unparsed`/`unreadable` row not explained, any `memory_sweep` hit, or an unexplained `not_swept` entry, is a FAIL.
 
 ### D2.2 — No credential text in shell histories
 - **source:** box
@@ -82,7 +82,7 @@ bundle must be from the same day as the sign-off.
 ### D3.1 — Every credential measures as declared
 - **source:** laptop
 - **claim:** `audit-credential-access.sh --all --customer` measures each role as declared, with the audit's own exit code.
-- **expected:** `rc 0`; `.env.ga` `READ_ONLY`; `.env.gaw` `MUTATE_CAPABLE` — or, under the read-only posture (D3.2, v1.5), **no `.env.gaw` row at all**; every `mismatch false`; the fingerprints equal the authorised set. The retired write token's sha12 (`b5aa4baf3310`) appears nowhere in either bundle.
+- **expected:** `rc 0`; `.env.ga` `READ_ONLY`; `.env.gaw` `MUTATE_CAPABLE` — or, under the read-only posture (D3.2, v1.5), **no `.env.gaw` row at all**; every `mismatch false`; the fingerprints equal the authorised set. The box credential's `refresh_token_sha12` (box bundle `credentials`) equals the laptop `.env.ga` row's. The retired write token's sha12 (`b5aa4baf3310`) appears nowhere in either bundle.
 - **pass rule:** any mismatch or non-zero `rc` is a FAIL. A `.env.gaw` row under the read-only posture is a FAIL, and so is the retired sha12 appearing anywhere.
 
 ### D3.2 — The ADMIN decision is made and recorded
@@ -96,7 +96,7 @@ bundle must be from the same day as the sign-off.
 ### D4.1 — The gateway cannot read credentials or the governance store
 - **source:** box
 - **claim:** from inside the gateway container, the governance store is absent and credential files are absent, unreadable or empty masks; the control path is readable.
-- **expected:** `/opt/governance` and `/var/lib/hermes/governance` `absent`; `/projects/claude_google_ads/.env` `readable 0` (the empty mask) or `absent`; both `/opt/hermes-agent/.env.ga*` `absent`; `/opt/registry/projects.yaml` `readable <n>` (the control); `google_ads_env_names` empty.
+- **expected:** `/opt/governance` and `/var/lib/hermes/governance` `absent`; `/projects/claude_google_ads/.env` `readable 0` (the empty mask) or `absent`; both `/opt/hermes-agent/.env.ga*` `absent`; `/etc/hermes/.env.ga` `absent`; `/opt/registry/projects.yaml` `readable <n>` (the control); `google_ads_env_names` empty.
 - **pass rule:** a readable credential, or a failed control, is a FAIL; `could-not-check` is CANNOT-VERIFY.
 
 ### D4.2 — The Docker proxy is live
@@ -168,8 +168,8 @@ bundle must be from the same day as the sign-off.
 ### D7.1 — Client data is where it should be, readable only by its owners
 - **source:** box
 - **claim:** vaults, run records and backups are the expected ones, none world-readable, none inside a package.
-- **expected:** vault directories `0700` owned by uid 10000; `root_backups` explained by the operator (e.g. `live-gate-*`).
-- **pass rule:** a world-readable client path is a FAIL.
+- **expected:** `vaults`: every row `status: active`, directory `0700` owned by uid 10000; `root_backups` explained by the operator (e.g. `live-gate-*`). `audit_data`: every row `status: active`, `owner` the container uid (10000 or its name), `mode 0o700`. No `retired` or `unregistered` row in either list: offboarding removes them. `/var/lib/hermes/audit-logs/<client>/` holds each run's step logs; it is root-only and not in the bundle: the operator states that `sudo stat -c '%U:%G %a' /var/lib/hermes/audit-logs` prints `root:root 711`.
+- **pass rule:** a world-readable client path is a FAIL. Any `vaults` or `audit_data` row whose `status` is `retired` or `unregistered` is a FAIL. Any `audit_data` row whose `owner` is not 10000 (or its name), or whose `mode` is not `0o700`, is a FAIL. A missing `audit-logs` statement is CANNOT-VERIFY; any value other than `root:root 711` is a FAIL.
 
 ## D8 Stop and recover
 

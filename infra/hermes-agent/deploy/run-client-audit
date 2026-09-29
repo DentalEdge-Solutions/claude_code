@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed as /usr/local/sbin/run-client-audit (symlink, BRING-UP "Ads audits on the box").
+# Root only: it reads /etc/hermes's 0400 credential and drives Docker directly.
+[ "$(id -u)" = 0 ] || { echo "run-client-audit: run with sudo" >&2; exit 2; }
+exec python3 /opt/hermes-agent/bin/run-client-audit.py "$@"

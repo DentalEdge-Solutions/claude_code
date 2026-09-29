@@ -1427,12 +1427,12 @@ not stop collateral within an account.
 
 | Role | Account | Access level | Credential file | Why |
 |---|---|---|---|---|
-| read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga`, **on the laptop only** (the box holds no Google Ads credential; security review #3) | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
+| read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga`, on the laptop, and on the box at `/etc/hermes/.env.ga` (`root:root 0400`, same token; passed per run to the audit containers, never mounted) | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
 | write | **none — read-only posture** (2026-09-29) | — | no `.env.gaw` anywhere | Operator decision, security review D3.2: Hermes holds no write credential. Changes to client accounts are made by the apps that join the AI OS, not by Hermes core. The mutation tier is parked. |
 
 **The box's one non-Google secret file.** The gateway `.env`
 (`/opt/projects/claude_code/infra/hermes-agent/.env`, `root:root 0600`) holds the dashboard
-basic-auth password (real) and a **dummy** `ANTHROPIC_API_KEY`. The review collector reports it as
+basic-auth password (real) and a **real** `ANTHROPIC_API_KEY` (workspace `hermes-box`, monthly spend limit; used only by the audit analyst). The review collector reports it as
 `kind: authorised-other`, `label: gateway-env` (`AUTHORISED_OTHER` in
 `bin/collect-review-evidence.py`). Adding another secret file to the box means adding it there and
 here, or the next review sees it as `unlisted`.

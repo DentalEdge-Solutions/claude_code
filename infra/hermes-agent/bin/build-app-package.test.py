@@ -78,5 +78,31 @@ class TestBuild(Base):
             B.build("app", self.repo, self.commit[:12], self.projects, tempfile.mkdtemp())
 
 
+class TestRefuseClientIds(unittest.TestCase):
+    def test_doc_with_customer_id_is_refused(self):
+        import package_lib as PK
+        with self.assertRaises(ValueError) as cm:
+            PK.refuse_client_ids({"campaigns.md": b"ok", "google-ads-audit.md": b"Account 676-497-7319"})
+        self.assertIn("google-ads-audit.md", str(cm.exception))
+        self.assertNotIn("676", str(cm.exception))
+
+    def test_undashed_id_is_refused(self):
+        import package_lib as PK
+        with self.assertRaises(ValueError):
+            PK.refuse_client_ids({"x.md": b"cid 6764977319 here"})
+
+    def test_long_digit_runs_are_refused_without_naming_them(self):
+        import package_lib as PK
+        for name, body in (("a.md", b"campaign 23892569751"), ("b.md", b"ad group 238925697512")):
+            with self.assertRaises(ValueError) as cm:
+                PK.refuse_client_ids({name: body, "ok.md": b"CPL 120"})
+            self.assertIn(name, str(cm.exception))
+            self.assertNotIn("2389256975", str(cm.exception))
+
+    def test_code_files_are_not_scanned_and_clean_docs_pass(self):
+        import package_lib as PK
+        PK.refuse_client_ids({"code/a.py": b"MCC = 4518110176", "dental-benchmarks.md": b"CPL $120-$250"})
+
+
 if __name__ == "__main__":
     unittest.main()

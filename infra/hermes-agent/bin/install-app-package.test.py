@@ -65,6 +65,12 @@ class TestInstall(Base):
         self.assertEqual((os.path.getsize(env), stat.S_IMODE(os.stat(env).st_mode)), (0, 0o600))
         PK.verify_installed(self.target, self.sha, "code/mutator.py")      # guard 7 would pass
 
+    def test_install_creates_empty_audit_data_mount_point(self):
+        self._install()
+        p = os.path.join(self.target, "audit_data")
+        self.assertTrue(os.path.isdir(p))
+        self.assertEqual(os.listdir(p), [])
+
     def test_reinstall_over_an_installed_package(self):
         self._install(); self._install()                                     # read-only tree replaced
 

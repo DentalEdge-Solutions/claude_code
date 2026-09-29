@@ -87,6 +87,9 @@ def install(target, raw_manifest, files, chown=True):
             _write_new(dest, files[rel], 0o444)
         _write_new(os.path.join(new, PK.MANIFEST_NAME), raw_manifest, 0o444)
         _write_new(os.path.join(new, ".env"), b"", 0o600)
+        # Mount point for the per-client audit-data bind (spec 2026-09-29 ads-audits-on-the-box §2):
+        # it must pre-exist, because the app dir is bound read-only. Empty; D6.1 lists files only.
+        os.mkdir(os.path.join(new, "audit_data"), 0o755)
         for root, dirs, names in os.walk(new, topdown=False):
             for n in names:
                 if chown:
