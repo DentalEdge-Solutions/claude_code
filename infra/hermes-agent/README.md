@@ -1428,41 +1428,27 @@ not stop collateral within an account.
 | Role | Account | Access level | Credential file | Why |
 |---|---|---|---|---|
 | read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga` | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
-| write | the operator's own Google account | **ADMIN** on the manager | `.env.gaw` | Operator decision, 2026-08-18: reuse the existing account rather than provision a dedicated `hermes-write@`. |
+| write | **none — read-only posture** (2026-09-29) | — | no `.env.gaw` anywhere | Operator decision, security review D3.2: Hermes holds no write credential. Changes to client accounts are made by the apps that join the AI OS, not by Hermes core. The mutation tier is parked. |
 
-**The write row is a deliberate, recorded tradeoff, not the ideal shape.** A
-purpose-made `hermes-write@` at STANDARD would be better on three counts, and it is
-worth knowing which ones were traded away:
+**Why there is no write credential (security review D3.2, 2026-09-29).** From 2026-08-18
+the write role reused the operator's own Google account at **ADMIN**. That carried user
+management, billing and account linking; Google's change history recorded Hermes's changes
+under a human's name; and revocation could not be surgical, because canon (credential
+governance, rule 1, amended 2026-08-19) measured that revocation isolation follows the Google
+**account**, not the OAuth client. Review #1 recommended a dedicated STANDARD-access account.
+The operator chose not to create another account: the ADMIN account is shared with another
+project, and `hermes@` must stay READ_ONLY (F25: it had drifted to STANDARD and was put back).
+So Hermes runs **read-only**.
 
-- **Privilege.** The operator account is ADMIN at the manager level, so the write
-  credential carries user management, billing and account linking — far more than
-  the one typed action (`add_campaign_negative`) the mutation tier actually uses.
-  A STANDARD service account would be mutate-capable and nothing more.
-- **Attribution.** Google's change history will record Hermes's mutations under a
-  human's identity. Nothing on the platform side distinguishes "the operator did
-  this" from "Hermes did this while the operator was asleep". The vault audit log
-  (`data/vaults/<slug>/changes/log.jsonl`) is the only place that distinction
-  exists, so it carries more weight than it otherwise would.
-- **Assurance.** With a purpose-made account the access level is known by
-  construction. With a human account it is inherited from whatever that person
-  needs for their own work, and it can change without anyone touching Hermes —
-  which is exactly the drift pattern this capsule has been bitten by twice.
-  Compensate by running the access audit after any change to the operator's own
-  Google Ads permissions, not just after Hermes changes.
-
-**Also lost: surgical revocation.** *(Corrected 2026-09-29 — the earlier text here
-said revocation stayed surgical because Hermes has its own OAuth client. Canon says
-otherwise; the independent security review of 2026-09-29 caught the contradiction.)*
-Canon (credential governance, rule 1, amended 2026-08-19) measured that a separate
-OAuth client gives **no** revocation isolation: revoking a credential on the same
-account through a *different* client killed the write credential. The isolation
-boundary is the **account**. A separate Cloud project isolated in one later measurement
-(2026-08-24), but canon does not yet recommend relying on it. So with the write role on
-the operator's own account, revoking the Hermes write grant can take the operator's
-other grants for that account with it — and the reverse. This is the security review's
-D3.2 reason to move the write role to a dedicated STANDARD-access account. The
-revocation procedure, including the collateral check, is BRING-UP "Revoke the write
-credential and prove it dead".
+- **The old ADMIN write token (sha12 `b5aa4baf3310`) is not revoked.** Revoking any grant on the
+  ADMIN account could kill the other project's grant (canon rule 1). Instead every copy is destroyed:
+  the box copies were shredded 2026-09-27 (F24), and the laptop copy was shredded 2026-09-29.
+  This is a recorded, accepted risk: the token stays valid at Google until it goes unused long
+  enough to expire. **Any copy found later is a leaked ADMIN credential:** measure exposure
+  (canon rule 3), then decide on revocation with the other project's owner.
+- **Bringing a write role back** — for Hermes or for an app — reopens D3.2. It needs a
+  dedicated account at **STANDARD**, never `hermes@` and never the ADMIN account. Provision it
+  with the steps below, then run a security review before any live gate.
 
 Never point both files at the same account, and never copy a token between them.
 The read guarantee is only real while the read account genuinely cannot mutate.
@@ -1473,10 +1459,9 @@ The read guarantee is only real while the read account genuinely cannot mutate.
    user at the minimum role for its job (`STANDARD` for write; `READ_ONLY` for read).
    Accept the invitation from that account.
 
-   *Skip this step when reusing an existing account* — which is the current shape of
-   the write role, and the one the 2026-09-29 security review recommends ending (D3.2):
-   a reused account means revocation is **not** surgical, whatever the client (canon
-   rule 1). Step 2 still creates a **separate OAuth client**; never reuse another
+   *Do not skip this step by reusing an existing account.* That was the write role's shape
+   until the 2026-09-29 security review (D3.2): a reused account means revocation is
+   **not** surgical, whatever the client (canon rule 1). Step 2 still creates a **separate OAuth client**; never reuse another
    component's client just because you are reusing its account.
 2. Cloud Console → Credentials → Create OAuth client ID → **Desktop app**, named for
    the component. One client per component; do not reuse another component's.

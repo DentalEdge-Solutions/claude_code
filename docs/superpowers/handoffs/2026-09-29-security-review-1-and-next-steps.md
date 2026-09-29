@@ -13,6 +13,26 @@ any committed file. Stage by explicit path (the working tree carries unrelated `
 gitignored `infra/hermes-agent/security-reviews/` and the operator's private storage. The operator
 runs every box command and pastes the output; the assistant has no box access.
 
+## Update — later on 2026-09-29: steps A and B done
+
+- **A (box), done.** A1: the box checkout is at `dc295d8`. A2: the in-memory mount sweep printed only
+  the two `done` lines (D2.1 cleared). A3: both vault directories are now `700`, owned by uid 10000,
+  group `hermes`; the operator still has to confirm `getent group hermes` shows gid 10000 with no
+  members. A4: the gateway `.env` holds two secrets, both real: `ANTHROPIC_API_KEY` (used only by the
+  box, with a workspace spend limit) and the dashboard password (kept only in the password manager and
+  this file). The other names are flags or paths. No Google Ads variables.
+- **B (D3.2), decided: read-only posture.** No write credential. The operator won't create another
+  Google account (the ADMIN account is shared with another project), and `hermes@` must stay
+  READ_ONLY. **F25:** `hermes@` had drifted to STANDARD; the operator put it back, and it is measured
+  READ_ONLY again. Changes to client accounts belong to the apps that join the AI OS. The old ADMIN
+  token `b5aa4baf3310` is **not revoked** (revoking could hit the other project, canon rule 1); every
+  copy is destroyed instead, as an accepted risk. See README "Why there is no write credential".
+- **Checklist v1.5** covers the read-only posture (D2.1, D3.1, D3.2, D5.3).
+- **Step E is parked.** No live gate until a write role comes back, which needs a dedicated
+  STANDARD account and a new review.
+- Operator evidence for review #2 is in the gitignored
+  `infra/hermes-agent/security-reviews/2026-09-29-operator-evidence-step-A.md`.
+
 ## Where things stand
 
 | | State |
@@ -97,7 +117,7 @@ minors from the build — see the PR #69 description and review history.
    > security-reviews/bundle-laptop.json`, then `stash pop`. If step B changed the credential, the
    laptop `.env.gaw` is the new one.
 3. Launch a fresh reviewer agent (most capable model) with ONLY: REVIEWER-BRIEF.md, CHECKLIST.md
-   (v1.4), REPORT-TEMPLATE.md, both bundles, the findings doc. It writes
+   (v1.5), REPORT-TEMPLATE.md, both bundles, the findings doc. It writes
    `docs/security-reviews/<date>-review.md`. Give it the A2 sweep output and the A4 answers as the
    operator's stated evidence for D2.1 / "not on the checklist" #2.
 4. Operator sign-off in the report (final verdict, D3.2, D8, D9 lines). Land it by PR; brain decision.
