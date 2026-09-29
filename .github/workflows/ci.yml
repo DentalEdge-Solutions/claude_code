@@ -140,6 +140,8 @@ jobs:
       # into a failure — read "executed N" on the PR run AND on the merge commit.
       - name: Bind agreement integration
         run: sudo env HERMES_REQUIRE_LINUX_INTEGRATION=1 python3 infra/hermes-agent/deploy/bind-agreement-integration.test.py
+      - name: Audit containers' mounts (root, Linux, real Docker)
+        run: sudo env HERMES_REQUIRE_LINUX_INTEGRATION=1 python3 infra/hermes-agent/deploy/audit-mounts-integration.test.py -v
 
   static-scan-skills:
     name: Static scan all skills

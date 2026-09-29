@@ -144,3 +144,29 @@ services:
       - ../../../claude-google-ads:/projects/claude_google_ads:ro
       - ./registry:/opt/registry:ro
       - ./bin:/opt/cc-bin:ro
+  # ---- One-shot audit containers (spec 2026-09-29 ads-audits-on-the-box §2). Driven ONLY by
+  # bin/run-client-audit.py, which sets HERMES_AUDIT_DATA_DIR per client and passes the READ
+  # credential as `-e NAME` (value from its env, never argv, never a mounted file). No env_file:
+  # these containers never see the gateway .env (it holds ANTHROPIC_API_KEY).
+  # HERMES_AUDIT_DATA_DIR defaults to /dev/null, so a run without it fails closed (a char device
+  # cannot be bind-mounted onto a directory) and the gateway's `up` never needs it set.
+  ads-collector:
+    image: hermes-agent-claude
+    profiles: ["tools"]
+    entrypoint: ["/opt/ads-venv/bin/python3"]
+    working_dir: /projects/claude_google_ads
+    volumes:
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro
+      - ./masks/empty:/projects/claude_google_ads/.env:ro
+      - ${HERMES_AUDIT_DATA_DIR:-/dev/null}:/projects/claude_google_ads/audit_data
+  ads-reader:
+    image: hermes-agent-claude
+    profiles: ["tools"]
+    entrypoint: ["python3", "/opt/cc-bin/run-ads-report.py"]
+    volumes:
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro
+      - ./masks/empty:/projects/claude_google_ads/.env:ro
+      - ${HERMES_AUDIT_DATA_DIR:-/dev/null}:/projects/claude_google_ads/audit_data:ro
+      - ./registry:/opt/registry:ro
+      - ./bin:/opt/cc-bin:ro
+      - ./data/reports:/opt/data/reports
