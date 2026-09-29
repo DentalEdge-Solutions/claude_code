@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""One client's Google Ads trend-audit DRAFT on the box (spec 2026-09-29 ads-audits-on-the-box).
+
+  sudo run-client-audit <client> [--dry-run]
+
+Pre-checks, then: collect (one-shot ads-collector) -> snapshot (host) -> readers (one-shot
+ads-reader) -> draft (claude -p in the gateway, as run-trend-audit.sh) -> vault-write -> the
+check that the draft names no other client. Stops at the first failure. Exit: 0 draft
+written, 1 a step failed, 2 a pre-check refused, 3 another audit is running.
+Nothing shown carries a customer id or credential value; each step's stdout and stderr go to
+<audit-data>/logs/<step>.{stdout,stderr} (0600)."""
+import argparse, datetime, json, os, subprocess, sys, time
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
+import changeset_lib as C
+import client_audit_lib as L
+import review_lib as R
+
+AGENT_DIR = "/opt/hermes-agent"
+GOV = "/var/lib/hermes/governance"
+REGISTRY = GOV + "/registry/clients.json"
+CRED = "/etc/hermes/.env" + ".ga"
+APP_DIR = "/opt/projects/claude-google-ads"
+AUDIT_DATA = "/var/lib/hermes/audit-data"
+LOCK = "/run/lock/hermes-client-audit.lock"
+PROJECT = "claude_google_ads"
+COLLECTORS = ("audit_discovery", "negatives_audit", "audit_assets_rsa", "assess_supplemental")
+READERS = ("account_overview", "audit_search_terms", "audit_analyze")
+TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "draft": 1200, "vault-write": 120}
+CRED_NAMES = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
+              "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
+OWNER_UID = 0                 # the credential file's owner; tests override
+DATA_UID = DATA_GID = 10000   # the containers' uid; tests set None to skip chown
+PIN_OVERRIDE = None           # tests only
+# vault-write runs on the HOST but writes files the gateway (uid 10000) must read next month
+# (trend mode): run it AS that uid, or the vault fills with root-owned files. Tests set [].
+RUN_AS_DATA_UID = ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"]
+
+# Verbatim from run-trend-audit.sh (spec §2 step 5): the analyst, its model and its limits.
+DRAFT_SCRIPT = r'''
+  set -eu
+  skill="/opt/data/skills/claude-code-ads-analyst/SKILL.md"
+  vault="/opt/data/vaults/$CLIENT"; reports="/opt/data/reports/$PROJECT"
+  ls "$reports"/*.md >/dev/null 2>&1 || { echo "no reports for $PROJECT" >&2; exit 1; }
+  mkdir -p "/opt/data/audits/$PROJECT"
+  out="/opt/data/audits/$PROJECT/$TS-audit.md"
+  claude -p "Read and follow $skill EXACTLY, INCLUDING its Trend mode. Produce the Google Ads audit DRAFT for project $PROJECT. Fresh scrubbed reports: $reports/. THIS client'\''s prior history (read for trend deltas): $vault/metrics/, $vault/audits/, $vault/timeline.md (may be empty on the first run = establish baseline). SOP/benchmark docs: /projects/$PROJECT/. Read ONLY within $vault, $reports, and /projects/$PROJECT. Do NOT attempt ExitPlanMode and do NOT narrate your tools or environment; BEGIN your response with the DRAFT banner and output ONLY the deliverable markdown." \
+    --allowedTools "Read,Grep,Glob" --permission-mode plan --model claude-opus-4-8 > "$out"
+  echo "$out"
+'''
+
+
+def step_name(argv):
+    if "ads-collector" in argv:
+        return "collect:" + os.path.basename(argv[-1])[:-3]
+    if "ads-reader" in argv:
+        return "read:" + argv[argv.index("--report") + 1]
+    if "exec" in argv:
+        return "draft"
+    return "snapshot" if any(a.endswith("ads-metrics-snapshot.py") for a in argv) else "vault-write"
+    # (a vault-write argv may start with RUN_AS_DATA_UID; the fallback still names it)
+
+
+def real_runner(argv, env, timeout, out_path, err_path):
+    with open(out_path, "w") as out, open(err_path, "w") as err:
+        try:
+            return subprocess.run(argv, env=env, stdout=out, stderr=err, timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            err.write(f"\n[run-client-audit] timed out after {timeout}s\n")
+            return 124
+
+
+def _compose(root):
+    return ["docker", "compose", "-f", root + AGENT_DIR + "/docker-compose.yml", "--profile", "tools"]
+
+
+def plan(rec, ts, root):
+    """[(timeout_key, argv, env)] — env holds only what the step needs, plus PATH."""
+    slug, cid = rec["slug"], rec["customer_id"]
+    data = AUDIT_DATA + "/" + slug
+    base = {"PATH": os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")}
+    cred = {**base, **{k: v for k, v in L.load_cred_env(root + CRED).items() if k in CRED_NAMES},
+            "GOOGLE_ADS_CUSTOMER_ID": cid, "HERMES_AUDIT_DATA_DIR": data}
+    eflags = [x for n in CRED_NAMES for x in ("-e", n)]
+    run = _compose(root) + ["run", "--rm", "--no-deps", "-T"] + eflags
+    steps = [("collect", run + ["ads-collector", f"code/{c}.py"], cred) for c in COLLECTORS]
+    steps.append(("snapshot", ["python3", root + AGENT_DIR + "/bin/ads-metrics-snapshot.py",
+                               "--audit-data", root + data, "--customer", cid, "--collected-at", ts], base))
+    steps += [("read", run + ["ads-reader", "--report", r, "--project", PROJECT], cred) for r in READERS]
+    steps.append(("draft", _compose(root) + ["exec", "-e", "PROJECT", "-e", "CLIENT", "-e", "TS", "-T",
+                                             "hermes-agent", "sh", "-lc", DRAFT_SCRIPT],
+                  {**base, "PROJECT": PROJECT, "CLIENT": slug, "TS": ts}))
+    steps.append(("vault-write", RUN_AS_DATA_UID + ["python3", root + AGENT_DIR + "/bin/vault-write.py", "--client", slug,
+                                  "--audit-file", root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md",
+                                  "--metrics-file", root + data + "/logs/snapshot.stdout", "--ts", ts,
+                                  "--registry", root + REGISTRY],
+                  {**base, "VAULT_ROOT": root + AGENT_DIR + "/data/vaults", "TS": ts}))
+    return steps
+
+
+def main(argv=None, runner=None, root="/", now=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("client")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args(argv)
+    root = root.rstrip("/")
+    runner = runner or real_runner
+    ts = now or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    try:
+        rec = L.eligible_client(a.client, root + REGISTRY)
+    except (L.PrecheckError, ValueError, OSError) as e:
+        print(f"run-client-audit: refused: {e}", file=sys.stderr); return 2
+    red = R.Redactor([], [rec["customer_id"]])
+    say = lambda s: print(red.text(s))
+    try:
+        L.check_secret_file(root + CRED, uid=OWNER_UID, mode=0o400)
+        if L.anthropic_key_state(root + AGENT_DIR + "/.env") != "real":
+            raise L.PrecheckError("the gateway .env has no real Anthropic key")
+        pin = PIN_OVERRIDE or C.read_package(root + AGENT_DIR + "/registry/projects.yaml", PROJECT)["sha256"]
+        L.package_matches(root + APP_DIR, pin)
+    except (L.PrecheckError, ValueError, OSError) as e:
+        print(red.text(f"run-client-audit: refused: {e}"), file=sys.stderr); return 2
+    steps = plan(rec, ts, root)
+    if a.dry_run:
+        for key, argv_, env in steps:
+            shown = ["<script>" if len(x) > 200 else x for x in argv_]
+            say(f"would run [{step_name(argv_)}] timeout={TIMEOUTS[key]}s: {' '.join(shown)}"
+                f" env={sorted(k for k in env if k != 'PATH')}")
+        return 0
+    try:
+        with L.AuditLock(root + LOCK):
+            return _run(steps, rec, ts, root, runner, say)
+    except L.PrecheckError as e:
+        print(f"run-client-audit: {e}", file=sys.stderr); return 3
+    except (OSError, ValueError) as e:
+        say(f"run-client-audit: failed: {type(e).__name__}: {e}"); return 1
+
+
+def _run(steps, rec, ts, root, runner, say):
+    slug = rec["slug"]
+    data = root + AUDIT_DATA + "/" + slug
+    kw = ({"uid": os.geteuid(), "gid": os.getegid()} if DATA_UID is None
+          else {"uid": DATA_UID, "gid": DATA_GID})
+    L.reset_dir(data, **kw)
+    logs = os.path.join(data, "logs"); os.makedirs(logs, mode=0o700)
+    os.chown(logs, kw["uid"], kw["gid"])
+    reports = root + f"{AGENT_DIR}/data/reports/{PROJECT}"
+    results = []
+    for i, (key, argv_, env) in enumerate(steps):
+        name = step_name(argv_)
+        if key == "snapshot":                                   # collection just finished
+            bad = L.error_files(data)
+            if bad:
+                say(f"run-client-audit: collector errors, no draft: {bad}"); return _summary(results, 1, say)
+            if L.json_count(data) == 0:
+                say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
+        if key == "read" and name.endswith(READERS[0]) and os.path.isdir(reports):
+            for f in os.listdir(reports):
+                if f.endswith(".md"):
+                    os.remove(os.path.join(reports, f))
+        stem = os.path.join(logs, name.replace(":", "-"))
+        t0 = time.monotonic()
+        rc = runner(argv_, env, TIMEOUTS[key], stem + ".stdout", stem + ".stderr")
+        for p in (stem + ".stdout", stem + ".stderr"):
+            if os.path.exists(p):
+                os.chmod(p, 0o600)
+                if DATA_UID is not None:              # vault-write (as 10000) reads snapshot.stdout
+                    os.chown(p, DATA_UID, DATA_GID)
+        results.append((name, rc, round(time.monotonic() - t0, 1)))
+        if rc != 0:
+            say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
+            return _summary(results, 1, say)
+    vault_draft = root + f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
+    with open(vault_draft, encoding="utf-8", errors="replace") as f:
+        named = L.others_named(f.read(), slug, list(L.V.load_registry(root + REGISTRY)))
+    if named:
+        say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}")
+        return _summary(results, 1, say)
+    transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"
+    if os.path.exists(transient):
+        os.remove(transient)
+    say(f"run-client-audit: draft -> {vault_draft[len(root):]}  (data collected {ts} UTC)")
+    return _summary(results, 0, say)
+
+
+def _summary(results, rc, say):
+    for name, r, secs in results:
+        say(f"  {name:<28} rc={r:<4} {secs}s")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
