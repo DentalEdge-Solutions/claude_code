@@ -994,6 +994,69 @@ Pass `--registry` explicitly, as above. Nothing on the box was wrong.
 Every prerequisite above is now met. Creating `control/mutation-enabled` remains the operator's
 decision — and it is turned off again immediately after the live gate.
 
+### Stop everything in one step (security review D8.1)
+
+Paste as one block. It removes the kill switch first (that alone disables every apply), then
+stops the broker and the Docker proxy so nothing can file or run a mutation, and confirms both.
+Undo is a separate, deliberate step. It is a sequence, not a single `if`: the kill-switch
+removal runs even if a `systemctl` call fails.
+
+```bash
+G=/var/lib/hermes/governance
+sudo rm -f $G/control/mutation-enabled
+sudo systemctl stop hermes-broker hermes-docker-proxy
+sudo test -e $G/control/mutation-enabled && echo "KILL SWITCH PRESENT — remove it" || echo "kill switch ABSENT"   # kill switch ABSENT
+systemctl is-active hermes-broker hermes-docker-proxy                                   # inactive, inactive
+```
+
+To resume later: `sudo systemctl start hermes-docker-proxy hermes-broker` (the broker requires
+the proxy). The kill switch stays absent until the operator creates it again.
+
+### Revoke the write credential and prove it dead (security review D8.2)
+
+Canon (credential governance) decides the order and the proof: **mint the replacement before
+revoking** if the role must keep working, and **prove death by using the token** — the revoke
+endpoint's HTTP 200 only means "request accepted". Run on the laptop, from
+`~/Projects/claude_code/infra/hermes-agent`, against the laptop's `.env.gaw`. Nothing prints the
+token: it goes to `curl` on stdin, never in argv.
+
+1. **Disable on the box first:** the D8.1 block above, then remove the box's copy:
+   `sudo shred -u /opt/hermes-agent/.env.gaw` and a system-wide `sudo find / -xdev -name '*env.gaw*'`
+   that shows only `.env.gaw.example`.
+2. **Record which token you are killing:**
+   `sed -n 's/^GOOGLE_ADS_REFRESH_TOKEN=//p' .env.gaw | tr -d '\n' | shasum | cut -c1-12`
+3. **Revoke:**
+   ```bash
+   sed -n 's/^GOOGLE_ADS_REFRESH_TOKEN=//p' .env.gaw | tr -d '\n' | sed 's/^/token=/' \
+     | curl -s -o /dev/null -w 'revoke http %{http_code}\n' --data @- https://oauth2.googleapis.com/revoke   # revoke http 200 — NOT proof
+   ```
+   (Equivalent by hand: Google Account → Security → Third-party access → the Hermes OAuth app →
+   remove access. Either way, step 4 is the proof.)
+4. **Prove death:** `./audit-credential-access.sh --cred .env.gaw; echo rc=$?` must now FAIL — the
+   token refresh is refused (Google's refusal names `invalid_grant`). A successful read means the
+   token is alive: stop and investigate. Only then delete the laptop's `.env.gaw`.
+5. **Check collateral, per canon rule 1:** revocation isolation follows the Google ACCOUNT, not the
+   OAuth client. If the write role shares an account with anything else, run
+   `./audit-credential-access.sh --all` and confirm every credential you meant to keep still reads.
+6. **Record it:** the revoked token's sha12 (step 2), the date, and step 4's refusal, in the findings
+   doc and the brain.
+
+### Sweep the in-memory mounts (security review D2.1)
+
+The collector's credential sweep stays on the root filesystem (`find / -xdev`), so it reports the
+writable in-memory mounts as `not_swept`. Sweep them directly and attach the result to the review.
+Each `/run/user/<uid>` is its own mount, so each is listed. Names first, then a content check for
+renamed files; both are read-only and print paths only.
+
+```bash
+for m in /dev/shm /run /run/lock /run/user/*; do
+  sudo find "$m" -xdev -type f \( -name '.env*' -o -name '*.ga' -o -name '*.gaw' -o -name '.git-credentials' \
+      -o -name 'credentials.json' -o -name 'application_default_credentials.json' \
+      -o -name 'id_rsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' \) -print 2>/dev/null
+done; echo "name sweep done"                                                             # only "name sweep done"
+sudo grep -rlsI -E 'GOOGLE_ADS_(REFRESH_TOKEN|CLIENT_SECRET|DEVELOPER_TOKEN)=|1//0[0-9A-Za-z_-]{20,}' /dev/shm /run/user 2>/dev/null; echo "content sweep done"   # only "content sweep done"
+```
+
 ---
 
 ## Phase 7: Reach the Dashboard From the Laptop

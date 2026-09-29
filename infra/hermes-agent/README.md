@@ -1419,9 +1419,11 @@ now refuses at guard 7 — including `--dry-run`.
 The model, stated once so the next project does not have to rediscover it:
 
 **One OAuth client per credential-holding component, and one Google *account* per
-role.** These are different axes and conflating them is what made an earlier
-revocation collateral rather than surgical — revocation is per *(user, client)*
-pair, so a shared client means killing one grant kills them all.
+role.** These are different axes. Only the **account** isolates revocation — canon
+(credential governance, rule 1, amended 2026-08-19) measured that revoking one grant
+killed another grant of the same account even through a *different* client. Separate
+clients still keep grants distinguishable and let one be revoked on purpose; they do
+not stop collateral within an account.
 
 | Role | Account | Access level | Credential file | Why |
 |---|---|---|---|---|
@@ -1448,11 +1450,19 @@ worth knowing which ones were traded away:
   Compensate by running the access audit after any change to the operator's own
   Google Ads permissions, not just after Hermes changes.
 
-**What is NOT lost:** revocation stays surgical. OAuth revocation is per
-*(user, client)* pair, and Hermes has its own OAuth client as of 2026-08-17, so
-revoking the Hermes write grant does not disturb the operator's other grants for
-the same account. That property came from separating the client, not the account —
-which is why the two axes are worth keeping distinct even when one is reused.
+**Also lost: surgical revocation.** *(Corrected 2026-09-29 — the earlier text here
+said revocation stayed surgical because Hermes has its own OAuth client. Canon says
+otherwise; the independent security review of 2026-09-29 caught the contradiction.)*
+Canon (credential governance, rule 1, amended 2026-08-19) measured that a separate
+OAuth client gives **no** revocation isolation: revoking a credential on the same
+account through a *different* client killed the write credential. The isolation
+boundary is the **account**. A separate Cloud project isolated in one later measurement
+(2026-08-24), but canon does not yet recommend relying on it. So with the write role on
+the operator's own account, revoking the Hermes write grant can take the operator's
+other grants for that account with it — and the reverse. This is the security review's
+D3.2 reason to move the write role to a dedicated STANDARD-access account. The
+revocation procedure, including the collateral check, is BRING-UP "Revoke the write
+credential and prove it dead".
 
 Never point both files at the same account, and never copy a token between them.
 The read guarantee is only real while the read account genuinely cannot mutate.
@@ -1464,8 +1474,9 @@ The read guarantee is only real while the read account genuinely cannot mutate.
    Accept the invitation from that account.
 
    *Skip this step when reusing an existing account* — which is the current shape of
-   the write role. Reuse changes nothing below: step 2 still creates a **separate
-   OAuth client**, and that is what keeps revocation surgical. Never reuse another
+   the write role, and the one the 2026-09-29 security review recommends ending (D3.2):
+   a reused account means revocation is **not** surgical, whatever the client (canon
+   rule 1). Step 2 still creates a **separate OAuth client**; never reuse another
    component's client just because you are reusing its account.
 2. Cloud Console → Credentials → Create OAuth client ID → **Desktop app**, named for
    the component. One client per component; do not reuse another component's.

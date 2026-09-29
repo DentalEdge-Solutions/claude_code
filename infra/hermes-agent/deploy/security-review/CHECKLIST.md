@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.3
+version: 1.4
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version. Changing this file changes the box fingerprint's `checklist` component,
@@ -44,18 +44,18 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 - **expected:** login shells: `root` and `hermesops` only; sudo group: `hermesops` only; `sudoers_d` holds only files the operator recognises.
 - **pass rule:** any unexplained account is a FAIL.
 
-### D1.6 — The deploy user is not in the docker group
+### D1.6 — No human or deploy account is in the docker group
 - **source:** box
-- **claim:** `docker` group membership would be root-equivalent.
-- **expected:** `docker_group_members` is empty.
-- **pass rule:** empty.
+- **claim:** `docker` group membership is root-equivalent, so no login account may hold it.
+- **expected:** `docker_group_members` is exactly `["hermes-docker-proxy"]` — the proxy service account, which must reach the Docker socket to broker every container create (by design, BRING-UP Phase 6). Neither `hermesops` nor any other login account appears. (v1.4: the 2026-09-29 review failed v1.3's "empty" expectation on this designed member.)
+- **pass rule:** any member other than `hermes-docker-proxy` is a FAIL.
 
 ## D2 Credential inventory
 
 ### D2.1 — The credential sweep finds exactly the authorised set
 - **source:** box
 - **claim:** a system-wide sweep (not known paths — F24) finds only authorised credentials, each `hermes-broker:hermes-broker 0600` (write) or as the README table says (read).
-- **expected:** every `credential` row matches an entry in the report's authorised set; examples are `kind: example`; nothing else carries a `credential`. `not_swept` is empty or every entry is explained by the operator. No row is `kind: unparsed` or `kind: unreadable` — either is a FAIL until explained.
+- **expected:** every `credential` row matches an entry in the report's authorised set; examples are `kind: example`; nothing else carries a `credential`. `not_swept` entries are explained: `/boot`, `/boot/efi` (kernel and bootloader), `/dev` (device nodes) and `/run/lock` (lock files) are pre-explained here and need nothing; `/dev/shm`, `/run` and `/run/user/<uid>` are writable in-memory mounts, so the operator attaches the result of BRING-UP's "Sweep the in-memory mounts" command showing no credential-named file; any other entry must be explained by the operator. No row is `kind: unparsed` or `kind: unreadable` — either is a FAIL until explained.
 - **pass rule:** an unexpected credential, a mode wider than `0600`, an unexplained `not_swept` entry, or an unexplained `unparsed`/`unreadable` row, is a FAIL.
 
 ### D2.2 — No credential text in shell histories
