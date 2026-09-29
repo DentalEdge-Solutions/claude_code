@@ -483,6 +483,10 @@ def box_fingerprint(host, ctx):
         # dump is not volatile by construction; the fallback and the result are still run
         # through normalize_ruleset() because iptables-save has no such flag and Docker
         # rewrites its own chains regardless of which tool produced the dump.
+        # Note: on an iptables-legacy host `nft -s list ruleset` succeeds but returns an
+        # empty ruleset (rc 0, no rules) rather than failing, so the iptables-save
+        # fallback below never runs there — not the case on this box (Ubuntu 24.04's
+        # nft/nftables backend), where nft is authoritative.
         rc, out, _ = host.run(["nft", "-s", "list", "ruleset"])
         kind = "nft"
         if rc != 0:

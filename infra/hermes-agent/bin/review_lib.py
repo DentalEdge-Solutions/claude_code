@@ -22,11 +22,27 @@ _MIN_SECRET_LEN = 8
 DOCKER_MANAGED_CHAINS = {"DOCKER", "DOCKER-ISOLATION-STAGE-1", "DOCKER-ISOLATION-STAGE-2",
                           "DOCKER-CT", "DOCKER-BRIDGE", "DOCKER-FORWARD"}
 
+# fail2ban's sshd jail bans/unbans on ~10-minute cycles on a public-SSH box: chain(s) and
+# set elements named/prefixed `f2b-` are its ban list, not box configuration, and must not
+# be hashed. Its liveness (is the jail running at all) is checked separately by D1.4 — the
+# fingerprint only needs to ignore WHICH ips are currently banned.
+FAIL2BAN_CHAIN_PREFIX = "f2b-"
+
 _BR_ID_RE = re.compile(r"br-[0-9a-f]{12}")
+# Matches only bare identifiers (`chain input {`), not quoted names (`chain "input" {`) —
+# fine here because both Docker's and fail2ban's own chain names are always plain
+# identifiers; nft only needs quoting for names containing characters this can't match.
 _NFT_CHAIN_RE = re.compile(r"^\s*chain (\S+) \{")
+_NFT_TABLE_RE = re.compile(r"^\s*table (\S+) (\S+) \{")
+_NFT_F2B_JUMP_RE = re.compile(r"\b(?:jump|goto) f2b-\S+")
 _NFT_COUNTER_RE = re.compile(r"counter packets \d+ bytes \d+ ?")
 _IPTABLES_CHAIN_DECL_RE = re.compile(r"^:(\S+) (\S+) \[\d+:\d+\]")
 _IPTABLES_RULE_CHAIN_RE = re.compile(r"^-A (\S+)\s")
+_IPTABLES_F2B_TARGET_RE = re.compile(r"(?:-j|-g) f2b-\S+")
+
+
+def _is_managed_chain(name):
+    return name in DOCKER_MANAGED_CHAINS or name.startswith(FAIL2BAN_CHAIN_PREFIX)
 
 
 def normalize_ruleset(text, kind):
@@ -45,6 +61,17 @@ def normalize_ruleset(text, kind):
       recreate. DOCKER-USER is NOT dropped — it holds only the operator's own rules, so
       it is stable and a real signal the fingerprint must keep. Rules in other chains
       that merely jump/target a Docker chain are kept: the jump itself is stable.
+    - both: anything named or prefixed `f2b-` (FAIL2BAN_CHAIN_PREFIX) — fail2ban's sshd
+      jail bans and unbans IPs on ~10-minute cycles, rewriting its own chain (nft) or
+      chain-and-rules (iptables), an nftables banaction's whole `table inet f2b-table`
+      (chain + address set), and the `jump`/`goto`/`-j`/`-g` rule elsewhere that wires it
+      in on first ban. All of that is dropped; the jail's liveness is a separate
+      box-state fact checked by D1.4, not by this hash.
+
+    Known gap (not handled): Docker's per-published-port hairpin MASQUERADE rule in `nat
+    POSTROUTING` (`ip saddr X ip daddr X tcp dport P masquerade`) embeds container IPs and
+    is not normalised here. The box publishes no ports today, so this is dormant — the
+    first published port would make the fingerprint unstable; handle it then.
 
     Rule order is preserved (never sorted) — it is semantically meaningful.
     """
@@ -62,14 +89,26 @@ def _clean_line(line):
 def _normalize_nft(text):
     out = []
     skip_chain = False
+    skip_table_depth = 0  # >0: inside a dropped `table … f2b-… { }`, counting brace depth
     for raw in text.splitlines():
+        if skip_table_depth > 0:
+            skip_table_depth += raw.count("{") - raw.count("}")
+            if skip_table_depth <= 0:
+                skip_table_depth = 0
+            continue
+        tm = _NFT_TABLE_RE.match(raw)
+        if tm and tm.group(2).startswith(FAIL2BAN_CHAIN_PREFIX):
+            skip_table_depth = raw.count("{") - raw.count("}")
+            continue
         m = _NFT_CHAIN_RE.match(raw)
         if m:
-            skip_chain = m.group(1) in DOCKER_MANAGED_CHAINS
+            skip_chain = _is_managed_chain(m.group(1))
         line = _clean_line(raw)
         if skip_chain:
             if line.strip() == "}":
                 skip_chain = False
+            continue
+        if _NFT_F2B_JUMP_RE.search(raw):
             continue
         stripped = _NFT_COUNTER_RE.sub("", line)
         if stripped != line:
@@ -92,13 +131,15 @@ def _normalize_iptables(text):
         decl = _IPTABLES_CHAIN_DECL_RE.match(line)
         if decl:
             name = decl.group(1)
-            if name in DOCKER_MANAGED_CHAINS:
+            if _is_managed_chain(name):
                 continue
             line = f":{decl.group(1)} {decl.group(2)} [0:0]"
             out.append(line)
             continue
         rule = _IPTABLES_RULE_CHAIN_RE.match(line)
-        if rule and rule.group(1) in DOCKER_MANAGED_CHAINS:
+        if rule and _is_managed_chain(rule.group(1)):
+            continue
+        if _IPTABLES_F2B_TARGET_RE.search(line):
             continue
         out.append(line)
     return "\n".join(out)

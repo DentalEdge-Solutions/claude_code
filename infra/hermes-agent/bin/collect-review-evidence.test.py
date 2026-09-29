@@ -248,6 +248,7 @@ class TestBundle(Base):
         h1 = self.host()
         self.outputs[("nft", "-s")] = (0, base % "172.17.0.2", "")
         fp1 = CE.box_fingerprint(h1, CE.context(h1))
+        self.assertTrue(fp1["complete"])
 
         h2 = self.host()
         variant = (base % "172.17.0.9").replace("counter packets 12 bytes 840",
