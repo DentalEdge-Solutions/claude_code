@@ -4,7 +4,7 @@
 Nothing here judges. It makes evidence safe to hand to a reviewer: slugs and customer ids
 redacted, credentials reduced to fingerprints, and one canonical fingerprint hash.
 """
-import hashlib, json, os, re
+import datetime, hashlib, json, os, re
 
 CLIENT = "<client>"
 OBSERVED = "observed"
@@ -12,6 +12,12 @@ COULD_NOT_CHECK = "could-not-check"
 SECRET_KEYS = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_SECRET",
                "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_CLIENT_ID")
 ROLE_BY_NAME = {".env.ga": "read", ".env.gaw": "write"}
+
+
+def utc_now():
+    """When a bundle was collected, second precision, UTC (review #3 §5: evidence had no
+    timestamp). Never part of the fingerprint, which must stay stable across runs."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 _MIN_SECRET_LEN = 8
 
 # Chains Docker itself rewrites on every container create/recreate (container IPs, rule

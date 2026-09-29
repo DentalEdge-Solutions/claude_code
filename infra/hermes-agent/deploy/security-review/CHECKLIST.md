@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.6
+version: 1.7
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version, so every change to this file must raise it (CI enforces this:
@@ -8,13 +8,16 @@ cites this version, so every change to this file must raise it (CI enforces this
 component hashes the git tree of `deploy/`, which contains this file, and flags uncommitted
 edits. The `checklist` component records the version. Either way, the review is
 re-triggered (§5). (v1.6: this paragraph only. The v1.5 header named the wrong fingerprint
-component, and the version-bump rule is new. No item changed.)
+component, and the version-bump rule is new. No item changed.) (v1.7: D2.1 `kind`s and
+`memory_sweep`, D2.2 coverage, D6.1 `.env` rule, bundle `collected_at` — review #3's residuals.)
 
 **How to read an item.** `source` says where the evidence comes from: `box` (the box
 bundle, item id as key), `laptop` (the laptop bundle), or `manual` (the operator states it
 in the report). `expected` is what a healthy box shows. The reviewer marks each item
 `PASS`, `FAIL` or `CANNOT-VERIFY`, quoting the evidence. An item whose evidence is
-`could-not-check` is `CANNOT-VERIFY` — never `PASS`.
+`could-not-check` is `CANNOT-VERIFY` — never `PASS`. Each bundle carries `collected_at` (UTC):
+the box bundle must postdate the last change to the box the report relies on, and the laptop
+bundle must be from the same day as the sign-off.
 
 ## D1 Host exposure
 
@@ -59,12 +62,12 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 ### D2.1 — The credential sweep finds exactly the authorised set
 - **source:** box
 - **claim:** a system-wide sweep (not known paths — F24) finds only authorised credentials, each `hermes-broker:hermes-broker 0600` (write) or as the README table says (read). Under the read-only posture (D3.2, v1.5) the authorised set holds **no** write credential, so any `.env.gaw` other than `.env.gaw.example` is a FAIL.
-- **expected:** every `credential` row matches an entry in the report's authorised set; examples are `kind: example`; nothing else carries a `credential`. `not_swept` entries are explained: `/boot`, `/boot/efi` (kernel and bootloader), `/dev` (device nodes) and `/run/lock` (lock files) are pre-explained here and need nothing; `/dev/shm`, `/run` and `/run/user/<uid>` are writable in-memory mounts, so the operator attaches the result of BRING-UP's "Sweep the in-memory mounts" command showing no credential-named file; any other entry must be explained by the operator. No row is `kind: unparsed` or `kind: unreadable` — either is a FAIL until explained.
-- **pass rule:** an unexpected credential, a mode wider than `0600`, an unexplained `not_swept` entry, or an unexplained `unparsed`/`unreadable` row, is a FAIL.
+- **expected:** every row has a `kind`. `credential` rows match the report's authorised set (none on the box under the read-only posture). `example` rows are templates. `empty` rows are 0 bytes. `authorised-other` rows carry a `label` naming the README's non-Google secret (`gateway-env`: the gateway `.env`, `root:root 0600`). No row is `unlisted`, `unparsed` or `unreadable`. `not_swept`: `/boot`, `/boot/efi` (kernel and bootloader), `/dev` (device nodes) and `/run/lock` (lock files) are pre-explained; the writable in-memory mounts are covered by `memory_sweep`, whose `name_hits`, `content_hits` and `unreadable` are all empty; any other entry must be explained by the operator. If `memory_sweep` is `could-not-check`, the operator attaches BRING-UP's manual "Sweep the in-memory mounts" output instead.
+- **pass rule:** an unexpected credential, a mode wider than `0600`, an `unlisted`/`unparsed`/`unreadable` row not explained, any `memory_sweep` hit, or an unexplained `not_swept` entry, is a FAIL.
 
 ### D2.2 — No credential text in shell histories
 - **source:** box
-- **claim:** no value-shaped credential or known secret sits in any history file.
+- **claim:** no value-shaped credential or known secret sits in any history file — shell, REPL and database clients (`.bash_history`, `.zsh_history`, `.python_history`, `.psql_history`, …) — in `/root`, every `/home/*` and every home `/etc/passwd` names, service accounts included.
 - **expected:** every `pattern_hits` and `known_secret_hits` is `0`.
 - **pass rule:** any non-zero is a FAIL until explained and cleaned.
 
@@ -145,7 +148,7 @@ in the report). `expected` is what a healthy box shows. The reviewer marks each 
 ### D6.1 — The installed package is the pinned package
 - **source:** box
 - **claim:** each app directory holds exactly the pinned package.
-- **expected:** `installed_sha256 == pin.sha256`; `commit == pin.commit`; `mismatched` and `extra` empty; `placeholder false`; `git_dir false`.
+- **expected:** `installed_sha256 == pin.sha256`; `commit == pin.commit`; `mismatched` and `extra` empty; `placeholder false`; `git_dir false`; `env_file.size` `0`. (The app's `.env` is masked from the executor and exempt from `extra` only while it is empty; a non-empty one appears in `extra`.)
 - **pass rule:** any deviation is a FAIL.
 
 ### D6.2 — No git or GitHub credential on the box

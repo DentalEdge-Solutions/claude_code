@@ -1043,6 +1043,10 @@ token: it goes to `curl` on stdin, never in argv.
 
 ### Sweep the in-memory mounts (security review D2.1)
 
+**Since checklist v1.7 the collector does this itself** (D2.1 `memory_sweep`: every tmpfs/ramfs
+mount, by name and by content, paths only), so a review no longer needs this block. Keep it as the
+fallback when `memory_sweep` is `could-not-check`, and to re-check by hand.
+
 The collector's credential sweep stays on the root filesystem (`find / -xdev`), so it reports the
 writable in-memory mounts as `not_swept`. Sweep them directly and attach the result to the review.
 Each `/run/user/<uid>` is its own mount, so each is listed. Names first, then a content check for

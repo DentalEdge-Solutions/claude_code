@@ -265,6 +265,139 @@ class TestBundle(Base):
         self.assertNotEqual(fp1["fingerprint"], fp3["fingerprint"])
 
 
+class TestTighteningAfterReview3(Base):
+    """Review #3's non-blocking findings: freshness, in-memory mounts, .env kinds,
+    the D6.1 .env exemption, and history coverage."""
+    GATEWAY_ENV = CE.CHECKOUT + "/infra/hermes-agent/.env"
+    APP_ENV = CE.APP_HOST_DIRS["claude_google_ads"] + "/.env"
+
+    def _rows(self):
+        return {r["path"]: r for r in CE.collect(self.host())["items"]["D2.1"]["data"]["files"]}
+
+    # ---- a: freshness ----------------------------------------------------------
+    def test_bundle_carries_collected_at_utc(self):
+        b = CE.collect(self.host())
+        self.assertRegex(b["collected_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_collected_at_is_not_part_of_the_fingerprint(self):
+        h = self.host()
+        self.assertNotIn("collected_at", json.dumps(CE.box_fingerprint(h, CE.context(h))))
+
+    # ---- b: in-memory mounts are swept by the collector itself -------------------
+    def test_memory_sweep_finds_credential_name_and_content_without_printing_the_value(self):
+        self.outputs[("findmnt",)] = (0, "/ ext4\n/dev/shm tmpfs\n/run/user/1000 tmpfs\n/boot ext4\n", "")
+        self._w("/dev/shm/.env.stash", "FOO=1\n")
+        self._w("/run/user/1000/notes.txt", f"pasted {TOKEN}\n")
+        self._w("/run/user/1000/clean.txt", "nothing here\n")
+        out = CE.collect(self.host())
+        ms = out["items"]["D2.1"]["data"]["memory_sweep"]
+        self.assertEqual(ms["mounts"], ["/dev/shm", "/run/user/1000"])
+        self.assertEqual(ms["name_hits"], ["/dev/shm/.env.stash"])
+        self.assertEqual(ms["content_hits"], ["/run/user/1000/notes.txt"])
+        self.assertNotIn(TOKEN, json.dumps(out))
+
+    def test_memory_sweep_clean_control(self):
+        self.outputs[("findmnt",)] = (0, "/ ext4\n/dev/shm tmpfs\n", "")
+        self._w("/dev/shm/sem.x", "nothing\n")
+        ms = CE.collect(self.host())["items"]["D2.1"]["data"]["memory_sweep"]
+        self.assertEqual((ms["mounts"], ms["name_hits"], ms["content_hits"]), (["/dev/shm"], [], []))
+
+    def test_memory_sweep_reports_an_unenterable_dir_instead_of_skipping_it(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can enter a 0000 directory")
+        self.outputs[("findmnt",)] = (0, "/ ext4\n/dev/shm tmpfs\n", "")
+        self._w("/dev/shm/locked/f", "x\n")
+        locked = os.path.join(self.root, "dev/shm/locked")
+        os.chmod(locked, 0)
+        try:
+            ms = CE.collect(self.host())["items"]["D2.1"]["data"]["memory_sweep"]
+        finally:
+            os.chmod(locked, 0o700)
+        self.assertEqual(ms["unreadable"], ["/dev/shm/locked"])
+
+    def test_memory_sweep_survives_a_dir_vanishing_mid_walk(self):
+        self.outputs[("findmnt",)] = (0, "/ ext4\n/run tmpfs\n", "")
+        self._w("/run/gone/f", "x\n")
+        real = os.lstat
+        def flaky(p, *a, **k):
+            if p.endswith("/run/gone"):
+                raise FileNotFoundError(p)
+            return real(p, *a, **k)
+        from unittest import mock
+        with mock.patch.object(CE.os, "lstat", side_effect=flaky):
+            items = CE.collect(self.host())["items"]
+        self.assertEqual(items["D2.1"]["status"], R.OBSERVED)
+        self.assertEqual(items["D2.1"]["data"]["memory_sweep"]["mounts"], ["/run"])
+
+    def test_memory_sweep_could_not_check_when_findmnt_fails_item_stays_observed(self):
+        items = CE.collect(self.host())["items"]                   # findmnt not faked
+        self.assertEqual(items["D2.1"]["status"], R.OBSERVED)
+        self.assertEqual(items["D2.1"]["data"]["memory_sweep"], R.COULD_NOT_CHECK)
+
+    # ---- c: every sweep hit gets a meaningful kind -----------------------------------
+    def test_env_files_are_classified(self):
+        self._w(self.GATEWAY_ENV, "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=hunter2hunter2\n")
+        self._w(self.APP_ENV, "")
+        self._w("/etc/someapp/.env", "API_KEY=abc\n")
+        self.outputs[("find",)] = (0, "\n".join([CE.AGENT_DIR + "/.env.gaw", self.GATEWAY_ENV,
+                                                 self.APP_ENV, "/etc/someapp/.env"]) + "\n", "")
+        rows = self._rows()
+        self.assertEqual(rows[CE.AGENT_DIR + "/.env.gaw"]["kind"], "credential")
+        self.assertEqual(rows[self.GATEWAY_ENV]["kind"], "authorised-other")
+        self.assertEqual(rows[self.GATEWAY_ENV]["label"], "gateway-env")
+        self.assertEqual(rows[self.APP_ENV]["kind"], "empty")
+        self.assertEqual(rows["/etc/someapp/.env"]["kind"], "unlisted")
+
+    def test_authorised_path_holding_a_google_credential_is_still_a_credential(self):
+        self._w(self.GATEWAY_ENV, f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n")
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n", "")
+        self.assertEqual(self._rows()[self.GATEWAY_ENV]["kind"], "credential")
+
+    # ---- d: the app .env is exempt from `extra` only while empty ----------------------
+    def _install_package(self, env_body):
+        import package_lib as PK
+        d = CE.APP_HOST_DIRS["claude_google_ads"]
+        self._w(CE.CHECKOUT + "/infra/hermes-agent/registry/projects.yaml",
+                "projects:\n  claude_google_ads:\n    workdir: /projects/claude_google_ads\n")
+        self._w(d + "/code/a.py", "print(1)\n")
+        m = PK.build_manifest("claude_google_ads", "r", "a" * 40, {"code/a.py": b"print(1)\n"})
+        with open(os.path.join(self.root, (d + "/" + PK.MANIFEST_NAME).lstrip("/")), "wb") as f:
+            f.write(PK.manifest_bytes(m))
+        if env_body is not None:
+            self._w(d + "/.env", env_body)
+
+    def test_d6_1_empty_env_is_not_extra(self):
+        self._install_package("")
+        row = CE.collect(self.host())["items"]["D6.1"]["data"]["claude_google_ads"]
+        self.assertEqual(row["extra"], [])
+        self.assertEqual(row["env_file"], {"present": True, "size": 0})
+
+    def test_d6_1_non_empty_env_is_extra(self):
+        self._install_package("GOOGLE_ADS_DEVELOPER_TOKEN=x\n")
+        row = CE.collect(self.host())["items"]["D6.1"]["data"]["claude_google_ads"]
+        self.assertEqual(row["extra"], [".env"])
+
+    def test_d6_1_absent_env_control(self):
+        self._install_package(None)
+        row = CE.collect(self.host())["items"]["D6.1"]["data"]["claude_google_ads"]
+        self.assertEqual((row["extra"], row["env_file"]), ([], {"present": False, "size": 0}))
+
+    # ---- e: every home in /etc/passwd, and more history kinds --------------------------
+    def test_history_sweep_covers_passwd_homes_and_more_file_kinds(self):
+        self._w("/etc/passwd", "root:x:0:0:root:/root:/bin/bash\n"
+                               "hermes-broker:x:998:998::/var/lib/hermes-broker:/usr/sbin/nologin\n")
+        self._w("/var/lib/hermes-broker/.psql_history", f"\\set t {TOKEN}\n")
+        self._w("/root/.bash_history", "ls\n")
+        h = CE.collect(self.host())["items"]["D2.2"]["data"]["histories"]
+        self.assertEqual(h["/var/lib/hermes-broker/.psql_history"]["pattern_hits"], 1)
+        self.assertEqual(h["/root/.bash_history"]["pattern_hits"], 0)      # control
+
+    def test_history_sweep_without_passwd_falls_back_to_root_and_home(self):
+        self._w("/home/alice/.bash_history", "ls\n")
+        h = CE.collect(self.host())["items"]["D2.2"]["data"]["histories"]
+        self.assertIn("/home/alice/.bash_history", h)
+
+
 class TestCredentialsOnly(Base):
     def test_lists_the_installed_set_by_fingerprint(self):
         infos, _secrets, _unparsed, _unreadable = CE.installed_credentials(self.host())

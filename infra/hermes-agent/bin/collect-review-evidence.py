@@ -11,7 +11,7 @@ should show, and the independent reviewer compares. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, grp, json, os, pwd, re, stat, subprocess, sys
+import argparse, fnmatch, grp, json, os, pwd, re, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import changeset_lib as C
@@ -33,7 +33,17 @@ GATEWAY_PROBE_PATHS = ("/opt/governance", "/var/lib/hermes/governance",
 GATEWAY_CONTROL_PATH = "/opt/registry/projects.yaml"
 SWEEP_NAMES = (".env*", "*.ga", "*.gaw", ".git-credentials", "hosts.yml", "credentials.json",
                "application_default_credentials.json", "id_rsa", "id_ecdsa", "id_ed25519")
-HISTORY_FILES = (".bash_history", ".zsh_history", ".python_history")
+HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history", ".python_history",
+                 ".psql_history", ".mysql_history", ".sqlite_history", ".node_repl_history",
+                 ".rediscli_history", ".lesshst")
+# Non-Google secret files the box is meant to hold (README credential table). A sweep hit
+# at one of these paths is `authorised-other`; any other non-empty, non-Google hit is
+# `unlisted`, which the reviewer must see explained (review #3, not-on-checklist #3).
+AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env"}
+# Writable in-memory filesystems `find / -xdev` never crosses: the collector sweeps them
+# itself, by name and by content (review #3 §5 — the manual sweep went stale).
+MEMORY_FSTYPES = {"tmpfs", "ramfs"}
+MEMORY_READ_LIMIT = 1 << 20
 # Moved into review_lib.py (final-review Group A4) so both the collector and
 # review_lib.looks_like_credential_text share one definition. Kept as an alias here —
 # the collector's own _count_cred_text still reads it under this name.
@@ -198,24 +208,73 @@ def _sweep(host):
     return sorted(set(line for line in out.splitlines() if line))
 
 
-def _not_swept(host):
-    """Mounts `_sweep`'s `find / -xdev` does NOT cross, other than real pseudo/virtual
-    filesystems (final-review A2). Returns a sorted list of targets, or the literal
-    string could-not-check if `findmnt` itself could not be read — the D2.1 item
-    itself stays observed either way; the reviewer judges."""
+def _mounts(host):
+    """[(target, fstype)] for every mount `find / -xdev` does NOT cross, other than real
+    pseudo/virtual filesystems (final-review A2), or None when `findmnt` cannot be read."""
     rc, out, _ = host.run(["findmnt", "-rn", "-o", "TARGET,FSTYPE"])
     if rc != 0:
-        return R.COULD_NOT_CHECK
-    not_swept = []
+        return None
+    mounts = set()
     for line in out.splitlines():
         cols = line.split()
-        if len(cols) < 2:
+        if len(cols) < 2 or cols[0] == "/" or cols[1] in PSEUDO_FSTYPES:
             continue
-        target, fstype = cols[0], cols[1]
-        if target == "/" or fstype in PSEUDO_FSTYPES:
+        mounts.add((cols[0], cols[1]))
+    return sorted(mounts)
+
+
+def _not_swept(host, mounts):
+    """Targets the root sweep did not cross — a sorted list, or could-not-check. The D2.1
+    item itself stays observed either way; the reviewer judges."""
+    return R.COULD_NOT_CHECK if mounts is None else sorted({t for t, _ in mounts})
+
+
+def _memory_sweep(host, mounts):
+    """Sweep the writable in-memory mounts the root sweep skips: a file whose NAME is
+    credential-shaped (SWEEP_NAMES), or whose CONTENT looks like a Google Ads credential.
+    Paths only, never content. Each mount is walked without crossing into another mount
+    (it is walked on its own), regular files only, the first MEMORY_READ_LIMIT bytes."""
+    if mounts is None:
+        return R.COULD_NOT_CHECK
+    targets = sorted(t for t, fs in mounts if fs in MEMORY_FSTYPES)
+    names, contents, unreadable = set(), set(), set()
+    for m in targets:
+        top = host.path(m)
+        try:
+            dev = os.lstat(top).st_dev
+        except OSError:
+            unreadable.add(m)
             continue
-        not_swept.append(target)
-    return sorted(set(not_swept))
+        def shown_of(full):
+            return "/" + os.path.relpath(full, host.path("/"))
+
+        def same_mount(full):
+            # /run churns: a directory that vanishes between listing and lstat is skipped,
+            # never allowed to fail the whole item.
+            try:
+                return os.lstat(full).st_dev == dev
+            except OSError:
+                return False
+
+        # onerror: a directory walk cannot enter is REPORTED, never silently skipped.
+        for root, dirs, files in os.walk(top, onerror=lambda e: unreadable.add(shown_of(e.filename))):
+            dirs[:] = [d for d in dirs if same_mount(os.path.join(root, d))]
+            for n in files:
+                full = os.path.join(root, n)
+                shown = shown_of(full)
+                try:
+                    st = os.lstat(full)
+                    if not stat.S_ISREG(st.st_mode):
+                        continue
+                    if any(fnmatch.fnmatch(n, pat) for pat in SWEEP_NAMES):
+                        names.add(shown)
+                    with open(full, encoding="utf-8", errors="replace") as f:
+                        if R.looks_like_credential_text(f.read(MEMORY_READ_LIMIT)):
+                            contents.add(shown)
+                except OSError:
+                    unreadable.add(shown)
+    return {"mounts": targets, "name_hits": sorted(names), "content_hits": sorted(contents),
+            "unreadable": sorted(unreadable)}
 
 
 def _shared_sweep(host, ctx):
@@ -264,28 +323,38 @@ def installed_credentials(host, sweep=None):
 
 
 def d2_1(host, ctx):
+    """Every sweep hit gets a kind: example, credential (a Google Ads credential), unparsed
+    (credential-shaped but not parseable), empty, authorised-other (AUTHORISED_OTHER, with
+    its label), unlisted (anything else non-empty), or unreadable."""
     rows = []
     for p in _shared_sweep(host, ctx):
         is_example = p.endswith(".example")
-        row = {"path": p, "kind": "example" if is_example else "candidate"}
+        row = {"path": p, "kind": "example" if is_example else "unlisted"}
         try:
             row.update(_stat(host, p))
             if not is_example:
                 info, s = R.parse_credential_file(host.path(p))
                 ctx.setdefault("secrets", []).extend(s)
                 if info["refresh_token_sha12"]:
+                    row["kind"] = "credential"
                     row["credential"] = {k: info[k] for k in ("role", "refresh_token_sha12", "client_id_sha12")}
                 else:
                     with open(host.path(p), encoding="utf-8", errors="replace") as f:
                         text = f.read()
                     if R.looks_like_credential_text(text):
                         row["kind"] = "unparsed"
+                    elif row["size"] == 0:
+                        row["kind"] = "empty"
+                    elif p in AUTHORISED_OTHER:
+                        row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
         except OSError as e:
             row["error"] = type(e).__name__
             if not is_example:
                 row["kind"] = "unreadable"
         rows.append(row)
-    return {"files": rows, "not_swept": _not_swept(host)}
+    mounts = _mounts(host)
+    return {"files": rows, "not_swept": _not_swept(host, mounts),
+            "memory_sweep": _memory_sweep(host, mounts)}
 
 
 def _count_cred_text(text, secrets):
@@ -293,11 +362,25 @@ def _count_cred_text(text, secrets):
             "known_secret_hits": sum(text.count(s) for s in secrets if len(s) >= 8)}
 
 
+def _homes(host):
+    """/root, every /home/*, and every home directory /etc/passwd names — service
+    accounts included (review #3 §8: two login accounts' histories were not enough)."""
+    homes = {"/root"} | {"/home/" + h for h in (os.listdir(host.path("/home"))
+                                               if os.path.isdir(host.path("/home")) else [])}
+    try:
+        with open(host.path("/etc/passwd")) as f:
+            for line in f:
+                cols = line.rstrip("\n").split(":")
+                if len(cols) >= 6 and cols[5].startswith("/") and cols[5] != "/":
+                    homes.add(cols[5])
+    except OSError:
+        pass
+    return sorted(h for h in homes if os.path.isdir(host.path(h)))
+
+
 def d2_2(host, ctx):
-    homes = ["/root"] + ["/home/" + h for h in (sorted(os.listdir(host.path("/home")))
-                                                if os.path.isdir(host.path("/home")) else [])]
     out = {}
-    for home in homes:
+    for home in _homes(host):
         for name in HISTORY_FILES:
             p = f"{home}/{name}"
             if os.path.isfile(host.path(p)):
@@ -396,14 +479,23 @@ def d6_1(host, ctx):
             bad = [e["path"] for e in m["files"]
                    if not os.path.isfile(host.path(d + "/" + e["path"]))
                    or PK.sha256_file(host.path(d + "/" + e["path"])) != e["sha256"]]
+            # The app's `.env` is masked from the executor and must stay EMPTY: it is exempt
+            # from `extra` only while it is 0 bytes, so a filled one cannot pass silently
+            # (review #3, not-on-checklist #4).
+            env = host.path(d + "/.env")
+            env_size = os.lstat(env).st_size if os.path.lexists(env) else 0
+            allowed = {e["path"] for e in m["files"]} | {PK.MANIFEST_NAME}
+            if env_size == 0:
+                allowed.add(".env")
             extra = []
             for root, _, names in os.walk(host.path(d)):
                 for n in names:
                     rel = os.path.relpath(os.path.join(root, n), host.path(d))
-                    if rel not in {e["path"] for e in m["files"]} | {PK.MANIFEST_NAME, ".env"}:
+                    if rel not in allowed:
                         extra.append(rel)
             row.update(installed_sha256=PK.sha256_bytes(raw), commit=m["commit"],
-                       files=len(m["files"]), mismatched=bad, extra=sorted(extra))
+                       files=len(m["files"]), mismatched=bad, extra=sorted(extra),
+                       env_file={"present": os.path.lexists(env), "size": env_size})
         else:
             row["installed_sha256"] = None
         out[project] = row
@@ -528,7 +620,7 @@ def collect_with_secrets(host):
         creds = R.credential_set(infos)
     except CouldNotCheck as e:
         secrets, creds = [], {R.COULD_NOT_CHECK: str(e)}
-    bundle = {"schema": 1, "kind": "box", "items": items,
+    bundle = {"schema": 1, "kind": "box", "collected_at": R.utc_now(), "items": items,
               "fingerprint": box_fingerprint(host, ctx), "credentials": creds}
     return ctx["redactor"].obj(bundle), ctx.get("secrets", []) + secrets
 
