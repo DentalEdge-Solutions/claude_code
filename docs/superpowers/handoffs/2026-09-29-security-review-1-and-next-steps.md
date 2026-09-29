@@ -33,6 +33,49 @@ runs every box command and pastes the output; the assistant has no box access.
 - Operator evidence for review #2 is in the gitignored
   `infra/hermes-agent/security-reviews/2026-09-29-operator-evidence-step-A.md`.
 
+## Update — 2026-09-29 final: review #3 PASS, signed off
+
+- **Review #3** (`docs/security-reviews/2026-09-29-review-3.md`): **PASS, 25/25**, signed off by the operator.
+  It binds to box fingerprint `5dc0194e…2f69`, access digest `0f0bdb9e…1319` (re-checked just before
+  sign-off) and checklist v1.5. The one FAIL on the first judgment (D3.2, a copy of the retired token kept in the
+  password manager) was cleared when the operator deleted that copy and emptied the trash.
+- **Posture:** read-only. There is no Google Ads credential on the box; `.env.ga` is laptop-only. Step E (write
+  credential, live gate) stays parked.
+- **Follow-up work (non-blocking):**
+  - ads audits on the box (read credential, host `.venv`, writable `audit_data/`, BRING-UP install steps,
+    README credential table, then its own review)
+  - checklist edits that skip the version bump don't change the fingerprint: hash the file, or enforce the
+    bump in CI
+  - `collected_at` stamps on both bundles; fold the in-memory sweep into the box collector
+  - classify `.env` files in the sweep, and list the gateway `.env` as an allowed non-Google secret
+  - declare the role in `.env.ga`
+  - document the ads `.env` exclusion in D6.1
+  - update the findings doc's header and "Final state"
+  - delete the retired client's vault from the box
+  - widen the shell-history sweep
+  - restrict SSH source addresses
+  - give the retired ADMIN grant an owner and a revocation trigger
+
+## Update — end of 2026-09-29: C done, review #2 run (NOT PASS, 0 FAIL)
+
+- **C (D9.1) decided:** every named item accepted with a reason. `main` is already protected by
+  the `main-protection` ruleset (the classic branch-protection API returns 404 for rulesets). Also accepted:
+  F25 (the operator raised `hermes@` themselves; no changes made in the window) and the public
+  review reports.
+- **D run:** fresh bundles (box rc 0 then deleted from the box; laptop rc 0 after starting Docker).
+  Review #1's bundles kept as `bundle-*-review1.json`. Review #2 (`docs/security-reviews/2026-09-29-review-2.md`):
+  **17 PASS, 0 FAIL, 7 CANNOT-VERIFY**. Every item open for lack of an operator statement is now answered in
+  the gitignored operator evidence file.
+- **Corrections found on the way:** the gateway `ANTHROPIC_API_KEY` is a **dummy** (A4 had said
+  real); the read credential `.env.ga` is **laptop-only** (the box holds no Google Ads credential; F25
+  wording fixed); the retired ADMIN token is **kept on purpose in the operator's password manager**, so
+  a future revoke can be proven by using it. `/root/live-gate-20260926` (empty) deleted.
+- **Decision (option A):** running the ads audit pipeline on the box (read credential, host
+  `.venv`, writable `audit_data/`, install steps in BRING-UP, README credential table) is separate
+  follow-up work, with its own review. It is not part of this review.
+- **Next:** box: collect a fresh bundle (the backup deletion changed D7.1); reuse or re-collect the laptop
+  bundle; fresh reviewer re-judges with the updated operator evidence → operator sign-off → land by PR → brain decision.
+
 ## Where things stand
 
 | | State |

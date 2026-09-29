@@ -610,10 +610,12 @@ because it "has STANDARD access". `hermes@` is the **read** account: README requ
 ("Never upgrade this account"), because a read-only account is the platform backstop, where Google refuses every
 mutate server-side. The operator confirmed it had been raised to STANDARD and put it back.
 
-**Exposure:** while it was STANDARD, the box's read credential (sha12 `fd18a3b7d0f4`) was
-mutate-capable, and only the allow-lists stood between a read path and a write. When it was raised
-is not known. Review #1's laptop audit, collected earlier the same day, measured `READ_ONLY`, so
-either the window closed before that run or the drift happened after it.
+**Exposure:** while it was STANDARD, the read credential (sha12 `fd18a3b7d0f4`, `.env.ga`, which
+lives on the laptop only; the box holds no Google Ads credential) was
+mutate-capable, and only the allow-lists stood between a read path and a write. The operator raised it
+themselves and later set it back; review #1's laptop audit, collected earlier the same day, measured
+`READ_ONLY`. Google Ads change history shows no change made by `hermes@` in the window (operator,
+2026-09-29). **Accepted** in review #2's D9.1 decisions.
 
 **After the fix, measured on the laptop** (`audit-credential-access.sh --cred .env.ga`, rc 0): the same
 token `fd18a3b7d0f4`, `measured_verdict READ_ONLY`, `mismatch false`, `admin false`, and the mutate
