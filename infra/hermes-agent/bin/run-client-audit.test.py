@@ -152,10 +152,14 @@ class TestFailClosed(Base):
         self.run_main(FakeRunner(self.root))
         self.assertFalse(os.path.exists(ad + "/stale.json"))
 
-    def test_draft_naming_another_client_fails(self):
-        rc, text = self.run_main(FakeRunner(self.root, draft_text="compare with other-dental"))
+    def test_draft_naming_another_client_fails_before_vault_write(self):
+        r = FakeRunner(self.root, draft_text="compare with other-dental")
+        rc, text = self.run_main(r)
         self.assertEqual(rc, 1)
         self.assertIn("other-dental", text)
+        self.assertNotIn("vault-write", [RCA.step_name(c["argv"]) for c in r.calls])
+        self.assertFalse(os.path.exists(self.root + "/opt/hermes-agent/data/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"))
+        self.assertEqual(os.listdir(self.root + "/opt/hermes-agent/data/audits/claude_google_ads"), [])
 
 
 class TestPrechecks(Base):
@@ -193,6 +197,15 @@ class TestPrechecks(Base):
 
 
 class TestUnexpectedFailure(Base):
+    def test_unreadable_credential_bytes_refused_rc2_normal_and_dry_run(self):
+        p = self.root + "/etc/hermes/.env" + ".ga"
+        os.chmod(p, 0o600); open(p, "wb").write(b"GOOGLE_ADS_X=\xff\n"); os.chmod(p, 0o400)
+        for extra in ((), ("--dry-run",)):
+            r = FakeRunner(self.root)
+            rc, text = self.run_main(r, *extra)
+            self.assertEqual(rc, 2, text); self.assertNotIn("Traceback", text)
+            self.assertEqual(r.calls, [])
+
     def test_oserror_under_lock_is_a_redacted_rc1_not_a_traceback(self):
         parent = self.root + "/var/lib/hermes/audit-data"
         os.makedirs(os.path.dirname(parent), exist_ok=True)

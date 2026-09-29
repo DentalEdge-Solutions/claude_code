@@ -117,9 +117,9 @@ def main(argv=None, runner=None, root="/", now=None):
             raise L.PrecheckError("the gateway .env has no real Anthropic key")
         pin = PIN_OVERRIDE or C.read_package(root + AGENT_DIR + "/registry/projects.yaml", PROJECT)["sha256"]
         L.package_matches(root + APP_DIR, pin)
+        steps = plan(rec, ts, root)          # re-reads the credential file: same refusal path
     except (L.PrecheckError, ValueError, OSError) as e:
         print(red.text(f"run-client-audit: refused: {e}"), file=sys.stderr); return 2
-    steps = plan(rec, ts, root)
     if a.dry_run:
         for key, argv_, env in steps:
             shown = ["<script>" if len(x) > 200 else x for x in argv_]
@@ -157,6 +157,14 @@ def _run(steps, rec, ts, root, runner, say):
             for f in os.listdir(reports):
                 if f.endswith(".md"):
                     os.remove(os.path.join(reports, f))
+        if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
+            transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"
+            with open(transient, encoding="utf-8", errors="replace") as f:
+                named = L.others_named(f.read(), slug, list(L.V.load_registry(root + REGISTRY)))
+            if named:
+                os.remove(transient)
+                say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}; not written to the vault")
+                return _summary(results, 1, say)
         stem = os.path.join(logs, name.replace(":", "-"))
         t0 = time.monotonic()
         rc = runner(argv_, env, TIMEOUTS[key], stem + ".stdout", stem + ".stderr")
@@ -170,10 +178,8 @@ def _run(steps, rec, ts, root, runner, say):
             say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
             return _summary(results, 1, say)
     vault_draft = root + f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
-    with open(vault_draft, encoding="utf-8", errors="replace") as f:
-        named = L.others_named(f.read(), slug, list(L.V.load_registry(root + REGISTRY)))
-    if named:
-        say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}")
+    if not os.path.isfile(vault_draft):
+        say("run-client-audit: vault-write reported success but the vault draft is missing")
         return _summary(results, 1, say)
     transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"
     if os.path.exists(transient):
