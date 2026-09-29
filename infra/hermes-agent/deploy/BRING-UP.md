@@ -1074,6 +1074,14 @@ by variable name, and is never mounted. The orchestrator calls `docker compose` 
 
 Do the steps in order. The slug and the customer id never go in the repo; write `<client>` here.
 
+**0. Update the box checkout.** Everything below (the command, the compose services, the checks)
+comes from this PR's merge.
+
+```bash
+cd /opt/projects/claude_code && sudo git pull --ff-only && sudo git log --oneline -1   # the merge commit of the ads-audits-on-the-box PR
+sudo git -C /opt/projects/claude_code status --short                                 # empty
+```
+
 **1. Install the re-pinned package.** The pin is in `registry/projects.yaml`
 (`claude_google_ads` → `commit: 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b`, the scrubbed SOP docs).
 Build on the laptop, copy to the deploy user's home, install on the box. This is the same
@@ -1128,12 +1136,16 @@ sudo docker compose ps                                                          
 
 The orchestrator refuses a key that does not start `sk-ant-` (it also refuses the old dummy).
 
-**4. Create the audit-data root.** Per-client directories are created `10000:10000 0700` by the
-tool; the root must be traversable by uid 10000 but not listable.
+**4. Create the audit-data and audit-logs roots.** Per-client audit-data directories are created
+`10000:10000 0700` by the tool (the collector mounts them read-write); the root must be traversable
+by uid 10000 but not listable. Each run's step logs go to `/var/lib/hermes/audit-logs/<client>/`,
+which is never mounted into a container: root-owned `0711`, logs `root 0600`, except
+`snapshot.stdout`, which is handed to uid 10000 so `vault-write` can read it.
 
 ```bash
 sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-data
-sudo stat -c '%U:%G %a' /var/lib/hermes/audit-data                                 # root:root 711
+sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-logs
+sudo stat -c '%U:%G %a' /var/lib/hermes/audit-data /var/lib/hermes/audit-logs      # root:root 711 (twice)
 ```
 
 **5. Register the spending client.** Follow the procedure in the Gate section block "RESULT,
@@ -1170,19 +1182,21 @@ Two checks that have never run on real Docker; do them on this first run and wri
   auth error naming a variable means the pass-through does not work: stop and fix it before
   another run.
 - **(b) uid 10000 traversal.** `vault-write` runs as uid 10000 via `setpriv`. It must traverse the
-  governance store (`root:hermes 2750`) and `/var/lib/hermes/audit-data` (`0711`). A `vault-write`
-  failure with `EACCES` (Permission denied) is a traversal problem: check the modes on each path
-  component (`sudo namei -m /var/lib/hermes/audit-data/<client>`), not the tool.
+  governance store (`root:hermes 2750`) and `/var/lib/hermes/audit-logs` (`0711`, twice: the root
+  and `<client>/`), to read `snapshot.stdout`. A `vault-write` failure with `EACCES` (Permission
+  denied) is a traversal problem: check the modes on each path component
+  (`sudo namei -m /var/lib/hermes/audit-logs/<client>/snapshot.stdout`), not the tool. The step
+  logs are `root 0600`: read them with `sudo`.
 
 **Operator note:** after the first real run, merge and push the ads-repo branch
 `docs/scrub-client-ids` (commit `8087dfa`), so the pin is reproducible from GitHub.
 
 **8. Offboarding.** When a client is retired, set its registry status to `retired`, then remove
-both trees. The review's D7.1 checks that no retired client has either.
+both trees and its logs. The review's D7.1 checks that no retired client has either tree.
 
 ```bash
-sudo rm -rf /var/lib/hermes/audit-data/<client> /opt/hermes-agent/data/vaults/<client>
-sudo ls /var/lib/hermes/audit-data /opt/hermes-agent/data/vaults                   # <client> no longer listed
+sudo rm -rf /var/lib/hermes/audit-data/<client> /var/lib/hermes/audit-logs/<client> /opt/hermes-agent/data/vaults/<client>
+sudo ls /var/lib/hermes/audit-data /var/lib/hermes/audit-logs /opt/hermes-agent/data/vaults   # <client> no longer listed
 ```
 
 ---
