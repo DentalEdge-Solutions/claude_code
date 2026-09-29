@@ -99,6 +99,19 @@ jobs:
       # image, which runs as 10000. Every other suite runs fully.
       - name: Hermes bin suites
         run: infra/hermes-agent/bin/run-bin-tests.sh
+      # A signed security-review report cites the checklist by version, so a version must
+      # name exactly one text: any change to CHECKLIST.md must raise `version:`. Lives in
+      # this job because the main-protection ruleset requires it. Base = the PR's base
+      # commit, or the pre-push commit on main; the shallow checkout lacks it, so fetch it.
+      - name: Checklist version raised on change
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "checklist-version: no base commit for this event — skipped"; exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE"
+          python3 infra/hermes-agent/bin/check-checklist-version.py --base "$BASE"
       # run-bin-tests.sh globs bin/ only, so the systemd unit suite lives outside its
       # discovery BY DESIGN — the units live beside their test in deploy/. Invoke it
       # explicitly, or it runs only when a human remembers to. It asserts what the unit

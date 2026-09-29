@@ -1,10 +1,14 @@
 # Hermes security review — checklist
 
-version: 1.5
+version: 1.6
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
-cites this version. Changing this file changes the box fingerprint's `checklist` component,
-which re-triggers the review (§5).
+cites this version, so every change to this file must raise it (CI enforces this:
+`bin/check-checklist-version.py`). Any change also changes the box fingerprint: its `code`
+component hashes the git tree of `deploy/`, which contains this file, and flags uncommitted
+edits. The `checklist` component records the version. Either way, the review is
+re-triggered (§5). (v1.6: this paragraph only. The v1.5 header named the wrong fingerprint
+component, and the version-bump rule is new. No item changed.)
 
 **How to read an item.** `source` says where the evidence comes from: `box` (the box
 bundle, item id as key), `laptop` (the laptop bundle), or `manual` (the operator states it
