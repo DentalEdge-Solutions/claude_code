@@ -39,6 +39,8 @@ PIN_OVERRIDE = None           # tests only
 RUN_AS_DATA_UID = ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"]
 
 # Verbatim from run-trend-audit.sh (spec §2 step 5): the analyst, its model and its limits.
+# One change (I2): `timeout 1150` kills claude INSIDE the container before the host's 1200 s
+# timeout, which can only kill the `docker compose exec` client.
 DRAFT_SCRIPT = r'''
   set -eu
   skill="/opt/data/skills/claude-code-ads-analyst/SKILL.md"
@@ -46,7 +48,7 @@ DRAFT_SCRIPT = r'''
   ls "$reports"/*.md >/dev/null 2>&1 || { echo "no reports for $PROJECT" >&2; exit 1; }
   mkdir -p "/opt/data/audits/$PROJECT"
   out="/opt/data/audits/$PROJECT/$TS-audit.md"
-  claude -p "Read and follow $skill EXACTLY, INCLUDING its Trend mode. Produce the Google Ads audit DRAFT for project $PROJECT. Fresh scrubbed reports: $reports/. THIS client'\''s prior history (read for trend deltas): $vault/metrics/, $vault/audits/, $vault/timeline.md (may be empty on the first run = establish baseline). SOP/benchmark docs: /projects/$PROJECT/. Read ONLY within $vault, $reports, and /projects/$PROJECT. Do NOT attempt ExitPlanMode and do NOT narrate your tools or environment; BEGIN your response with the DRAFT banner and output ONLY the deliverable markdown." \
+  timeout 1150 claude -p "Read and follow $skill EXACTLY, INCLUDING its Trend mode. Produce the Google Ads audit DRAFT for project $PROJECT. Fresh scrubbed reports: $reports/. THIS client'\''s prior history (read for trend deltas): $vault/metrics/, $vault/audits/, $vault/timeline.md (may be empty on the first run = establish baseline). SOP/benchmark docs: /projects/$PROJECT/. Read ONLY within $vault, $reports, and /projects/$PROJECT. Do NOT attempt ExitPlanMode and do NOT narrate your tools or environment; BEGIN your response with the DRAFT banner and output ONLY the deliverable markdown." \
     --allowedTools "Read,Grep,Glob" --permission-mode plan --model claude-opus-4-8 > "$out"
   echo "$out"
 '''
@@ -75,12 +77,26 @@ def read_nofollow(path):
         return f.read()
 
 
-def real_runner(argv, env, timeout, out, err):
-    """out/err are the open log files (open_log); nothing is re-opened by path."""
+def _quiet(argv):
+    try:
+        return subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return type(e).__name__
+
+
+def real_runner(argv, env, timeout, out, err, cleanup=None):
+    """out/err are the open log files (open_log); nothing is re-opened by path. A timeout kills
+    only the `docker compose` client, so a named `run` container is removed explicitly (I2):
+    it must not keep writing into the next client's reports."""
     try:
         return subprocess.run(argv, env=env, stdout=out, stderr=err, timeout=timeout).returncode
     except subprocess.TimeoutExpired:
         err.write(f"\n[run-client-audit] timed out after {timeout}s\n")
+        if "--name" in argv:
+            name = argv[argv.index("--name") + 1]
+            rc = (cleanup or _quiet)(["docker", "rm", "-f", name])
+            err.write(f"[run-client-audit] docker rm -f {name}: rc {rc}\n")
+        err.flush()
         return 124
 
 
@@ -96,11 +112,13 @@ def plan(rec, ts, root):
     cred = {**base, **{k: v for k, v in L.load_cred_env(root + CRED).items() if k in CRED_NAMES},
             "GOOGLE_ADS_CUSTOMER_ID": cid, "HERMES_AUDIT_DATA_DIR": data}
     eflags = [x for n in CRED_NAMES for x in ("-e", n)]
-    run = _compose(root) + ["run", "--rm", "--no-deps", "-T"] + eflags
-    steps = [("collect", run + ["ads-collector", f"code/{c}.py"], cred) for c in COLLECTORS]
+    run = lambda step: (_compose(root) + ["run", "--rm", "--no-deps", "-T", "--name", f"hermes-audit-{ts}-{step}"]
+                        + eflags)                     # named, so a timeout can remove it (I2)
+    steps = [("collect", run(f"collect-{c}") + ["ads-collector", f"code/{c}.py"], cred) for c in COLLECTORS]
     steps.append(("snapshot", ["python3", root + AGENT_DIR + "/bin/ads-metrics-snapshot.py",
                                "--audit-data", root + data, "--customer", cid, "--collected-at", ts], base))
-    steps += [("read", run + ["ads-reader", "--report", r, "--project", PROJECT], cred) for r in READERS]
+    steps += [("read", run(f"read-{r}") + ["ads-reader", "--report", r, "--project", PROJECT], cred)
+              for r in READERS]
     steps.append(("draft", _compose(root) + ["exec", "-e", "PROJECT", "-e", "CLIENT", "-e", "TS", "-T",
                                              "hermes-agent", "sh", "-lc", DRAFT_SCRIPT],
                   {**base, "PROJECT": PROJECT, "CLIENT": slug, "TS": ts}))

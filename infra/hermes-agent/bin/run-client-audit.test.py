@@ -207,6 +207,44 @@ class TestHappyPath(Base):
         self.assertEqual(os.listdir(d), [])
 
 
+class TestTimeouts(Base):
+    def test_every_compose_run_step_is_named(self):
+        import re
+        r = FakeRunner(self.root)
+        self.assertEqual(self.run_main(r)[0], 0)
+        runs = [c["argv"] for c in r.calls if "run" in c["argv"] and "docker" in c["argv"]]
+        self.assertEqual(len(runs), len(RCA.COLLECTORS) + len(RCA.READERS))
+        for a in runs:
+            name = a[a.index("--name") + 1]
+            slug = RCA.step_name(a).replace(":", "-")
+            self.assertEqual(name, f"hermes-audit-2026-10-01_12-00-00-{slug}")
+            self.assertRegex(name, r"^[a-z0-9_-]+$")
+            self.assertLess(a.index("--name"), a.index("ads-collector" if "ads-collector" in a else "ads-reader"))
+
+    def test_timed_out_run_step_removes_its_container(self):
+        d = tempfile.mkdtemp()
+        cmds = []
+        out, err = RCA.open_log(d + "/s.stdout"), RCA.open_log(d + "/s.stderr")
+        with out, err:
+            rc = RCA.real_runner(["sh", "-c", "sleep 5", "--name", "hermes-audit-x-collect-a"], None, 0.2,
+                                 out, err, cleanup=lambda argv: cmds.append(argv) or 0)
+        self.assertEqual(rc, 124)
+        self.assertEqual(cmds, [["docker", "rm", "-f", "hermes-audit-x-collect-a"]])
+        log = open(d + "/s.stderr").read()
+        self.assertIn("timed out", log); self.assertIn("docker rm -f hermes-audit-x-collect-a", log)
+
+    def test_timed_out_host_step_removes_nothing(self):
+        d = tempfile.mkdtemp()
+        cmds = []
+        with RCA.open_log(d + "/o") as out, RCA.open_log(d + "/e") as err:
+            rc = RCA.real_runner(["sleep", "5"], None, 0.2, out, err, cleanup=lambda a: cmds.append(a) or 0)
+        self.assertEqual((rc, cmds), (124, []))
+
+    def test_the_analyst_dies_inside_the_container_before_the_host_timeout(self):
+        self.assertIn("timeout 1150 claude -p", RCA.DRAFT_SCRIPT)
+        self.assertLess(1150, RCA.TIMEOUTS["draft"])
+
+
 class TestFailClosed(Base):
     def test_stops_at_first_failed_step(self):
         r = FakeRunner(self.root, fail_on="snapshot")
