@@ -245,6 +245,31 @@ class TestTimeouts(Base):
         self.assertLess(1150, RCA.TIMEOUTS["draft"])
 
 
+class TestDraftAndSnapshotArgs(Base):
+    def test_snapshot_collected_at_is_iso_from_the_same_instant(self):
+        r = FakeRunner(self.root)
+        self.run_main(r)
+        snap = [c["argv"] for c in r.calls if RCA.step_name(c["argv"]) == "snapshot"][0]
+        self.assertEqual(snap[snap.index("--collected-at") + 1], "2026-10-01T12:00:00Z")
+        vw = [c["argv"] for c in r.calls if RCA.step_name(c["argv"]) == "vault-write"][0]
+        self.assertEqual(vw[vw.index("--ts") + 1], "2026-10-01_12-00-00")      # file names keep ts
+
+    def test_draft_gets_its_values_inline_and_no_credential(self):
+        r = FakeRunner(self.root)
+        self.run_main(r)
+        d = [c for c in r.calls if RCA.step_name(c["argv"]) == "draft"][0]
+        a = d["argv"]
+        for kv in ("PROJECT=claude_google_ads", "CLIENT=acme-dental", "TS=2026-10-01_12-00-00"):
+            self.assertEqual(a[a.index(kv) - 1], "-e", kv)
+        self.assertEqual(sorted(d["env"]), ["PATH"])
+
+    def test_a_malformed_ts_is_refused(self):
+        import client_audit_lib as L
+        rec = L.eligible_client("acme-dental", self.root + RCA.REGISTRY)
+        with self.assertRaises(ValueError):
+            RCA.plan(rec, "2026-10-01_12-00-00; rm -rf /", self.root)
+
+
 class TestFailClosed(Base):
     def test_stops_at_first_failed_step(self):
         r = FakeRunner(self.root, fail_on="snapshot")
@@ -332,6 +357,29 @@ class TestUnexpectedFailure(Base):
             rc, text = self.run_main(r, *extra)
             self.assertEqual(rc, 2, text); self.assertNotIn("Traceback", text)
             self.assertEqual(r.calls, [])
+
+    def test_malformed_registry_entry_is_a_clean_refusal(self):
+        # M12: a non-dict entry raises TypeError/AttributeError, not ValueError
+        for entry in (5, None):
+            open(self.root + RCA.REGISTRY, "w").write(json.dumps({"clients": {"acme-dental": entry}}))
+            r = FakeRunner(self.root)
+            rc, text = self.run_main(r)
+            self.assertEqual(rc, 2, text); self.assertNotIn("Traceback", text); self.assertEqual(r.calls, [])
+
+    def test_type_or_attribute_error_in_prechecks_is_rc2(self):
+        from unittest import mock
+        for exc in (TypeError, AttributeError):
+            with mock.patch.object(RCA.L, "package_matches", side_effect=exc("bad manifest")):
+                r = FakeRunner(self.root)
+                rc, text = self.run_main(r)
+            self.assertEqual(rc, 2, text); self.assertIn("refused", text); self.assertEqual(r.calls, [])
+
+    def test_type_or_attribute_error_under_lock_is_rc1(self):
+        for exc in (TypeError, AttributeError):
+            r = FakeRunner(self.root, raise_on=("read:", exc))
+            rc, text = self.run_main(r)
+            self.assertEqual(rc, 1, text); self.assertIn("run-client-audit: failed:", text)
+            self.assertNotIn(CID, text)
 
     def test_oserror_under_lock_is_a_redacted_rc1_not_a_traceback(self):
         parent = self.root + "/var/lib/hermes/audit-data"

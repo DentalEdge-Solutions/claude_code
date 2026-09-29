@@ -11,7 +11,7 @@ Nothing shown carries a customer id or credential value; each step's stdout and 
 /var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
 to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
 file there is created O_EXCL|O_NOFOLLOW: root never follows a container-planted symlink."""
-import argparse, datetime, json, os, stat, subprocess, sys, time
+import argparse, datetime, json, os, re, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import changeset_lib as C
 import client_audit_lib as L
@@ -26,6 +26,7 @@ AUDIT_DATA = "/var/lib/hermes/audit-data"
 AUDIT_LOGS = "/var/lib/hermes/audit-logs"   # root-only; never mounted into anything
 LOCK = "/run/lock/hermes-client-audit.lock"
 PROJECT = "claude_google_ads"
+TS_FMT = "%Y-%m-%d_%H-%M-%S"   # file names; the snapshot gets the same instant in ISO (M8)
 COLLECTORS = ("audit_discovery", "negatives_audit", "audit_assets_rsa", "assess_supplemental")
 READERS = ("account_overview", "audit_search_terms", "audit_analyze")
 TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "draft": 1200, "vault-write": 120}
@@ -100,6 +101,13 @@ def real_runner(argv, env, timeout, out, err, cleanup=None):
         return 124
 
 
+def _iso(ts):
+    """ts is validated here: it reaches container names, the draft's env and file names."""
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}", ts):
+        raise ValueError("invalid run timestamp")
+    return datetime.datetime.strptime(ts, TS_FMT).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _compose(root):
     return ["docker", "compose", "-f", root + AGENT_DIR + "/docker-compose.yml", "--profile", "tools"]
 
@@ -107,6 +115,7 @@ def _compose(root):
 def plan(rec, ts, root):
     """[(timeout_key, argv, env)] — env holds only what the step needs, plus PATH."""
     slug, cid = rec["slug"], rec["customer_id"]
+    collected_at = _iso(ts)
     data = AUDIT_DATA + "/" + slug
     base = {"PATH": os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")}
     cred = {**base, **{k: v for k, v in L.load_cred_env(root + CRED).items() if k in CRED_NAMES},
@@ -116,12 +125,13 @@ def plan(rec, ts, root):
                         + eflags)                     # named, so a timeout can remove it (I2)
     steps = [("collect", run(f"collect-{c}") + ["ads-collector", f"code/{c}.py"], cred) for c in COLLECTORS]
     steps.append(("snapshot", ["python3", root + AGENT_DIR + "/bin/ads-metrics-snapshot.py",
-                               "--audit-data", root + data, "--customer", cid, "--collected-at", ts], base))
+                               "--audit-data", root + data, "--customer", cid, "--collected-at", collected_at], base))
     steps += [("read", run(f"read-{r}") + ["ads-reader", "--report", r, "--project", PROJECT], cred)
               for r in READERS]
-    steps.append(("draft", _compose(root) + ["exec", "-e", "PROJECT", "-e", "CLIENT", "-e", "TS", "-T",
-                                             "hermes-agent", "sh", "-lc", DRAFT_SCRIPT],
-                  {**base, "PROJECT": PROJECT, "CLIENT": slug, "TS": ts}))
+    # Non-secret, validated values inline (M9): slug (eligible_client), PROJECT (constant), ts (_iso).
+    steps.append(("draft", _compose(root) + ["exec", "-e", f"PROJECT={PROJECT}", "-e", f"CLIENT={slug}",
+                                             "-e", f"TS={ts}", "-T", "hermes-agent", "sh", "-lc", DRAFT_SCRIPT],
+                  base))
     steps.append(("vault-write", RUN_AS_DATA_UID + ["python3", root + AGENT_DIR + "/bin/vault-write.py", "--client", slug,
                                   "--audit-file", root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md",
                                   "--metrics-file", root + AUDIT_LOGS + "/" + slug + "/snapshot.stdout", "--ts", ts,
@@ -137,10 +147,10 @@ def main(argv=None, runner=None, root="/", now=None):
     a = ap.parse_args(argv)
     root = root.rstrip("/")
     runner = runner or real_runner
-    ts = now or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    ts = now or datetime.datetime.now(datetime.timezone.utc).strftime(TS_FMT)
     try:
         rec = L.eligible_client(a.client, root + REGISTRY)
-    except (L.PrecheckError, ValueError, OSError) as e:
+    except (L.PrecheckError, ValueError, OSError, TypeError, AttributeError) as e:   # M12: malformed entry
         print(f"run-client-audit: refused: {e}", file=sys.stderr); return 2
     red = R.Redactor([], [rec["customer_id"]])
     say = lambda s: print(red.text(s))
@@ -151,7 +161,7 @@ def main(argv=None, runner=None, root="/", now=None):
         pin = PIN_OVERRIDE or C.read_package(root + AGENT_DIR + "/registry/projects.yaml", PROJECT)["sha256"]
         L.package_matches(root + APP_DIR, pin)
         steps = plan(rec, ts, root)          # re-reads the credential file: same refusal path
-    except (L.PrecheckError, ValueError, OSError) as e:
+    except (L.PrecheckError, ValueError, OSError, TypeError, AttributeError) as e:
         print(red.text(f"run-client-audit: refused: {e}"), file=sys.stderr); return 2
     if a.dry_run:
         for key, argv_, env in steps:
@@ -164,7 +174,7 @@ def main(argv=None, runner=None, root="/", now=None):
             return _run(steps, rec, ts, root, runner, say)
     except L.PrecheckError as e:
         print(f"run-client-audit: {e}", file=sys.stderr); return 3
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, TypeError, AttributeError) as e:          # Ruling 6 (+ M12)
         say(f"run-client-audit: failed: {type(e).__name__}: {e}"); return 1
 
 
