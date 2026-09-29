@@ -39,9 +39,11 @@ class TestAuditMounts(unittest.TestCase):
         os.makedirs(cls.data)
         os.chown(cls.data, 10000, 10000); os.chmod(cls.data, 0o700)
         d = os.path.join(cls.tmp, "img"); os.makedirs(d)
-        open(os.path.join(d, "Dockerfile"), "w").write(STANDIN)
+        with open(os.path.join(d, "Dockerfile"), "w") as f:
+            f.write(STANDIN)
         sh("docker", "build", "-q", "-t", "hermes-agent-claude", d)
         cls.env = dict(os.environ, HERMES_AUDIT_DATA_DIR=cls.data, HERMES_SPOOL_DIR=cls.tmp,
+                       HERMES_GOVERNANCE_DIR=os.path.join(cls.tmp, "governance"),
                        HERMES_AGENT_DIR=cls.agent, HERMES_ADS_REPO_DIR=os.path.join(cls.tmp, "claude-google-ads"))
         cls.compose = ["docker", "compose", "--env-file", "/dev/null", "-f",
                        os.path.join(cls.agent, "docker-compose.yml"), "--profile", "tools"]
@@ -63,6 +65,7 @@ class TestAuditMounts(unittest.TestCase):
     def test_collector_cannot_write_the_app_code(self):
         r = self.run_svc("ads-collector", "-c", "open('/projects/claude_google_ads/code/y','w')")
         self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Read-only file system", r.stderr)
 
     def test_no_audit_service_gets_env_file_or_mounts_etc_hermes(self):
         cfg = json.loads(sh(*self.compose, "config", "--format", "json", env=self.env).stdout)
@@ -78,6 +81,7 @@ class TestAuditMounts(unittest.TestCase):
         r = sh(*self.compose, "run", "--rm", "--no-deps", "-T", "ads-collector", "code/stub_write.py",
                env=env, check=False)
         self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("interpolating", r.stderr)   # must fail at the mount, not at interpolation
 
 
 if __name__ == "__main__":
