@@ -151,11 +151,19 @@ Test-first, as in steps 1 and 2.
    - the journal holds no credential text after a real run (D2.3).
 5. Operator sign-off, then land by PR and record a brain decision.
 
-## 9. Open items for the plan
+## 9. Decisions resolved before planning
 
-- **Exact SOP/benchmark doc list** for the package: the docs the `claude-code-ads-analyst` skill
-  references, read from the skill when planning.
-- **Whether the analyst skill (`/opt/data/skills/claude-code-ads-analyst/`) is present on the box;**
-  install it as a BRING-UP step if not.
-- **Where box mode lives:** a `--box` mode in `run-trend-audit.sh`, or a sibling script sharing its
-  steps. Whichever keeps the laptop path unchanged and testable.
+- **Package docs:** `dental-benchmarks.md`, `dental-sefl-blueprint.md`, `ad-assets-best-practices.md`,
+  `anatomy-of-a-good-ad.md`, `campaigns.md` and `find-and-add-negatives.md` (the docs the
+  `claude-code-ads-analyst` skill names), plus the already-packaged `universal-negative-keywords.md`. All are
+  tracked at the pin and generic. **Every `google-ads-*.md` is excluded:** at least one
+  (`google-ads-negative-keyword-audit.md`) is a past client deliverable carrying a client name and account ids,
+  and the skill's "any `*negative*` doc" wording would otherwise sweep it in. The package build gains a guard
+  that refuses any packaged doc containing a customer-id-shaped number (`\d{3}-?\d{3}-?\d{4}`).
+- **Analyst skill on the box:** already present. `docker-compose.yml` mounts
+  `skills/claude-code-ads-analyst` read-only from the checkout.
+- **Where box mode lives:** a sibling Python script, `bin/run-client-audit.py`, reusing `vault_lib`,
+  `ads-metrics-snapshot.py`, `vault-write.py` and the reader wrapper; `sudo run-client-audit` is its thin
+  wrapper. It is testable on a faked box, like the collectors. The laptop's `run-trend-audit.sh` is unchanged.
+- **Follow-up, out of scope:** on the laptop, the skill's `*negative*` wording can read that client
+  deliverable during another client's audit. Narrow the skill's doc list in its own change.
