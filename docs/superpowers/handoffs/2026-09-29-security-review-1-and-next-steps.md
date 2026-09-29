@@ -33,6 +33,29 @@ runs every box command and pastes the output; the assistant has no box access.
 - Operator evidence for review #2 is in the gitignored
   `infra/hermes-agent/security-reviews/2026-09-29-operator-evidence-step-A.md`.
 
+## Update — 2026-09-29 final: review #3 PASS, signed off
+
+- **Review #3** (`docs/security-reviews/2026-09-29-review-3.md`): **PASS, 25/25**, signed off by the operator.
+  It binds to box fingerprint `5dc0194e…2f69`, access digest `0f0bdb9e…1319` (re-checked just before
+  sign-off) and checklist v1.5. The one FAIL on the first judgment (D3.2, a copy of the retired token kept in the
+  password manager) was cleared when the operator deleted that copy and emptied the trash.
+- **Posture:** read-only. There is no Google Ads credential on the box; `.env.ga` is laptop-only. Step E (write
+  credential, live gate) stays parked.
+- **Follow-up work (non-blocking):**
+  - ads audits on the box (read credential, host `.venv`, writable `audit_data/`, BRING-UP install steps,
+    README credential table, then its own review)
+  - checklist edits that skip the version bump don't change the fingerprint: hash the file, or enforce the
+    bump in CI
+  - `collected_at` stamps on both bundles; fold the in-memory sweep into the box collector
+  - classify `.env` files in the sweep, and list the gateway `.env` as an allowed non-Google secret
+  - declare the role in `.env.ga`
+  - document the ads `.env` exclusion in D6.1
+  - update the findings doc's header and "Final state"
+  - delete the retired client's vault from the box
+  - widen the shell-history sweep
+  - restrict SSH source addresses
+  - give the retired ADMIN grant an owner and a revocation trigger
+
 ## Update — end of 2026-09-29: C done, review #2 run (NOT PASS, 0 FAIL)
 
 - **C (D9.1) decided:** every named item accepted with a reason. `main` is already protected by
