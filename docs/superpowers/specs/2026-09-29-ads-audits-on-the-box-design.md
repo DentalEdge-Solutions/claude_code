@@ -42,7 +42,7 @@ exits.
      same registry D5.4 counts), with `status: active`. A retired or unregistered client is refused. The
      `mutation_target` flag is irrelevant: this path is read-only.
    - The installed app package matches its pin (the D6.1 check).
-   - `/etc/hermes/ads-read.env` exists, `root:root 0400`. The gateway `.env` holds a non-dummy
+   - `/etc/hermes/.env.ga` exists, `root:root 0400`. The gateway `.env` holds a non-dummy
      `ANTHROPIC_API_KEY` (checked by prefix, never printed).
    - The box-wide audit lock is free.
 2. **Collect.** A one-shot container from the existing Hermes image (the pinned Google Ads SDK is in
@@ -53,9 +53,12 @@ exits.
    `/projects/claude_google_ads/audit_data`, in this container only. The rest of the app directory is
    mounted read-only. `audit-data/<client>/` is emptied first, so a run never mixes old and new data.
 3. **Snapshot.** `ads-metrics-snapshot.py` over that directory (unchanged).
-4. **Reports.** Clear `/opt/data/reports/<project>/`, then run the allow-listed readers through the
-   existing wrapper (`run-audit-bundle.sh` → `run-ads-report.sh`), with the same per-run credential and
-   `audit-data/<client>` mounted **read-only**.
+4. **Reports.** Clear `/opt/data/reports/<project>/`, then run the allow-listed readers
+   (`account_overview`, `audit_search_terms`, `audit_analyze`) through the existing enforcer
+   `run-ads-report.py`, in a **one-shot `ads-reader` container** (tools profile, the `ads-credential-audit`
+   pattern). The reader gets the same per-run credential, `audit-data/<client>` mounted **read-only**, and
+   the reports directory read-write. It does not run by `exec` in the gateway, because the long-running
+   gateway's mounts are fixed and cannot carry one client's data read-only per run.
 5. **Draft.** `claude -p` (Opus, plan mode, `Read,Grep,Glob` only), in trend mode, exactly as
    `run-trend-audit.sh` does today. It reads the scrubbed reports, this client's vault history and the
    packaged SOP/benchmark docs. It gets the Anthropic key via the existing `claude-auth-init` path and
@@ -70,7 +73,7 @@ exits.
 
 | Item | Where | Owner / mode | Seen by |
 |---|---|---|---|
-| Ads read credential (same token as the laptop's `.env.ga`, `hermes@` READ_ONLY) | `/etc/hermes/ads-read.env` (outside the repo checkout, so no container mount can reach it) | `root:root 0400` | the collector and reader runs only, as per-run `-e` |
+| Ads read credential (same token as the laptop's `.env.ga`, `hermes@` READ_ONLY) | `/etc/hermes/.env.ga` (outside the repo checkout, so no container mount can reach it) | `root:root 0400` | the collector and reader runs only, as per-run `-e` |
 | Anthropic key (new, dedicated) | gateway `.env`, replacing the dummy | `root:root 0600` | `claude -p` in the gateway |
 | Collectors + SOP/benchmark docs | app package, re-pinned in `projects.yaml` | as installed today | collector container (collectors); analyst (docs) |
 | Raw client data | `/var/lib/hermes/audit-data/<client>/` | `0700`, uid 10000 | collector (rw), readers (ro) |
@@ -127,13 +130,13 @@ Test-first, as in steps 1 and 2.
   - enforces each step's timeout.
 - **Linux CI mount test**, extending the root, real-Docker "Bind agreement" job with stub collectors.
   It checks that `audit-data` is writable in the collect run and **not** writable in the reader and
-  draft runs, and that `/etc/hermes/ads-read.env` is invisible inside the gateway container.
+  draft runs, and that `/etc/hermes/.env.ga` is invisible inside the gateway container.
 - **Nothing in CI calls Google or Anthropic.** Real calls happen only on the box.
 
 ## 8. Rollout and review #4
 
 1. Merge. On the box: pull (this brings #73, #74 and this work), install the re-pinned package, install
-   `/etc/hermes/ads-read.env` and the Anthropic key, and register the spending client (all as BRING-UP
+   `/etc/hermes/.env.ga` and the Anthropic key, and register the spending client (all as BRING-UP
    steps).
 2. Laptop: `audit-credential-access.sh`. The box credential's fingerprint must equal `.env.ga`'s
    (`fd18a3b7d0f4`), and the access digest must be unchanged. Declare `GOOGLE_ADS_CREDENTIAL_ROLE=read`
@@ -141,17 +144,23 @@ Test-first, as in steps 1 and 2.
 3. **First real audit on the spending client**, before the review, so review #4 sees the system as it
    is actually used.
 4. Collect both bundles; a fresh reviewer runs checklist **v1.8**, which adds:
-   - the authorised set holds one **read** credential on the box, `/etc/hermes/ads-read.env`,
+   - the authorised set holds one **read** credential on the box, `/etc/hermes/.env.ga`,
      `root:root 0400`, with a fingerprint equal to the laptop's;
    - the gateway `.env`'s `ANTHROPIC_API_KEY` is real, recorded as such, with the workspace spend limit
      stated;
-   - D4.1 also probes `/etc/hermes/ads-read.env` from inside the gateway (expected `absent`);
+   - D4.1 also probes `/etc/hermes/.env.ga` from inside the gateway (expected `absent`);
    - `audit-data/<client>/` and the vaults are `0700`, uid 10000; no retired client has either;
    - the new package pin covers the collectors and docs;
    - the journal holds no credential text after a real run (D2.3).
 5. Operator sign-off, then land by PR and record a brain decision.
 
 ## 9. Decisions resolved before planning
+
+- **Credential file name: `/etc/hermes/.env.ga`, not `ads-read.env`.** The review's system-wide sweep matches
+  `.env*`, `*.ga` and `*.gaw`, and would never have seen `ads-read.env`. The new name is swept, and
+  `review_lib.ROLE_BY_NAME` classifies it as the `read` role. The file also declares
+  `GOOGLE_ADS_CREDENTIAL_ROLE=read`.
+- **Readers run in a one-shot `ads-reader` container** (§2 step 4), not by `exec` in the gateway.
 
 - **Package docs:** `dental-benchmarks.md`, `dental-sefl-blueprint.md`, `ad-assets-best-practices.md`,
   `anatomy-of-a-good-ad.md`, `campaigns.md` and `find-and-add-negatives.md` (the docs the
