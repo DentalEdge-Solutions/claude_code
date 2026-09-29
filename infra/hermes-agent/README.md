@@ -1427,8 +1427,15 @@ not stop collateral within an account.
 
 | Role | Account | Access level | Credential file | Why |
 |---|---|---|---|---|
-| read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga` | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
+| read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga`, **on the laptop only** (the box holds no Google Ads credential; security review #3) | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
 | write | **none — read-only posture** (2026-09-29) | — | no `.env.gaw` anywhere | Operator decision, security review D3.2: Hermes holds no write credential. Changes to client accounts are made by the apps that join the AI OS, not by Hermes core. The mutation tier is parked. |
+
+**The box's one non-Google secret file.** The gateway `.env`
+(`/opt/projects/claude_code/infra/hermes-agent/.env`, `root:root 0600`) holds the dashboard
+basic-auth password (real) and a **dummy** `ANTHROPIC_API_KEY`. The review collector reports it as
+`kind: authorised-other`, `label: gateway-env` (`AUTHORISED_OTHER` in
+`bin/collect-review-evidence.py`). Adding another secret file to the box means adding it there and
+here, or the next review sees it as `unlisted`.
 
 **Why there is no write credential (security review D3.2, 2026-09-29).** From 2026-08-18
 the write role reused the operator's own Google account at **ADMIN**. That carried user

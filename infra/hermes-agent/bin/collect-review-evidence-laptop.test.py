@@ -86,6 +86,14 @@ class TestMain(unittest.TestCase):
                 rc = L.main(["--customer", "1234567890", "--access-digest"])
             self.assertEqual(rc, 2)
 
+    def test_bundle_carries_collected_at_utc(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
+        with mock.patch.object(L.subprocess, "run", return_value=fake):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                L.main(["--customer", "1234567890"])
+        self.assertRegex(json.loads(buf.getvalue())["collected_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
     def test_package_items_need_all_three_args(self):
         fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
         with mock.patch.object(L.subprocess, "run", return_value=fake):

@@ -100,7 +100,7 @@ def main(argv=None):
             items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": str(e)}
     else:
         items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": "no --package-* arguments"}
-    print(json.dumps({"schema": 1, "kind": "laptop", "items": items}, indent=2, sort_keys=True))
+    print(json.dumps({"schema": 1, "kind": "laptop", "collected_at": R.utc_now(), "items": items}, indent=2, sort_keys=True))
     return 0
 
 
