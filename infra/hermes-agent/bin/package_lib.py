@@ -64,11 +64,13 @@ def build_manifest(project, source_repo, commit, files):
                       for p in sorted(files)]}
 
 
-_CLIENT_ID_RE = re.compile(rb"(?<!\d)\d{3}-?\d{3}-?\d{4}(?!\d)")
+_CLIENT_ID_RE = re.compile(rb"(?<!\d)\d{3}-?\d{3}-?\d{4}(?!\d)|(?<!\d)\d{10,}(?!\d)")
 
 
 def refuse_client_ids(files):
-    """A packaged DOC must never carry a customer-id-shaped number: the package is built from
+    """A packaged DOC must never carry a customer-id-shaped number
+    (account, campaign or ad-group id: a dashed/undashed 10-digit id, or any run of 10+ digits):
+    the package is built from
     the ads repo, where past client deliverables sit beside the generic SOPs (spec 2026-09-29
     ads-audits-on-the-box §9). Code is exempt (it may hold the MCC id in a constant).
     Raises ValueError naming the file, never the match."""
