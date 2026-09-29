@@ -41,6 +41,9 @@ exits.
    - The client is registered in the governance registry (`clients.json`, resolved by `vault_lib`, the
      same registry D5.4 counts), with `status: active`. A retired or unregistered client is refused. The
      `mutation_target` flag is irrelevant: this path is read-only.
+   - The client's registry `customer_id` is a string of exactly 10 digits, no dashes (Ruling 9).
+     `vault-write.py` would reject anything else only at the end, after the spend; refuse it here,
+     without printing the id.
    - The installed app package matches its pin (the D6.1 check).
    - `/etc/hermes/.env.ga` exists, `root:root 0400`. The gateway `.env` holds a non-dummy
      `ANTHROPIC_API_KEY` (checked by prefix, never printed).
@@ -52,20 +55,28 @@ exits.
    `/var/lib/hermes/audit-data/<client>/` is mounted **read-write** at the app's
    `/projects/claude_google_ads/audit_data`, in this container only. The rest of the app directory is
    mounted read-only. `audit-data/<client>/` is emptied first, so a run never mixes old and new data.
-3. **Snapshot.** `ads-metrics-snapshot.py` over that directory (unchanged).
+3. **Snapshot.** `ads-metrics-snapshot.py` over that directory (unchanged), run on the host as uid
+   10000, not root: it reads files the collector container controls. Its stdout goes to
+   `/var/lib/hermes/audit-logs/<client>/snapshot.stdout`, the one log file handed to uid 10000, which
+   vault-write reads as `--metrics-file`.
 4. **Reports.** Clear `/opt/data/reports/<project>/`, then run the allow-listed readers
    (`account_overview`, `audit_search_terms`, `audit_analyze`) through the existing enforcer
    `run-ads-report.py`, in a **one-shot `ads-reader` container** (tools profile, the `ads-credential-audit`
    pattern). The reader gets the same per-run credential, `audit-data/<client>` mounted **read-only**, and
    the reports directory read-write. It does not run by `exec` in the gateway, because the long-running
    gateway's mounts are fixed and cannot carry one client's data read-only per run.
+   Everything below `/opt/hermes-agent/data/` belongs to the gateway (uid 10000), so root clears the
+   reports, and later reads and removes the transient draft and checks the vault draft, by walking
+   down from `data/` one `O_NOFOLLOW` directory at a time (Ruling 12). A symlink at any level fails
+   the run (rc 1) before anything is deleted or read.
 5. **Draft.** `claude -p` (Opus, plan mode, `Read,Grep,Glob` only), in trend mode, exactly as
    `run-trend-audit.sh` does today. It reads the scrubbed reports, this client's vault history and the
    packaged SOP/benchmark docs. It gets the Anthropic key via the existing `claude-auth-init` path and
    never sees the Ads credential.
-6. **Vault write and isolation check.** `vault-write.py` ingests the draft, metrics and timeline into
-   `data/vaults/<client>/`. The existing check that the draft names no other client runs against the
-   governance registry.
+6. **Isolation check, then vault write.** The existing check that the draft names no other client
+   runs against the governance registry **before** `vault-write.py` (Ruling 7): a draft that names
+   another client never reaches the vault. Only then does `vault-write.py` (as uid 10000) ingest the
+   draft, metrics and timeline into `data/vaults/<client>/`.
 7. **Summary.** The vault path of the draft, the data collection timestamp, and the rc and duration of
    each step. The operator copies the draft off with `scp`.
 
@@ -77,6 +88,7 @@ exits.
 | Anthropic key (new, dedicated) | gateway `.env`, replacing the dummy | `root:root 0600` | `claude -p` in the gateway |
 | Collectors + SOP/benchmark docs | app package, re-pinned in `projects.yaml` | as installed today | collector container (collectors); analyst (docs) |
 | Raw client data | `/var/lib/hermes/audit-data/<client>/` | `0700`, uid 10000 | collector (rw), readers (ro) |
+| Step logs | `/var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr}` (never mounted into any container) | dir `0711` root; files `0600` root, except `snapshot.stdout` (uid 10000) | the operator; vault-write reads `snapshot.stdout` |
 | Drafts, metrics, timeline | `data/vaults/<client>/` (existing) | `0700`, uid 10000 (D7.1) | vault-write (w), analyst (r) |
 
 **Anthropic key:** a new key in its own Console workspace (e.g. `hermes-box`) with a monthly spend limit,
@@ -93,15 +105,19 @@ and sha256. D6.1 and D6.3 then cover them.
   before the draft, printing collector names only, never content.
 - **One audit at a time.** A box-wide lock (`flock`) keeps spend and API quota predictable.
 - **Timeouts** on every step. A hung Google or Anthropic call fails cleanly.
-- **Customer ids stay out of logs.** The Google Ads SDK prints raw customer ids to stderr. Collector
-  and reader stderr goes to `audit-data/<client>/logs/<step>.stderr` (`0600`, inside the client's private
-  directory). The terminal and the journal get line counts only, so D2.3 keeps holding.
+- **Customer ids stay out of logs.** The Google Ads SDK prints raw customer ids to stderr. Every step's
+  stdout and stderr goes to `/var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr}`: root-owned
+  (`0600`), never mounted into any container, each file created `O_EXCL|O_NOFOLLOW`. Only
+  `snapshot.stdout` is handed to uid 10000, for vault-write. The logs are deliberately NOT under
+  `audit-data/<client>/`, which the collector mounts read-write and could fill with symlinks. The
+  terminal and the journal get redacted summary lines only, so D2.3 keeps holding.
 - **Spend limit.** A refusal from the Anthropic workspace limit is an ordinary failed step.
 
 ## 5. Retention
 
 - **Raw data** (`audit-data/<client>/`): the latest run only, replaced on each run.
 - **Scrubbed reports:** the latest run only (cleared at step 4).
+- **Step logs** (`/var/lib/hermes/audit-logs/<client>/`): the latest run only, replaced on each run.
 - **Drafts, metrics, timeline** (the vault): kept, because trend mode compares against them. No
   automatic expiry.
 - **Offboarding:** a new BRING-UP step deletes a retired client's `audit-data/<client>/` and vault. A
