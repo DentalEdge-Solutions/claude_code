@@ -98,7 +98,9 @@ projects:
         - code/audit_assets_rsa.py
         - code/assess_supplemental.py
         # SOP/benchmark docs the claude-code-ads-analyst skill reads. NEVER google-ads-*.md:
-        # those are past client deliverables (package_lib.refuse_client_ids enforces it).
+        # those are past client deliverables, kept out because this include list never names
+        # them. package_lib.refuse_client_ids is the backstop: it refuses any packaged doc that
+        # holds a customer-id-shaped number.
         - dental-benchmarks.md
         - dental-sefl-blueprint.md
         - ad-assets-best-practices.md
