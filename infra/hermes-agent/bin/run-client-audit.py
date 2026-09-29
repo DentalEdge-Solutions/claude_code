@@ -41,8 +41,9 @@ PIN_OVERRIDE = None           # tests only
 RUN_AS_DATA_UID = ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"]
 
 # Verbatim from run-trend-audit.sh (spec §2 step 5): the analyst, its model and its limits.
-# One change (I2): `timeout 1150` kills claude INSIDE the container before the host's 1200 s
-# timeout, which can only kill the `docker compose exec` client.
+# One change (I2): `timeout -k 30 1150` stops claude INSIDE the container before the host's
+# 1200 s timeout, which can only kill the `docker compose exec` client; -k 30 sends SIGKILL if
+# claude ignores SIGTERM, still inside 1200 s (F3).
 DRAFT_SCRIPT = r'''
   set -eu
   skill="/opt/data/skills/claude-code-ads-analyst/SKILL.md"
@@ -50,7 +51,7 @@ DRAFT_SCRIPT = r'''
   ls "$reports"/*.md >/dev/null 2>&1 || { echo "no reports for $PROJECT" >&2; exit 1; }
   mkdir -p "/opt/data/audits/$PROJECT"
   out="/opt/data/audits/$PROJECT/$TS-audit.md"
-  timeout 1150 claude -p "Read and follow $skill EXACTLY, INCLUDING its Trend mode. Produce the Google Ads audit DRAFT for project $PROJECT. Fresh scrubbed reports: $reports/. THIS client'\''s prior history (read for trend deltas): $vault/metrics/, $vault/audits/, $vault/timeline.md (may be empty on the first run = establish baseline). SOP/benchmark docs: /projects/$PROJECT/. Read ONLY within $vault, $reports, and /projects/$PROJECT. Do NOT attempt ExitPlanMode and do NOT narrate your tools or environment; BEGIN your response with the DRAFT banner and output ONLY the deliverable markdown." \
+  timeout -k 30 1150 claude -p "Read and follow $skill EXACTLY, INCLUDING its Trend mode. Produce the Google Ads audit DRAFT for project $PROJECT. Fresh scrubbed reports: $reports/. THIS client'\''s prior history (read for trend deltas): $vault/metrics/, $vault/audits/, $vault/timeline.md (may be empty on the first run = establish baseline). SOP/benchmark docs: /projects/$PROJECT/. Read ONLY within $vault, $reports, and /projects/$PROJECT. Do NOT attempt ExitPlanMode and do NOT narrate your tools or environment; BEGIN your response with the DRAFT banner and output ONLY the deliverable markdown." \
     --allowedTools "Read,Grep,Glob" --permission-mode plan --model claude-opus-4-8 > "$out"
   echo "$out"
 '''

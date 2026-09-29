@@ -313,7 +313,8 @@ class TestTimeouts(Base):
         self.assertEqual((rc, cmds), (124, []))
 
     def test_the_analyst_dies_inside_the_container_before_the_host_timeout(self):
-        self.assertIn("timeout 1150 claude -p", RCA.DRAFT_SCRIPT)
+        self.assertIn("timeout -k 30 1150 claude -p", RCA.DRAFT_SCRIPT)   # F3: SIGKILL if TERM is ignored
+        self.assertLess(1150 + 30, RCA.TIMEOUTS["draft"])
         self.assertLess(1150, RCA.TIMEOUTS["draft"])
 
 
