@@ -209,7 +209,7 @@ class TestBundle(Base):
 
     def test_entry_points_uses_nft_ruleset_when_available(self):
         self._make_other_components_healthy()
-        self.outputs[("nft",)] = (0, "table inet filter {}\n", "")
+        self.outputs[("nft", "-s")] = (0, "table inet filter {}\n", "")
         h = self.host()
         fp = CE.box_fingerprint(h, CE.context(h))
         self.assertTrue(fp["complete"])
@@ -226,6 +226,42 @@ class TestBundle(Base):
         h = self.host()                                       # neither nft nor iptables-save fake
         fp = CE.box_fingerprint(h, CE.context(h))
         self.assertFalse(fp["complete"])                       # control: everything else healthy
+
+    def test_fingerprint_is_stable_across_counter_changes(self):
+        self._make_other_components_healthy()
+        base = ("table inet filter {\n"
+                "\tchain input {\n"
+                "\t\ttype filter hook input priority 0; policy drop;\n"
+                "\t\tcounter packets 12 bytes 840\n"
+                "\t\ttcp dport 22 accept\n"
+                "\t}\n"
+                "}\n"
+                "table ip filter {\n"
+                "\tchain DOCKER {\n"
+                "\t\tcounter packets 3 bytes 180\n"
+                "\t\tip daddr %s accept\n"
+                "\t}\n"
+                "\tchain DOCKER-USER {\n"
+                "\t\treturn\n"
+                "\t}\n"
+                "}\n")
+        h1 = self.host()
+        self.outputs[("nft", "-s")] = (0, base % "172.17.0.2", "")
+        fp1 = CE.box_fingerprint(h1, CE.context(h1))
+
+        h2 = self.host()
+        variant = (base % "172.17.0.9").replace("counter packets 12 bytes 840",
+                                                  "counter packets 99 bytes 7331")
+        self.outputs[("nft", "-s")] = (0, variant, "")
+        fp2 = CE.box_fingerprint(h2, CE.context(h2))
+        self.assertEqual(fp1["fingerprint"], fp2["fingerprint"])
+
+        h3 = self.host()
+        control = (base % "172.17.0.2").replace(
+            "tcp dport 22 accept", "tcp dport 22 accept\n\t\tudp dport 41641 accept")
+        self.outputs[("nft", "-s")] = (0, control, "")
+        fp3 = CE.box_fingerprint(h3, CE.context(h3))
+        self.assertNotEqual(fp1["fingerprint"], fp3["fingerprint"])
 
 
 class TestCredentialsOnly(Base):

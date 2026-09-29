@@ -478,15 +478,22 @@ def box_fingerprint(host, ctx):
         # without nftables. If neither can be read, raise so the existing _component()
         # wrapper marks this whole component could-not-check, which correctly marks
         # the fingerprint incomplete (final-review B2).
-        rc, out, _ = host.run(["nft", "list", "ruleset"])
+        #
+        # `-s` ("stateless") drops nft's live packet/byte counters at the source so the
+        # dump is not volatile by construction; the fallback and the result are still run
+        # through normalize_ruleset() because iptables-save has no such flag and Docker
+        # rewrites its own chains regardless of which tool produced the dump.
+        rc, out, _ = host.run(["nft", "-s", "list", "ruleset"])
+        kind = "nft"
         if rc != 0:
             rc, out, _ = host.run(["iptables-save"])
+            kind = "iptables"
             if rc != 0:
                 raise CouldNotCheck("nft list ruleset and iptables-save both failed")
         return {"listeners": d1_1(host, ctx)["listeners"],
                 "ufw": _ok(host, ["ufw", "status", "verbose"]).splitlines(),
                 "sshd": sorted(_ok(host, ["sshd", "-T"]).splitlines()),
-                "firewall_ruleset_sha256": PK.sha256_bytes(out.encode())}
+                "firewall_ruleset_sha256": PK.sha256_bytes(R.normalize_ruleset(out, kind).encode())}
 
     def checklist():
         with open(host.path(CHECKLIST)) as f:

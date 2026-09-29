@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.2
+version: 1.3
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version. Changing this file changes the box fingerprint's `checklist` component,
