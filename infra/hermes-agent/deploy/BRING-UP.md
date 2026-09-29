@@ -1083,7 +1083,7 @@ sudo git -C /opt/projects/claude_code status --short                            
 ```
 
 **1. Install the re-pinned package.** The pin is in `registry/projects.yaml`
-(`claude_google_ads` → `commit: 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b`, the scrubbed SOP docs).
+(`claude_google_ads` → `commit: 81103e1a3b563d97b4a1087fc35c29f9e74f120f`, the scrubbed SOP docs).
 Build on the laptop, copy to the deploy user's home, install on the box. This is the same
 procedure as in "The ads repo" (its **App package** bullet) and in the Gate section paragraph
 "The security review must PASS for the current state"; only the pin changed.
@@ -1092,16 +1092,16 @@ procedure as in "The ads repo" (its **App package** bullet) and in the Gate sect
 # laptop — the builder refuses unless the ads repo's HEAD is exactly the pin with no tracked changes,
 # so park the local settings change, build, then restore it and the branch you were on
 cd ~/Projects/claude_code/infra/hermes-agent
-git -C ~/Projects/claude-google-ads checkout -q 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b
+git -C ~/Projects/claude-google-ads checkout -q 81103e1a3b563d97b4a1087fc35c29f9e74f120f
 git -C ~/Projects/claude-google-ads stash push -q -m pkg -- .claude/settings.json
-python3 bin/build-app-package.py --project claude_google_ads --repo ~/Projects/claude-google-ads --commit 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b --out-dir /tmp/pkg; echo rc=$?   # rc=0, "files: 21", printed sha256 == package.sha256 in registry/projects.yaml
+python3 bin/build-app-package.py --project claude_google_ads --repo ~/Projects/claude-google-ads --commit 81103e1a3b563d97b4a1087fc35c29f9e74f120f --out-dir /tmp/pkg; echo rc=$?   # rc=0, "files: 21", printed sha256 == package.sha256 in registry/projects.yaml
 git -C ~/Projects/claude-google-ads stash pop -q
 git -C ~/Projects/claude-google-ads checkout -q -
 git -C ~/Projects/claude-google-ads stash list                                          # empty
-scp /tmp/pkg/claude_google_ads-8087dfa585ca.tar /tmp/pkg/claude_google_ads-8087dfa585ca.manifest.json hermesops@<host>:~/
+scp /tmp/pkg/claude_google_ads-81103e1a3b56.tar /tmp/pkg/claude_google_ads-81103e1a3b56.manifest.json hermesops@<host>:~/
 # box
 cd /opt/hermes-agent
-sudo python3 bin/install-app-package.py --project claude_google_ads --package ~/claude_google_ads-8087dfa585ca.tar --manifest ~/claude_google_ads-8087dfa585ca.manifest.json --target /opt/projects/claude-google-ads; echo rc=$?   # rc=0: the installer refuses unless the manifest sha256 equals the registry pin and every member matches
+sudo python3 bin/install-app-package.py --project claude_google_ads --package ~/claude_google_ads-81103e1a3b56.tar --manifest ~/claude_google_ads-81103e1a3b56.manifest.json --target /opt/projects/claude-google-ads; echo rc=$?   # rc=0: the installer refuses unless the manifest sha256 equals the registry pin and every member matches
 sudo docker compose up -d --force-recreate hermes-agent && sudo docker compose ps hermes-agent   # running
 ```
 
@@ -1189,7 +1189,7 @@ Two checks that have never run on real Docker; do them on this first run and wri
   logs are `root 0600`: read them with `sudo`.
 
 **Operator note:** after the first real run, merge and push the ads-repo branch
-`docs/scrub-client-ids` (commit `8087dfa`), so the pin is reproducible from GitHub.
+`docs/scrub-client-ids` (commit `81103e1`), so the pin is reproducible from GitHub.
 
 **8. Offboarding.** When a client is retired, set its registry status to `retired`, then remove
 both trees and its logs. The review's D7.1 checks that no retired client has either tree.

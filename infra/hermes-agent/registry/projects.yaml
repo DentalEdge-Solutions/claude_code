@@ -88,8 +88,8 @@ projects:
     # App package (spec 2026-09-28 §6): the allow-listed code of BOTH tiers plus these
     # static inputs, at a verified commit. Guard 7 refuses a mutator whose bytes differ.
     package:
-      commit: 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b
-      sha256: a6e706a860d81a79808db3082b584e959a853d70e23a13f454ed943320617f89
+      commit: 81103e1a3b563d97b4a1087fc35c29f9e74f120f
+      sha256: e6b0ceac800aceaa6cb84f99225f86b7a1055d3218abb4c76cac3fcd62c81f15
       include:
         - universal-negative-keywords.md
         # Collectors (run in the one-shot ads-collector container; spec 2026-09-29 §2):
