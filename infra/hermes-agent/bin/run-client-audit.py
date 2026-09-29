@@ -72,10 +72,62 @@ def open_log(path):
     return os.fdopen(fd, "w")
 
 
-def read_nofollow(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
+# Everything below data/ is the gateway's (uid 10000): any component can be a planted symlink.
+# Root reaches it only through L.open_dir_below from the trusted checkout, then acts on names
+# relative to that fd (F1). data/ itself cannot be swapped: its parent is the root-owned checkout.
+def _data_dir(root, *parts):
+    return L.open_dir_below(root + AGENT_DIR, ("data",) + parts)
+
+
+def clear_reports(root):
+    """Remove last run's *.md from data/reports/<project>. unlink never follows the final name."""
+    fd = _data_dir(root, "reports", PROJECT)
+    if fd is None:
+        return
+    try:
+        for f in os.listdir(fd):
+            if f.endswith(".md"):
+                os.unlink(f, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def read_transient(root, ts):
+    fd = _data_dir(root, "audits", PROJECT)
+    if fd is None:
+        raise FileNotFoundError("the transient draft is missing")
+    try:
+        ffd = os.open(f"{ts}-audit.md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    finally:
+        os.close(fd)
+    with os.fdopen(ffd, encoding="utf-8", errors="replace") as f:
+        if not stat.S_ISREG(os.fstat(ffd).st_mode):          # a planted FIFO must not hang root
+            raise L.UnsafePathError("the transient draft is not a regular file")
         return f.read()
+
+
+def remove_transient(root, ts):
+    fd = _data_dir(root, "audits", PROJECT)
+    if fd is None:
+        return
+    try:
+        os.unlink(f"{ts}-audit.md", dir_fd=fd)
+    except FileNotFoundError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def vault_draft_is_file(root, slug, ts):
+    fd = _data_dir(root, "vaults", slug, "audits")
+    if fd is None:
+        return False
+    try:
+        return stat.S_ISREG(os.stat(f"{ts}-audit.md", dir_fd=fd, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(fd)
 
 
 def _quiet(argv):
@@ -186,9 +238,7 @@ def _run(steps, rec, ts, root, runner, say):
     L.reset_dir(data, **kw)
     logs = root + AUDIT_LOGS + "/" + slug              # root-created, so rmtree is safe; 0711 so
     L.reset_dir(logs, uid=os.geteuid(), gid=os.getegid(), mode=0o711)   # 10000 reaches snapshot.stdout
-    reports = root + f"{AGENT_DIR}/data/reports/{PROJECT}"
     results = []
-    transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"
     try:
         for i, (key, argv_, env) in enumerate(steps):
             name = step_name(argv_)
@@ -198,12 +248,10 @@ def _run(steps, rec, ts, root, runner, say):
                     say(f"run-client-audit: collector errors, no draft: {bad}"); return _summary(results, 1, say)
                 if L.json_count(data) == 0:
                     say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
-            if key == "read" and name.endswith(READERS[0]) and os.path.isdir(reports):
-                for f in os.listdir(reports):
-                    if f.endswith(".md"):
-                        os.remove(os.path.join(reports, f))
+            if key == "read" and name.endswith(READERS[0]):          # before the first reader
+                clear_reports(root)       # a symlinked reports dir raises UnsafePathError: rc 1
             if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
-                named = L.others_named(read_nofollow(transient), slug, list(L.V.load_registry(root + REGISTRY)))
+                named = L.others_named(read_transient(root, ts), slug, list(L.V.load_registry(root + REGISTRY)))
                 if named:
                     say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}; not written to the vault")
                     return _summary(results, 1, say)
@@ -217,19 +265,14 @@ def _run(steps, rec, ts, root, runner, say):
             if rc != 0:
                 say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
                 return _summary(results, 1, say)
-        vault_draft = root + f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
-        try:                                      # lstat: the gateway can write the vault tree
-            is_draft = stat.S_ISREG(os.lstat(vault_draft).st_mode)
-        except FileNotFoundError:
-            is_draft = False
-        if not is_draft:
+        vault_draft = f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
+        if not vault_draft_is_file(root, slug, ts):   # the gateway can write the vault tree
             say("run-client-audit: vault-write reported success but the vault draft is missing")
             return _summary(results, 1, say)
-        say(f"run-client-audit: draft -> {vault_draft[len(root):]}  (data collected {ts} UTC)")
+        say(f"run-client-audit: draft -> {vault_draft}  (data collected {ts} UTC)")
         return _summary(results, 0, say)
-    finally:                        # the transient draft never outlives the run (I3); os.remove
-        if os.path.lexists(transient):   # does not follow a symlink
-            os.remove(transient)
+    finally:                        # the transient draft never outlives the run (I3)
+        remove_transient(root, ts)
 
 
 def _summary(results, rc, say):

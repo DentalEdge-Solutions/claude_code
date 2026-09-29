@@ -207,6 +207,69 @@ class TestHappyPath(Base):
         self.assertEqual(os.listdir(d), [])
 
 
+class TestRootNeverFollowsGatewaySymlinks(Base):
+    """F1: the gateway (uid 10000) owns data/; root must not follow a symlink it plants there."""
+    REPORTS = "/opt/hermes-agent/data/reports/claude_google_ads"
+    AUDITS = "/opt/hermes-agent/data/audits/claude_google_ads"
+
+    def test_symlinked_reports_dir_fails_before_any_reader_and_deletes_nothing(self):
+        outside = tempfile.mkdtemp(); keep = os.path.join(outside, "keep.md")
+        open(keep, "w").write("keep\n")
+        os.makedirs(os.path.dirname(self.root + self.REPORTS))
+        os.symlink(outside, self.root + self.REPORTS)
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        self.assertTrue(os.path.exists(keep))
+        self.assertFalse([c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")])
+        self.assertEqual(len([l for l in text.splitlines() if "failed" in l]), 1, text)
+        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
+
+    def test_symlinked_reports_parent_fails_the_same_way(self):
+        outside = tempfile.mkdtemp(); os.makedirs(outside + "/claude_google_ads")
+        keep = outside + "/claude_google_ads/keep.md"; open(keep, "w").write("keep\n")
+        os.makedirs(self.root + "/opt/hermes-agent/data")
+        os.symlink(outside, self.root + "/opt/hermes-agent/data/reports")
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text); self.assertTrue(os.path.exists(keep))
+        self.assertFalse([c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")])
+
+    def test_symlinked_md_in_reports_removes_the_link_not_its_target(self):
+        outside = tempfile.mkdtemp(); target = os.path.join(outside, "t.md")
+        open(target, "w").write("target\n")
+        os.makedirs(self.root + self.REPORTS)
+        open(self.root + self.REPORTS + "/old.md", "w").write("stale\n")
+        os.symlink(target, self.root + self.REPORTS + "/evil.md")
+        rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 0, text)
+        self.assertFalse(os.path.lexists(self.root + self.REPORTS + "/evil.md"))
+        self.assertFalse(os.path.lexists(self.root + self.REPORTS + "/old.md"))
+        self.assertEqual(open(target).read(), "target\n")
+
+    def test_symlinked_audits_dir_draft_is_neither_read_nor_removed(self):
+        outside = tempfile.mkdtemp()
+        os.makedirs(os.path.dirname(self.root + self.AUDITS))
+        os.symlink(outside, self.root + self.AUDITS)
+        # the fake analyst writes through the planted link; the text would trip the name check if read
+        r = FakeRunner(self.root, draft_text="compare with other-dental")
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        planted = os.path.join(outside, "2026-10-01_12-00-00-audit.md")
+        self.assertTrue(os.path.exists(planted), text)                       # not removed
+        self.assertNotIn("other-dental", text)                               # not read
+        self.assertNotIn("vault-write", [RCA.step_name(c["argv"]) for c in r.calls])
+        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
+
+    def test_symlinked_vault_audits_dir_is_not_trusted(self):
+        outside = tempfile.mkdtemp()
+        v = self.root + "/opt/hermes-agent/data/vaults/acme-dental"
+        os.makedirs(v); os.symlink(outside, v + "/audits")
+        rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 1, text); self.assertNotIn("draft ->", text)
+        self.assertNotIn("Traceback", text)
+
+
 class TestTimeouts(Base):
     def test_every_compose_run_step_is_named(self):
         import re

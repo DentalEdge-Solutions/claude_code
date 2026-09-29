@@ -144,6 +144,49 @@ class TestDirsAndScans(Base):
         self.assertEqual(L.others_named("acme-dental only", "acme-dental", ["acme-dental", "old-dental"]), [])
 
 
+class TestOpenDirBelow(Base):
+    """F1: root walks below the trusted data/ one component at a time, never through a symlink."""
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.d, "base/data/reports/proj"))
+        w(os.path.join(self.d, "base/data/reports/proj/r.md"), "x")
+        self.base = os.path.join(self.d, "base")
+
+    def test_real_path_gives_a_usable_fd(self):
+        fd = L.open_dir_below(self.base, ("data", "reports", "proj"))
+        try:
+            self.assertEqual(os.listdir(fd), ["r.md"])
+        finally:
+            os.close(fd)
+
+    def test_missing_component_gives_none(self):
+        self.assertIsNone(L.open_dir_below(self.base, ("data", "reports", "nope")))
+        self.assertIsNone(L.open_dir_below(self.base, ("data", "nope", "proj")))
+
+    def test_symlinked_component_raises(self):
+        outside = tempfile.mkdtemp(); os.makedirs(os.path.join(outside, "proj"))
+        os.symlink(outside, os.path.join(self.base, "data/audits"))
+        os.symlink(os.path.join(outside, "proj"), os.path.join(self.base, "data/reports/p2"))
+        os.symlink(os.path.join(outside, "gone"), os.path.join(self.base, "data/reports/dangling"))
+        for parts in (("data", "audits", "proj"), ("data", "reports", "p2"), ("data", "reports", "dangling")):
+            with self.assertRaises(L.UnsafePathError, msg=parts):
+                L.open_dir_below(self.base, parts)
+
+    def test_non_directory_component_raises(self):
+        with self.assertRaises(L.UnsafePathError):
+            L.open_dir_below(self.base, ("data", "reports", "proj", "r.md"))
+
+    def test_dotdot_or_slash_component_raises(self):
+        for bad in ("..", ".", "", "a/b"):
+            with self.assertRaises(L.UnsafePathError, msg=bad):
+                L.open_dir_below(self.base, ("data", bad))
+
+    def test_unsafe_path_is_an_oserror(self):
+        # the orchestrator maps OSError under the lock to rc 1 (PrecheckError there means rc 3)
+        self.assertTrue(issubclass(L.UnsafePathError, OSError))
+        self.assertFalse(issubclass(L.UnsafePathError, L.PrecheckError))
+
+
 class TestLock(Base):
     def test_second_holder_refused(self):
         p = os.path.join(self.d, "lock")

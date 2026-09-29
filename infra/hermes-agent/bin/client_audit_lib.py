@@ -11,6 +11,39 @@ class PrecheckError(Exception):
     pass
 
 
+class UnsafePathError(OSError):
+    """A path component below a trusted base is a symlink, not a directory, or not a plain name.
+    An OSError on purpose: under the lock the orchestrator maps OSError to rc 1 (PrecheckError
+    there means the lock is held, rc 3)."""
+
+
+def open_dir_below(base, parts):
+    """An O_DIRECTORY fd for base/parts[0]/parts[1]/..., opened one component at a time with
+    O_NOFOLLOW relative to the previous fd: a symlink planted at ANY component is refused, and
+    no component can be swapped between a check and a use (F1). base itself is trusted (its
+    parent is root-owned). Missing component: None. The caller closes the fd."""
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in parts:
+            if name in ("", ".", "..") or "/" in name:
+                raise UnsafePathError(f"refusing path component {name!r}")
+            try:
+                nfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return None
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):   # EMLINK: FreeBSD's ELOOP
+                    raise UnsafePathError(f"{'/'.join(parts)}: {name!r} is a symlink or not a directory")
+                raise
+            os.close(fd)
+            fd = nfd
+        ret, fd = fd, None
+        return ret
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def load_cred_env(path):
     """GOOGLE_ADS_* assignments, parsed as DATA (never sourced), matching run-ads-report.sh:
     split on the first '=', strip one layer of matching quotes, tolerate CRLF and `export `."""
