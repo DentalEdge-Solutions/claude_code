@@ -271,6 +271,14 @@ class TestFailClosed(Base):
         self.run_main(FakeRunner(self.root))
         self.assertFalse(os.path.exists(ad + "/stale.json"))
 
+    def test_transient_draft_is_removed_when_a_later_step_fails(self):
+        d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
+        for runner in (FakeRunner(self.root, fail_on="vault-write"),
+                       FakeRunner(self.root, raise_on=("vault-write", OSError))):
+            rc, text = self.run_main(runner)
+            self.assertEqual(rc, 1, text)
+            self.assertEqual(os.listdir(d), [], text)
+
     def test_draft_naming_another_client_fails_before_vault_write(self):
         r = FakeRunner(self.root, draft_text="compare with other-dental")
         rc, text = self.run_main(r)

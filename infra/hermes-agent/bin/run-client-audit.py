@@ -178,48 +178,48 @@ def _run(steps, rec, ts, root, runner, say):
     L.reset_dir(logs, uid=os.geteuid(), gid=os.getegid(), mode=0o711)   # 10000 reaches snapshot.stdout
     reports = root + f"{AGENT_DIR}/data/reports/{PROJECT}"
     results = []
-    for i, (key, argv_, env) in enumerate(steps):
-        name = step_name(argv_)
-        if key == "snapshot":                                   # collection just finished
-            bad = L.error_files(data)
-            if bad:
-                say(f"run-client-audit: collector errors, no draft: {bad}"); return _summary(results, 1, say)
-            if L.json_count(data) == 0:
-                say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
-        if key == "read" and name.endswith(READERS[0]) and os.path.isdir(reports):
-            for f in os.listdir(reports):
-                if f.endswith(".md"):
-                    os.remove(os.path.join(reports, f))
-        if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
-            transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"
-            named = L.others_named(read_nofollow(transient), slug, list(L.V.load_registry(root + REGISTRY)))
-            if named:
-                os.remove(transient)
-                say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}; not written to the vault")
-                return _summary(results, 1, say)
-        stem = os.path.join(logs, name.replace(":", "-"))
-        t0 = time.monotonic()
-        with open_log(stem + ".stdout") as out, open_log(stem + ".stderr") as err:
-            if key == "snapshot" and DATA_UID is not None:   # vault-write (as 10000) reads it
-                os.fchown(out.fileno(), DATA_UID, DATA_GID)
-            rc = runner(argv_, env, TIMEOUTS[key], out, err)
-        results.append((name, rc, round(time.monotonic() - t0, 1)))
-        if rc != 0:
-            say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
-            return _summary(results, 1, say)
-    vault_draft = root + f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
-    try:                                      # lstat: the gateway can write the vault tree
-        is_draft = stat.S_ISREG(os.lstat(vault_draft).st_mode)
-    except FileNotFoundError:
-        is_draft = False
-    if not is_draft:
-        say("run-client-audit: vault-write reported success but the vault draft is missing")
-        return _summary(results, 1, say)
     transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"
-    if os.path.exists(transient):
-        os.remove(transient)
-    say(f"run-client-audit: draft -> {vault_draft[len(root):]}  (data collected {ts} UTC)")
-    return _summary(results, 0, say)
+    try:
+        for i, (key, argv_, env) in enumerate(steps):
+            name = step_name(argv_)
+            if key == "snapshot":                                   # collection just finished
+                bad = L.error_files(data)
+                if bad:
+                    say(f"run-client-audit: collector errors, no draft: {bad}"); return _summary(results, 1, say)
+                if L.json_count(data) == 0:
+                    say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
+            if key == "read" and name.endswith(READERS[0]) and os.path.isdir(reports):
+                for f in os.listdir(reports):
+                    if f.endswith(".md"):
+                        os.remove(os.path.join(reports, f))
+            if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
+                named = L.others_named(read_nofollow(transient), slug, list(L.V.load_registry(root + REGISTRY)))
+                if named:
+                    say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}; not written to the vault")
+                    return _summary(results, 1, say)
+            stem = os.path.join(logs, name.replace(":", "-"))
+            t0 = time.monotonic()
+            with open_log(stem + ".stdout") as out, open_log(stem + ".stderr") as err:
+                if key == "snapshot" and DATA_UID is not None:   # vault-write (as 10000) reads it
+                    os.fchown(out.fileno(), DATA_UID, DATA_GID)
+                rc = runner(argv_, env, TIMEOUTS[key], out, err)
+            results.append((name, rc, round(time.monotonic() - t0, 1)))
+            if rc != 0:
+                say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
+                return _summary(results, 1, say)
+        vault_draft = root + f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
+        try:                                      # lstat: the gateway can write the vault tree
+            is_draft = stat.S_ISREG(os.lstat(vault_draft).st_mode)
+        except FileNotFoundError:
+            is_draft = False
+        if not is_draft:
+            say("run-client-audit: vault-write reported success but the vault draft is missing")
+            return _summary(results, 1, say)
+        say(f"run-client-audit: draft -> {vault_draft[len(root):]}  (data collected {ts} UTC)")
+        return _summary(results, 0, say)
+    finally:                        # the transient draft never outlives the run (I3); os.remove
+        if os.path.lexists(transient):   # does not follow a symlink
+            os.remove(transient)
 
 
 def _summary(results, rc, say):
