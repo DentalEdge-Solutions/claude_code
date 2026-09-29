@@ -34,6 +34,7 @@ def build(project, repo, commit, projects, out_dir):
         raise ValueError("tracked files are modified — refusing; the package must equal the commit")
     paths = PK.package_file_list(projects, project)
     files = {p: _git(repo, "show", f"{commit}:{p}") for p in paths}
+    PK.refuse_client_ids(files)
     m = PK.build_manifest(project, os.path.basename(os.path.abspath(repo)), commit, files)
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.join(out_dir, f"{project}-{commit[:12]}")
