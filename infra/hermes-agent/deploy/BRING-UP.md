@@ -1081,8 +1081,15 @@ procedure as in "The ads repo" (its **App package** bullet) and in the Gate sect
 "The security review must PASS for the current state"; only the pin changed.
 
 ```bash
-# laptop
-python3 bin/build-app-package.py --project claude_google_ads --repo ../claude-google-ads --commit 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b --out-dir /tmp/pkg
+# laptop — the builder refuses unless the ads repo's HEAD is exactly the pin with no tracked changes,
+# so park the local settings change, build, then restore it and the branch you were on
+cd ~/Projects/claude_code/infra/hermes-agent
+git -C ~/Projects/claude-google-ads checkout -q 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b
+git -C ~/Projects/claude-google-ads stash push -q -m pkg -- .claude/settings.json
+python3 bin/build-app-package.py --project claude_google_ads --repo ~/Projects/claude-google-ads --commit 8087dfa585ca6f8eab6a19e7cde5c693e8f16b9b --out-dir /tmp/pkg; echo rc=$?   # rc=0, "files: 21", printed sha256 == package.sha256 in registry/projects.yaml
+git -C ~/Projects/claude-google-ads stash pop -q
+git -C ~/Projects/claude-google-ads checkout -q -
+git -C ~/Projects/claude-google-ads stash list                                          # empty
 scp /tmp/pkg/claude_google_ads-8087dfa585ca.tar /tmp/pkg/claude_google_ads-8087dfa585ca.manifest.json hermesops@<host>:~/
 # box
 cd /opt/hermes-agent
