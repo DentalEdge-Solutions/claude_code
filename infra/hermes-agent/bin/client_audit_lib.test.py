@@ -59,8 +59,19 @@ class TestAnthropicKey(Base):
 
 class TestEligibleClient(Base):
     def test_active_client_resolves_with_digit_id(self):
-        rec = L.eligible_client("acme-dental", self.reg)
-        self.assertEqual((rec["slug"], rec["customer_id"]), ("acme-dental", "1234567890"))
+        rec = L.eligible_client("pilot", self.reg)
+        self.assertEqual((rec["slug"], rec["customer_id"]), ("pilot", "4445556666"))
+
+    def test_dashed_or_non_ten_digit_id_refused_without_naming_it(self):
+        # vault-write's validate_customer_id rejects dashes: refuse now, not after the spend (M7).
+        with self.assertRaises(L.PrecheckError) as cm:
+            L.eligible_client("acme-dental", self.reg)          # "123-456-7890" in the registry
+        self.assertNotIn("123-456-7890", str(cm.exception)); self.assertNotIn("1234567890", str(cm.exception))
+        for bad in ("12345678901", "123456789", 1234567890, None, "12345 67890"):
+            reg = w(os.path.join(self.d, "r2.json"), json.dumps({"clients": {
+                "x-dental": {"customer_id": bad, "status": "active"}}}))
+            with self.assertRaises(L.PrecheckError, msg=repr(bad)):
+                L.eligible_client("x-dental", reg)
 
     def test_dormant_pilot_is_allowed(self):
         self.assertEqual(L.eligible_client("pilot", self.reg)["slug"], "pilot")

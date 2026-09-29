@@ -64,9 +64,12 @@ def eligible_client(slug, registry_path):
     rec = dict(clients[slug])
     if rec.get("status") != "active":
         raise PrecheckError(f"client {slug!r} is {rec.get('status', 'unknown')}, not active")
-    cid = re.sub(r"\D", "", str(rec.get("customer_id", "")))
-    if len(cid) != 10:
-        raise PrecheckError(f"client {slug!r} has no valid customer id in the registry")
+    # Exactly ten digits, as a string: vault-write's validate_customer_id rejects dashes and
+    # non-strings, and it runs LAST, after the spend. Refuse here instead (M7).
+    cid = rec.get("customer_id")
+    if not isinstance(cid, str) or not re.fullmatch(r"[0-9]{10}", cid):
+        raise PrecheckError(f"client {slug!r} has no valid customer id in the registry "
+                            "(exactly 10 digits, no dashes)")
     rec.update(slug=slug, customer_id=cid)
     return rec
 
