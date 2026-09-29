@@ -36,7 +36,8 @@ OWNER_UID = 0                 # the credential file's owner; tests override
 DATA_UID = DATA_GID = 10000   # the containers' uid; tests set None to skip chown
 PIN_OVERRIDE = None           # tests only
 # vault-write runs on the HOST but writes files the gateway (uid 10000) must read next month
-# (trend mode): run it AS that uid, or the vault fills with root-owned files. Tests set [].
+# (trend mode): run it AS that uid, or the vault fills with root-owned files. The snapshot runs
+# as that uid too: it reads files the collector container controls (F2). Tests set [].
 RUN_AS_DATA_UID = ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"]
 
 # Verbatim from run-trend-audit.sh (spec §2 step 5): the analyst, its model and its limits.
@@ -63,7 +64,7 @@ def step_name(argv):
     if "exec" in argv:
         return "draft"
     return "snapshot" if any(a.endswith("ads-metrics-snapshot.py") for a in argv) else "vault-write"
-    # (a vault-write argv may start with RUN_AS_DATA_UID; the fallback still names it)
+    # (snapshot and vault-write argvs may start with RUN_AS_DATA_UID; neither test looks at argv[0])
 
 
 def open_log(path):
@@ -176,7 +177,9 @@ def plan(rec, ts, root):
     run = lambda step: (_compose(root) + ["run", "--rm", "--no-deps", "-T", "--name", f"hermes-audit-{ts}-{step}"]
                         + eflags)                     # named, so a timeout can remove it (I2)
     steps = [("collect", run(f"collect-{c}") + ["ads-collector", f"code/{c}.py"], cred) for c in COLLECTORS]
-    steps.append(("snapshot", ["python3", root + AGENT_DIR + "/bin/ads-metrics-snapshot.py",
+    # The snapshot reads collector-controlled audit-data/<slug>/*.json: never as root (F2). Its
+    # stdout is still the root-created, fchown'd snapshot.stdout fd.
+    steps.append(("snapshot", RUN_AS_DATA_UID + ["python3", root + AGENT_DIR + "/bin/ads-metrics-snapshot.py",
                                "--audit-data", root + data, "--customer", cid, "--collected-at", collected_at], base))
     steps += [("read", run(f"read-{r}") + ["ads-reader", "--report", r, "--project", PROJECT], cred)
               for r in READERS]

@@ -201,6 +201,15 @@ class TestHappyPath(Base):
         vw = [a for k, a, e in RCA.plan(rec, "2026-10-01_12-00-00", self.root) if k == "vault-write"][0]
         self.assertEqual(vw[:4], ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"])
 
+    def test_snapshot_runs_as_the_container_uid_and_keeps_its_name(self):
+        # F2: the snapshot reads collector-controlled audit-data/<slug>/*.json; not as root
+        RCA.RUN_AS_DATA_UID = ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"]
+        import client_audit_lib as L
+        rec = L.eligible_client("acme-dental", self.root + RCA.REGISTRY)
+        snap = [a for k, a, e in RCA.plan(rec, "2026-10-01_12-00-00", self.root) if k == "snapshot"][0]
+        self.assertEqual(snap[:4], ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"])
+        self.assertEqual(RCA.step_name(snap), "snapshot")
+
     def test_transient_draft_is_removed_after_vault_write(self):
         self.run_main(FakeRunner(self.root))
         d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
