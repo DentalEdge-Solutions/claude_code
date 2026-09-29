@@ -8,8 +8,10 @@ ads-reader) -> draft (claude -p in the gateway, as run-trend-audit.sh) -> vault-
 check that the draft names no other client. Stops at the first failure. Exit: 0 draft
 written, 1 a step failed, 2 a pre-check refused, 3 another audit is running.
 Nothing shown carries a customer id or credential value; each step's stdout and stderr go to
-<audit-data>/logs/<step>.{stdout,stderr} (0600)."""
-import argparse, datetime, json, os, subprocess, sys, time
+/var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
+to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
+file there is created O_EXCL|O_NOFOLLOW: root never follows a container-planted symlink."""
+import argparse, datetime, json, os, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import changeset_lib as C
 import client_audit_lib as L
@@ -21,6 +23,7 @@ REGISTRY = GOV + "/registry/clients.json"
 CRED = "/etc/hermes/.env" + ".ga"
 APP_DIR = "/opt/projects/claude-google-ads"
 AUDIT_DATA = "/var/lib/hermes/audit-data"
+AUDIT_LOGS = "/var/lib/hermes/audit-logs"   # root-only; never mounted into anything
 LOCK = "/run/lock/hermes-client-audit.lock"
 PROJECT = "claude_google_ads"
 COLLECTORS = ("audit_discovery", "negatives_audit", "audit_assets_rsa", "assess_supplemental")
@@ -60,13 +63,25 @@ def step_name(argv):
     # (a vault-write argv may start with RUN_AS_DATA_UID; the fallback still names it)
 
 
-def real_runner(argv, env, timeout, out_path, err_path):
-    with open(out_path, "w") as out, open(err_path, "w") as err:
-        try:
-            return subprocess.run(argv, env=env, stdout=out, stderr=err, timeout=timeout).returncode
-        except subprocess.TimeoutExpired:
-            err.write(f"\n[run-client-audit] timed out after {timeout}s\n")
-            return 124
+def open_log(path):
+    """A NEW 0600 log file; refuses (OSError) anything already there, a symlink included."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    return os.fdopen(fd, "w")
+
+
+def read_nofollow(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def real_runner(argv, env, timeout, out, err):
+    """out/err are the open log files (open_log); nothing is re-opened by path."""
+    try:
+        return subprocess.run(argv, env=env, stdout=out, stderr=err, timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        err.write(f"\n[run-client-audit] timed out after {timeout}s\n")
+        return 124
 
 
 def _compose(root):
@@ -91,7 +106,7 @@ def plan(rec, ts, root):
                   {**base, "PROJECT": PROJECT, "CLIENT": slug, "TS": ts}))
     steps.append(("vault-write", RUN_AS_DATA_UID + ["python3", root + AGENT_DIR + "/bin/vault-write.py", "--client", slug,
                                   "--audit-file", root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md",
-                                  "--metrics-file", root + data + "/logs/snapshot.stdout", "--ts", ts,
+                                  "--metrics-file", root + AUDIT_LOGS + "/" + slug + "/snapshot.stdout", "--ts", ts,
                                   "--registry", root + REGISTRY],
                   {**base, "VAULT_ROOT": root + AGENT_DIR + "/data/vaults", "TS": ts}))
     return steps
@@ -141,8 +156,8 @@ def _run(steps, rec, ts, root, runner, say):
     kw = ({"uid": os.geteuid(), "gid": os.getegid()} if DATA_UID is None
           else {"uid": DATA_UID, "gid": DATA_GID})
     L.reset_dir(data, **kw)
-    logs = os.path.join(data, "logs"); os.makedirs(logs, mode=0o700)
-    os.chown(logs, kw["uid"], kw["gid"])
+    logs = root + AUDIT_LOGS + "/" + slug              # root-created, so rmtree is safe; 0711 so
+    L.reset_dir(logs, uid=os.geteuid(), gid=os.getegid(), mode=0o711)   # 10000 reaches snapshot.stdout
     reports = root + f"{AGENT_DIR}/data/reports/{PROJECT}"
     results = []
     for i, (key, argv_, env) in enumerate(steps):
@@ -159,26 +174,27 @@ def _run(steps, rec, ts, root, runner, say):
                     os.remove(os.path.join(reports, f))
         if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
             transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"
-            with open(transient, encoding="utf-8", errors="replace") as f:
-                named = L.others_named(f.read(), slug, list(L.V.load_registry(root + REGISTRY)))
+            named = L.others_named(read_nofollow(transient), slug, list(L.V.load_registry(root + REGISTRY)))
             if named:
                 os.remove(transient)
                 say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}; not written to the vault")
                 return _summary(results, 1, say)
         stem = os.path.join(logs, name.replace(":", "-"))
         t0 = time.monotonic()
-        rc = runner(argv_, env, TIMEOUTS[key], stem + ".stdout", stem + ".stderr")
-        for p in (stem + ".stdout", stem + ".stderr"):
-            if os.path.exists(p):
-                os.chmod(p, 0o600)
-                if DATA_UID is not None:              # vault-write (as 10000) reads snapshot.stdout
-                    os.chown(p, DATA_UID, DATA_GID)
+        with open_log(stem + ".stdout") as out, open_log(stem + ".stderr") as err:
+            if key == "snapshot" and DATA_UID is not None:   # vault-write (as 10000) reads it
+                os.fchown(out.fileno(), DATA_UID, DATA_GID)
+            rc = runner(argv_, env, TIMEOUTS[key], out, err)
         results.append((name, rc, round(time.monotonic() - t0, 1)))
         if rc != 0:
             say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
             return _summary(results, 1, say)
     vault_draft = root + f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
-    if not os.path.isfile(vault_draft):
+    try:                                      # lstat: the gateway can write the vault tree
+        is_draft = stat.S_ISREG(os.lstat(vault_draft).st_mode)
+    except FileNotFoundError:
+        is_draft = False
+    if not is_draft:
         say("run-client-audit: vault-write reported success but the vault draft is missing")
         return _summary(results, 1, say)
     transient = root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md"

@@ -125,6 +125,19 @@ class TestDirsAndScans(Base):
         self.assertEqual(L.error_files(p), ["b.ERROR.txt"])
         self.assertEqual(L.json_count(p), 1)
 
+    def test_json_count_counts_regular_files_only(self):
+        # A container can plant a symlink named x.json; it is not collected data (C1).
+        p = os.path.join(self.d, "ad2")
+        w(os.path.join(p, "a.json"), "{}")
+        os.symlink("/etc/passwd", os.path.join(p, "x.json"))
+        os.makedirs(os.path.join(p, "d.json"))
+        self.assertEqual(L.json_count(p), 1)
+
+    def test_reset_dir_takes_a_mode(self):
+        p = os.path.join(self.d, "audit-logs/acme")
+        L.reset_dir(p, uid=os.geteuid(), gid=os.getegid(), mode=0o711)
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o711)
+
     def test_others_named(self):
         self.assertEqual(L.others_named("Report for Old-Dental ...", "acme-dental", ["acme-dental", "old-dental"]),
                          ["old-dental"])

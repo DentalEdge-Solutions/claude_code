@@ -89,12 +89,12 @@ def package_matches(app_dir, pin_sha256):
             raise PrecheckError(f"installed file differs from the package: {e['path']}")
 
 
-def reset_dir(path, uid=10000, gid=10000):
+def reset_dir(path, uid=10000, gid=10000, mode=0o700):
     if os.path.lexists(path):
         shutil.rmtree(path)
     os.makedirs(path)
     os.chown(path, uid, gid)
-    os.chmod(path, 0o700)
+    os.chmod(path, mode)
 
 
 def error_files(path):
@@ -102,7 +102,8 @@ def error_files(path):
 
 
 def json_count(path):
-    return len(glob.glob(os.path.join(path, "*.json")))
+    """Regular files only (lstat): a container-planted symlink named x.json is not data."""
+    return sum(1 for p in glob.glob(os.path.join(path, "*.json")) if stat.S_ISREG(os.lstat(p).st_mode))
 
 
 def others_named(text, me, slugs):
