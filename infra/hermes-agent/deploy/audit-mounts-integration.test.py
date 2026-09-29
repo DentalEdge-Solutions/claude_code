@@ -88,6 +88,69 @@ class TestAuditMounts(unittest.TestCase):
         self.assertNotIn("interpolating", r.stderr)   # must fail at the mount, not at interpolation
 
 
+@unittest.skipUnless(CAN, "needs root + Linux + docker")
+class TestOrchestratorSeams(unittest.TestCase):
+    """I6: run-client-audit's REAL collect argv and env from plan(), run as real_runner runs it.
+    Compose is called WITHOUT --env-file, so HERMES_* interpolation comes from the agent dir's
+    .env, as on the box; the credential values come only from the step's env (-e NAME)."""
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("rca", os.path.join(AGENT, "bin", "run-client-audit.py"))
+        cls.RCA = importlib.util.module_from_spec(spec); spec.loader.exec_module(cls.RCA)
+        cls.tmp = tempfile.mkdtemp()
+        agent = os.path.join(cls.tmp, "claude_code/infra/hermes-agent")
+        shutil.copytree(AGENT, agent, ignore=shutil.ignore_patterns("data", "security-reviews", ".env*"))
+        with open(os.path.join(agent, ".env"), "w") as f:   # interpolation source, as on the box
+            f.write(f"HERMES_SPOOL_DIR={cls.tmp}\nHERMES_GOVERNANCE_DIR={cls.tmp}/governance\n"
+                    f"HERMES_AGENT_DIR={agent}\nHERMES_ADS_REPO_DIR={cls.tmp}/claude-google-ads\n"
+                    "ANTHROPIC_API_KEY=sk-ant-integration-fake\n")
+        app = os.path.join(cls.tmp, "claude-google-ads")
+        os.makedirs(os.path.join(app, "code")); os.makedirs(os.path.join(app, "audit_data"))
+        open(os.path.join(app, ".env"), "w").close()
+        with open(os.path.join(app, "code/audit_discovery.py"), "w") as f:
+            f.write("import os\nprint('\\n'.join(sorted(k for k in os.environ\n"
+                    "      if k.startswith(('GOOGLE_ADS_', 'ANTHROPIC')))))\n")
+        os.chmod(app, 0o755)
+        # <root>/opt/hermes-agent -> the agent copy, as /opt/hermes-agent is on the box. root sits
+        # one level under tmp, so ../../../claude-google-ads resolves to tmp/claude-google-ads
+        # whether compose resolves the symlink or not.
+        cls.root = os.path.join(cls.tmp, "root")
+        os.makedirs(os.path.join(cls.root, "opt")); os.makedirs(os.path.join(cls.root, "etc/hermes"))
+        os.symlink(agent, os.path.join(cls.root, "opt/hermes-agent"))
+        cred = os.path.join(cls.root, "etc/hermes", ".env" + ".ga")
+        with open(cred, "w") as f:
+            for n in cls.RCA.CRED_NAMES:
+                if n != "GOOGLE_ADS_CUSTOMER_ID":             # plan() sets it from the registry
+                    f.write(f"{n}=fake-{n.lower()}\n")
+            f.write("GOOGLE_ADS_CREDENTIAL_ROLE=read\n")
+        os.chmod(cred, 0o400)
+        cls.RCA.AUDIT_DATA = os.path.join(cls.tmp, "audit-data")   # the one knob: keep CI's /var clean
+        cls.slug = "it-seams"
+        data = os.path.join(cls.RCA.AUDIT_DATA, cls.slug)
+        os.makedirs(data); os.chown(data, 10000, 10000); os.chmod(data, 0o700)
+        d = os.path.join(cls.tmp, "img"); os.makedirs(d)
+        with open(os.path.join(d, "Dockerfile"), "w") as f:
+            f.write(STANDIN)
+        sh("docker", "build", "-q", "-t", "hermes-agent-claude", d)
+
+    def test_first_collect_step_sees_every_credential_name_and_no_anthropic_var(self):
+        import datetime
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime(self.RCA.TS_FMT)
+        steps = self.RCA.plan({"slug": self.slug, "customer_id": "1234567890"}, ts, self.root)
+        key, argv, env = steps[0]
+        self.assertEqual(key, "collect")
+        self.assertNotIn("--env-file", argv)
+        logs = os.path.join(self.tmp, "logs"); os.makedirs(logs)
+        with self.RCA.open_log(logs + "/o") as out, self.RCA.open_log(logs + "/e") as err:
+            rc = self.RCA.real_runner(argv, env, self.RCA.TIMEOUTS[key], out, err)
+        seen = open(logs + "/o").read().split()
+        self.assertEqual(rc, 0, open(logs + "/e").read())
+        for n in self.RCA.CRED_NAMES:
+            self.assertIn(n, seen)
+        self.assertFalse([n for n in seen if n.startswith("ANTHROPIC")], seen)
+
+
 if __name__ == "__main__":
     if not CAN:
         print("SKIPPED: audit-mounts integration needs root + Linux + docker")
