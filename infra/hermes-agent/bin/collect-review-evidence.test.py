@@ -425,5 +425,19 @@ class TestFingerprint(Base):
         self.assertEqual(a, CE.box_fingerprint(h, CE.context(h)))
 
 
+class TestAuditsOnTheBox(Base):
+    def test_gateway_probe_includes_the_box_credential_path(self):
+        self.assertIn("/etc/hermes/.env" + ".ga", CE.GATEWAY_PROBE_PATHS)
+
+    def test_d7_1_reports_audit_data_dirs_by_status_without_slugs(self):
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/acme-dental"))
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/ghost-client"))
+        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults"), exist_ok=True)
+        out = CE.collect(self.host())
+        rows = out["items"]["D7.1"]["data"]["audit_data"]
+        self.assertEqual(sorted(r["status"] for r in rows), ["active", "unregistered"])
+        self.assertNotIn("ghost-client", json.dumps(out))
+
+
 if __name__ == "__main__":
     unittest.main()

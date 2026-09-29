@@ -29,7 +29,8 @@ APP_HOST_DIRS = {"claude_google_ads": "/opt/projects/claude-google-ads"}
 GATEWAY_FILTER = "label=com.docker.compose.service=hermes-agent"
 GATEWAY_PROBE_PATHS = ("/opt/governance", "/var/lib/hermes/governance",
                        "/projects/claude_google_ads/.env", "/opt/hermes-agent/.env.gaw",
-                       "/opt/hermes-agent/.env.ga")
+                       "/opt/hermes-agent/.env.ga",
+                       "/etc/hermes/.env" + ".ga")
 GATEWAY_CONTROL_PATH = "/opt/registry/projects.yaml"
 SWEEP_NAMES = (".env*", "*.ga", "*.gaw", ".git-credentials", "hosts.yml", "credentials.json",
                "application_default_credentials.json", "id_rsa", "id_ecdsa", "id_ed25519")
@@ -521,7 +522,16 @@ def d7_1(host, ctx):
     records = host.path(GOV + "/records")
     backups = sorted(n for n in os.listdir(host.path("/root")) if n.startswith("live-gate-")) \
         if os.path.isdir(host.path("/root")) else []
-    return {"vaults": vault_rows,
+    audit = []
+    ad_root = host.path("/var/lib/hermes/audit-data")
+    if os.path.isdir(ad_root):
+        with open(host.path(GOV + "/registry/clients.json")) as f:
+            reg = json.load(f).get("clients", {})
+        for name in sorted(os.listdir(ad_root)):
+            st = os.lstat(os.path.join(ad_root, name))
+            audit.append({"status": reg.get(name, {}).get("status", "unregistered"),
+                          "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
+    return {"vaults": vault_rows, "audit_data": audit,
             "records": sum(len(fs) for _, _, fs in os.walk(records)) if os.path.isdir(records) else 0,
             "root_backups": [{"dir": b, "files": len(os.listdir(host.path("/root/" + b)))} for b in backups]}
 
