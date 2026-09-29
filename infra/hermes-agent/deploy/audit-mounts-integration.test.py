@@ -144,8 +144,11 @@ class TestOrchestratorSeams(unittest.TestCase):
         logs = os.path.join(self.tmp, "logs"); os.makedirs(logs)
         with self.RCA.open_log(logs + "/o") as out, self.RCA.open_log(logs + "/e") as err:
             rc = self.RCA.real_runner(argv, env, self.RCA.TIMEOUTS[key], out, err)
-        seen = open(logs + "/o").read().split()
-        self.assertEqual(rc, 0, open(logs + "/e").read())
+        with open(logs + "/o") as f:
+            seen = f.read().split()
+        with open(logs + "/e") as f:
+            stderr = f.read()
+        self.assertEqual(rc, 0, stderr)
         for n in self.RCA.CRED_NAMES:
             self.assertIn(n, seen)
         self.assertFalse([n for n in seen if n.startswith("ANTHROPIC")], seen)
