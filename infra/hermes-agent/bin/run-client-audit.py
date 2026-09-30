@@ -90,8 +90,8 @@ def ensure_reports_dir(root):
     docker as root:root 0755 and the reader then gets EACCES (2026-09-30), so make it ours first.
     Reached through the symlink-refusing walk; an existing dir owned by anyone else fails closed."""
     data_fd = _data_dir(root)
-    if data_fd is None:
-        return                                    # no data/ at all: nothing to mount or fix
+    if data_fd is None:      # docker would create it root-owned: the same bug one level up
+        raise ValueError(f"data/ is missing under the agent dir {AGENT_DIR}; create it 10000:hermes 0700")
     try:
         try:
             os.mkdir("reports", 0o700, dir_fd=data_fd)
@@ -108,11 +108,10 @@ def ensure_reports_dir(root):
     try:
         if DATA_UID is None:
             return
-        if created:
-            os.fchown(fd, DATA_UID, DATA_GID)
-            os.fchmod(fd, 0o700)
-        elif os.fstat(fd).st_uid != DATA_UID:
+        if not created and os.fstat(fd).st_uid != DATA_UID:
             raise ValueError(f"data/reports is not owned by the container uid {DATA_UID}; fix: {REPORTS_FIX}")
+        os.fchown(fd, DATA_UID, DATA_GID)         # owner proven (or ours just now): fix group and mode
+        os.fchmod(fd, 0o700)
     finally:
         os.close(fd)
 
