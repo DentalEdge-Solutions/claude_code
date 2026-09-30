@@ -113,9 +113,11 @@ class TestOrchestratorSeams(unittest.TestCase):
                     "      if k.startswith(('GOOGLE_ADS_', 'ANTHROPIC')))))\n")
         os.chmod(app, 0o755)
         # <root>/opt/hermes-agent -> the agent copy, as /opt/hermes-agent is on the box. root sits
-        # one level under tmp, so ../../../claude-google-ads resolves to tmp/claude-google-ads
-        # whether compose resolves the symlink or not.
-        cls.root = os.path.join(cls.tmp, "root")
+        # TWO levels under tmp on purpose: from the UNRESOLVED path, ../../../claude-google-ads
+        # lands in tmp/deep/claude-google-ads, which does not exist, so the collect step fails;
+        # only the symlink-resolved path (what run-client-audit must pass, 2026-09-30 box run)
+        # reaches tmp/claude-google-ads. An earlier layout resolved either way and hid the bug.
+        cls.root = os.path.join(cls.tmp, "deep", "root")
         os.makedirs(os.path.join(cls.root, "opt")); os.makedirs(os.path.join(cls.root, "etc/hermes"))
         os.symlink(agent, os.path.join(cls.root, "opt/hermes-agent"))
         cred = os.path.join(cls.root, "etc/hermes", ".env" + ".ga")
