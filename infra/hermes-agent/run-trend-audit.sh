@@ -4,7 +4,7 @@
 #   metrics snapshot -> fresh reports -> claude -p trend audit (reads fresh reports +
 #   THIS client's vault history) -> vault-write (sole vault writer). No mutation.
 set -eu
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 CLIENT=""
 while [ $# -gt 0 ]; do
   case "$1" in --client) CLIENT="$2"; shift 2 ;; *) echo "usage: run-trend-audit.sh --client <slug>" >&2; exit 1 ;; esac

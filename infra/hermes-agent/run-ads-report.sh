@@ -7,7 +7,7 @@
 # (Increment 2) but parses rather than sources so shell metacharacters in a
 # credential value are never interpreted or executed.
 set -eu
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 if [ ! -f "$here/.env.ga" ]; then
   echo "run-ads-report: $here/.env.ga not found — copy .env.ga.example and fill in the READ-ONLY credential" >&2
   exit 1

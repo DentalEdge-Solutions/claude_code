@@ -15,7 +15,7 @@
 # Deliberately NOT a wrapper for apply/undo. Those need the write credential and stay
 # in run-ads-mutate.sh, which is the file an operator should have to name on purpose.
 set -eu
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 
 cmd="${1:-}"
 if [ "$#" -ge 1 ]; then shift; fi

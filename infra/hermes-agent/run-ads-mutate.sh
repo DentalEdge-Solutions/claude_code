@@ -21,7 +21,7 @@
 # them (`HERMES-EXIT <nonce> <rc>`); 1 is also this script's own refusals before Compose.
 # 4 = the executor's exit could not be verified — treat the account as possibly modified.
 set -eu
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 
 # Resolves HERMES_GOVERNANCE_DIR (environment first, else parsed as DATA out of .env,
 # which is Compose-interpolation-only and never exported) and exports the two host-side

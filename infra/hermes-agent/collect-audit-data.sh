@@ -16,7 +16,7 @@ for _a in "$@"; do
 done
 DRY=0
 for _a in "$@"; do [ "$_a" = "--dry-run" ] && DRY=1; done
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 project_dir="${ADS_PROJECT_DIR:-$(cd "$here/../../../claude-google-ads" 2>/dev/null && pwd || true)}"
 env_file="$here/.env.ga"
 # Collector set. All are SELECT-only and verified working on the host under the

@@ -22,7 +22,7 @@
 #
 # Usage:  ./open-proposal-pr.sh --project claude_code [--proposal latest|<ts>] [--dry-run]
 set -eu
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 [ -f "$here/.env.pr" ] || { echo "missing $here/.env.pr (copy .env.pr.example, add the bot PAT)" >&2; exit 1; }
 while IFS= read -r _line || [ -n "$_line" ]; do
   case "$_line" in
