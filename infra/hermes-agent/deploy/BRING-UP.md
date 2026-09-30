@@ -1146,7 +1146,11 @@ which is never mounted into a container: root-owned `0711`, logs `root 0600`, ex
 sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-data
 sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-logs
 sudo stat -c '%U:%G %a' /var/lib/hermes/audit-data /var/lib/hermes/audit-logs      # root:root 711 (twice)
+sudo install -d -o 10000 -g hermes -m 0700 /opt/hermes-agent/data/reports
+sudo stat -c '%u:%G %a' /opt/hermes-agent/data/reports                              # 10000:hermes 700
 ```
+
+`ads-reader` (uid 10000) bind-mounts `data/reports`; if it is missing, Docker creates it as `root:root 0755` and the reader fails with `PermissionError` (first box run, 2026-09-30). The tool also creates it (10000, `0700`) and refuses the run if an existing one belongs to another uid.
 
 **5. Register the spending client.** The entry is `"status": "active"` with **no**
 `mutation_target`; the dormant pilot stays the only mutation target. The slug and the id stay off

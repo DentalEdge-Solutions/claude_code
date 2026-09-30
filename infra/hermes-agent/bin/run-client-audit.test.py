@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, stat, sys, tempfile, unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import package_lib as PK
 spec = importlib.util.spec_from_file_location("rca", os.path.join(HERE, "run-client-audit.py"))
@@ -73,6 +74,7 @@ class Base(unittest.TestCase):
         open(R(app + "/" + PK.MANIFEST_NAME), "wb").write(PK.manifest_bytes(m))
         self.pin = PK.manifest_hash(m)
         os.makedirs(R("/run/lock"), exist_ok=True)
+        os.makedirs(R("/opt/hermes-agent/data"), exist_ok=True)   # the box always has data/
         RCA.PIN_OVERRIDE = self.pin          # tests bypass projects.yaml; main() reads the pin otherwise
         RCA.OWNER_UID = os.geteuid()         # tests are not root
         RCA.DATA_UID = RCA.DATA_GID = None   # skip chown to 10000 in tests
@@ -154,7 +156,8 @@ class TestHappyPath(Base):
             rc, text = self.run_main(FakeRunner(self.root))
         self.assertEqual(rc, 0, text)
         snap = os.stat(self.root + "/var/lib/hermes/audit-logs/acme-dental/snapshot.stdout").st_ino
-        self.assertEqual(fch, [(snap, 10000, 10000)])
+        rep = os.stat(self.root + "/opt/hermes-agent/data/reports").st_ino
+        self.assertEqual(sorted(fch), sorted([(rep, 10000, 10000), (snap, 10000, 10000)]))   # nothing else
         self.assertFalse(any(p.startswith(self.root + "/var/lib/hermes/audit-logs") and u == 10000
                              for p, u, g in ch), ch)
 
@@ -237,7 +240,7 @@ class TestRootNeverFollowsGatewaySymlinks(Base):
     def test_symlinked_reports_parent_fails_the_same_way(self):
         outside = tempfile.mkdtemp(); os.makedirs(outside + "/claude_google_ads")
         keep = outside + "/claude_google_ads/keep.md"; open(keep, "w").write("keep\n")
-        os.makedirs(self.root + "/opt/hermes-agent/data")
+        os.makedirs(self.root + "/opt/hermes-agent/data", exist_ok=True)
         os.symlink(outside, self.root + "/opt/hermes-agent/data/reports")
         r = FakeRunner(self.root)
         rc, text = self.run_main(r)
@@ -277,6 +280,105 @@ class TestRootNeverFollowsGatewaySymlinks(Base):
         rc, text = self.run_main(FakeRunner(self.root))
         self.assertEqual(rc, 1, text); self.assertNotIn("draft ->", text)
         self.assertNotIn("Traceback", text)
+
+
+class TestReportsDirOwnership(Base):
+    """2026-09-30: docker created a missing data/reports as root; the reader (uid 10000) got EACCES."""
+    DATA = "/opt/hermes-agent/data"
+
+    def _readers(self, r):
+        return [c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")]
+
+    def _reports_fchowns(self, r, uid):
+        """Run main with fchown recording (fd is resolved to an inode INSIDE the patch), chown a no-op."""
+        want = os.stat(self.root + self.DATA + "/reports").st_ino if os.path.exists(self.root + self.DATA + "/reports") else None
+        calls = []
+        def rec(fd, u, g):
+            calls.append((os.fstat(fd).st_ino, u, g))
+        with mock.patch.object(RCA.os, "fchown", rec), mock.patch.object(RCA.os, "chown"):
+            rc, text = self.run_main(r)
+        return rc, text, calls, want
+
+    def _reports_ino(self):
+        return os.stat(self.root + self.DATA + "/reports").st_ino
+
+    def test_missing_reports_dir_is_created_0700_and_handed_to_the_container_uid(self):
+        RCA.DATA_UID = RCA.DATA_GID = 10000
+        old = os.umask(0o000)                      # mkdir alone would yield 0700 & ~0 = 0700; make fchmod matter below
+        try:
+            r = FakeRunner(self.root)
+            rc, text, calls, _ = self._reports_fchowns(r, 10000)
+        finally:
+            os.umask(old)
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(stat.S_IMODE(os.stat(self.root + self.DATA + "/reports").st_mode), 0o700)
+        self.assertIn((self._reports_ino(), 10000, 10000), calls)     # the REPORTS dir, not the snapshot log
+        self.assertTrue(self._readers(r))
+
+    def test_new_reports_dir_mode_is_forced_by_fchmod_not_left_to_mkdir(self):
+        RCA.DATA_UID = RCA.DATA_GID = 10000
+        real_mkdir = os.mkdir
+        def loose_mkdir(path, mode=0o777, *, dir_fd=None):
+            real_mkdir(path, 0o755, dir_fd=dir_fd)             # a mkdir that ignores the requested 0700
+        with mock.patch.object(RCA.os, "mkdir", loose_mkdir):
+            rc, text, calls, _ = self._reports_fchowns(FakeRunner(self.root), 10000)
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(stat.S_IMODE(os.stat(self.root + self.DATA + "/reports").st_mode), 0o700)
+
+    def test_existing_reports_dir_owned_by_the_container_uid_is_fixed_to_0700(self):
+        RCA.DATA_UID = RCA.DATA_GID = os.geteuid()
+        rp = self.root + self.DATA + "/reports"
+        os.makedirs(rp); os.chmod(rp, 0o755)
+        r = FakeRunner(self.root)
+        rc, text, calls, _ = self._reports_fchowns(r, RCA.DATA_UID)
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(stat.S_IMODE(os.stat(rp).st_mode), 0o700)
+        self.assertIn((self._reports_ino(), RCA.DATA_UID, RCA.DATA_GID), calls)
+        self.assertTrue(self._readers(r))
+
+    def test_missing_data_dir_fails_closed_before_any_reader(self):
+        os.rmdir(self.root + self.DATA)
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        self.assertFalse(self._readers(r))
+        self.assertIn("data/ is missing", text); self.assertNotIn("Traceback", text)
+        self.assertFalse(os.path.exists(self.root + self.DATA))
+
+    def test_symlink_planted_between_mkdir_and_open_is_refused(self):
+        outside = tempfile.mkdtemp()
+        real_mkdir = os.mkdir
+        def racy_mkdir(path, mode=0o777, *, dir_fd=None):
+            if path == "reports":
+                os.symlink(outside, path, dir_fd=dir_fd)
+                raise FileExistsError(path)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+        r = FakeRunner(self.root)
+        with mock.patch.object(RCA.os, "mkdir", racy_mkdir):
+            rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        self.assertFalse(self._readers(r)); self.assertEqual(os.listdir(outside), [])
+        self.assertEqual(stat.S_IMODE(os.stat(outside).st_mode), 0o700)   # mkdtemp's mode, untouched
+
+    def test_reports_dir_owned_by_someone_else_fails_before_any_reader(self):
+        os.makedirs(self.root + self.DATA + "/reports")
+        RCA.DATA_UID = RCA.DATA_GID = os.geteuid() + 1
+        r = FakeRunner(self.root)
+        with mock.patch.object(RCA.os, "fchown", lambda *a: None), mock.patch.object(RCA.os, "chown"):
+            rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        self.assertFalse(self._readers(r))
+        self.assertIn("sudo chown 10000:hermes /opt/hermes-agent/data/reports && sudo chmod 700 /opt/hermes-agent/data/reports", text)
+        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
+
+    def test_symlinked_reports_dir_is_still_refused(self):
+        outside = tempfile.mkdtemp()
+        os.makedirs(self.root + self.DATA, exist_ok=True)
+        os.symlink(outside, self.root + self.DATA + "/reports")
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        self.assertFalse(self._readers(r)); self.assertEqual(os.listdir(outside), [])
 
 
 class TestTimeouts(Base):
