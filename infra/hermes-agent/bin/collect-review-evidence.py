@@ -521,6 +521,27 @@ def _reg_status(reg, name):
     return e.get("status", "unknown") if isinstance(e, dict) else "unknown"
 
 
+def _dir_row(host, p):
+    """owner, group, mode of a directory (lstat, never followed), or 'absent'."""
+    try:
+        st = os.lstat(host.path(p))
+    except FileNotFoundError:
+        return "absent"
+    return {"owner": _owner(st.st_uid), "group": _group(st.st_gid), "mode": oct(stat.S_IMODE(st.st_mode))}
+
+
+def _audit_logs(host, reg):
+    """The audit-logs root plus one row per child: registry status, owner, mode, never the name."""
+    root = "/var/lib/hermes/audit-logs"
+    rows = []
+    if os.path.isdir(host.path(root)):
+        for name in sorted(os.listdir(host.path(root))):
+            st = os.lstat(os.path.join(host.path(root), name))
+            rows.append({"status": _reg_status(reg, name),
+                         "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
+    return {"root": _dir_row(host, root), "rows": rows}
+
+
 def d7_1(host, ctx):
     with open(host.path(GOV + "/registry/clients.json")) as f:     # one read for both row kinds
         reg = json.load(f).get("clients", {})
@@ -540,6 +561,8 @@ def d7_1(host, ctx):
             audit.append({"status": _reg_status(reg, name),
                           "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
     return {"vaults": vault_rows, "audit_data": audit,
+            "reports": _dir_row(host, AGENT_DIR + "/data/reports"),
+            "audit_logs": _audit_logs(host, reg),
             "records": sum(len(fs) for _, _, fs in os.walk(records)) if os.path.isdir(records) else 0,
             "root_backups": [{"dir": b, "files": len(os.listdir(host.path("/root/" + b)))} for b in backups]}
 

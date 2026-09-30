@@ -453,5 +453,40 @@ class TestAuditsOnTheBox(Base):
             self.assertNotIn(slug, dump)
 
 
+    def _d7_setup(self):
+        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {
+            "acme-dental": {"customer_id": "1234567890", "status": "active"},
+            "gone-dental": {"customer_id": "2223334444", "status": "retired"}}}))
+        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults"), exist_ok=True)
+
+    def test_d7_1_reports_reports_dir_and_absent(self):
+        self._d7_setup()
+        d = CE.collect(self.host())["items"]["D7.1"]["data"]
+        self.assertEqual(d["reports"], "absent")
+        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/reports"))
+        d = CE.collect(self.host())["items"]["D7.1"]["data"]
+        self.assertEqual(set(d["reports"]) & {"owner", "group", "mode"}, {"owner", "group", "mode"})
+
+    def test_d7_1_audit_logs_root_and_rows_by_status_without_slugs(self):
+        self._d7_setup()
+        base = os.path.join(self.root, "var/lib/hermes/audit-logs")
+        for n in ("acme-dental", "gone-dental", "stray-dental"):
+            os.makedirs(os.path.join(base, n))
+        out = CE.collect(self.host())
+        al = out["items"]["D7.1"]["data"]["audit_logs"]
+        self.assertEqual(set(al["root"]) & {"owner", "group", "mode"}, {"owner", "group", "mode"})
+        self.assertEqual([r["status"] for r in al["rows"]], ["active", "retired", "unregistered"])
+        for r in al["rows"]:
+            self.assertEqual(set(r), {"status", "owner", "mode"})
+        dump = json.dumps(out)
+        for slug in ("gone-dental", "stray-dental"):
+            self.assertNotIn(slug, dump)
+
+    def test_d7_1_audit_logs_absent_root(self):
+        self._d7_setup()
+        al = CE.collect(self.host())["items"]["D7.1"]["data"]["audit_logs"]
+        self.assertEqual(al, {"root": "absent", "rows": []})
+
+
 if __name__ == "__main__":
     unittest.main()

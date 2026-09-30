@@ -1,6 +1,6 @@
 # Hermes security review — checklist
 
-version: 1.8
+version: 1.9
 
 Spec: `docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`. Every report
 cites this version, so every change to this file must raise it (CI enforces this:
@@ -9,7 +9,7 @@ component hashes the git tree of `deploy/`, which contains this file, and flags 
 edits. The `checklist` component records the version. Either way, the review is
 re-triggered (§5). (v1.6: this paragraph only. The v1.5 header named the wrong fingerprint
 component, and the version-bump rule is new. No item changed.) (v1.7: D2.1 `kind`s and
-`memory_sweep`, D2.2 coverage, D6.1 `.env` rule, bundle `collected_at` — review #3's residuals.) (v1.8: ads audits on the box: the box's read credential, the real Anthropic key, D4.1 probe, D7.1 `audit_data`, vault `status` and `audit-logs`.)
+`memory_sweep`, D2.2 coverage, D6.1 `.env` rule, bundle `collected_at` — review #3's residuals.) (v1.8: ads audits on the box: the box's read credential, the real Anthropic key, D4.1 probe, D7.1 `audit_data`, vault `status` and `audit-logs`.) (v1.9: D7.1 also checks `reports` and `audit_logs` — hardening after review #4.)
 
 **How to read an item.** `source` says where the evidence comes from: `box` (the box
 bundle, item id as key), `laptop` (the laptop bundle), or `manual` (the operator states it
@@ -168,8 +168,8 @@ bundle must be from the same day as the sign-off.
 ### D7.1 — Client data is where it should be, readable only by its owners
 - **source:** box
 - **claim:** vaults, run records and backups are the expected ones, none world-readable, none inside a package.
-- **expected:** `vaults`: every row `status: active`, directory `0700` owned by uid 10000; `root_backups` explained by the operator (e.g. `live-gate-*`). `audit_data`: every row `status: active`, `owner` the container uid (10000 or its name), `mode 0o700`. No `retired` or `unregistered` row in either list: offboarding removes them. `/var/lib/hermes/audit-logs/<client>/` holds each run's step logs; it is root-only and not in the bundle: the operator states that `sudo stat -c '%U:%G %a' /var/lib/hermes/audit-logs` prints `root:root 711`.
-- **pass rule:** a world-readable client path is a FAIL. Any `vaults` or `audit_data` row whose `status` is `retired` or `unregistered` is a FAIL. Any `audit_data` row whose `owner` is not 10000 (or its name), or whose `mode` is not `0o700`, is a FAIL. A missing `audit-logs` statement is CANNOT-VERIFY; any value other than `root:root 711` is a FAIL.
+- **expected:** `vaults`: every row `status: active`, directory `0700` owned by uid 10000; `root_backups` explained by the operator (e.g. `live-gate-*`). `audit_data`: every row `status: active`, `owner` the container uid (10000 or its name), `mode 0o700`. No `retired` or `unregistered` row in either list: offboarding removes them. `reports` (`/opt/hermes-agent/data/reports`): owner 10000 (or its name), group `hermes`, mode `0o700`. `audit_logs` (`/var/lib/hermes/audit-logs/<client>/` holds each run's step logs, never mounted): `root` is `root:root` mode `0o711`; each row `status: active`, mode `0o700`. No `retired` or `unregistered` `audit_logs` row: offboarding removes them.
+- **pass rule:** a world-readable client path is a FAIL. Any `vaults` or `audit_data` row whose `status` is `retired` or `unregistered` is a FAIL. Any `audit_data` row whose `owner` is not 10000 (or its name), or whose `mode` is not `0o700`, is a FAIL. A `reports` value other than owner 10000, group `hermes`, `0o700` (`absent` included) is a FAIL. An `audit_logs` row that is `retired` or `unregistered`, or whose mode is not `0o700`, is a FAIL; so is an `audit_logs` root other than `root:root 0o711`.
 
 ## D8 Stop and recover
 
