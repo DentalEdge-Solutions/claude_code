@@ -1148,14 +1148,60 @@ sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-logs
 sudo stat -c '%U:%G %a' /var/lib/hermes/audit-data /var/lib/hermes/audit-logs      # root:root 711 (twice)
 ```
 
-**5. Register the spending client.** Follow the procedure in the Gate section block "RESULT,
-2026-09-26 — first real client registered as the dormant pilot" (registry entry rebuilt from the
-current file, its log created by `migrate-governance.py --bootstrap-logs --apply` and sealed
-append-only, `preflight-governance-access.py` `rc=0`) with two differences: the entry is
-`"status": "active"` and carries **no** `mutation_target`, and the customer id is the client's own (the operator
-has it from the laptop audit; never typed into the repo, and never the dormant pilot's write target
-unless it is the same account). Keep
-the vault directory `10000:hermes 0700`. The slug and the id stay off the repo (F21).
+**5. Register the spending client.** The entry is `"status": "active"` with **no**
+`mutation_target`; the dormant pilot stays the only mutation target. The slug and the id stay off
+the repo (F21). Compute the id's fingerprint on the laptop first, printing only the sha1 prefix:
+`printf '%s' <id> | shasum -a 1 | cut -c1-12`.
+
+**Incident, 2026-09-29 — do not change this procedure's shape.** An earlier version put a hidden
+`read` inside a multi-line paste. The paste fed `read` an empty line, the id check failed, and the
+next line's `sudo install` copied the resulting EMPTY temp file over `clients.json`. The store was
+broken (`migrate-governance` and the preflight refused, correctly) until it was rebuilt. Hence:
+the id is read in its OWN one-line paste, from `/dev/tty`, into a root-only temp file; the
+registry is only ever replaced by a script that parses the current file, validates the new one and
+swaps it atomically.
+
+A. Paste this **single line**, press Enter, type the id at the hidden prompt, Enter:
+
+```bash
+read -rs -p "customer id: " P </dev/tty; echo; printf '%s' "$P" | tr -dc 0-9 | sudo tee /root/.cid >/dev/null; unset P; sudo sh -c 'tr -d "\n" </root/.cid | wc -c; tr -d "\n" </root/.cid | sha1sum | cut -c1-12'   # 10, then the laptop fingerprint — if not, stop
+```
+
+B. Only if both matched (no prompt in this block; set `SLUG` and `FP`, the laptop fingerprint):
+
+```bash
+G=/var/lib/hermes/governance; SLUG=<client>; FP=<fingerprint>; cd /opt/hermes-agent
+sudo python3 - "$G" "$SLUG" "$FP" <<'PY'
+import grp, hashlib, json, os, re, sys
+G, slug, fp = sys.argv[1:]
+reg = G + '/registry/clients.json'
+cid = open('/root/.cid').read().strip()
+assert re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', slug), 'bad slug'
+assert re.fullmatch(r'\d{10}', cid) and hashlib.sha1(cid.encode()).hexdigest()[:12] == fp, 'id does not match its fingerprint'
+d = json.load(open(reg)); c = d['clients']                  # the CURRENT registry must parse; never start from empty
+assert slug not in c, 'slug already registered'
+assert all(v.get('customer_id') != cid for v in c.values()), 'customer id already registered'
+before = len(c)
+c[slug] = {"project": "claude_google_ads", "customer_id": cid, "currency": "USD",
+           "timezone": "America/New_York", "status": "active"}
+tmp = reg + '.new'
+with open(tmp, 'w') as f:
+    json.dump(d, f, indent=2); f.write('\n')
+assert len(json.load(open(tmp))['clients']) == before + 1
+os.chown(tmp, 0, grp.getgrnam('hermes').gr_gid); os.chmod(tmp, 0o640)
+os.replace(tmp, reg)                                          # atomic: the old file stays until the new one is complete
+c = json.load(open(reg))['clients']
+print(len(c), sorted(v['status'] for v in c.values()), sum(v.get('mutation_target') == 'dormant_pilot' for v in c.values()))
+PY
+sudo stat -c '%U:%G %a' $G/registry/clients.json                                     # root:hermes 640
+sudo python3 bin/migrate-governance.py --governance-root $G --bootstrap-logs --apply  # created: [<client>]
+sudo lsattr $G/log/$SLUG.jsonl                                                       # an "a" in the flags
+sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $G; echo rc=$?   # rc=0
+sudo install -d -o 10000 -g hermes -m 0700 data/vaults/$SLUG && sudo stat -c '%u:%G %a' data/vaults/$SLUG   # 10000:hermes 700
+sudo shred -u /root/.cid; sudo ls /root/.cid 2>&1                                    # No such file or directory
+```
+
+If the script stops at any `assert`, the registry is untouched: fix the input and repeat A.
 
 **6. Install the command.**
 
