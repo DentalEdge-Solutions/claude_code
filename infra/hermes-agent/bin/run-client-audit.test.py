@@ -465,5 +465,39 @@ class TestUnexpectedFailure(Base):
         self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
 
 
+
+class TestComposePathResolution(Base):
+    """2026-09-30, first box run: /opt/hermes-agent is a SYMLINK into the checkout. Given
+    `-f /opt/hermes-agent/docker-compose.yml`, compose resolved `../../../claude-google-ads`
+    from the symlink's own location, to /claude-google-ads (an empty dir docker then created),
+    so the collector failed to mount its .env mask. The compose file path must be resolved."""
+    def _box_layout(self):
+        import shutil
+        real = self.root + "/opt/projects/claude_code/infra/hermes-agent"
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        shutil.move(self.root + "/opt/hermes-agent", real)
+        os.symlink(real, self.root + "/opt/hermes-agent")
+        return real
+
+    def test_compose_gets_the_symlink_resolved_file(self):
+        real = self._box_layout()
+        import client_audit_lib as L
+        rec = L.eligible_client("acme-dental", self.root + RCA.REGISTRY)
+        for key, argv, env in RCA.plan(rec, "2026-10-01_12-00-00", self.root):
+            if argv[:2] == ["docker", "compose"]:
+                f = argv[argv.index("-f") + 1]
+                self.assertEqual(f, os.path.realpath(real + "/docker-compose.yml"), key)
+                self.assertNotIn("/opt/hermes-agent/", f)
+
+    def test_draft_exec_still_targets_the_hermes_agent_project(self):
+        self._box_layout()
+        import client_audit_lib as L
+        rec = L.eligible_client("acme-dental", self.root + RCA.REGISTRY)
+        draft = [a for k, a, e in RCA.plan(rec, "2026-10-01_12-00-00", self.root) if k == "draft"][0]
+        f = draft[draft.index("-f") + 1]
+        # compose derives the project name from the file's directory: it must stay "hermes-agent",
+        # or `exec` would not find the running gateway (container hermes-agent-hermes-agent-1).
+        self.assertEqual(os.path.basename(os.path.dirname(f)), "hermes-agent")
+
 if __name__ == "__main__":
     unittest.main()
