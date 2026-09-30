@@ -107,7 +107,7 @@ mcp_servers:
 | `ads_audit_status(request_id)` | reads the result file; files nothing | the result, or `pending` |
 | `ads_audit_list(client)` | writes a `list` request and waits up to 60 s | audit timestamps only |
 
-It validates only the slug format (`^[a-z0-9][a-z0-9-]{0,39}$`) and the request-id format. A refusal is
+It validates only the slug format (`governance_lib.SLUG_RE`, the one shared definition) and the request-id format (`governance_lib.REQUEST_ID_RE`). A refusal is
 returned as final and never rendered as a retryable error (the syscall rule, mutation spec §12).
 
 ### 3.2 Request and result files
@@ -120,7 +120,7 @@ A result is written by the broker to `results/<request_id>.json`, and every fiel
 
 ```json
 {"request_id": "…", "op": "run", "client": "<slug>", "status": "ok|refused|failed|busy",
- "reason": "<enum|null>", "exit_code": 0, "ts": "YYYYMMDDTHHMMSSZ|null",
+ "reason": "<enum|null>", "exit_code": 0, "ts": "YYYY-MM-DD_HH-MM-SS|null",
  "steps": [{"name": "collect|snapshot|read|draft|isolation|vault-write", "rc": 0, "seconds": 0}],
  "vault_path": "/var/lib/hermes/vaults/<slug>/audits/<ts>-audit.md|null",
  "audits": ["<ts>", "…"]}
@@ -156,8 +156,10 @@ The seen-set and quota ledger are append-only JSONL under `app-state/`, which no
 `hermes-app-runner@ads-audit.path` watches `jobs/` (`DirectoryNotEmpty=`). The service is a root oneshot
 that processes jobs oldest first:
 
-- It `lstat`s and size-caps the job, and parses a three-key schema (`job_id`, `op`, `client`) with the same
-  slug regex.
+- It first turns anything left in `running/` into an `interrupted` done file: `running/` only ever holds a job whose
+  run was cut off (a crash or reboot), and it is never re-run.
+- It `lstat`s and size-caps the job, parses a three-key schema (`job_id`, `op`, `client`) with the same
+  `SLUG_RE`, and renames it into `running/` before executing.
 - It maps `op` to the manifest's fixed argv: `run` gives `/usr/local/sbin/run-client-audit <slug> --json`,
   and `list` gives `… <slug> --list --json`. No shell; the slug is one argv element.
 - It runs with the manifest timeout (30 min for `run`, 60 s for `list`), killing the process group on expiry
@@ -165,6 +167,12 @@ that processes jobs oldest first:
 - It writes stdout (at most 64 KiB) and the rc to `done/<job_id>.json` atomically, as `root:hermes-app-ads-audit 0640`,
   then removes the job. `done/` is owned by the broker user (`0700`), so the broker can read and unlink
   what root wrote.
+
+Layout of `app-state/ads-audit/`: the directory itself is `root:hermes-app-ads-audit 0750`, so only root can
+create or remove `DISABLED` in it; `state/`, `jobs/` and `done/` are the broker user's (`0700`); `running/`
+is `root:hermes-app-ads-audit 0750`, so the broker can see a job in flight and never mistakes it for an
+interrupted one. The runner is serial, so a `list` filed during an audit waits behind it (the MCP tool
+returns `pending`).
 
 The runner is the only root code this design adds. It reads only files written by the broker user, into a
 directory only that user can write (`jobs/`: `0700` `hermes-app-ads-audit`). Root can read it regardless of
@@ -191,7 +199,8 @@ mode.
 
 - `vault_lib` gains a single `VAULT_ROOT`. On the box it's `/var/lib/hermes/vaults`; on the laptop it defaults
   to `data/vaults` (darwin has no uid separation to protect).
-- `ads-reader` mounts `reports/<client>` read-write instead of `data/reports`.
+- `ads-reader` mounts `reports/<client>` read-write at `/opt/data/reports/claude_google_ads` (where
+  `run-ads-report.py` writes), instead of the shared `data/reports`.
 - `vault-write` (host, uid 10000) writes the new vault root.
 - The parent `/var/lib/hermes/{vaults,reports,draft-out}` directories are root `0711`, and each
   `<client>/` below is pre-created with the right owner (the lesson behind PR #78).
@@ -311,8 +320,8 @@ The same proxy pattern for the collector and reader, with a Google-APIs allow-li
 ## 8. Review tooling
 
 - **Keyed `cid:` fingerprints.** `review_lib` replaces `sha12` for customer ids with HMAC-SHA256.
-  - The key lives only on the laptop (`~/.config/hermes-review/fp.key`, `0600`). The box collector receives
-    it on stdin for one run (`--fp-key-stdin`), never on disk.
+  - The key lives only on the laptop (`~/.config/hermes-review/fp.key`, `0600`). The box collector reads it
+    from the tty for one run (`--fp-key-tty`, a hidden one-line paste), never from disk or argv.
   - Refresh-token and client-id fingerprints stay `sha12`: those values are high-entropy, and existing
     records (canon, decisions) compare against them.
 - **Credential-placement probe:** `run-client-audit --probe-env`, root only.
