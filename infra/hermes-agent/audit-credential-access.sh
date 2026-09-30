@@ -16,7 +16,7 @@
 # so a credential pinned to one account can be measured against an authorised
 # one. Exit 3 = declared role and measured access level disagree.
 set -eu
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 
 CRED=""; CUSTOMER=""; ALL=0
 while [ $# -gt 0 ]; do

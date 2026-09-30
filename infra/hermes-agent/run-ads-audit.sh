@@ -5,7 +5,7 @@
 # shell redirect. claude itself only Reads/Greps/Globs (plan mode); the redirect
 # writes to /opt/data (writable state volume), never the :ro project mount.
 set -eu
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT="${1-claude_google_ads}"   # default only when UNSET; an explicit '' is rejected below
 # Validate the project name up front: it flows into container paths and the inner
 # shell/prompt, so reject anything that could inject shell or traverse paths.

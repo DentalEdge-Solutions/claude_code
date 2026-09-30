@@ -4,7 +4,7 @@
 # reader is allow-list-enforced by run-ads-report.py. The reader set MATCHES the
 # registry read_execute.allow (finalized in the Task-1 gate).
 set -eu
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT="${1-claude_google_ads}"; shift 2>/dev/null || true
 CUSTOMER=""
 while [ $# -gt 0 ]; do
