@@ -1175,28 +1175,7 @@ B. Only if both matched (no prompt in this block; set `SLUG` and `FP`, the lapto
 
 ```bash
 G=/var/lib/hermes/governance; SLUG=<client>; FP=<fingerprint>; cd /opt/hermes-agent
-sudo python3 - "$G" "$SLUG" "$FP" <<'PY'
-import grp, hashlib, json, os, re, sys
-G, slug, fp = sys.argv[1:]
-reg = G + '/registry/clients.json'
-cid = open('/root/.cid').read().strip()
-assert re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', slug), 'bad slug'
-assert re.fullmatch(r'\d{10}', cid) and hashlib.sha1(cid.encode()).hexdigest()[:12] == fp, 'id does not match its fingerprint'
-d = json.load(open(reg)); c = d['clients']                  # the CURRENT registry must parse; never start from empty
-assert slug not in c, 'slug already registered'
-assert all(v.get('customer_id') != cid for v in c.values()), 'customer id already registered'
-before = len(c)
-c[slug] = {"project": "claude_google_ads", "customer_id": cid, "currency": "USD",
-           "timezone": "America/New_York", "status": "active"}
-tmp = reg + '.new'
-with open(tmp, 'w') as f:
-    json.dump(d, f, indent=2); f.write('\n')
-assert len(json.load(open(tmp))['clients']) == before + 1
-os.chown(tmp, 0, grp.getgrnam('hermes').gr_gid); os.chmod(tmp, 0o640)
-os.replace(tmp, reg)                                          # atomic: the old file stays until the new one is complete
-c = json.load(open(reg))['clients']
-print(len(c), sorted(v['status'] for v in c.values()), sum(v.get('mutation_target') == 'dormant_pilot' for v in c.values()))
-PY
+sudo python3 bin/register-client.py --slug "$SLUG" --fingerprint "$FP"                # N ['active', ...] 1: it refuses, changing nothing, on an empty or unparsable registry, a duplicate, or a wrong fingerprint
 sudo stat -c '%U:%G %a' $G/registry/clients.json                                     # root:hermes 640
 sudo python3 bin/migrate-governance.py --governance-root $G --bootstrap-logs --apply  # created: [<client>]
 sudo lsattr $G/log/$SLUG.jsonl                                                       # an "a" in the flags
