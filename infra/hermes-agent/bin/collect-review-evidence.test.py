@@ -487,6 +487,23 @@ class TestAuditsOnTheBox(Base):
         al = CE.collect(self.host())["items"]["D7.1"]["data"]["audit_logs"]
         self.assertEqual(al, {"root": "absent", "rows": []})
 
+    def test_d7_1_symlinked_audit_logs_root_is_reported_not_followed(self):
+        self._d7_setup()
+        target = os.path.join(self.root, "elsewhere")
+        os.makedirs(os.path.join(target, "ghost-client"))
+        link = os.path.join(self.root, "var/lib/hermes/audit-logs")
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+        out = CE.collect(self.host())
+        self.assertEqual(out["items"]["D7.1"]["data"]["audit_logs"], {"root": "symlink", "rows": []})
+        self.assertNotIn("ghost-client", json.dumps(out))
+
+    def test_d7_1_symlinked_reports_dir_is_reported(self):
+        self._d7_setup()
+        d = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data")
+        os.symlink(self.root, os.path.join(d, "reports"))
+        self.assertEqual(CE.collect(self.host())["items"]["D7.1"]["data"]["reports"], "symlink")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -522,24 +522,30 @@ def _reg_status(reg, name):
 
 
 def _dir_row(host, p):
-    """owner, group, mode of a directory (lstat, never followed), or 'absent'."""
+    """owner, group, mode of a directory (lstat, never followed); 'absent'; or 'symlink' / 'not-a-directory'."""
     try:
         st = os.lstat(host.path(p))
     except FileNotFoundError:
         return "absent"
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if not stat.S_ISDIR(st.st_mode):
+        return "not-a-directory"
     return {"owner": _owner(st.st_uid), "group": _group(st.st_gid), "mode": oct(stat.S_IMODE(st.st_mode))}
 
 
 def _audit_logs(host, reg):
-    """The audit-logs root plus one row per child: registry status, owner, mode, never the name."""
+    """The audit-logs root plus one row per child: registry status, owner, mode, never the name.
+    A symlinked root is reported as such and never listed."""
     root = "/var/lib/hermes/audit-logs"
+    row = _dir_row(host, root)
     rows = []
-    if os.path.isdir(host.path(root)):
+    if isinstance(row, dict):
         for name in sorted(os.listdir(host.path(root))):
             st = os.lstat(os.path.join(host.path(root), name))
             rows.append({"status": _reg_status(reg, name),
                          "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
-    return {"root": _dir_row(host, root), "rows": rows}
+    return {"root": row, "rows": rows}
 
 
 def d7_1(host, ctx):
