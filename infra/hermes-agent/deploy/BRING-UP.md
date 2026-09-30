@@ -980,7 +980,7 @@ sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $G; echo
 sudo test -e $G/control/mutation-enabled && echo PRESENT || echo ABSENT               # ABSENT
 ```
 
-Every line as expected: id fingerprint matched the audit (`00c17987f3d2`), `2 ['active',
+Every line as expected: id fingerprint matched the laptop audit's (value kept off the repo: see step 5 of "Ads audits on the box"), `2 ['active',
 'retired'] 1`, `root:hermes 640`, `PILOT_OK`, `created: [<client>]` / `skipped: [rehearsal]`, the
 log sealed (`-----a--------e-------`), pre-flight `rc=0`, kill switch absent.
 
@@ -1156,6 +1156,9 @@ sudo stat -c '%u:%G %a' /opt/hermes-agent/data/reports                          
 `mutation_target`; the dormant pilot stays the only mutation target. The slug and the id stay off
 the repo (F21). Compute the id's fingerprint on the laptop first, printing only the sha1 prefix:
 `printf '%s' <id> | shasum -a 1 | cut -c1-12`.
+The fingerprint is for comparing laptop and box **in the terminal only**: never write it into
+this repo, a review report, the brain or a ticket. A customer id is 10 digits, so its sha1 prefix
+is reversible by brute force in minutes, and publishing it is publishing the id.
 
 **Incident, 2026-09-29 — do not change this procedure's shape.** An earlier version put a hidden
 `read` inside a multi-line paste. The paste fed `read` an empty line, the id check failed, and the
