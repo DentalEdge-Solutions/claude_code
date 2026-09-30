@@ -67,9 +67,12 @@ def register(slug, fingerprint, registry, cid_file):
                "timezone": "America/New_York", "status": "active"}
     tmp = registry + ".new"
     try:
-        with open(tmp, "w") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # holds customer ids: never world-readable
+        with os.fdopen(fd, "w") as f:
             json.dump(d, f, indent=2)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         with open(tmp) as f:
             after = json.load(f)["clients"]
         if len(after) != before + 1:
@@ -82,10 +85,18 @@ def register(slug, fingerprint, registry, cid_file):
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
-    with open(registry) as f:
-        c = json.load(f)["clients"]
-    return "%d %s %d" % (len(c), sorted(v.get("status") for v in c.values()),
-                         sum(v.get("mutation_target") == "dormant_pilot" for v in c.values()))
+    return summary(registry)
+
+
+def summary(registry):
+    """`N [statuses] pilots`. Runs AFTER the swap, so it must never raise or claim nothing changed."""
+    try:
+        with open(registry) as f:
+            vs = [v for v in json.load(f)["clients"].values() if isinstance(v, dict)]
+        return "%d %s %d" % (len(vs), sorted(str(v.get("status")) for v in vs),
+                             sum(v.get("mutation_target") == "dormant_pilot" for v in vs))
+    except (OSError, KeyError, ValueError, AttributeError):
+        return "registered (summary unavailable)"
 
 
 def main(argv=None):
