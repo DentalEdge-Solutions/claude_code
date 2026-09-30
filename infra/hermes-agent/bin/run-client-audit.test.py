@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, stat, sys, tempfile, unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import package_lib as PK
 spec = importlib.util.spec_from_file_location("rca", os.path.join(HERE, "run-client-audit.py"))
@@ -277,6 +278,50 @@ class TestRootNeverFollowsGatewaySymlinks(Base):
         rc, text = self.run_main(FakeRunner(self.root))
         self.assertEqual(rc, 1, text); self.assertNotIn("draft ->", text)
         self.assertNotIn("Traceback", text)
+
+
+class TestReportsDirOwnership(Base):
+    """2026-09-30: docker created a missing data/reports as root; the reader (uid 10000) got EACCES."""
+    DATA = "/opt/hermes-agent/data"
+
+    def _readers(self, r):
+        return [c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")]
+
+    def test_missing_reports_dir_is_created_0700_and_handed_to_the_container_uid(self):
+        os.makedirs(self.root + self.DATA)
+        RCA.DATA_UID = RCA.DATA_GID = 10000
+        chowned = []
+        real = os.fchown
+        def rec(fd, uid, gid):
+            chowned.append((uid, gid))
+            if (uid, gid) != (10000, 10000): real(fd, uid, gid)
+        r = FakeRunner(self.root)
+        with mock.patch.object(RCA.os, "fchown", rec), mock.patch.object(RCA.os, "chown"):   # not root
+            rc, text = self.run_main(r)
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(stat.S_IMODE(os.stat(self.root + self.DATA + "/reports").st_mode), 0o700)
+        self.assertIn((10000, 10000), chowned)
+        self.assertTrue(self._readers(r))
+
+    def test_reports_dir_owned_by_someone_else_fails_before_any_reader(self):
+        os.makedirs(self.root + self.DATA + "/reports")
+        RCA.DATA_UID = RCA.DATA_GID = os.geteuid() + 1
+        r = FakeRunner(self.root)
+        with mock.patch.object(RCA.os, "fchown", lambda *a: None), mock.patch.object(RCA.os, "chown"):
+            rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        self.assertFalse(self._readers(r))
+        self.assertIn("sudo chown 10000:hermes /opt/hermes-agent/data/reports && sudo chmod 700 /opt/hermes-agent/data/reports", text)
+        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
+
+    def test_symlinked_reports_dir_is_still_refused(self):
+        outside = tempfile.mkdtemp()
+        os.makedirs(self.root + self.DATA)
+        os.symlink(outside, self.root + self.DATA + "/reports")
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 1, text)
+        self.assertFalse(self._readers(r)); self.assertEqual(os.listdir(outside), [])
 
 
 class TestTimeouts(Base):

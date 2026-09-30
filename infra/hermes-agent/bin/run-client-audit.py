@@ -11,7 +11,7 @@ Nothing shown carries a customer id or credential value; each step's stdout and 
 /var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
 to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
 file there is created O_EXCL|O_NOFOLLOW: root never follows a container-planted symlink."""
-import argparse, datetime, json, os, re, stat, subprocess, sys, time
+import argparse, datetime, errno, json, os, re, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import changeset_lib as C
 import client_audit_lib as L
@@ -79,6 +79,42 @@ def open_log(path):
 # relative to that fd (F1). data/ itself cannot be swapped: its parent is the root-owned checkout.
 def _data_dir(root, *parts):
     return L.open_dir_below(root + AGENT_DIR, ("data",) + parts)
+
+
+REPORTS_FIX = ("sudo chown 10000:hermes /opt/hermes-agent/data/reports"
+               " && sudo chmod 700 /opt/hermes-agent/data/reports")
+
+
+def ensure_reports_dir(root):
+    """data/reports is bind-mounted into ads-reader (uid 10000). A missing source is created by
+    docker as root:root 0755 and the reader then gets EACCES (2026-09-30), so make it ours first.
+    Reached through the symlink-refusing walk; an existing dir owned by anyone else fails closed."""
+    data_fd = _data_dir(root)
+    if data_fd is None:
+        return                                    # no data/ at all: nothing to mount or fix
+    try:
+        try:
+            os.mkdir("reports", 0o700, dir_fd=data_fd)
+            created = True
+        except FileExistsError:
+            created = False
+        fd = os.open("reports", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=data_fd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+            raise L.UnsafePathError("data/reports is a symlink or not a directory")
+        raise
+    finally:
+        os.close(data_fd)
+    try:
+        if DATA_UID is None:
+            return
+        if created:
+            os.fchown(fd, DATA_UID, DATA_GID)
+            os.fchmod(fd, 0o700)
+        elif os.fstat(fd).st_uid != DATA_UID:
+            raise ValueError(f"data/reports is not owned by the container uid {DATA_UID}; fix: {REPORTS_FIX}")
+    finally:
+        os.close(fd)
 
 
 def clear_reports(root):
@@ -258,6 +294,7 @@ def _run(steps, rec, ts, root, runner, say):
                 if L.json_count(data) == 0:
                     say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
             if key == "read" and name.endswith(READERS[0]):          # before the first reader
+                ensure_reports_dir(root)  # owned by the container uid, or rc 1 before any reader
                 clear_reports(root)       # a symlinked reports dir raises UnsafePathError: rc 1
             if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
                 named = L.others_named(read_transient(root, ts), slug, list(L.V.load_registry(root + REGISTRY)))
