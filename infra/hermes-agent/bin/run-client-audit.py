@@ -163,7 +163,12 @@ def _iso(ts):
 
 
 def _compose(root):
-    return ["docker", "compose", "-f", root + AGENT_DIR + "/docker-compose.yml", "--profile", "tools"]
+    # /opt/hermes-agent is a SYMLINK into the checkout. compose resolves the file's relative
+    # binds (../../../claude-google-ads, ../..) from the directory named in -f WITHOUT following
+    # it, so the unresolved path mounted /claude-google-ads and would have mounted / (first box
+    # run, 2026-09-30). Pass the real path; the project name stays "hermes-agent".
+    return ["docker", "compose", "-f", os.path.realpath(root + AGENT_DIR + "/docker-compose.yml"),
+            "--profile", "tools"]
 
 
 def plan(rec, ts, root):
