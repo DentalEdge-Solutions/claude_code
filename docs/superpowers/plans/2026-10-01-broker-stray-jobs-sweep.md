@@ -299,4 +299,8 @@ git commit -m "fix(hermes): broker sweeps stray entries out of jobs/ every pass 
   planted by root or the app user still spins the root runner.
 - **No checklist change:** the two new journal lines start `warning: `, which the collector's `_NOTE_RE` already
   counts under `note_counts`; checklist D10.7 already says fixed-text lines are expected.
+- **Checklist 1.12 (operator decision after the review):** the review found that D10.7's sentence "one other
+  fixed-text warning shares that key" went stale with the two new lines. The operator chose to correct it now,
+  so this branch raises `CHECKLIST.md` to 1.12. That supersedes the "no change to `CHECKLIST.md`" constraint
+  above; no pass rule changed.
 - **Fingerprint:** `bin/` is in the box fingerprint, so this must be on `main` before the box rollout.
