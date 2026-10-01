@@ -1414,9 +1414,11 @@ belong to operator-run verification.
 
 The gate for real credentials and for any app code on the box is the **security review**
 (`docs/superpowers/specs/2026-09-28-hermes-security-review-design.md`): a versioned checklist
-(`deploy/security-review/CHECKLIST.md`), two read-only collectors that redact by design
+(`deploy/security-review/CHECKLIST.md`), two collectors that redact by design
 (`bin/collect-review-evidence.py` on the box, `bin/collect-review-evidence-laptop.py` on the
-laptop), an independent reviewer (`deploy/security-review/REVIEWER-BRIEF.md`), and the
+laptop; they change nothing a review looks at, but the box one is not read-only: it runs the two
+`run-client-audit` probes, which take the audit lock, start containers and make one outbound
+CONNECT), an independent reviewer (`deploy/security-review/REVIEWER-BRIEF.md`), and the
 operator's sign-off. Raw bundles live in the gitignored `security-reviews/`; only the report
 is committed. A PASS binds to a box fingerprint; any trigger (§5) voids it.
 

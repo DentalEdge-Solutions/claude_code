@@ -3,6 +3,7 @@
 - **Checklist version:** 
 - **Reviewer:** (session / model) — did not build the box: yes
 - **Box fingerprint:** `<sha256>` (complete: true|false)
+- **`cid_key_id`:** box `<8 hex>`, laptop `<8 hex>` — equal: yes|no (if not, no `cid:` fingerprint can be compared across the bundles)
 - **Authorised credential set:** (role, refresh-token sha12, client-id sha12 — one line each)
 - **Measured-access digest:** `<sha256>`
 - **Components changed since the last PASS:** (first review: n/a)
@@ -12,14 +13,9 @@
 | Item | Verdict | Evidence (short quote) | Note |
 |---|---|---|---|
 | D1.1 | | | |
-| D10.1 | | | |
-| D10.2 | | | |
-| D10.3 | | | |
-| D10.4 | | | |
-| D10.5 | | | |
-| D10.6 | | | |
-| D10.7 | | | |
-| D10.8 | | | |
+| … | | | |
+
+(One row per checklist item, in the checklist's order, from D1.1 to its last item: the row above is an example, not the list.)
 
 ## Not on the checklist
 

@@ -37,6 +37,18 @@ class TestChecklistSync(unittest.TestCase):
         lap = {k for k, v in items()[1].items() if v == "laptop"}
         self.assertEqual(lap, set(_load("cl", "collect-review-evidence-laptop.py").ITEMS))
 
+    def test_d10_6_states_the_committed_mcp_block(self):
+        """D10.6 judges the box's `mcp_servers:` block by `equals_repo` and by its sha256 and line
+        count, which the checklist states: they must be config.yaml.example's, as the collector
+        computes them, so changing the committed block means changing (and re-versioning) this file."""
+        ce = _load("ce", "collect-review-evidence.py")
+        block = ce._mcp_block(os.path.join(os.path.dirname(HERE), "config.yaml.example"), "config.yaml.example")
+        d10_6 = re.split(r"(?m)^### ", items()[0])
+        d10_6 = next(b for b in d10_6 if b.startswith("D10.6 — "))
+        self.assertIn(f"`mcp_block.sha256` is `{ce._block_sha256(block)}`", d10_6)
+        self.assertIn(f"`mcp_block.lines` is `{len(block)}`", d10_6)
+        self.assertIn("`mcp_block.equals_repo` is `true`", d10_6)
+
     def test_every_area_d1_to_d10_is_present(self):
         areas = {k.split(".")[0] for k in items()[1]}
         self.assertEqual(areas, {f"D{i}" for i in range(1, 11)})
