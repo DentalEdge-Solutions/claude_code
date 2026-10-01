@@ -5,7 +5,10 @@
 
 vaults/<client>/ is copied to <dest>/vaults/<client>/ with owner, mode and mtime preserved, then
 every file is re-hashed at the destination; only when all match are data/vaults and data/reports
-removed (reports are per run and rebuilt by the next audit, so they are not copied). A symlink
+removed (reports are per run and rebuilt by the next audit, so they are not copied).
+Exit: 0 done; 1 copy/verify failed or the source changed (source intact: remove the listed
+destination dirs and re-run); 2 refused before copying; 3 copies verified but removing the source
+failed (keep the destination; finish removing data/vaults and data/reports by hand). A symlink
 anywhere in the source, an existing destination client dir, or a destination parent that is
 not root 0711 refuses before anything is copied. The source is owned by the gateway and is
 treated as hostile: every source file is opened O_NOFOLLOW and checked (regular file, same
@@ -121,8 +124,11 @@ def _copy_client(src, dst, entries):
             os.mkdir(d, 0o700)
         else:
             seen[rel] = _copy_file(s, d, est)
-    dirs = [("", st)] + sorted((e for e in entries if stat.S_ISDIR(e[1].st_mode)),
-                               key=lambda e: -e[0].count(os.sep))
+    # Deepest first and the client dir LAST: until then dst stays root's 0700, so nobody else can
+    # swap a name below it while these path-based calls run (owner/mode/mtime of each dir would
+    # otherwise be applied under a dir already handed to uid 10000).
+    dirs = sorted((e for e in entries if stat.S_ISDIR(e[1].st_mode)),
+                  key=lambda e: -e[0].count(os.sep)) + [("", st)]
     for rel, est in dirs:
         d = os.path.join(dst, rel) if rel else dst
         os.chown(d, est.st_uid, est.st_gid, follow_symlinks=False)
@@ -215,9 +221,10 @@ def main(argv=None):
             if os.path.lexists(tree):
                 shutil.rmtree(tree)
     except OSError as e:
-        print(f"migrate-client-data: copies are verified but removing the source failed: {e}; "
-              f"finish by removing data/vaults and data/reports by hand", file=sys.stderr)
-        return 1
+        print(f"migrate-client-data: copies verified; removing the source failed ({e.strerror or e}). "
+              f"DO NOT remove the destination: it may now be the only full copy. Finish removing "
+              f"data/vaults and data/reports by hand", file=sys.stderr)
+        return 3
     print("migrate-client-data: done; data/vaults and data/reports removed")
     return 0
 

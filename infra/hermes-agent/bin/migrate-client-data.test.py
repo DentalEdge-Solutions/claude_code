@@ -197,6 +197,45 @@ class T(unittest.TestCase):
         self.assertIn("acme/audits/2026-09-30_10-00-00-audit.md", text)
         self.assertIn(os.path.join(self.dest, "vaults", "acme"), text)
 
+    def test_source_removal_failure_is_rc3_and_says_keep_the_destination(self):
+        """Copies verified but rmtree fails: NOT rc 1 (whose advice is to remove the destination)."""
+        def boom(path, *a, **k):
+            raise OSError(16, "Device or resource busy", path)
+        with mock.patch.object(M.shutil, "rmtree", boom):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 3, text)
+        got = os.path.join(self.dest, "vaults/acme/audits/2026-09-30_10-00-00-audit.md")
+        self.assertEqual(open(got).read(), "draft")                  # destination intact
+        self.assertIn("DO NOT remove the destination", text)
+        self.assertIn("data/vaults and data/reports by hand", text)
+        self.assertNotIn("remove each, then re-run", text)
+
+    def test_dir_owner_mode_mtime_preserved_at_every_depth(self):
+        """Deepest first, the client dir LAST: the final owner/mode/mtime of every dir is the source's."""
+        src = os.path.join(self.agent, "data/vaults/acme")
+        deep = os.path.join(src, "metrics/2026"); os.makedirs(deep)
+        open(os.path.join(deep, "m.json"), "w").write("{}")
+        want = {}
+        for rel, mode, mt in (("metrics/2026", 0o750, 1_300_000_000_000_000_000),
+                              ("metrics", 0o710, 1_200_000_000_000_000_000),
+                              ("audits", 0o700, 1_150_000_000_000_000_000),
+                              ("", 0o700, 1_100_000_000_000_000_000)):
+            d = os.path.join(src, rel) if rel else src
+            os.chmod(d, mode); os.utime(d, ns=(mt, mt))
+            want[rel] = (mode, mt, os.stat(d).st_uid, os.stat(d).st_gid)
+        order = []
+        real_chown = os.chown
+        def chown(p, *a, **k):
+            order.append(os.path.relpath(p, os.path.join(self.dest, "vaults/acme")))
+            return real_chown(p, *a, **k)
+        with mock.patch.object(M.os, "chown", chown):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(order[-1], ".", order)                      # the client dir is applied last
+        for rel, (mode, mt, uid, gid) in want.items():
+            st = os.stat(os.path.join(self.dest, "vaults/acme", rel) if rel else os.path.join(self.dest, "vaults/acme"))
+            self.assertEqual((stat.S_IMODE(st.st_mode), st.st_mtime_ns, st.st_uid, st.st_gid), (mode, mt, uid, gid), rel)
+
 
 if __name__ == "__main__":
     unittest.main()

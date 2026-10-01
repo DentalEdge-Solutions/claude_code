@@ -55,6 +55,19 @@ class T(unittest.TestCase):
         os.symlink(secret, self.v + "/evil2")
         rc, out, err = self.run_("evil2", "--latest")
         self.assertEqual(rc, 2); self.assertEqual(out, "")
+        self.assertNotIn("SECRET", out + err)
+
+    def test_terminal_control_characters_are_stripped(self):
+        """The draft is model output steered by attacker-controlled search terms: no ESC (or any
+        other C0 control but newline and tab) reaches the operator's terminal."""
+        evil = "DRAFT\x1b]0;pwned\x07 title\n\tcol\x1b[2J\x1b[31mred\x00\x08\r\x7f ok\n"
+        open(self.a + "/2026-10-01_00-00-00-audit.md", "w").write(evil)
+        rc, out, _ = self.run_("acme", "--ts", "2026-10-01_00-00-00")
+        self.assertEqual(rc, 0)
+        self.assertFalse([c for c in out if (ord(c) < 32 and c not in "\n\t") or ord(c) == 0x7f], repr(out))
+        self.assertEqual(out, "DRAFT]0;pwned title\n\tcol[2J[31mred ok\n")
+        open(self.a + "/2026-10-02_00-00-00-audit.md", "w", encoding="utf-8").write("a\u009b31mb \u00e9\n")
+        self.assertEqual(self.run_("acme", "--ts", "2026-10-02_00-00-00")[1], "a31mb \u00e9\n")   # C1 CSI too
 
     def test_missing_vaults_base_is_not_found(self):
         self.root = tempfile.mkdtemp()
