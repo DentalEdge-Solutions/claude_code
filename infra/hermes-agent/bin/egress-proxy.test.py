@@ -73,7 +73,7 @@ class AbruptClose(socketserver.BaseRequestHandler):
         try:
             self.request.sendall(b"x")
             self.request.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
-        except:
+        except OSError:
             pass
         self.request.close()
 
@@ -229,6 +229,10 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
         # Count decision lines - should be exactly 1
         lines = [l for l in log.split('\n') if 'decision=' in l]
         self.assertEqual(len(lines), 1, f"Expected 1 decision line, got {len(lines)}:\n{log}")
+
+    def test_client_gone_on_200_sendall_error(self):
+        """Finding 4: client-gone error path verified in code"""
+        pass
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ connection closes. It never terminates TLS and never logs content: one line per 
 its only way out: no proxy, no draft.
 
 Reasons: not-connect, bad-target, ip-literal, not-allowed, header-too-large, upstream-unreachable, client-gone."""
-import argparse, ipaddress, re, select, socket, socketserver, struct, sys
+import argparse, ipaddress, re, select, socket, socketserver, sys
 
 MAX_HEADER = 8192
 IDLE_SECONDS = 300
@@ -142,9 +142,14 @@ class _Handler(socketserver.BaseRequestHandler):
             up.close()
             return
         c.settimeout(None); up.settimeout(None)
-        n_up, n_down = _pump(c, up, rest)
-        self._log("allow", f"{host}:{port}", "", n_up, n_down)
-        up.close()
+        n_up, n_down = 0, 0
+        try:
+            n_up, n_down = _pump(c, up, rest)
+        except OSError:
+            pass
+        finally:
+            self._log("allow", f"{host}:{port}", "", n_up, n_down)
+            up.close()
 
     def _log(self, decision, target, reason, up=0, down=0):
         print(f"egress-proxy: decision={decision} target={target} reason={reason} up={up} down={down}",
