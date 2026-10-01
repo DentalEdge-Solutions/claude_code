@@ -9,7 +9,7 @@ It decides admission (schema, replay, kill switch, client status, quota — rese
 job exists) and writes a job file for the root runner; it never executes anything. Results are
 built only by app_lib.map_done's whitelist. Nothing re-runs on its own: a reservation whose job
 vanished is reported `interrupted`, never re-queued."""
-import argparse, os, sys, time
+import argparse, os, stat, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 import vault_lib as V
@@ -25,6 +25,7 @@ class Ctx:
         self.req_dir = os.path.join(spool, "requests")
         self.res_dir = os.path.join(spool, "results")
         self.ledger = A.Ledger(os.path.join(state, "state", "ledger.jsonl"))
+        self.dir_noted = False
 
     def d(self, name):
         return os.path.join(self.state, name)
@@ -35,11 +36,22 @@ def _say(ctx, rid, op, client, status, reason):
             f"status={status} reason={reason or '-'}")
 
 
-def _unlink(path):
+def _note(ctx, text):
+    """A fixed-text journal line: never carries a hostile name or an exception message."""
+    ctx.log(f"hermes-app-broker[{ctx.m.app}]: {text}")
+
+
+def _rid_or_dash(rid):
+    return rid if A.REQUEST_ID_RE.fullmatch(rid) else "-"
+
+
+def _unlink(ctx, path):
     try:
         os.unlink(path)
     except FileNotFoundError:
         pass
+    except OSError:
+        _note(ctx, "error: could not remove a spool entry")
 
 
 def _result(ctx, result):
@@ -56,8 +68,10 @@ def _active(ctx, client):
 
 
 def _refuse(ctx, rid, op, client, reason):
-    ctx.ledger.append("refused", rid, op, client, now=ctx.now())
+    # The result FIRST: if it cannot be written nothing is recorded, and the request (still in
+    # requests/) is retried next pass. Rewriting the same result on a retry is idempotent.
     _result(ctx, A.refused_result(rid, op, client, reason))
+    ctx.ledger.append("refused", rid, op, client, now=ctx.now())
 
 
 def _admit(ctx, req):
@@ -75,6 +89,24 @@ def _admit(ctx, req):
     _say(ctx, rid, op, client, "queued", None)
 
 
+def _handle_request(ctx, n):
+    p = os.path.join(ctx.req_dir, n)
+    rid = n[:-5]
+    try:
+        req = A.parse_request(A.read_capped(p, A.MAX_REQUEST_BYTES), n, ctx.m)
+    except A.Refused:
+        if A.REQUEST_ID_RE.fullmatch(rid) and not ctx.ledger.seen(rid):
+            _refuse(ctx, rid, None, None, "bad_request")
+        else:
+            _say(ctx, _rid_or_dash(rid), None, None, "dropped", "bad_request")
+        _unlink(ctx, p); return
+    if ctx.ledger.seen(rid):
+        _say(ctx, rid, req["op"], req["client"], "dropped", "duplicate")   # the first result stands
+        _unlink(ctx, p); return
+    _admit(ctx, req)
+    _unlink(ctx, p)
+
+
 def drain_once(ctx):
     try:
         names = os.listdir(ctx.req_dir)
@@ -86,63 +118,80 @@ def drain_once(ctx):
         p = os.path.join(ctx.req_dir, n)
         try:
             st = os.lstat(p)
-        except FileNotFoundError:
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            # The gateway can mkdir here; a non-empty directory cannot be removed by us. Leave it,
+            # say so once per process, and never let it stop a pass.
+            try:
+                os.rmdir(p)
+            except OSError:
+                if not ctx.dir_noted:
+                    _note(ctx, "warning: a directory in requests/ cannot be removed (left in place)")
+                    ctx.dir_noted = True
             continue
         if not A.FILENAME_RE.fullmatch(n):
             if not n.startswith(".") or now - st.st_mtime > REQUEST_MAX_AGE:   # keep in-flight temp files
-                _unlink(p)
+                if not n.startswith("."):
+                    _say(ctx, "-", None, None, "dropped", "bad_request")
+                _unlink(ctx, p)
             continue
+        if not stat.S_ISREG(st.st_mode):                                 # FIFO, symlink, socket, device
+            _say(ctx, _rid_or_dash(n[:-5]), None, None, "dropped", "bad_request")
+            _unlink(ctx, p); continue
         if now - st.st_mtime > REQUEST_MAX_AGE:
-            _unlink(p); continue
+            _say(ctx, _rid_or_dash(n[:-5]), None, None, "dropped", "expired")
+            _unlink(ctx, p); continue
         todo.append((st.st_mtime, n))
     for _, n in sorted(todo)[:MAX_PER_PASS]:
-        p = os.path.join(ctx.req_dir, n)
-        rid = n[:-5]
         try:
-            req = A.parse_request(A.read_capped(p, A.MAX_REQUEST_BYTES), n, ctx.m)
-        except A.Refused:
-            if A.REQUEST_ID_RE.fullmatch(rid) and not ctx.ledger.seen(rid):
-                _refuse(ctx, rid, None, None, "bad_request")
-            _unlink(p); continue
-        if ctx.ledger.seen(rid):
-            _say(ctx, rid, req["op"], req["client"], "dropped", "duplicate")   # the first result stands
-            _unlink(p); continue
-        _admit(ctx, req)
-        _unlink(p)
+            _handle_request(ctx, n)
+        except Exception:                                # one entry costs one line, never the pass
+            _note(ctx, "error: a request could not be processed (left for the next pass)")
+
+
+def _collect_one(ctx, n, open_):
+    p = os.path.join(ctx.d("done"), n)
+    rid = n[:-5]
+    try:
+        done = A.parse_done(A.read_capped(p, A.MAX_DONE_BYTES), n)
+    except A.Refused:
+        done = None
+    # Only an id this broker reserved and has not yet resulted gets a result: the first
+    # result stands, and `released` can never be written twice or for a foreign id.
+    if not A.FILENAME_RE.fullmatch(n) or rid not in open_:
+        _unlink(ctx, p); return
+    op, client = open_.pop(rid)
+    req = {"request_id": rid, "op": op, "client": client}
+    if done is None:
+        result = A.refused_result(rid, op, client, "internal", status="failed")
+    else:
+        result = A.map_done(req, done, ctx.m)
+    # The result FIRST, then close the ledger, then drop the done file: a failure at any point
+    # leaves the reservation open and the done file in place, so the next pass retries.
+    _result(ctx, result)
+    if result["status"] == "busy":
+        ctx.ledger.append("released", rid, now=ctx.now())
+    ctx.ledger.append("resulted", rid, now=ctx.now())
+    _unlink(ctx, p)
 
 
 def collect_once(ctx):
     now = time.time()
+    open_ = {r: (o, c) for r, o, c in ctx.ledger.unresolved()}      # once per pass
     for n in sorted(os.listdir(ctx.d("done"))):
         p = os.path.join(ctx.d("done"), n)
-        rid = n[:-5]
         if n.startswith("."):                      # the runner's in-flight atomic-write temp file
             try:
                 if now - os.lstat(p).st_mtime > REQUEST_MAX_AGE:
-                    _unlink(p)
+                    _unlink(ctx, p)
             except FileNotFoundError:
                 pass
             continue
         try:
-            done = A.parse_done(A.read_capped(p, A.MAX_DONE_BYTES), n)
-        except A.Refused:
-            done = None
-        # Only an id this broker reserved and has not yet resulted gets a result: the first
-        # result stands, and `released` can never be written twice or for a foreign id.
-        open_ = {r: (o, c) for r, o, c in ctx.ledger.unresolved()} if A.FILENAME_RE.fullmatch(n) else {}
-        if rid not in open_:
-            _unlink(p); continue
-        op, client = open_[rid]
-        req = {"request_id": rid, "op": op, "client": client}
-        if done is None:
-            result = A.refused_result(rid, op, client, "internal", status="failed")
-        else:
-            result = A.map_done(req, done, ctx.m)
-        if result["status"] == "busy":
-            ctx.ledger.append("released", rid, now=ctx.now())
-        ctx.ledger.append("resulted", rid, now=ctx.now())
-        _result(ctx, result)
-        _unlink(p)
+            _collect_one(ctx, n, open_)
+        except Exception:
+            _note(ctx, "error: a done file could not be collected (left for the next pass)")
 
 
 def recover(ctx):
@@ -150,8 +199,11 @@ def recover(ctx):
         name = rid + ".json"
         if any(os.path.exists(os.path.join(ctx.d(d), name)) for d in ("jobs", "running", "done")):
             continue
-        ctx.ledger.append("resulted", rid, now=ctx.now())
-        _result(ctx, A.refused_result(rid, op, client, "interrupted", status="failed"))
+        try:
+            _result(ctx, A.refused_result(rid, op, client, "interrupted", status="failed"))
+            ctx.ledger.append("resulted", rid, now=ctx.now())
+        except Exception:
+            _note(ctx, "error: an interrupted reservation could not be resulted (retried at next recover)")
 
 
 def expire_results(ctx, max_age=7 * 86400):

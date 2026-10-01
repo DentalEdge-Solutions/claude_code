@@ -261,5 +261,109 @@ class TestHardening(Base):
             self.assertFalse(any(cid in l for l in self.logs), cid)
 
 
+class TestFixRound1(Base):
+    """Review fix round 1: directory DoS, result-before-ledger, one journal line per request."""
+
+    def ledger_events(self):
+        p = os.path.join(self.state, "state", "ledger.jsonl")
+        return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
+
+    def unresolved(self):
+        return [r for r, _, _ in A.Ledger(os.path.join(self.state, "state", "ledger.jsonl")).unresolved()]
+
+    def fail_results_once(self):
+        """Patch app_lib.write_json_atomic so the next write into results/ raises once."""
+        orig, res_dir, state = A.write_json_atomic, os.path.join(self.spool, "results"), {"left": 1}
+
+        def flaky(dirpath, name, obj, *a, **kw):
+            if dirpath == res_dir and state["left"]:
+                state["left"] -= 1
+                raise OSError("disk full")
+            return orig(dirpath, name, obj, *a, **kw)
+        A.write_json_atomic = flaky
+        self.addCleanup(setattr, A, "write_json_atomic", orig)
+
+    def test_directories_in_requests_do_not_stop_the_broker(self):
+        for name in ("0f8e2c1a-1111-4222-8333-444455556666.json", "junkdir"):
+            d = os.path.join(self.spool, "requests", name)
+            os.mkdir(d); open(os.path.join(d, "x"), "w").close()      # non-empty: cannot be removed
+        rid = self.file()
+        B.drain_once(self.ctx)                                         # must return, not raise
+        self.assertEqual(self.jobs(), [rid + ".json"])
+        rid2 = self.file(client="b-dental")
+        B.drain_once(self.ctx)                                         # a second pass still works
+        self.assertEqual(self.jobs(), sorted([rid + ".json", rid2 + ".json"]))
+        self.assertEqual(sorted(os.listdir(os.path.join(self.spool, "requests"))),
+                         ["0f8e2c1a-1111-4222-8333-444455556666.json", "junkdir"])
+        self.assertFalse(any("junkdir" in l for l in self.logs))       # hostile names never logged
+
+    def test_an_exception_in_one_request_costs_one_log_line_not_the_pass(self):
+        bad, good = self.file(), self.file(client="b-dental")
+        orig = B._admit
+
+        def boom(ctx, req):
+            if req["request_id"] == bad:
+                raise RuntimeError("unexpected")
+            return orig(ctx, req)
+        B._admit = boom
+        self.addCleanup(setattr, B, "_admit", orig)
+        B.drain_once(self.ctx)
+        self.assertEqual(self.jobs(), [good + ".json"])
+        self.assertTrue(any("error" in l for l in self.logs))
+
+    def test_collect_writes_the_result_before_closing_the_ledger(self):
+        rid = self.file(); B.drain_once(self.ctx)
+        os.unlink(os.path.join(self.state, "jobs", rid + ".json"))
+        A.write_json_atomic(os.path.join(self.state, "done"), rid + ".json",
+                            {"job_id": rid, "rc": 3, "timed_out": False, "interrupted": False,
+                             "stdout": json.dumps({"status": "busy", "reason": "busy", "exit_code": 3, "ts": None,
+                                                   "steps": [], "vault_path": None})})
+        self.fail_results_once()
+        B.collect_once(self.ctx)
+        self.assertIsNone(self.result(rid))
+        self.assertEqual(self.unresolved(), [rid])                     # still open, done file kept
+        self.assertEqual(os.listdir(os.path.join(self.state, "done")), [rid + ".json"])
+        self.assertEqual([e for e in self.ledger_events() if e["event"] == "released"], [])
+        B.collect_once(self.ctx)
+        self.assertEqual(self.result(rid)["status"], "busy")
+        self.assertEqual(self.unresolved(), [])
+        self.assertEqual(os.listdir(os.path.join(self.state, "done")), [])
+        self.assertEqual(len([e for e in self.ledger_events() if e["event"] == "released"]), 1)
+
+    def test_recover_writes_the_result_before_closing_the_ledger(self):
+        rid = self.file(); B.drain_once(self.ctx)
+        os.unlink(os.path.join(self.state, "jobs", rid + ".json"))
+        self.fail_results_once()
+        B.recover(self.ctx)
+        self.assertIsNone(self.result(rid))
+        self.assertEqual(self.unresolved(), [rid])
+        B.recover(self.ctx)
+        self.assertEqual(self.result(rid)["reason"], "interrupted")
+        self.assertEqual(self.unresolved(), [])
+
+    def test_refusal_writes_the_result_before_the_ledger(self):
+        rid = self.file(client="nobody")
+        self.fail_results_once()
+        B.drain_once(self.ctx)
+        self.assertIsNone(self.result(rid))
+        self.assertEqual(self.ledger_events(), [])                     # nothing recorded yet
+        self.assertEqual(os.listdir(os.path.join(self.spool, "requests")), [rid + ".json"])  # retried
+        B.drain_once(self.ctx)
+        self.assertEqual(self.result(rid)["reason"], "inactive_client")
+        self.assertEqual([e["event"] for e in self.ledger_events()], ["refused"])
+
+    def test_every_dropped_request_gets_one_journal_line(self):
+        rid = self.file(client="nobody"); B.drain_once(self.ctx)        # seen
+        open(os.path.join(self.spool, "requests", rid + ".json"), "w").write("{nope")
+        open(os.path.join(self.spool, "requests", "junk.txt"), "w").close()
+        self.logs.clear()
+        B.drain_once(self.ctx)
+        self.assertIn(f"hermes-app-broker[ads-audit]: request={rid} op=- client=- status=dropped reason=bad_request",
+                      self.logs)
+        self.assertIn("hermes-app-broker[ads-audit]: request=- op=- client=- status=dropped reason=bad_request",
+                      self.logs)
+        self.assertFalse(any("junk" in l for l in self.logs))
+
+
 if __name__ == "__main__":
     unittest.main()
