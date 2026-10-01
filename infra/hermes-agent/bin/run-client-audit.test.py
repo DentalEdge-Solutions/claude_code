@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, stat, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, signal, stat, subprocess, sys, tempfile, threading, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import package_lib as PK
 spec = importlib.util.spec_from_file_location("rca", os.path.join(HERE, "run-client-audit.py"))
 RCA = importlib.util.module_from_spec(spec); spec.loader.exec_module(RCA)
+REAL_STOP_PROXY = RCA.stop_proxy      # Base stubs the module attribute; the real one is tested below
 
 TOKEN = "1//0gFAKEREFRESHTOKENabcdefghijklmnop"
 CID = "1234567890"
@@ -45,11 +46,11 @@ class FakeRunner:
                 open(os.path.join(ad, self.error_file), "w").write("boom")
         ts = env.get("TS") or next((a[3:] for a in argv if a.startswith("TS=")), None)
         if name == "draft":
-            d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
+            d = self.root + "/var/lib/hermes/draft-out/acme-dental"
             os.makedirs(d, exist_ok=True)
             open(os.path.join(d, ts + "-audit.md"), "w").write(self.draft_text)
         if name == "vault-write":
-            v = self.root + "/opt/hermes-agent/data/vaults/acme-dental/audits"
+            v = self.root + "/var/lib/hermes/vaults/acme-dental/audits"
             os.makedirs(v, exist_ok=True)
             open(os.path.join(v, ts + "-audit.md"), "w").write(self.draft_text)
         return 0
@@ -66,7 +67,7 @@ class Base(unittest.TestCase):
             "acme-dental": {"customer_id": CID, "status": "active", "project": "claude_google_ads"},
             "other-dental": {"customer_id": "9998887777", "status": "active", "project": "claude_google_ads"}}}))
         w("/etc/hermes/.env" + ".ga", f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\nGOOGLE_ADS_CREDENTIAL_ROLE=read\n", 0o400)
-        w("/opt/hermes-agent/.env", "ANTHROPIC_API_KEY=sk-ant-api03-x\n")
+        w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-x\n", 0o400)
         app = "/opt/projects/claude-google-ads"
         files = {"code/a.py": b"x"}
         w(app + "/code/a.py", "x")
@@ -74,7 +75,11 @@ class Base(unittest.TestCase):
         open(R(app + "/" + PK.MANIFEST_NAME), "wb").write(PK.manifest_bytes(m))
         self.pin = PK.manifest_hash(m)
         os.makedirs(R("/run/lock"), exist_ok=True)
-        os.makedirs(R("/opt/hermes-agent/data"), exist_ok=True)   # the box always has data/
+        for parent in ("/var/lib/hermes/vaults", "/var/lib/hermes/reports", "/var/lib/hermes/draft-out"):
+            os.makedirs(R(parent), exist_ok=True); os.chmod(R(parent), 0o711)
+        os.makedirs(R("/var/lib/hermes/vaults/acme-dental"), exist_ok=True)
+        self.proxy_stops = []
+        RCA.stop_proxy = lambda root, logs, say: self.proxy_stops.append((root, logs))
         RCA.PIN_OVERRIDE = self.pin          # tests bypass projects.yaml; main() reads the pin otherwise
         RCA.OWNER_UID = os.geteuid()         # tests are not root
         RCA.DATA_UID = RCA.DATA_GID = None   # skip chown to 10000 in tests
@@ -94,8 +99,8 @@ class TestHappyPath(Base):
         self.assertEqual(rc, 0, text)
         names = [RCA.step_name(c["argv"]) for c in r.calls]
         self.assertEqual(names, [f"collect:{c}" for c in RCA.COLLECTORS] + ["snapshot"]
-                         + [f"read:{x}" for x in RCA.READERS] + ["draft", "vault-write"])
-        self.assertIn("data/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md", text)
+                         + [f"read:{x}" for x in RCA.READERS] + ["proxy", "draft", "vault-write"])
+        self.assertIn("/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md", text)
 
     def test_credential_only_as_env_names_and_never_on_screen(self):
         r = FakeRunner(self.root)
@@ -122,7 +127,7 @@ class TestHappyPath(Base):
         self.assertTrue(os.path.exists(os.path.join(logs, "snapshot.stderr")))
         self.assertEqual(os.stat(logs).st_mode & 0o777, 0o711)
         names = os.listdir(logs)
-        self.assertEqual(len(names), 2 * 10)                      # stdout + stderr for each step
+        self.assertEqual(len(names), 2 * 11)                      # stdout + stderr for each step (incl. proxy)
         for n in names:
             self.assertEqual(os.lstat(os.path.join(logs, n)).st_mode & 0o777, 0o600, n)
         # the collector's rw mount holds no logs/ (C1): nothing there is ever opened as root
@@ -151,13 +156,14 @@ class TestHappyPath(Base):
         fch, ch = [], []
         def rec_fchown(fd, uid, gid):
             fch.append((os.fstat(fd).st_ino, uid, gid))
+        # the test user cannot own the vault dir as 10000: that pre-check is not this test's subject
         with mock.patch.object(RCA.os, "fchown", rec_fchown), \
-             mock.patch.object(RCA.os, "chown", lambda p, u, g: ch.append((p, u, g))):
+             mock.patch.object(RCA.os, "chown", lambda p, u, g: ch.append((p, u, g))), \
+             mock.patch.object(RCA.L, "check_client_dir", lambda p, uid: None):
             rc, text = self.run_main(FakeRunner(self.root))
         self.assertEqual(rc, 0, text)
         snap = os.stat(self.root + "/var/lib/hermes/audit-logs/acme-dental/snapshot.stdout").st_ino
-        rep = os.stat(self.root + "/opt/hermes-agent/data/reports").st_ino
-        self.assertEqual(sorted(fch), sorted([(rep, 10000, 10000), (snap, 10000, 10000)]))   # nothing else
+        self.assertEqual(sorted(fch), [(snap, 10000, 10000)])   # nothing else
         self.assertFalse(any(p.startswith(self.root + "/var/lib/hermes/audit-logs") and u == 10000
                              for p, u, g in ch), ch)
 
@@ -172,8 +178,8 @@ class TestHappyPath(Base):
                 rc = super().__call__(argv, env, timeout, out, err)
                 name = RCA.step_name(argv)
                 if name == s.where:
-                    d = {"draft": s.root + "/opt/hermes-agent/data/audits/claude_google_ads",
-                         "vault-write": s.root + "/opt/hermes-agent/data/vaults/acme-dental/audits"}[name]
+                    d = {"draft": s.root + "/var/lib/hermes/draft-out/acme-dental",
+                         "vault-write": s.root + "/var/lib/hermes/vaults/acme-dental/audits"}[name]
                     os.remove(os.path.join(d, ts + "-audit.md"))
                     os.symlink(secret, os.path.join(d, ts + "-audit.md"))
                 return rc
@@ -215,170 +221,8 @@ class TestHappyPath(Base):
 
     def test_transient_draft_is_removed_after_vault_write(self):
         self.run_main(FakeRunner(self.root))
-        d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
+        d = self.root + "/var/lib/hermes/draft-out/acme-dental"
         self.assertEqual(os.listdir(d), [])
-
-
-class TestRootNeverFollowsGatewaySymlinks(Base):
-    """F1: the gateway (uid 10000) owns data/; root must not follow a symlink it plants there."""
-    REPORTS = "/opt/hermes-agent/data/reports/claude_google_ads"
-    AUDITS = "/opt/hermes-agent/data/audits/claude_google_ads"
-
-    def test_symlinked_reports_dir_fails_before_any_reader_and_deletes_nothing(self):
-        outside = tempfile.mkdtemp(); keep = os.path.join(outside, "keep.md")
-        open(keep, "w").write("keep\n")
-        os.makedirs(os.path.dirname(self.root + self.REPORTS))
-        os.symlink(outside, self.root + self.REPORTS)
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertTrue(os.path.exists(keep))
-        self.assertFalse([c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")])
-        self.assertEqual(len([l for l in text.splitlines() if "failed" in l]), 1, text)
-        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
-
-    def test_symlinked_reports_parent_fails_the_same_way(self):
-        outside = tempfile.mkdtemp(); os.makedirs(outside + "/claude_google_ads")
-        keep = outside + "/claude_google_ads/keep.md"; open(keep, "w").write("keep\n")
-        os.makedirs(self.root + "/opt/hermes-agent/data", exist_ok=True)
-        os.symlink(outside, self.root + "/opt/hermes-agent/data/reports")
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text); self.assertTrue(os.path.exists(keep))
-        self.assertFalse([c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")])
-
-    def test_symlinked_md_in_reports_removes_the_link_not_its_target(self):
-        outside = tempfile.mkdtemp(); target = os.path.join(outside, "t.md")
-        open(target, "w").write("target\n")
-        os.makedirs(self.root + self.REPORTS)
-        open(self.root + self.REPORTS + "/old.md", "w").write("stale\n")
-        os.symlink(target, self.root + self.REPORTS + "/evil.md")
-        rc, text = self.run_main(FakeRunner(self.root))
-        self.assertEqual(rc, 0, text)
-        self.assertFalse(os.path.lexists(self.root + self.REPORTS + "/evil.md"))
-        self.assertFalse(os.path.lexists(self.root + self.REPORTS + "/old.md"))
-        self.assertEqual(open(target).read(), "target\n")
-
-    def test_symlinked_audits_dir_draft_is_neither_read_nor_removed(self):
-        outside = tempfile.mkdtemp()
-        os.makedirs(os.path.dirname(self.root + self.AUDITS))
-        os.symlink(outside, self.root + self.AUDITS)
-        # the fake analyst writes through the planted link; the text would trip the name check if read
-        r = FakeRunner(self.root, draft_text="compare with other-dental")
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        planted = os.path.join(outside, "2026-10-01_12-00-00-audit.md")
-        self.assertTrue(os.path.exists(planted), text)                       # not removed
-        self.assertNotIn("other-dental", text)                               # not read
-        self.assertNotIn("vault-write", [RCA.step_name(c["argv"]) for c in r.calls])
-        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
-
-    def test_symlinked_vault_audits_dir_is_not_trusted(self):
-        outside = tempfile.mkdtemp()
-        v = self.root + "/opt/hermes-agent/data/vaults/acme-dental"
-        os.makedirs(v); os.symlink(outside, v + "/audits")
-        rc, text = self.run_main(FakeRunner(self.root))
-        self.assertEqual(rc, 1, text); self.assertNotIn("draft ->", text)
-        self.assertNotIn("Traceback", text)
-
-
-class TestReportsDirOwnership(Base):
-    """2026-09-30: docker created a missing data/reports as root; the reader (uid 10000) got EACCES."""
-    DATA = "/opt/hermes-agent/data"
-
-    def _readers(self, r):
-        return [c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")]
-
-    def _reports_fchowns(self, r, uid):
-        """Run main with fchown recording (fd is resolved to an inode INSIDE the patch), chown a no-op."""
-        want = os.stat(self.root + self.DATA + "/reports").st_ino if os.path.exists(self.root + self.DATA + "/reports") else None
-        calls = []
-        def rec(fd, u, g):
-            calls.append((os.fstat(fd).st_ino, u, g))
-        with mock.patch.object(RCA.os, "fchown", rec), mock.patch.object(RCA.os, "chown"):
-            rc, text = self.run_main(r)
-        return rc, text, calls, want
-
-    def _reports_ino(self):
-        return os.stat(self.root + self.DATA + "/reports").st_ino
-
-    def test_missing_reports_dir_is_created_0700_and_handed_to_the_container_uid(self):
-        RCA.DATA_UID = RCA.DATA_GID = 10000
-        old = os.umask(0o000)                      # mkdir alone would yield 0700 & ~0 = 0700; make fchmod matter below
-        try:
-            r = FakeRunner(self.root)
-            rc, text, calls, _ = self._reports_fchowns(r, 10000)
-        finally:
-            os.umask(old)
-        self.assertEqual(rc, 0, text)
-        self.assertEqual(stat.S_IMODE(os.stat(self.root + self.DATA + "/reports").st_mode), 0o700)
-        self.assertIn((self._reports_ino(), 10000, 10000), calls)     # the REPORTS dir, not the snapshot log
-        self.assertTrue(self._readers(r))
-
-    def test_new_reports_dir_mode_is_forced_by_fchmod_not_left_to_mkdir(self):
-        RCA.DATA_UID = RCA.DATA_GID = 10000
-        real_mkdir = os.mkdir
-        def loose_mkdir(path, mode=0o777, *, dir_fd=None):
-            real_mkdir(path, 0o755, dir_fd=dir_fd)             # a mkdir that ignores the requested 0700
-        with mock.patch.object(RCA.os, "mkdir", loose_mkdir):
-            rc, text, calls, _ = self._reports_fchowns(FakeRunner(self.root), 10000)
-        self.assertEqual(rc, 0, text)
-        self.assertEqual(stat.S_IMODE(os.stat(self.root + self.DATA + "/reports").st_mode), 0o700)
-
-    def test_existing_reports_dir_owned_by_the_container_uid_is_fixed_to_0700(self):
-        RCA.DATA_UID = RCA.DATA_GID = os.geteuid()
-        rp = self.root + self.DATA + "/reports"
-        os.makedirs(rp); os.chmod(rp, 0o755)
-        r = FakeRunner(self.root)
-        rc, text, calls, _ = self._reports_fchowns(r, RCA.DATA_UID)
-        self.assertEqual(rc, 0, text)
-        self.assertEqual(stat.S_IMODE(os.stat(rp).st_mode), 0o700)
-        self.assertIn((self._reports_ino(), RCA.DATA_UID, RCA.DATA_GID), calls)
-        self.assertTrue(self._readers(r))
-
-    def test_missing_data_dir_fails_closed_before_any_reader(self):
-        os.rmdir(self.root + self.DATA)
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r))
-        self.assertIn("data/ is missing", text); self.assertNotIn("Traceback", text)
-        self.assertFalse(os.path.exists(self.root + self.DATA))
-
-    def test_symlink_planted_between_mkdir_and_open_is_refused(self):
-        outside = tempfile.mkdtemp()
-        real_mkdir = os.mkdir
-        def racy_mkdir(path, mode=0o777, *, dir_fd=None):
-            if path == "reports":
-                os.symlink(outside, path, dir_fd=dir_fd)
-                raise FileExistsError(path)
-            return real_mkdir(path, mode, dir_fd=dir_fd)
-        r = FakeRunner(self.root)
-        with mock.patch.object(RCA.os, "mkdir", racy_mkdir):
-            rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r)); self.assertEqual(os.listdir(outside), [])
-        self.assertEqual(stat.S_IMODE(os.stat(outside).st_mode), 0o700)   # mkdtemp's mode, untouched
-
-    def test_reports_dir_owned_by_someone_else_fails_before_any_reader(self):
-        os.makedirs(self.root + self.DATA + "/reports")
-        RCA.DATA_UID = RCA.DATA_GID = os.geteuid() + 1
-        r = FakeRunner(self.root)
-        with mock.patch.object(RCA.os, "fchown", lambda *a: None), mock.patch.object(RCA.os, "chown"):
-            rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r))
-        self.assertIn("sudo chown 10000:hermes /opt/hermes-agent/data/reports && sudo chmod 700 /opt/hermes-agent/data/reports", text)
-        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
-
-    def test_symlinked_reports_dir_is_still_refused(self):
-        outside = tempfile.mkdtemp()
-        os.makedirs(self.root + self.DATA, exist_ok=True)
-        os.symlink(outside, self.root + self.DATA + "/reports")
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r)); self.assertEqual(os.listdir(outside), [])
 
 
 class TestTimeouts(Base):
@@ -387,13 +231,14 @@ class TestTimeouts(Base):
         r = FakeRunner(self.root)
         self.assertEqual(self.run_main(r)[0], 0)
         runs = [c["argv"] for c in r.calls if "run" in c["argv"] and "docker" in c["argv"]]
-        self.assertEqual(len(runs), len(RCA.COLLECTORS) + len(RCA.READERS))
+        self.assertEqual(len(runs), len(RCA.COLLECTORS) + len(RCA.READERS) + 1)   # + the drafter
         for a in runs:
             name = a[a.index("--name") + 1]
             slug = RCA.step_name(a).replace(":", "-")
             self.assertEqual(name, f"hermes-audit-2026-10-01_12-00-00-{slug}")
             self.assertRegex(name, r"^[a-z0-9_-]+$")
-            self.assertLess(a.index("--name"), a.index("ads-collector" if "ads-collector" in a else "ads-reader"))
+            svc = next(x for x in ("ads-collector", "ads-reader", "ads-drafter") if x in a)
+            self.assertLess(a.index("--name"), a.index(svc))
 
     def test_timed_out_run_step_removes_its_container(self):
         d = tempfile.mkdtemp()
@@ -436,7 +281,11 @@ class TestDraftAndSnapshotArgs(Base):
         a = d["argv"]
         for kv in ("PROJECT=claude_google_ads", "CLIENT=acme-dental", "TS=2026-10-01_12-00-00"):
             self.assertEqual(a[a.index(kv) - 1], "-e", kv)
-        self.assertEqual(sorted(d["env"]), ["PATH"])
+        self.assertEqual(a[a.index("ANTHROPIC_API_KEY") - 1], "-e")           # a name only
+        self.assertEqual(d["env"]["ANTHROPIC_API_KEY"], "sk-ant-api03-x")    # the value only in env
+        self.assertFalse(any(k.startswith("GOOGLE_ADS_") for k in d["env"]), d["env"])
+        self.assertFalse(any("GOOGLE_ADS_" in x for x in a), a)
+        self.assertFalse(any("sk-ant" in x for x in a), a)
 
     def test_a_malformed_ts_is_refused(self):
         import client_audit_lib as L
@@ -472,7 +321,7 @@ class TestFailClosed(Base):
         self.assertFalse(os.path.exists(ad + "/stale.json"))
 
     def test_transient_draft_is_removed_when_a_later_step_fails(self):
-        d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
+        d = self.root + "/var/lib/hermes/draft-out/acme-dental"
         for runner in (FakeRunner(self.root, fail_on="vault-write"),
                        FakeRunner(self.root, raise_on=("vault-write", OSError))):
             rc, text = self.run_main(runner)
@@ -485,8 +334,8 @@ class TestFailClosed(Base):
         self.assertEqual(rc, 1)
         self.assertIn("other-dental", text)
         self.assertNotIn("vault-write", [RCA.step_name(c["argv"]) for c in r.calls])
-        self.assertFalse(os.path.exists(self.root + "/opt/hermes-agent/data/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"))
-        self.assertEqual(os.listdir(self.root + "/opt/hermes-agent/data/audits/claude_google_ads"), [])
+        self.assertFalse(os.path.exists(self.root + "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"))
+        self.assertEqual(os.listdir(self.root + "/var/lib/hermes/draft-out/acme-dental"), [])
 
 
 class TestPrechecks(Base):
@@ -498,7 +347,8 @@ class TestPrechecks(Base):
         self.assertEqual(rc, 2); self.assertEqual(r.calls, [])
 
     def test_dummy_anthropic_key_refused(self):
-        open(self.root + "/opt/hermes-agent/.env", "w").write("ANTHROPIC_API_KEY=dummy-key-this-wave\n")
+        p = self.root + "/etc/hermes/.env.anthropic"
+        os.chmod(p, 0o600); open(p, "w").write("ANTHROPIC_API_KEY=dummy\n"); os.chmod(p, 0o400)
         r = FakeRunner(self.root)
         rc, text = self.run_main(r)
         self.assertEqual(rc, 2); self.assertEqual(r.calls, []); self.assertIn("Anthropic", text)
@@ -521,6 +371,8 @@ class TestPrechecks(Base):
         self.assertEqual(rc, 0); self.assertEqual(r.calls, [])
         self.assertIn("ads-collector", text)
         self.assertNotIn(TOKEN, text); self.assertNotIn(CID, text)
+        self.assertIn("ANTHROPIC_API_KEY", text)          # the draft's env NAME is shown...
+        self.assertNotIn("sk-ant-api03-x", text)          # ...never its value
 
 
 class TestUnexpectedFailure(Base):
@@ -575,6 +427,7 @@ class TestComposePathResolution(Base):
     so the collector failed to mount its .env mask. The compose file path must be resolved."""
     def _box_layout(self):
         import shutil
+        os.makedirs(self.root + "/opt/hermes-agent", exist_ok=True)   # setUp no longer needs data/ under it
         real = self.root + "/opt/projects/claude_code/infra/hermes-agent"
         os.makedirs(os.path.dirname(real), exist_ok=True)
         shutil.move(self.root + "/opt/hermes-agent", real)
@@ -591,15 +444,427 @@ class TestComposePathResolution(Base):
                 self.assertEqual(f, os.path.realpath(real + "/docker-compose.yml"), key)
                 self.assertNotIn("/opt/hermes-agent/", f)
 
-    def test_draft_exec_still_targets_the_hermes_agent_project(self):
-        self._box_layout()
+    def test_draft_run_targets_the_drafter_in_the_hermes_agent_project(self):
+        real = self._box_layout()
         import client_audit_lib as L
         rec = L.eligible_client("acme-dental", self.root + RCA.REGISTRY)
         draft = [a for k, a, e in RCA.plan(rec, "2026-10-01_12-00-00", self.root) if k == "draft"][0]
         f = draft[draft.index("-f") + 1]
+        self.assertEqual(f, os.path.realpath(real + "/docker-compose.yml"))
+        self.assertIn("run", draft); self.assertIn("ads-drafter", draft)
+        self.assertNotIn("exec", draft); self.assertNotIn("hermes-agent", draft)   # not the gateway
         # compose derives the project name from the file's directory: it must stay "hermes-agent",
-        # or `exec` would not find the running gateway (container hermes-agent-hermes-agent-1).
+        # so the one-shot drafter joins the project's networks (and reaches egress-proxy).
         self.assertEqual(os.path.basename(os.path.dirname(f)), "hermes-agent")
+
+class TestOptionBLayout(Base):
+    def test_draft_gets_one_client_dirs_and_the_key_by_name(self):
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 0, text)
+        d = [c for c in r.calls if RCA.step_name(c["argv"]) == "draft"][0]
+        self.assertEqual(d["env"]["HERMES_VAULT_DIR"], "/var/lib/hermes/vaults/acme-dental")
+        self.assertEqual(d["env"]["HERMES_REPORTS_DIR"], "/var/lib/hermes/reports/acme-dental")
+        self.assertEqual(d["env"]["HERMES_DRAFT_OUT_DIR"], "/var/lib/hermes/draft-out/acme-dental")
+        self.assertIn("ANTHROPIC_API_KEY", d["argv"])
+        self.assertNotIn("sk-ant-api03-x", " ".join(d["argv"]))
+        self.assertNotIn("sk-ant-api03-x", text)
+
+    def test_readers_get_the_per_client_reports_dir(self):
+        r = FakeRunner(self.root)
+        self.run_main(r)
+        for c in r.calls:
+            if RCA.step_name(c["argv"]).startswith("read:"):
+                self.assertEqual(c["env"]["HERMES_REPORTS_DIR"], "/var/lib/hermes/reports/acme-dental")
+
+    def test_proxy_started_before_draft_and_stopped_on_every_exit(self):
+        for kw in ({}, {"fail_on": "draft"}, {"draft_text": "DRAFT names other-dental"},
+                   {"raise_on": ("draft", OSError)}):
+            with self.subTest(kw=kw):
+                self.proxy_stops.clear()
+                r = FakeRunner(self.root, **kw)
+                self.run_main(r)
+                names = [RCA.step_name(c["argv"]) for c in r.calls]
+                self.assertEqual(names[names.index("draft") - 1], "proxy")
+                self.assertEqual(self.proxy_stops,
+                                 [(self.root, self.root + "/var/lib/hermes/audit-logs/acme-dental")])
+
+    def test_proxy_stopped_even_if_removing_the_transient_draft_raises(self):
+        def boom(root, slug, ts):
+            raise OSError("draft-out vanished")
+        with mock.patch.object(RCA, "remove_transient", boom):
+            rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 1, text); self.assertNotIn("Traceback", text)
+        self.assertEqual(len(self.proxy_stops), 1)
+
+    def test_proxy_not_started_when_collection_fails(self):
+        r = FakeRunner(self.root, fail_on="collect")
+        self.run_main(r)
+        self.assertNotIn("proxy", [RCA.step_name(c["argv"]) for c in r.calls])
+
+    def test_reports_and_draft_out_reset_each_run(self):
+        stale = self.root + "/var/lib/hermes/reports/acme-dental/old.md"
+        os.makedirs(os.path.dirname(stale)); open(stale, "w").close()
+        self.run_main(FakeRunner(self.root))
+        self.assertFalse(os.path.exists(stale))
+
+    def test_bad_host_parent_refused_before_any_step(self):
+        os.chmod(self.root + "/var/lib/hermes/vaults", 0o755)
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 2); self.assertEqual(r.calls, [])
+
+    def test_missing_client_vault_refused_before_any_step(self):
+        os.rmdir(self.root + "/var/lib/hermes/vaults/acme-dental")
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 2); self.assertEqual(r.calls, [])
+
+    def test_anthropic_key_file_wrong_mode_refused(self):
+        os.chmod(self.root + "/etc/hermes/.env.anthropic", 0o600)
+        rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 2)
+
+    def test_symlink_in_draft_out_is_neither_read_nor_removed(self):
+        """The drafter (uid 10000) plants a symlink where the draft should be: root must refuse
+        to read it (rc 1, nothing reaches the vault) and must not unlink its target."""
+        outside = tempfile.mkdtemp(); target = os.path.join(outside, "secret.md")
+        open(target, "w").write("secret")
+        fake = FakeRunner(self.root)
+        def runner(argv, env, timeout, out, err):
+            if RCA.step_name(argv) == "draft":        # plant instead of writing a draft
+                d = self.root + "/var/lib/hermes/draft-out/acme-dental"
+                os.symlink(target, os.path.join(d, "2026-10-01_12-00-00-audit.md"))
+                return 0
+            return fake(argv, env, timeout, out, err)
+        rc, text = self.run_main(runner)
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(open(target).read(), "secret")
+        self.assertFalse(os.path.exists(self.root + "/var/lib/hermes/vaults/acme-dental/audits/"
+                                        "2026-10-01_12-00-00-audit.md"))
+
+
+class TestJson(Base):
+    def run_json(self, runner, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = RCA.main(["acme-dental", "--json", *extra], runner=runner, root=self.root, now="2026-10-01_12-00-00")
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        return rc, json.loads(lines[0]), err.getvalue()
+
+    def test_ok(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root))
+        self.assertEqual((rc, j["status"], j["reason"], j["exit_code"]), (0, "ok", None, 0))
+        self.assertEqual(j["vault_path"], "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md")
+        self.assertEqual([s["name"] for s in j["steps"]],
+                         ["collect", "snapshot", "read", "proxy", "draft", "vault-write"])
+        self.assertEqual(set(j), {"status", "reason", "exit_code", "ts", "steps", "vault_path"})
+
+    def test_failed_step_names_its_class(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, fail_on="read:audit_search_terms"))
+        self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "read"))
+        self.assertIsNone(j["vault_path"])
+
+    def test_isolation_failure(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, draft_text="DRAFT names other-dental"))
+        self.assertEqual((j["status"], j["reason"]), ("failed", "isolation"))
+
+    def test_collector_errors_are_collect(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, error_file="x.ERROR.txt"))
+        self.assertEqual((j["status"], j["reason"]), ("failed", "collect"))
+
+    def test_precheck_refused(self):
+        os.chmod(self.root + "/var/lib/hermes/vaults", 0o755)
+        rc, j, err = self.run_json(FakeRunner(self.root))
+        self.assertEqual((rc, j["status"], j["reason"]), (2, "refused", "precheck"))
+
+    def test_unregistered_client_refused(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = RCA.main(["nobody", "--json"], runner=FakeRunner(self.root), root=self.root)
+        self.assertEqual(rc, 2)
+        self.assertEqual(json.loads(out.getvalue())["reason"], "precheck")
+
+    def test_busy(self):
+        import fcntl
+        fd = os.open(self.root + RCA.LOCK, os.O_RDWR | os.O_CREAT, 0o600); fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            rc, j, _ = self.run_json(FakeRunner(self.root))
+        finally:
+            os.close(fd)
+        self.assertEqual((rc, j["status"], j["reason"]), (3, "busy", "busy"))
+
+    def test_unexpected_error_is_internal(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, raise_on=("collect", OSError)))
+        self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "internal"))
+
+    def test_json_never_carries_a_customer_id_or_key(self):
+        rc, j, err = self.run_json(FakeRunner(self.root))
+        blob = json.dumps(j)
+        self.assertNotIn(CID, blob); self.assertNotIn("sk-ant", blob); self.assertNotIn(CID, err)
+
+    def test_dry_run_prints_one_line_and_runs_nothing(self):
+        r = FakeRunner(self.root)
+        rc, j, err = self.run_json(r, "--dry-run")
+        self.assertEqual((rc, j["status"], j["reason"], j["steps"], j["vault_path"]), (0, "ok", None, [], None))
+        self.assertEqual(r.calls, [])
+        self.assertIn("would run [draft]", err)
+
+    def test_plain_output_unchanged_without_json(self):
+        rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 0)
+        self.assertNotIn('"status"', text)
+
+
+class TestList(Base):
+    def run_list(self, client="acme-dental"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = RCA.main([client, "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        return rc, json.loads(out.getvalue())
+
+    def test_lists_timestamps_only_and_takes_no_lock(self):
+        a = self.root + "/var/lib/hermes/vaults/acme-dental/audits"; os.makedirs(a)
+        for ts in ("2026-09-01_10-00-00", "2026-09-30_10-00-00"):
+            open(f"{a}/{ts}-audit.md", "w").close()
+        open(f"{a}/readme.md", "w").close()
+        import fcntl
+        fd = os.open(self.root + RCA.LOCK, os.O_RDWR | os.O_CREAT, 0o600); fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            rc, j = self.run_list()
+        finally:
+            os.close(fd)
+        self.assertEqual((rc, j), (0, {"status": "ok", "audits": ["2026-09-01_10-00-00", "2026-09-30_10-00-00"]}))
+
+    def test_no_audits_yet(self):
+        self.assertEqual(self.run_list(), (0, {"status": "ok", "audits": []}))
+
+    def test_inactive_client_refused(self):
+        rc, j = self.run_list("nobody")
+        self.assertEqual((rc, j["status"]), (2, "refused"))
+
+    def test_list_requires_json(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                RCA.main(["acme-dental", "--list"], runner=FakeRunner(self.root), root=self.root)
+
+    def test_list_keeps_only_the_newest_24(self):
+        a = self.root + "/var/lib/hermes/vaults/acme-dental/audits"; os.makedirs(a)
+        all_ts = [f"2026-09-{d:02d}_10-00-00" for d in range(1, 31)]
+        for ts in all_ts:
+            open(f"{a}/{ts}-audit.md", "w").close()
+        self.assertEqual(self.run_list(), (0, {"status": "ok", "audits": all_ts[-24:]}))
+
+    def test_list_oserror_is_a_failed_list(self):
+        """Controller addition: an entry vanishing between listdir and stat (a container-controlled
+        dir) must still yield exactly one JSON line, not a traceback."""
+        os.makedirs(self.root + "/var/lib/hermes/vaults/acme-dental/audits")
+        def boom(fd):
+            raise FileNotFoundError("vanished")
+        with mock.patch.object(RCA.L, "list_audit_ts", boom):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = RCA.main(["acme-dental", "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        self.assertEqual(lines[0], '{"reason": "internal", "status": "failed"}')
+        self.assertEqual(rc, 1)
+
+
+class TestJsonUnexpectedExceptions(Base):
+    """Fix round 1: an exception OUTSIDE the caught tuple still yields one JSON line under --json
+    (failed/internal, exit 1, only the type name on stderr); plain mode keeps its traceback."""
+    def call(self, argv, runner=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = RCA.main(argv, runner=runner or FakeRunner(self.root), root=self.root, now="2026-10-01_12-00-00")
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        return rc, json.loads(lines[0]), err.getvalue()
+
+    def test_eligible_client_keyerror(self):
+        def boom(*a):
+            raise KeyError(CID)
+        with mock.patch.object(RCA.L, "eligible_client", boom):
+            rc, j, err = self.call(["acme-dental", "--json"])
+        self.assertEqual((rc, j["status"], j["reason"], j["steps"]), (1, "failed", "internal", []))
+        self.assertIn("KeyError", err); self.assertNotIn(CID, err)
+
+    def test_precheck_keyerror(self):
+        def boom(*a, **k):
+            raise KeyError(CID)
+        with mock.patch.object(RCA.L, "package_matches", boom):
+            rc, j, err = self.call(["acme-dental", "--json"])
+        self.assertEqual((rc, j["status"], j["reason"], j["exit_code"], j["steps"]), (1, "failed", "internal", 1, []))
+        self.assertIn("KeyError", err); self.assertNotIn(CID, err)
+
+    def test_runner_runtimeerror_mid_run(self):
+        rc, j, err = self.call(["acme-dental", "--json"],
+                               FakeRunner(self.root, raise_on=("read:audit_search_terms", RuntimeError)))
+        self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "internal"))
+        self.assertEqual([s["name"] for s in j["steps"]], ["collect", "snapshot", "read"])
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertIn("RuntimeError", err); self.assertNotIn("boom", err)
+
+    def test_list_runtimeerror(self):
+        def boom(fd):
+            raise RuntimeError(CID)
+        os.makedirs(self.root + "/var/lib/hermes/vaults/acme-dental/audits")
+        with mock.patch.object(RCA.L, "list_audit_ts", boom):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = RCA.main(["acme-dental", "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        self.assertEqual((rc, out.getvalue()), (1, '{"reason": "internal", "status": "failed"}\n'))
+        self.assertNotIn(CID, err.getvalue())
+
+    def test_list_eligible_client_runtimeerror(self):
+        def boom(*a):
+            raise RuntimeError("x")
+        with mock.patch.object(RCA.L, "eligible_client", boom):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = RCA.main(["acme-dental", "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        self.assertEqual((rc, out.getvalue()), (1, '{"reason": "internal", "status": "failed"}\n'))
+
+    def test_plain_mode_still_propagates(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main(FakeRunner(self.root, raise_on=("read:audit_search_terms", RuntimeError)))
+        self.assertEqual(len(self.proxy_stops), 1)
+
+    def test_keyboard_interrupt_propagates_under_json(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_main(FakeRunner(self.root, raise_on=("draft", KeyboardInterrupt)), "--json")
+        self.assertEqual(len(self.proxy_stops), 1)
+
+
+def Term(_msg):
+    """What the SIGTERM handler raises, as FakeRunner's raise_on factory."""
+    return SystemExit(143)
+
+
+class TestSigterm(Base):
+    """Spec §7: a host-runner timeout (SIGTERM, then SIGKILL after a grace) must not skip cleanup."""
+    def test_handler_raises_systemexit_143_once(self):
+        old = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        with self.assertRaises(SystemExit) as cm:
+            RCA._on_sigterm(signal.SIGTERM, None)
+        self.assertEqual(cm.exception.code, 143)
+        # a second TERM (the runner's process-group kill reaching us again) must not cut cleanup short
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
+    def test_sigterm_mid_run_still_stops_proxy_and_removes_the_transient_draft(self):
+        r = FakeRunner(self.root, raise_on=("vault-write", Term))   # the draft is on disk by then
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(r)
+        self.assertEqual(cm.exception.code, 143)
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertEqual(os.listdir(self.root + "/var/lib/hermes/draft-out/acme-dental"), [])
+
+    def test_sigterm_under_json_prints_one_failed_internal_line(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as cm:
+            RCA.main(["acme-dental", "--json"], runner=FakeRunner(self.root, raise_on=("draft", Term)),
+                     root=self.root, now="2026-10-01_12-00-00")
+        self.assertEqual(cm.exception.code, 143)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        j = json.loads(lines[0])
+        self.assertEqual((j["status"], j["reason"]), ("failed", "internal"))
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_real_sigterm_during_a_named_run_step_removes_its_container(self):
+        old = signal.signal(signal.SIGTERM, RCA._on_sigterm)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        d = tempfile.mkdtemp(); cmds = []
+        t = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGTERM)); t.start()
+        self.addCleanup(t.cancel)
+        with RCA.open_log(d + "/o") as out, RCA.open_log(d + "/e") as err, self.assertRaises(SystemExit) as cm:
+            RCA.real_runner(["sh", "-c", "sleep 5", "--name", "hermes-audit-x-draft"], None, 10, out, err,
+                            cleanup=lambda a: cmds.append(a) or 0)
+        self.assertEqual(cm.exception.code, 143)
+        self.assertEqual(cmds, [["docker", "rm", "-f", "hermes-audit-x-draft"]])
+        self.assertIn("docker rm -f hermes-audit-x-draft", open(d + "/e").read())
+
+    def test_cleanup_commands_are_bounded_to_20s(self):
+        seen = []
+        def fake_run(argv, **kw):
+            seen.append(kw.get("timeout"))
+            return subprocess.CompletedProcess(argv, 0)
+        with mock.patch.object(RCA.subprocess, "run", fake_run):
+            RCA._quiet(["docker", "rm", "-f", "x"])
+        self.assertTrue(seen and all(t is not None and t <= 20 for t in seen), seen)
+
+
+class TestStopProxyKeepsTheDecisionLog(Base):
+    """Spec §5.2 / D10.2: the proxy's host+decision log is captured before `rm -sf` destroys it."""
+    def setUp(self):
+        super().setUp()
+        self.logs = self.root + "/var/lib/hermes/audit-logs/acme-dental"
+        os.makedirs(self.logs)
+        self.said = []
+
+    def call(self, rm_rc=0, logs_rc=0):
+        argvs = []
+        def fake_run(argv, **kw):
+            argvs.append((argv, kw.get("timeout")))
+            if "logs" in argv:
+                kw["stdout"].write("egress-proxy  | CONNECT api.anthropic.com:443 allow 1234 5678\n")
+                kw["stdout"].flush()
+                return subprocess.CompletedProcess(argv, logs_rc)
+            return subprocess.CompletedProcess(argv, rm_rc)
+        with mock.patch.object(RCA.subprocess, "run", fake_run):
+            rc = REAL_STOP_PROXY(self.root, self.logs, self.said.append)
+        return rc, argvs
+
+    def test_logs_captured_before_rm_with_both_rcs(self):
+        rc, argvs = self.call()
+        self.assertEqual(rc, 0)
+        self.assertEqual([("logs" in a, "rm" in a) for a, _ in argvs], [(True, False), (False, True)])
+        self.assertIn("--no-color", argvs[0][0]); self.assertEqual(argvs[0][0][-1], "egress-proxy")
+        self.assertEqual(argvs[1][0][-3:], ["rm", "-sf", "egress-proxy"])
+        self.assertTrue(all(t is not None and t <= 20 for _, t in argvs), argvs)
+        p = self.logs + "/proxy.log"
+        st = os.lstat(p)
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        text = open(p).read()
+        self.assertIn("CONNECT api.anthropic.com:443 allow", text)
+        self.assertIn("logs rc 0", text); self.assertIn("rm -sf egress-proxy rc 0", text)
+        self.assertEqual(self.said, [])
+
+    def test_failed_rm_is_recorded_and_warned(self):
+        rc, _ = self.call(rm_rc=1)
+        self.assertEqual(rc, 1)
+        self.assertIn("rm -sf egress-proxy rc 1", open(self.logs + "/proxy.log").read())
+        self.assertEqual(len(self.said), 1); self.assertIn("WARNING", self.said[0])
+        self.assertIn("egress-proxy", self.said[0])
+
+    def test_planted_proxy_log_is_not_followed_and_rm_still_runs(self):
+        target = os.path.join(tempfile.mkdtemp(), "t"); open(target, "w").write("keep")
+        os.symlink(target, self.logs + "/proxy.log")
+        rc, argvs = self.call()
+        self.assertEqual(open(target).read(), "keep")
+        self.assertTrue(any("rm" in a for a, _ in argvs))
+        self.assertTrue(self.said and "WARNING" in self.said[0])
+
+    def test_real_run_writes_proxy_log_on_every_exit(self):
+        for kw in ({}, {"fail_on": "collect"}, {"raise_on": ("draft", OSError)}):
+            with self.subTest(kw=kw):
+                calls = []
+                def fake_run(argv, **k):
+                    calls.append(argv)
+                    if "logs" in argv:
+                        k["stdout"].write("proxy decision\n")
+                    return subprocess.CompletedProcess(argv, 0)
+                with mock.patch.object(RCA, "stop_proxy", REAL_STOP_PROXY), \
+                        mock.patch.object(RCA.subprocess, "run", fake_run):
+                    self.run_main(FakeRunner(self.root, **kw))
+                self.assertIn("proxy decision", open(self.logs + "/proxy.log").read())
+
 
 if __name__ == "__main__":
     unittest.main()

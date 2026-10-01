@@ -1146,11 +1146,12 @@ which is never mounted into a container: root-owned `0711`, logs `root 0600`, ex
 sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-data
 sudo install -d -o root -g root -m 0711 /var/lib/hermes/audit-logs
 sudo stat -c '%U:%G %a' /var/lib/hermes/audit-data /var/lib/hermes/audit-logs      # root:root 711 (twice)
-sudo install -d -o 10000 -g hermes -m 0700 /opt/hermes-agent/data/reports
-sudo stat -c '%u:%G %a' /opt/hermes-agent/data/reports                              # 10000:hermes 700
 ```
 
-`ads-reader` (uid 10000) bind-mounts `data/reports`; if it is missing, Docker creates it as `root:root 0755` and the reader fails with `PermissionError` (first box run, 2026-09-30). The tool also creates it (10000, `0700`) and refuses the run if an existing one belongs to another uid.
+Reports no longer live in `data/reports`: since Option B part 1, `ads-reader` writes
+`/var/lib/hermes/reports/<client>`, which `run-client-audit` creates fresh (uid 10000, `0700`) on
+every run below the root `0711` parent from part 1 step 2 ("Chat-triggered audits — part 1"
+below). Do not create `data/reports`.
 
 **5. Register the spending client.** The entry is `"status": "active"` with **no**
 `mutation_target`; the dormant pilot stays the only mutation target. The slug and the id stay off
@@ -1183,7 +1184,7 @@ sudo stat -c '%U:%G %a' $G/registry/clients.json                                
 sudo python3 bin/migrate-governance.py --governance-root $G --bootstrap-logs --apply  # created: [<client>]
 sudo lsattr $G/log/$SLUG.jsonl                                                       # an "a" in the flags
 sudo -u hermes-broker python3 bin/preflight-governance-access.py --root $G; echo rc=$?   # rc=0
-sudo install -d -o 10000 -g hermes -m 0700 data/vaults/$SLUG && sudo stat -c '%u:%G %a' data/vaults/$SLUG   # 10000:hermes 700
+sudo install -d -o 10000 -g 10000 -m 0700 /var/lib/hermes/vaults/$SLUG && sudo stat -c '%u:%g %a' /var/lib/hermes/vaults/$SLUG   # 10000:10000 700 (Option B part 1: the vault is outside the gateway data/)
 sudo shred -u /root/.cid; sudo ls /root/.cid 2>&1                                    # No such file or directory
 ```
 
@@ -1200,7 +1201,7 @@ ls -l /usr/local/sbin/run-client-audit                                          
 
 ```bash
 sudo run-client-audit <client> --dry-run; echo rc=$?    # the planned steps: full commands, env var NAMES only, customer id redacted; rc=0
-sudo run-client-audit <client>; echo rc=$?              # every step rc=0; "draft -> /opt/hermes-agent/data/vaults/<client>/audits/<ts>-audit.md"; rc=0
+sudo run-client-audit <client>; echo rc=$?              # every step rc=0; "draft -> /var/lib/hermes/vaults/<client>/audits/<ts>-audit.md" (Option B part 1); rc=0
 ```
 
 Copy the draft off with `scp`, and record the runtime (the summary the run prints) and the cost
@@ -1227,9 +1228,63 @@ Two checks that have never run on real Docker; do them on this first run and wri
 both trees and its logs. The review's D7.1 checks that no retired client has either tree.
 
 ```bash
-sudo rm -rf /var/lib/hermes/audit-data/<client> /var/lib/hermes/audit-logs/<client> /opt/hermes-agent/data/vaults/<client>
-sudo ls /var/lib/hermes/audit-data /var/lib/hermes/audit-logs /opt/hermes-agent/data/vaults   # <client> no longer listed
+sudo rm -rf /var/lib/hermes/audit-data/<client> /var/lib/hermes/audit-logs/<client> /var/lib/hermes/vaults/<client> /var/lib/hermes/reports/<client> /var/lib/hermes/draft-out/<client>
+sudo ls /var/lib/hermes/audit-data /var/lib/hermes/audit-logs /var/lib/hermes/vaults /var/lib/hermes/reports /var/lib/hermes/draft-out   # <client> no longer listed
 ```
+
+## Chat-triggered audits — part 1: isolation and egress (spec 2026-09-30 §4–§6)
+
+**Gate: apply only after parts 2 and 3 are merged and review #6 is scheduled (spec §10: the box
+gets nothing until all three PRs are merged).**
+
+Breaks the review-#5 binding; nothing here is live for chat until part 2 and review #6.
+
+1. Pull: `cd /opt/projects/claude_code && sudo git pull --ff-only && sudo git log --oneline -1`
+2. Host parents (root 0711):
+   `sudo install -d -o root -g root -m 0711 /var/lib/hermes/vaults /var/lib/hermes/reports /var/lib/hermes/draft-out`
+3. Anthropic key to its own file. Run this ALONE (it prompts on the tty, hidden):
+   `sudo python3 /opt/hermes-agent/bin/install-env-secret.py set --file /etc/hermes/.env.anthropic --name ANTHROPIC_API_KEY --prefix sk-ant- --mode 0400 --owner-uid 0 --owner-gid 0`
+   Check: `sudo stat -c '%U:%G %a' /etc/hermes/.env.anthropic` → `root:root 400`.
+4. Stop the gateway, migrate, check:
+   `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
+   `sudo python3 bin/migrate-client-data.py` (dry run: read the counts)
+   `sudo python3 bin/migrate-client-data.py --apply; echo rc=$?` → `rc=0`
+   Exit codes: `0` done (copies verified, `data/vaults` and `data/reports` removed); `1` verify failed or the source changed while copying: the source is intact, remove the destination dirs the command lists, make sure the gateway is really stopped, and re-run; `2` refused before copying anything (a symlink in the source, an existing destination client dir, or a destination parent that is not root 0711); `3` copies verified but removing the source failed: **do NOT remove the destination** (it may now be the only full copy) — finish removing `data/vaults` and `data/reports` by hand, then continue.
+   `sudo ls -la /var/lib/hermes/vaults` → one `drwx------ 10000` dir per active client
+5. Strip the key from the gateway env (part 2 retires claude-auth-init; until then the gateway
+   needs no real key for audits):
+   `sudo python3 bin/install-env-secret.py strip --file /opt/hermes-agent/.env --name ANTHROPIC_API_KEY`
+   `sudo docker compose up -d --force-recreate hermes-agent`
+   `sudo test -e /opt/hermes-agent/data/home/.claude/settings.json && echo STILL-PRESENT || echo absent`
+   → `absent` (spec §6: no Anthropic key in a file the gateway can read; `STILL-PRESENT` stops here)
+6. Install show-audit: `sudo ln -sf /opt/hermes-agent/deploy/show-audit /usr/local/sbin/show-audit`
+7. Docker engine and DNS (CVE-2024-29018: older engines forward an `internal: true` network's
+   external DNS lookups, a covert exit for the drafter):
+   `sudo docker version --format '{{.Server.Version}}'` → at least **26.0.0**, or **25.0.4+** on 25.x,
+   or **23.0.11+** on 23.x; anything older stops here (upgrade Docker first).
+   In-drafter DNS probe (from `/opt/hermes-agent`; the drafter must not resolve an outside name):
+   `sudo docker compose --profile tools run --rm --no-deps -T ads-drafter "python3 -c 'import socket; socket.getaddrinfo(\"example.com\", 443)' 2>/dev/null && echo DNS_RESOLVES || echo DNS_BLOCKED"`
+   → `DNS_BLOCKED`; `DNS_RESOLVES` stops here (upgrade Docker; the CI integration test asserts the same).
+   Manual audit on the spending client:
+   `sudo run-client-audit <client> --dry-run` (the plan shows `proxy` then `draft`, env names only)
+   `sudo run-client-audit <client>; echo rc=$?` → `rc=0`
+   `sudo show-audit <client> | head -20` → the DRAFT banner
+   `sudo run-client-audit <client> --list --json` → `{"audits": [...], "status": "ok"}`
+   (`show-audit <client>` prints the latest; `--ts TS` a specific one; `--list` the timestamps.)
+8. Registering a NEW client from now on also creates
+   `sudo install -d -o 10000 -g 10000 -m 0700 /var/lib/hermes/vaults/<client>` (replaces the
+   data/vaults step of "Ads audits on the box" step 5). Offboarding removes
+   `/var/lib/hermes/{vaults,reports,draft-out}/<client>` as well as `audit-data` and `audit-logs`.
+9. Rollback (only if part 1 must be undone before part 2):
+   `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
+   `sudo install -d -o 10000 -g 10000 -m 700 /opt/hermes-agent/data/vaults` (the migration removed it)
+   For each client: `sudo mv /var/lib/hermes/vaults/<client> /opt/hermes-agent/data/vaults/<client>`
+   (`mv` on the same filesystem keeps owners, modes and mtimes; across filesystems use
+   `sudo cp -a` then verify before removing the source), then
+   `sudo stat -c '%u %a' /opt/hermes-agent/data/vaults/<client>` → `10000 700`.
+   Restore the gateway key, ALONE (prompts on the tty):
+   `sudo python3 /opt/hermes-agent/bin/install-env-secret.py set --file /opt/hermes-agent/.env --name ANTHROPIC_API_KEY --prefix sk-ant- --mode 0600 --owner-uid 0 --owner-gid 0`
+   `sudo docker compose up -d --force-recreate hermes-agent`
 
 ---
 
