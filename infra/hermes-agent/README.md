@@ -9,8 +9,8 @@ and runs Claude Code there.
 
 | Role | Runs on | Billed via | Notes |
 |------|---------|-----------|-------|
-| **Control plane** (Hermes's own reasoning / tool-orchestration) | cheap OSS model via **OpenRouter** (`deepseek/deepseek-v3.2`) | OpenRouter credits | swap freely — it's one config line |
-| **Executor** (`claude -p`, the real work) | **Claude**, direct Anthropic API | `ANTHROPIC_API_KEY` | model pinned per task via `--model` (haiku/sonnet/opus) |
+| **Control plane** (Hermes's own reasoning / tool-orchestration) | cheap OSS model via **OpenRouter** (`deepseek/deepseek-v3.2`) | OpenRouter credits (the gateway `.env` holds the OpenRouter key only) | swap freely — it's one config line |
+| **Executor** (`claude -p`, the real work, in `ads-drafter`) | **Claude**, direct Anthropic API | `ANTHROPIC_API_KEY` from `/etc/hermes/.env.anthropic` | model pinned per task via `--model` (haiku/sonnet/opus) |
 
 Why the split: OpenRouter's endpoint is OpenAI-compatible only, and Claude Code
 is a Claude-native agent (it carries each project's skills/agents/`CLAUDE.md`).
@@ -24,7 +24,6 @@ execution. See the project plan for the full rationale.
 - `docker-compose.yml` — loopback-only, read-only project mount, `env_file: .env`.
 - `.env.example` — copy to `.env` (gitignored) and fill in keys.
 - `config.yaml.example` — version-controlled template for the live `./data/config.yaml` (gitignored).
-- `bootstrap-claude-auth.sh` — init-sidecar script; projects the executor key from `.env` into claude's config.
 - `registry/projects.yaml` — project registry (which projects Hermes may operate, workdir, scope, model).
 - `skills/claude-code-operator/` — the operator skill (registry-aware, read-only, model-tiered).
 - `bin/monitor-runs.py` — read-only monitor over cron job/run history.
@@ -68,22 +67,9 @@ docker compose exec hermes-agent hermes --accept-hooks -z \
 A grounded, repo-correct answer confirms the full chain (OpenRouter control
 plane → `claude -p` → Anthropic).
 
-## How the executor gets its key (important, non-obvious)
+## How the executor gets its key
 
-Hermes **scrubs secrets from the environment** of the shell commands it runs
-(verified: `printenv ANTHROPIC_API_KEY` inside the terminal tool returns empty).
-So a **Hermes-launched `claude -p` never sees `$ANTHROPIC_API_KEY`** — it reads
-its key from Claude Code's own config, `$HOME/.claude/settings.json`, and Hermes
-runs those subprocesses with `HOME=/opt/data/home`.
-
-`bootstrap-claude-auth.sh` materializes that file from the container env at
-startup (wired as the `claude-auth-init` sidecar in `docker-compose.yml`, which
-`hermes-agent` waits on). Net effect:
-
-- **`.env` stays the single human-facing source of truth** for keys.
-- `data/home/.claude/settings.json` is a **generated** artifact (gitignored,
-  0600) — never hand-edited, never committed, never stale after a rotation.
-- Rotating a key = edit `.env`, then `docker compose up -d --force-recreate`.
+The gateway holds no Anthropic key; the executor receives it per run from `/etc/hermes/.env.anthropic` (spec 2026-09-30 §6).
 
 ## P2 — operating projects (registry, scheduling, monitoring)
 
@@ -835,6 +821,14 @@ Client data lives outside the gateway's `data/` and is never mounted into `herme
 
 Installed with `bin/install-env-secret.py`; data moved with `bin/migrate-client-data.py`; read back
 with `show-audit`. Runbook: `deploy/BRING-UP.md`, "Chat-triggered audits — part 1".
+
+### Chat-triggered apps
+
+- **Manifest**: `registry/apps/<app>.json` declares one app: its ops, fixed argv, quotas and tool names. It is the only place an app is defined.
+- **MCP**: `bin/hermes-app-mcp.py` runs in the gateway and exposes the manifest's three tools (`ads_audit_run`, `ads_audit_status`, `ads_audit_list`). It carries no policy; it only writes requests to the spool and reads results.
+- **Broker**: `hermes-app-broker@<app>.service` runs unprivileged (`hermes-app-<app>`, no network): schema, replay, kill switch, client status, and the quota reserved before the job exists.
+- **Runner**: `hermes-app-runner@<app>.service`, a root oneshot started by `hermes-app-runner@<app>.path`, runs the fixed argv and never re-runs an interrupted job. Results carry only whitelisted enums, numbers, timestamps and a regex-checked vault path, never free text from a step.
+- **Kill switch**: `touch /var/lib/hermes/app-state/<app>/DISABLED` refuses new requests; remove it to resume. Runbook: `deploy/BRING-UP.md`, "Chat-triggered audits — part 2".
 
 ### Client — `hermes-syscall`, in-container
 

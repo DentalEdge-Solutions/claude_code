@@ -1239,7 +1239,9 @@ gets nothing until all three PRs are merged).**
 
 Breaks the review-#5 binding; nothing here is live for chat until part 2 and review #6.
 
-1. Pull: `cd /opt/projects/claude_code && sudo git pull --ff-only && sudo git log --oneline -1`
+1. Record the current commit, then pull (the SHA is what a rollback checks out):
+   `git -C /opt/projects/claude_code log --oneline -1`
+   `cd /opt/projects/claude_code && sudo git pull --ff-only && sudo git log --oneline -1`
 2. Host parents (root 0711):
    `sudo install -d -o root -g root -m 0711 /var/lib/hermes/vaults /var/lib/hermes/reports /var/lib/hermes/draft-out`
 3. Anthropic key to its own file. Run this ALONE (it prompts on the tty, hidden):
@@ -1277,6 +1279,7 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
    `/var/lib/hermes/{vaults,reports,draft-out}/<client>` as well as `audit-data` and `audit-logs`.
 9. Rollback (only if part 1 must be undone before part 2):
    `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
+   Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>`
    `sudo install -d -o 10000 -g 10000 -m 700 /opt/hermes-agent/data/vaults` (the migration removed it)
    For each client: `sudo mv /var/lib/hermes/vaults/<client> /opt/hermes-agent/data/vaults/<client>`
    (`mv` on the same filesystem keeps owners, modes and mtimes; across filesystems use
@@ -1285,6 +1288,58 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
    Restore the gateway key, ALONE (prompts on the tty):
    `sudo python3 /opt/hermes-agent/bin/install-env-secret.py set --file /opt/hermes-agent/.env --name ANTHROPIC_API_KEY --prefix sk-ant- --mode 0600 --owner-uid 0 --owner-gid 0`
    `sudo docker compose up -d --force-recreate hermes-agent`
+
+---
+
+## Chat-triggered audits — part 2: the chat trigger (spec 2026-09-30 §3, §6)
+
+Requires part 1 on the box. Still not live until review #6.
+
+1. Record the current commit, then pull (the SHA is what a rollback checks out):
+   `git -C /opt/projects/claude_code log --oneline -1`
+   `cd /opt/projects/claude_code && git pull --ff-only`
+2. The app user (no login, no home, primary group of its own, member of hermes):
+   `sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin hermes-app-ads-audit`
+   `sudo usermod -aG hermes hermes-app-ads-audit`
+   `id hermes-app-ads-audit` → groups `hermes-app-ads-audit,hermes`, and NOT docker or sudo
+3. Layout: `cd /opt/hermes-agent && sudo python3 bin/init-host-layout.py --app ads-audit --apply; echo rc=$?` → `rc=0`
+   Registry readable by the broker: `sudo -u hermes-app-ads-audit test -r /var/lib/hermes/governance/registry/clients.json && echo REG_OK`
+4. Units:
+   `sudo cp deploy/hermes-app-broker@.service deploy/hermes-app-runner@.service deploy/hermes-app-runner@.path /etc/systemd/system/`
+   `sudo systemctl daemon-reload`
+   `sudo systemctl enable --now hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path`
+   `systemctl is-active hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path` → `active active`
+5. OpenRouter: in the OpenRouter console create a dedicated key with limit $10, reset monthly. Set
+   Zero Data Retention in the OpenRouter ACCOUNT privacy settings (Hermes has no zdr key; the
+   config sends `provider_routing.data_collection: "deny"`; spec §13), and deny data-collecting
+   providers there too. Back up the gateway env first (the rollback copy):
+   `sudo cp -a /opt/hermes-agent/.env /opt/hermes-agent/.env.pre-optb2`
+   Then, ALONE:
+   `sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name OPENROUTER_API_KEY --prefix sk-or- --mode 0600`
+6. Gateway config: back up the live file first, `sudo cp -a data/config.yaml data/config.yaml.pre-optb2`
+   (it is your rollback copy), then `sudo diff data/config.yaml config.yaml.example` (review anything
+   Hermes wrote itself), then `sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
+7. Recreate the gateway without the retired sidecar:
+   `sudo docker compose up -d --build --remove-orphans hermes-agent`
+   `sudo docker compose ps -a` → no `claude-auth-init`
+   `sudo test ! -e /opt/hermes-agent/data/home/.claude/settings.json && echo NO_CLAUDE_KEY_FILE`
+   (if present: `sudo rm -f /opt/hermes-agent/data/home/.claude/settings.json`)
+8. Tools visible: `sudo docker compose exec hermes-agent hermes mcp list` → `ads_audit` with 3 tools
+9. Kill switch (for the review and for emergencies):
+   on:  `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
+   off: `sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED`
+10. First chat audit: `sudo docker compose exec -it hermes-agent hermes chat`, then ask
+    "Run the Google Ads audit for <client>." Expect `ok` within ~5 min (or `pending`; ask for its
+    status later). Journal: `journalctl -u hermes-app-broker@ads-audit -n 20`.
+11. Rollback (only if part 2 must be undone):
+    `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
+    `sudo systemctl disable --now hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path`
+    `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
+    Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>`
+    Restore the config: `sudo install -o 10000 -g 10000 -m 640 data/config.yaml.pre-optb2 data/config.yaml`
+    Restore the gateway env: `sudo install -o root -g root -m 600 /opt/hermes-agent/.env.pre-optb2 /opt/hermes-agent/.env`
+    `cd /opt/hermes-agent && sudo docker compose up -d --build --force-recreate hermes-agent`
+    Revoke the OpenRouter key in its console.
 
 ---
 
