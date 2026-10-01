@@ -910,9 +910,10 @@ class TestStopProxyKeepsTheDecisionLog(Base):
                 self.assertIn("proxy decision", open(self.logs + "/proxy.log").read())
 
 
-ENV_OK = {"ads-collector": "GOOGLE_ADS_REFRESH_TOKEN\nGOOGLE_ADS_CUSTOMER_ID\nSENTINEL_FILES=0\n",
-          "ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n",
-          "ads-drafter": "ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n",
+ENV_OK = {"ads-collector": "GOOGLE_ADS_REFRESH_TOKEN\nGOOGLE_ADS_CUSTOMER_ID\n"
+                           "SENTINEL_ENV=GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n",
+          "ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_ENV=GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n",
+          "ads-drafter": "ANTHROPIC_API_KEY\nSENTINEL_ENV=ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n",
           "egress-proxy": "SENTINEL_FILES=0\n"}
 EGRESS_OK = ("DIRECT_BLOCKED\nHTTP/1.1 403 Forbidden\nHTTP/1.1 200 Connection Established\n"
              "WORK=out,reports,vault\nHOST_VISIBLE=0\n")
@@ -944,7 +945,8 @@ class TestProbes(Base):
                 self.assertNotIn("sk-ant-api03-x", v); self.assertNotIn(TOKEN, v)
 
     def test_probe_env_flags_a_leak(self):
-        outs = dict(ENV_OK, **{"ads-drafter": "ANTHROPIC_API_KEY\nGOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n"})
+        outs = dict(ENV_OK, **{"ads-drafter": "ANTHROPIC_API_KEY\nGOOGLE_ADS_REFRESH_TOKEN\n"
+                                              "SENTINEL_ENV=ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n"})
         run, _ = self.fake_probe_runner(outs)
         self.assertFalse(RCA.probe_env(self.root, run)["matches_declared"])
 
@@ -1028,21 +1030,68 @@ class TestProbes(Base):
                 self.assertEqual(names, set()); self.assertEqual(sorted(env), ["PATH"])
 
     def test_probe_env_fails_closed(self):
-        cases = {"sentinel found in a mounted file": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=2\n"}, {}),
-                 "no SENTINEL_FILES line": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\n"}, {}),
-                 "a SENTINEL_FILES line that is not a count": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0x\n"}, {}),
+        R = ENV_OK["ads-reader"]            # each case differs from the matching output in one thing
+        cases = {"sentinel found in a mounted file": ({"ads-reader": R.replace("FILES=0", "FILES=2")}, {}),
+                 "no SENTINEL_FILES line": ({"ads-reader": R.replace("SENTINEL_FILES=0\n", "")}, {}),
+                 "a SENTINEL_FILES line that is not a count": ({"ads-reader": R.replace("FILES=0", "FILES=0x")}, {}),
                  "the container failed": ({}, {"ads-collector": 125}),
                  "a declared credential is absent": ({"ads-drafter": "SENTINEL_FILES=0\n"}, {}),
                  "the proxy holds a credential": ({"egress-proxy": "ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n"}, {}),
-                 "an OpenRouter key anywhere": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nOPENROUTER_API_KEY\nSENTINEL_FILES=0\n"}, {}),
+                 "an OpenRouter key anywhere": ({"ads-reader": "OPENROUTER_API_KEY\n" + R}, {}),
                  "no output at all": ({s: "" for s in ENV_OK}, {})}
         for why, (outs, rcs) in cases.items():
             with self.subTest(why=why):
                 run, _ = self.fake_probe_runner(dict(ENV_OK, **outs), rcs)
                 j = RCA.probe_env(self.root, run)
                 self.assertFalse(j["matches_declared"], j)
-        run, _ = self.fake_probe_runner(dict(ENV_OK, **{"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\n"}))
+        run, _ = self.fake_probe_runner(dict(ENV_OK, **cases["no SENTINEL_FILES line"][0]))
         self.assertIs(RCA.probe_env(self.root, run)["services"]["ads-reader"]["sentinel_in_files"], True)
+
+    def test_probe_env_reports_the_names_of_env_vars_that_hold_the_sentinel(self):
+        """Spec §8: 'whether any sentinel appears in any environment or mounted file'. A sentinel
+        under a name with no credential-shaped prefix is invisible to the name listing."""
+        run, _ = self.fake_probe_runner(ENV_OK)
+        j = RCA.probe_env(self.root, run)
+        self.assertTrue(j["matches_declared"], j)
+        self.assertEqual({s: v["sentinel_env_names"] for s, v in j["services"].items()},
+                         {"ads-collector": ["GOOGLE_ADS_REFRESH_TOKEN"], "ads-reader": ["GOOGLE_ADS_REFRESH_TOKEN"],
+                          "ads-drafter": ["ANTHROPIC_API_KEY"], "egress-proxy": []})
+        D = ENV_OK["ads-drafter"]
+        cases = {"the sentinel under an undeclared name in the drafter":
+                     {"ads-drafter": D.replace("SENTINEL_FILES", "SENTINEL_ENV=API_KEY\nSENTINEL_FILES")},
+                 "the Google sentinel under its own name in the drafter":
+                     {"ads-drafter": D.replace("SENTINEL_FILES", "SENTINEL_ENV=GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES")},
+                 "any sentinel in the proxy": {"egress-proxy": "SENTINEL_ENV=FOO\nSENTINEL_FILES=0\n"},
+                 "a declared-prefix name in the proxy": {"egress-proxy": "SENTINEL_ENV=ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n"},
+                 "an empty name": {"ads-drafter": D.replace("SENTINEL_FILES", "SENTINEL_ENV=\nSENTINEL_FILES")},
+                 "a multi-line value's continuation line, not a name":
+                     {"ads-drafter": D.replace("SENTINEL_FILES", "SENTINEL_ENV=ANTHROPIC_ line two of a value\nSENTINEL_FILES")},
+                 "the sentinel never reached a declared service (the scan is unproven)":
+                     {"ads-drafter": "ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n"}}
+        for why, outs in cases.items():
+            with self.subTest(why=why):
+                run, _ = self.fake_probe_runner(dict(ENV_OK, **outs))
+                j = RCA.probe_env(self.root, run)
+                self.assertFalse(j["matches_declared"], j)
+        run, _ = self.fake_probe_runner(dict(ENV_OK, **cases["the sentinel under an undeclared name in the drafter"]))
+        j = RCA.probe_env(self.root, run)
+        self.assertEqual(j["services"]["ads-drafter"]["sentinel_env_names"], ["ANTHROPIC_API_KEY", "API_KEY"])
+        self.assertNotIn(RCA.SENTINEL, json.dumps(j))                     # names, never a value
+        run, _ = self.fake_probe_runner(dict(ENV_OK, **{"ads-drafter": D + "SENTINEL_ENV=tail of a value\n"}))
+        j = RCA.probe_env(self.root, run)
+        self.assertEqual(j["services"]["ads-drafter"]["sentinel_env_names"], ["<not a name>", "ANTHROPIC_API_KEY"])
+        self.assertNotIn("tail of a value", json.dumps(j))
+
+    def test_the_env_probe_script_lists_sentinel_holding_names_not_values(self):
+        """The script itself, under the local sh (no Docker): names only, one per line."""
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "API_KEY": "x" + RCA.SENTINEL + "y",
+               "ANTHROPIC_API_KEY": RCA.SENTINEL, "GOOGLE_ADS_CLIENT_ID": "clean", "HOME": "/nonexistent"}
+        p = subprocess.run(["sh", "-c", RCA._ENV_PROBE], env=env, capture_output=True, text=True)
+        lines = p.stdout.splitlines()
+        self.assertEqual(sorted(l for l in lines if l.startswith("SENTINEL_ENV=")),
+                         ["SENTINEL_ENV=ANTHROPIC_API_KEY", "SENTINEL_ENV=API_KEY"])
+        self.assertIn("ANTHROPIC_API_KEY", lines); self.assertIn("GOOGLE_ADS_CLIENT_ID", lines)
+        self.assertNotIn(RCA.SENTINEL, p.stdout)
 
     def test_probe_env_cleans_up_when_docker_fails(self):
         def boom(argv, env, timeout):
@@ -1164,7 +1213,8 @@ class TestProbeCli(Base):
         j = json.loads(out)
         self.assertEqual(set(j), {"services", "matches_declared"}); self.assertTrue(j["matches_declared"])
         self.assertEqual(j["services"]["ads-drafter"],
-                         {"rc": 0, "env_names": ["ANTHROPIC_API_KEY"], "sentinel_in_files": False})
+                         {"rc": 0, "env_names": ["ANTHROPIC_API_KEY"], "sentinel_env_names": ["ANTHROPIC_API_KEY"],
+                          "sentinel_in_files": False})
         self.assertNotIn(RCA.SENTINEL, out)
         self.assertEqual(len(runs), 4)
 

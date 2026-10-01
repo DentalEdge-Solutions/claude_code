@@ -312,7 +312,11 @@ SENTINEL = "".join(("HERMESPROBE", "SENTINEL0123456789"))
 DECLARED = {"ads-collector": ["GOOGLE_ADS_"], "ads-reader": ["GOOGLE_ADS_"],
             "ads-drafter": ["ANTHROPIC_"], "egress-proxy": []}
 _CRED_SHAPED = r"(GOOGLE_ADS_|ANTHROPIC_|OPENROUTER_)"
+# Three measurements: the credential-shaped env NAMES; the names of every variable whose VALUE
+# holds the sentinel, whatever it is called (spec §8: "in any environment or mounted file"); the
+# count of mounted files that hold it.
 _ENV_PROBE = ("env | cut -d= -f1 | grep -E '^" + _CRED_SHAPED + "' | sort; "
+              "env | grep -F " + SENTINEL + " | cut -d= -f1 | sed 's/^/SENTINEL_ENV=/'; "
               "n=$(grep -rlF " + SENTINEL + " /projects /work /opt/cc-bin /opt/skills /opt/registry 2>/dev/null | wc -l); "
               "echo SENTINEL_FILES=$n")
 _EGRESS_PROBE = r'''python3 - <<'EOF'
@@ -420,7 +424,12 @@ def probe_env(root, runner=None):
             # Fail closed: "no sentinel in the mounted files" only when the container says exactly
             # that. A missing or malformed count (the script died early) reads as found.
             clean = any(re.fullmatch(r"SENTINEL_FILES=\s*0+", l) for l in lines)
-            services[svc] = {"rc": rc, "env_names": names, "sentinel_in_files": not clean}
+            # Names only, never a value: anything after SENTINEL_ENV= that is not an env name (a
+            # multi-line value's continuation line) is shown as a placeholder, and matches nothing.
+            held = sorted(n if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n) else "<not a name>"
+                          for n in (l[len("SENTINEL_ENV="):] for l in lines if l.startswith("SENTINEL_ENV=")))
+            services[svc] = {"rc": rc, "env_names": names, "sentinel_env_names": held,
+                             "sentinel_in_files": not clean}
         ok = set(services) == set(DECLARED) and all(_matches(svc, s) for svc, s in services.items())
         return {"services": services, "matches_declared": ok}
     finally:
@@ -429,14 +438,16 @@ def probe_env(root, runner=None):
 
 def _matches(svc, s):
     """A service matches the declared map when it ran, holds no sentinel in any mounted file,
-    and every credential-shaped env name it holds has a declared prefix (and it holds at least
-    one when a prefix is declared; none when none is)."""
+    and every credential-shaped env name it holds, and every env name whose value holds the
+    sentinel, has a declared prefix. With a declared prefix it must hold at least one of each
+    (the sentinel reaching it also proves the value scan ran); with none, none of either."""
     if s["rc"] != 0 or s["sentinel_in_files"]:
         return False
     prefixes = DECLARED[svc]
+    names, held = s["env_names"], s["sentinel_env_names"]
     if not prefixes:
-        return s["env_names"] == []
-    return bool(s["env_names"]) and all(any(n.startswith(p) for p in prefixes) for n in s["env_names"])
+        return names == [] and held == []
+    return bool(names) and bool(held) and all(any(n.startswith(p) for p in prefixes) for n in names + held)
 
 
 def probe_egress(root, runner=None):
