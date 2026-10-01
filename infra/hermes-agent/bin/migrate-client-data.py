@@ -20,17 +20,37 @@ class Refused(Exception):
 
 
 def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
+    """Hash a regular file, never following a symlink at the final component."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
             h.update(chunk)
-    return h.hexdigest()
+        return h.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def _onerror(e):
+    raise Refused(f"cannot read the source tree: {e.filename and os.path.basename(e.filename)} ({e.strerror})")
+
+
+def _signature(entries):
+    """Comparable identity of a walked tree: dirs by inode, files by inode+size+mtime."""
+    return {(rel, st.st_dev, st.st_ino,
+             None if stat.S_ISDIR(st.st_mode) else st.st_size,
+             None if stat.S_ISDIR(st.st_mode) else st.st_mtime_ns) for rel, st in entries}
 
 
 def _walk(src):
     """(relpath, lstat) for every entry below src; a symlink anywhere refuses."""
     out = []
-    for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(src, followlinks=False, onerror=_onerror):
         for n in dirnames + filenames:
             p = os.path.join(dirpath, n)
             st = os.lstat(p)
@@ -167,10 +187,29 @@ def main(argv=None):
             if stat.S_ISREG(st.st_mode):
                 d = os.path.join(dst_vaults, c, rel)
                 size, digest = copied[c][rel]
-                if os.path.getsize(d) != size or _sha256(d) != digest:
+                try:
+                    dst_st = os.lstat(d)
+                    ok = (stat.S_ISREG(dst_st.st_mode) and dst_st.st_size == size
+                          and _sha256(d) == digest)
+                except OSError:
+                    ok = False
+                if not ok:
                     bad.append(f"{c}/{rel}")
     if bad:
-        return _fail(f"VERIFY FAILED for {len(bad)} file(s)", created)
+        return _fail(f"VERIFY FAILED for {len(bad)} file(s): " + ", ".join(bad), created)
+    # Removal is gated on the source still being exactly the verified set.
+    try:
+        changed = []
+        if sorted(os.listdir(src_vaults)) != clients:
+            changed.append("(client list)")
+        for c, src, entries in plan:
+            if _signature(_walk(src)) != _signature(entries):
+                changed.append(c)
+    except (Refused, OSError) as e:
+        changed = [f"(re-walk failed: {e})"]
+    if changed:
+        return _fail("the source changed after it was walked (" + ", ".join(changed) +
+                     f"); nothing removed, re-run after the gateway is really stopped", created)
     try:
         for tree in (src_vaults, src_reports):
             if os.path.lexists(tree):

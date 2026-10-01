@@ -132,6 +132,71 @@ class T(unittest.TestCase):
         rc, _ = self.run_("--apply")
         self.assertEqual(rc, 2)
 
+    def _after_copy(self, fn):
+        """Run fn(dst) right after each real client copy (i.e. between copy and verify/removal)."""
+        real = M._copy_client
+        def wrapped(src, dst, entries):
+            out = real(src, dst, entries)
+            fn(src, dst)
+            return out
+        return mock.patch.object(M, "_copy_client", wrapped)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores chmod 000")
+    def test_unreadable_source_subdir_refused_before_copying(self):
+        d = os.path.join(self.agent, "data/vaults/acme/audits")
+        os.chmod(d, 0)
+        self.addCleanup(os.chmod, d, 0o700)
+        rc, _ = self.run_("--apply")
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "vaults/acme")))
+
+    def test_file_added_after_copy_keeps_source(self):
+        def add(src, dst):
+            open(os.path.join(src, "late.md"), "w").write("new")
+        with self._after_copy(add):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 1, text)
+        self.assertTrue(os.path.exists(os.path.join(self.agent, "data/vaults/acme/late.md")))
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/reports")))
+        self.assertIn(os.path.join(self.dest, "vaults", "acme"), text)
+
+    def test_source_file_modified_after_copy_keeps_source(self):
+        def mod(src, dst):
+            with open(os.path.join(src, "timeline.md"), "w") as f: f.write("changed!")
+        with self._after_copy(mod):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 1, text)
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/acme")))
+
+    def test_new_client_dir_after_copy_keeps_source(self):
+        def add(src, dst):
+            os.makedirs(os.path.join(self.agent, "data/vaults/newclient"), exist_ok=True)
+        with self._after_copy(add):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 1, text)
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/newclient")))
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/acme")))
+
+    def test_dest_swapped_to_symlink_before_verify_fails(self):
+        secret = os.path.join(self.t, "secret"); open(secret, "w").write("t")  # same bytes as timeline.md
+        def swap(src, dst):
+            f = os.path.join(dst, "timeline.md"); os.remove(f); os.symlink(secret, f)
+        with self._after_copy(swap):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 1, text)
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/acme")))
+
+    def test_real_tamper_of_destination_detected_without_mocking_hash(self):
+        def tamper(src, dst):
+            f = os.path.join(dst, "audits/2026-09-30_10-00-00-audit.md")
+            with open(f, "r+b") as fh: fh.write(b"X")  # same size, one byte differs
+        with self._after_copy(tamper):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 1, text)
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/acme")))
+        self.assertIn("acme/audits/2026-09-30_10-00-00-audit.md", text)
+        self.assertIn(os.path.join(self.dest, "vaults", "acme"), text)
+
 
 if __name__ == "__main__":
     unittest.main()
