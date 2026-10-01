@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, io, json, os, sys, tempfile, time, unittest
+import importlib.util, io, json, os, socket, sys, tempfile, time, unittest
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 spec = importlib.util.spec_from_file_location("brk", os.path.join(HERE, "hermes-app-broker.py"))
@@ -439,14 +439,16 @@ class TestFinalFix(Base):
         self.assertNotIn(os.path.join(self.state, "jobs"), seen)
         self.assertIn(os.path.join(self.state, "state"), seen)
 
-    def test_stale_temp_files_in_jobs_are_swept_fresh_ones_kept(self):
+    def test_temp_files_in_jobs_are_removed_whatever_their_age(self):
         jobs = os.path.join(self.state, "jobs")
         old, new = os.path.join(jobs, ".x.json.old.tmp"), os.path.join(jobs, ".y.json.new.tmp")
-        open(old, "w").close(); open(new, "w").close()
+        for p in (old, new):
+            with open(p, "w") as f:
+                f.write("{}")
         t = time.time() - B.REQUEST_MAX_AGE - 10
         os.utime(old, (t, t))
-        B.collect_once(self.ctx)
-        self.assertEqual(self.jobs(), [".y.json.new.tmp"])
+        B.step(self.ctx, 1)
+        self.assertEqual(self.jobs(), [])
 
 
 class TestFinalFixLedger(Base):
@@ -518,6 +520,164 @@ class TestFinalFixLedger(Base):
         os.unlink(os.path.join(self.state, "jobs", rid + ".json"))
         B.step(self.ctx, 0)
         self.assertEqual(self.result(rid)["reason"], "interrupted")
+
+
+class TestStrayJobs(Base):
+    """jobs/ holds only <request id>.json files. Anything else keeps the runner's path unit
+    (DirectoryNotEmpty=jobs) re-triggering a runner that ignores it."""
+    RID = "0f8e2c1a-1111-4222-8333-444455556666"
+
+    def jp(self, name):
+        return os.path.join(self.state, "jobs", name)
+
+    def touch(self, name):
+        with open(self.jp(name), "w") as f:
+            f.write("{}")
+
+    def notes(self, text):
+        return [l for l in self.logs if l.endswith(text)]
+
+    def test_every_kind_of_stray_entry_is_removed_in_one_pass(self):
+        self.touch("leftover")
+        self.touch(".y.json.new.tmp")                      # a FRESH dot-file: no age test in jobs/
+        self.touch("0f8e2c1a.json")                        # .json, but not a request id
+        os.symlink("/etc/hostname", self.jp("link"))         # the no-follow cases have their own test
+        os.mkfifo(self.jp("fifo"))
+        os.mkdir(self.jp("emptydir"))
+        B.step(self.ctx, 1)                                # 1: not a recover() pass; the sweep runs anyway
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(len(self.notes("warning: stray entries in jobs/ were removed")), 1)
+        for name in ("leftover", ".y.json.new.tmp", "0f8e2c1a", "link", "fifo", "emptydir"):
+            self.assertFalse(any(name in l for l in self.logs), name)
+
+    def test_the_sweep_runs_before_recover(self):
+        """A recover() that dies (an unreadable ledger) must not leave the stray entry behind."""
+        self.touch("leftover")
+        real = B.recover
+        def boom(ctx):
+            raise OSError("ledger")
+        B.recover = boom
+        self.addCleanup(setattr, B, "recover", real)
+        with self.assertRaises(OSError):
+            B.step(self.ctx, 0)                            # 0: a recover() pass
+        self.assertEqual(self.jobs(), [])
+
+    def outside(self):
+        """A file and a non-empty directory outside jobs/, for links to point at."""
+        out = tempfile.mkdtemp()
+        f, d = os.path.join(out, "target"), os.path.join(out, "targetdir")
+        os.mkdir(d)
+        for p in (f, os.path.join(d, "inside")):
+            with open(p, "w") as fh:
+                fh.write("keep")
+        return out, f, d
+
+    def assert_intact(self, f, d):
+        with open(f) as fh:
+            self.assertEqual(fh.read(), "keep")
+        self.assertEqual(os.listdir(d), ["inside"])
+        with open(os.path.join(d, "inside")) as fh:
+            self.assertEqual(fh.read(), "keep")
+
+    def test_symlinks_are_unlinked_never_followed(self):
+        out, f, d = self.outside()
+        os.symlink(f, self.jp("tofile"))
+        os.symlink(d, self.jp("todir"))                    # a link to a NON-EMPTY directory
+        os.symlink(os.path.join(out, "absent"), self.jp("dangling"))
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), [])                  # all three links gone
+        self.assert_intact(f, d)                           # and neither target touched
+        self.assertEqual(len(self.notes("warning: stray entries in jobs/ were removed")), 1)
+        self.assertEqual(self.notes("cannot be removed (left in place)"), [])
+
+    def test_a_socket_is_removed(self):
+        if not hasattr(socket, "AF_UNIX"):
+            self.skipTest("no unix sockets on this platform")
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(os.path.join(self.state, "jobs"))         # bind by a relative name: the path limit is ~104 bytes
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(s.close)
+        s.bind("sock")
+        os.chdir(cwd)
+        self.assertEqual(self.jobs(), ["sock"])
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), [])
+
+    def test_a_matching_name_is_left_alone_whatever_its_type(self):
+        """The sweep decides by name only: a matching entry of any type is the runner's."""
+        out, f, d = self.outside()
+        names = sorted(self.RID[:-1] + c + ".json" for c in "abc")
+        os.mkdir(self.jp(names[0]))
+        os.mkfifo(self.jp(names[1]))
+        os.symlink(f, self.jp(names[2]))
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), names)
+        self.assertTrue(os.path.islink(self.jp(names[2])))
+        self.assert_intact(f, d)
+        self.assertEqual(self.logs, [])
+
+    def test_a_queued_job_survives_the_sweep(self):
+        rid = self.file()
+        B.drain_once(self.ctx)
+        self.assertEqual(self.jobs(), [rid + ".json"])
+        with open(self.jp(rid + ".json"), "rb") as f:
+            before = f.read()
+        for n in (1, 2, 3):
+            B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), [rid + ".json"])
+        with open(self.jp(rid + ".json"), "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(self.notes("were removed"), [])
+
+    def test_a_clean_jobs_dir_logs_nothing(self):
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.logs, [])
+
+    def test_a_trailing_newline_name_is_stray(self):
+        self.touch(self.RID + ".json\n")
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), [])
+
+    def test_a_non_empty_directory_is_left_with_one_note(self):
+        os.mkdir(self.jp("full"))
+        with open(os.path.join(self.jp("full"), "x"), "w") as f:
+            f.write("x")
+        self.touch("leftover")
+        for n in (1, 2, 3):
+            B.step(self.ctx, n)                            # never raises
+        self.assertEqual(self.jobs(), ["full"])            # the removable one is gone
+        self.assertEqual(len(self.notes("warning: a stray entry in jobs/ cannot be removed (left in place)")), 1)
+        self.assertFalse(any("full" in l for l in self.logs))
+
+    def test_a_vanishing_entry_costs_nothing(self):
+        self.touch("leftover")
+        real = os.lstat
+        def gone(p, *a, **k):
+            if os.path.basename(str(p)) == "leftover":
+                raise FileNotFoundError(p)
+            return real(p, *a, **k)
+        os.lstat = gone
+        self.addCleanup(setattr, os, "lstat", real)
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.logs, [])
+
+    def test_an_unlistable_jobs_dir_costs_nothing(self):
+        os.rmdir(os.path.join(self.state, "jobs"))
+        B.sweep_jobs(self.ctx)                             # never raises
+        self.assertEqual(self.logs, [])
+
+    def test_state_temp_files_keep_the_age_test(self):
+        st = os.path.join(self.state, "state")
+        old, new = os.path.join(st, ".x.json.old.tmp"), os.path.join(st, ".y.json.new.tmp")
+        for p in (old, new):
+            with open(p, "w") as f:
+                f.write("{}")
+        t = time.time() - B.REQUEST_MAX_AGE - 10
+        os.utime(old, (t, t))
+        B.step(self.ctx, 1)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(new))               # the broker's own in-flight write
 
 
 if __name__ == "__main__":

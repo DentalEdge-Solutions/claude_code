@@ -34,6 +34,7 @@ class Ctx:
         self.ledger = A.Ledger(os.path.join(state, "state", "ledger.jsonl"))
         self.idx = None         # A.LedgerIndex, rebuilt by one read at the start of each pass
         self.dir_noted = False
+        self.stray_noted = False
 
     def d(self, name):
         return os.path.join(self.state, name)
@@ -242,14 +243,47 @@ def _sweep_stale_dotfile(ctx, p, now):
         pass
 
 
+def sweep_jobs(ctx):
+    """jobs/ holds only <request id>.json files, renamed in by this broker (the temp file lives
+    in state/). Anything else is stray, and one stray entry keeps the runner's path unit
+    (DirectoryNotEmpty=jobs) re-triggering a runner that ignores it: remove it, every pass, by
+    name alone. A matching name is a job and is the runner's: never touched here."""
+    jobs = ctx.d("jobs")
+    try:
+        names = os.listdir(jobs)
+    except OSError:
+        return
+    removed = False
+    for n in names:
+        if A.FILENAME_RE.fullmatch(n):                     # fullmatch: `$` alone admits "…json\n"
+            continue
+        p = os.path.join(jobs, n)
+        try:
+            if stat.S_ISDIR(os.lstat(p).st_mode):          # lstat: a symlink is unlinked, never followed
+                os.rmdir(p)
+            else:
+                os.unlink(p)
+            removed = True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Anything that cannot be removed: a non-empty directory (only this user or root can
+            # make one here), a permission error, an entry that changed type after the lstat. Say
+            # so once per process and never let it stop a pass.
+            if not ctx.stray_noted:
+                _note(ctx, "warning: a stray entry in jobs/ cannot be removed (left in place)")
+                ctx.stray_noted = True
+    if removed:
+        _note(ctx, "warning: stray entries in jobs/ were removed")
+
+
 def collect_once(ctx):
     now = time.time()
-    # Stale temp files in jobs/ (older brokers wrote them there; a crash strands them) and in
-    # state/: a leftover in jobs/ keeps the runner's path unit re-triggering on nothing.
-    for d in ("jobs", "state"):
-        for n in os.listdir(ctx.d(d)):
-            if n.startswith(".") and n.endswith(".tmp"):
-                _sweep_stale_dotfile(ctx, os.path.join(ctx.d(d), n), now)
+    # Stale temp files in state/ (a crash strands them). jobs/ is sweep_jobs's: anything stray
+    # there goes at once, whatever its age.
+    for n in os.listdir(ctx.d("state")):
+        if n.startswith(".") and n.endswith(".tmp"):
+            _sweep_stale_dotfile(ctx, os.path.join(ctx.d("state"), n), now)
     _load_index(ctx)
     open_ = {r: (o, c) for r, o, c in ctx.idx.unresolved()}         # once per pass
     for n in sorted(os.listdir(ctx.d("done"))):
@@ -289,7 +323,11 @@ def expire_results(ctx, max_age=7 * 86400):
 
 def step(ctx, n):
     """Pass n of the loop. recover() runs on the first pass and every RECOVER_EVERY passes:
-    it is safe at any time, since it skips any id with a file in jobs/, running/ or done/."""
+    it is safe at any time, since it skips any id with a file in jobs/, running/ or done/.
+    sweep_jobs() runs on every pass: a stray entry in jobs/ must not outlive one interval. It
+    runs FIRST, so a recover() that dies (an unreadable ledger) cannot keep the stray entry in
+    place; recover() only looks at matching names, which the sweep never touches."""
+    sweep_jobs(ctx)
     if n % RECOVER_EVERY == 0:
         recover(ctx)
     drain_once(ctx)
