@@ -169,4 +169,53 @@ services:
       - ${HERMES_AUDIT_DATA_DIR:-/dev/null}:/projects/claude_google_ads/audit_data:ro
       - ./registry:/opt/registry:ro
       - ./bin:/opt/cc-bin:ro
-      - ./data/reports:/opt/data/reports
+      - ${HERMES_REPORTS_DIR:-/dev/null}:/opt/data/reports/claude_google_ads
+  # ---- Option B (spec 2026-09-30 §5): the Opus draft, per run and per client. Driven ONLY by
+  # bin/run-client-audit.py, which sets the three HERMES_*_DIR variables and passes
+  # ANTHROPIC_API_KEY as `-e NAME` (value from its env, read from /etc/hermes/.env.anthropic).
+  # No env_file: never the gateway .env. Each dir defaults to /dev/null so a run without it fails
+  # closed. Its only network is drafter-net (internal: no route out); egress-proxy is the one exit.
+  ads-drafter:
+    image: hermes-agent-claude
+    profiles: ["tools"]
+    user: "10000:10000"
+    entrypoint: ["sh", "-c"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 256
+    environment:
+      HOME: /tmp
+      HTTPS_PROXY: http://egress-proxy:3128
+      HTTP_PROXY: http://egress-proxy:3128
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      DISABLE_AUTOUPDATER: "1"
+    networks: [drafter-net]
+    volumes:
+      - ../../../claude-google-ads:/projects/claude_google_ads:ro
+      - ./masks/empty:/projects/claude_google_ads/.env:ro
+      - ./skills/claude-code-ads-analyst:/opt/skills/claude-code-ads-analyst:ro
+      - ${HERMES_VAULT_DIR:-/dev/null}:/work/vault:ro
+      - ${HERMES_REPORTS_DIR:-/dev/null}:/work/reports:ro
+      - ${HERMES_DRAFT_OUT_DIR:-/dev/null}:/work/out
+  # The drafter's one exit: CONNECT to api.anthropic.com:443 only (bin/egress-proxy.py). Started
+  # by run-client-audit for the draft step and removed in its `finally`.
+  egress-proxy:
+    image: hermes-agent-claude
+    profiles: ["tools"]
+    user: "10000:10000"
+    entrypoint: ["python3", "/opt/cc-bin/egress-proxy.py", "--listen", "0.0.0.0:3128",
+                 "--allow", "api.anthropic.com:443"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [default, drafter-net]
+    volumes:
+      - ./bin:/opt/cc-bin:ro
+
+networks:
+  drafter-net:
+    internal: true

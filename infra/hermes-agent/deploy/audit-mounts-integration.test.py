@@ -44,9 +44,15 @@ class TestAuditMounts(unittest.TestCase):
         with open(os.path.join(d, "Dockerfile"), "w") as f:
             f.write(STANDIN)
         sh("docker", "build", "-q", "-t", "hermes-agent-claude", d)
+        for name in ("vault", "reports", "out"):
+            p = os.path.join(cls.tmp, name + "/acme"); os.makedirs(p)
+            os.chown(p, 10000, 10000); os.chmod(p, 0o700)
+        cls.vault, cls.reports, cls.out = (os.path.join(cls.tmp, n + "/acme") for n in ("vault", "reports", "out"))
+        open(os.path.join(cls.vault, "timeline.md"), "w").close()
         cls.env = dict(os.environ, HERMES_AUDIT_DATA_DIR=cls.data, HERMES_SPOOL_DIR=cls.tmp,
                        HERMES_GOVERNANCE_DIR=os.path.join(cls.tmp, "governance"),
-                       HERMES_AGENT_DIR=cls.agent, HERMES_ADS_REPO_DIR=os.path.join(cls.tmp, "claude-google-ads"))
+                       HERMES_AGENT_DIR=cls.agent, HERMES_ADS_REPO_DIR=os.path.join(cls.tmp, "claude-google-ads"),
+                       HERMES_VAULT_DIR=cls.vault, HERMES_REPORTS_DIR=cls.reports, HERMES_DRAFT_OUT_DIR=cls.out)
         cls.compose = ["docker", "compose", "--env-file", "/dev/null", "-f",
                        os.path.join(cls.agent, "docker-compose.yml"), "--profile", "tools"]
 
@@ -86,6 +92,48 @@ class TestAuditMounts(unittest.TestCase):
                env=env, check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("interpolating", r.stderr)   # must fail at the mount, not at interpolation
+
+    def test_reader_writes_per_client_reports(self):
+        r = self.run_svc("--entrypoint", "sh", "ads-reader", "-c",
+                         "echo x > /opt/data/reports/claude_google_ads/t.md")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.reports, "t.md")))
+
+    def test_drafter_mounts_one_client_ro_and_writes_only_out(self):
+        script = ("id -u; test -r /work/vault/timeline.md && echo VAULT_R; "
+                  "touch /work/vault/x 2>/dev/null && echo VAULT_W; "
+                  "touch /work/reports/x 2>/dev/null && echo REPORTS_W; "
+                  "touch /work/out/draft.md && echo OUT_W; touch /etc/x 2>/dev/null && echo ROOTFS_W; "
+                  "test -e /var/lib/hermes && echo HOST_VISIBLE; env | cut -d= -f1 | grep -E '^GOOGLE_ADS_' || true")
+        r = self.run_svc("ads-drafter", script)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout.split()
+        self.assertEqual(out[0], "10000")
+        self.assertIn("VAULT_R", out); self.assertIn("OUT_W", out)
+        for bad in ("VAULT_W", "REPORTS_W", "ROOTFS_W", "HOST_VISIBLE"):
+            self.assertNotIn(bad, out)
+        self.assertFalse(any(x.startswith("GOOGLE_ADS_") for x in out))
+
+    def test_drafter_has_no_route_out_except_the_proxy(self):
+        sh(*self.compose, "up", "-d", "--no-deps", "egress-proxy", env=self.env)
+        try:
+            probe = ("import os,socket,sys\n"
+                     "def direct():\n"
+                     "  try: socket.create_connection(('1.1.1.1',443),timeout=5); return 'DIRECT_OK'\n"
+                     "  except OSError: return 'DIRECT_BLOCKED'\n"
+                     "def via(target):\n"
+                     "  s=socket.create_connection(('egress-proxy',3128),timeout=10)\n"
+                     "  s.sendall(('CONNECT %s HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n'%target).encode())\n"
+                     "  return s.recv(64).split(b'\\r\\n')[0].decode()\n"
+                     "print(direct()); print(via('example.com:443')); print(via('api.anthropic.com:443'))\n")
+            r = self.run_svc("ads-drafter", f"python3 -c \"{probe}\"")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            lines = r.stdout.splitlines()
+            self.assertEqual(lines[0], "DIRECT_BLOCKED")
+            self.assertIn("403", lines[1])
+            self.assertIn("200", lines[2])
+        finally:
+            sh(*self.compose, "rm", "-sf", "egress-proxy", env=self.env, check=False)
 
 
 @unittest.skipUnless(CAN, "needs root + Linux + docker")
