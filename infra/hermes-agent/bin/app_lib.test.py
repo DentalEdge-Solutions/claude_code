@@ -207,5 +207,64 @@ class TestHardening(unittest.TestCase):
         self.assertEqual(os.stat(os.path.join(d, RID + ".json")).st_gid, os.stat(d).st_gid)
 
 
+class TestFixRound1(unittest.TestCase):
+    def ledger(self):
+        p = os.path.join(tempfile.mkdtemp(), "ledger.jsonl")
+        return p, A.Ledger(p)
+
+    def test_append_after_torn_line_is_not_lost(self):
+        p, L = self.ledger()
+        L.append("reserved", "a" * 36, "run", "acme", now="2026-10-01T10:00:00Z")
+        with open(p, "a") as f:
+            f.write('{"event": "res')
+        L.append("reserved", "b" * 36, "run", "other", now="2026-10-01T11:00:00Z")
+        self.assertTrue(L.seen("b" * 36))
+        self.assertEqual(L.count("2026-10-01", "run"), 2)
+        self.assertEqual(L.unresolved(), [("a" * 36, "run", "acme"), ("b" * 36, "run", "other")])
+
+    def test_release_before_reservation_cancels_nothing(self):
+        p, L = self.ledger()
+        L.append("released", "x" * 36, now="2026-10-01T10:00:00Z")
+        L.append("reserved", "x" * 36, "run", "acme", now="2026-10-02T10:00:00Z")
+        self.assertEqual(L.count("2026-10-02", "run"), 1)
+        self.assertEqual(L.unresolved(), [("x" * 36, "run", "acme")])
+
+    def test_release_after_reservation_still_cancels(self):
+        p, L = self.ledger()
+        L.append("reserved", "x" * 36, "run", "acme", now="2026-10-02T10:00:00Z")
+        L.append("released", "x" * 36, now="2026-10-02T10:01:00Z")
+        self.assertEqual(L.count("2026-10-02", "run"), 0)
+
+    def run_payload(self, rc, status, reason, vault_path=None):
+        return json.dumps({"status": status, "reason": reason, "exit_code": rc, "ts": None,
+                           "steps": [], "vault_path": vault_path})
+
+    def test_reason_tied_to_status(self):
+        for rc, status, reason in ((3, "busy", "vault-write"), (2, "refused", "collect"),
+                                   (1, "failed", "precheck"), (1, "failed", "busy"),
+                                   (3, "busy", "precheck"), (2, "refused", "internal"),
+                                   (0, "ok", "internal")):
+            with self.subTest(status=status, reason=reason):
+                r = A.map_done(REQ, done(rc=rc, stdout=self.run_payload(rc, status, reason)), m())
+                self.assertEqual((r["status"], r["reason"]), ("failed", "internal"))
+
+    def test_consistent_reasons_pass(self):
+        for rc, status, reason in ((3, "busy", "busy"), (2, "refused", "precheck"),
+                                   (1, "failed", "internal"), (1, "failed", "vault-write"),
+                                   (1, "failed", "collect")):
+            with self.subTest(status=status, reason=reason):
+                r = A.map_done(REQ, done(rc=rc, stdout=self.run_payload(rc, status, reason)), m())
+                self.assertEqual((r["status"], r["reason"]), (status, reason))
+
+    def test_vault_path_ts_must_equal_ts(self):
+        ok = json.loads(OK_STDOUT)
+        s = json.dumps({**ok, "vault_path": "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-01-audit.md"})
+        r = A.map_done(REQ, done(stdout=s), m())
+        self.assertEqual((r["status"], r["reason"]), ("failed", "internal"))
+        s = json.dumps({**ok, "ts": None})
+        self.assertEqual(A.map_done(REQ, done(stdout=s), m())["reason"], "internal")
+        self.assertEqual(A.map_done(REQ, done(), m())["status"], "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,12 @@ BROKER_REASONS = ("bad_request", "duplicate", "inactive_client", "quota", "disab
 COMMAND_REASONS = ("precheck", "busy", "internal") + STEP_CLASSES
 LIST_LIMIT = 24
 RC_STATUS = {0: "ok", 1: "failed", 2: "refused", 3: "busy"}
+# The only reasons each status may carry. A contradictory pair (busy + vault-write) is out of
+# contract and becomes failed/internal.
+STATUS_REASONS = {"ok": (None,), "busy": ("busy",), "refused": ("precheck",),
+                  "failed": STEP_CLASSES + ("internal",)}
+_TS_BODY = TS_RE.pattern[1:-1]      # TS_RE without its ^...$ anchors, never restated
+assert TS_RE.pattern == "^" + _TS_BODY + "$"
 
 Manifest = collections.namedtuple("Manifest", "app user command ops tools wait_seconds")
 
@@ -188,7 +194,7 @@ def _run_result(req, rc, p):
         raise Refused("keys")
     if rc not in RC_STATUS or RC_STATUS[rc] != p["status"] or p["exit_code"] != rc:
         raise Refused("status/rc")
-    if not (p["reason"] is None if p["status"] == "ok" else p["reason"] in COMMAND_REASONS):
+    if p["reason"] not in STATUS_REASONS[p["status"]]:
         raise Refused("reason")
     if not (p["ts"] is None or (isinstance(p["ts"], str) and TS_RE.fullmatch(p["ts"]))):
         raise Refused("ts")
@@ -200,9 +206,10 @@ def _run_result(req, rc, p):
         raise Refused("steps")
     vp = p["vault_path"]
     if vp is not None:
-        want = re.compile(r"^/var/lib/hermes/vaults/" + re.escape(req["client"])
-                          + r"/audits/[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}-audit\.md$")
-        if not isinstance(vp, str) or not want.fullmatch(vp) or p["status"] != "ok":
+        want = re.compile("/var/lib/hermes/vaults/" + re.escape(req["client"])
+                          + "/audits/(" + _TS_BODY + r")-audit\.md")
+        mt = want.fullmatch(vp) if isinstance(vp, str) else None
+        if mt is None or mt.group(1) != p["ts"] or p["status"] != "ok":
             raise Refused("vault_path")
     r = _base(req["request_id"], "run", req["client"], p["status"], p["reason"])
     r.update(exit_code=rc, ts=p["ts"], steps=[dict(s) for s in steps], vault_path=vp)
@@ -282,8 +289,13 @@ class Ledger:
         now = now or utcnow()
         line = json.dumps({"event": event, "request_id": request_id, "op": op, "client": client,
                            "at": now, "day": now[:10]}, sort_keys=True) + "\n"
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
+            size = os.fstat(fd).st_size
+            if size and os.pread(fd, 1, size - 1) != b"\n":
+                # A crash left a torn last line: terminate it, or this event would be glued
+                # onto the fragment and skipped by _events (a lost reservation).
+                line = "\n" + line
             os.write(fd, line.encode("utf-8")); os.fsync(fd)
         finally:
             os.close(fd)
@@ -298,20 +310,22 @@ class Ledger:
         return None
 
     def count(self, day, op, client=None):
-        res, rel = set(), set()
+        # In file order: a release cancels only a reservation that appears EARLIER.
+        res = set()
         for e in self._events():
             if e.get("event") == "reserved" and e.get("day") == day and e.get("op") == op \
                     and (client is None or e.get("client") == client):
                 res.add(e["request_id"])
             elif e.get("event") == "released":
-                rel.add(e.get("request_id"))
-        return len(res - rel)
+                res.discard(e["request_id"])
+        return len(res)
 
     def unresolved(self):
-        reserved, closed = [], set()
+        # In file order, like count(): a close cancels only an EARLIER reservation.
+        open_ = {}
         for e in self._events():
             if e.get("event") == "reserved":
-                reserved.append((e["request_id"], e.get("op"), e.get("client")))
+                open_[e["request_id"]] = (e["request_id"], e.get("op"), e.get("client"))
             elif e.get("event") in ("resulted", "released"):
-                closed.add(e.get("request_id"))
-        return [r for r in reserved if r[0] not in closed]
+                open_.pop(e["request_id"], None)
+        return list(open_.values())
