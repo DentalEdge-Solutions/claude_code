@@ -14,6 +14,19 @@ IDLE_SECONDS = 300
 _SAFE = re.compile(r"^[A-Za-z0-9.\-]{1,253}:[0-9]{1,5}$")
 
 
+def _is_valid_port(port_str):
+    """Finding 1: validate port is ASCII digits and in range 1-65535"""
+    if not port_str or not all(c in "0123456789" for c in port_str):
+        return False
+    if len(port_str) > 5:
+        return False
+    try:
+        p = int(port_str)
+        return 1 <= p <= 65535
+    except ValueError:
+        return False
+
+
 class Refused(Exception):
     def __init__(self, reason):
         super().__init__(reason)
@@ -24,7 +37,7 @@ def parse_allow(values):
     out = set()
     for v in values:
         host, _, port = v.rpartition(":")
-        if not host or not port.isdigit():
+        if not host or not _is_valid_port(port):
             raise ValueError(f"bad --allow value {v!r}: expected host:port")
         out.add((host.lower().rstrip("."), int(port)))
     return frozenset(out)
@@ -46,7 +59,7 @@ def decide(head, allow):
     if target.startswith("[") and "]" in target:
         raise Refused("ip-literal")
     host, _, port = target.rpartition(":")
-    if not host or not port.isdigit():
+    if not host or not _is_valid_port(port):
         raise Refused("bad-target")
     if _is_ip(host):
         raise Refused("ip-literal")
@@ -59,7 +72,7 @@ def decide(head, allow):
 def _target_for_log(head):
     parts = head.split("\r\n", 1)[0].split(" ")
     t = parts[1] if len(parts) >= 2 else ""
-    return t if _SAFE.match(t) else "invalid"
+    return t if _SAFE.fullmatch(t) else "invalid"
 
 
 def _pump(a, b, first=b""):
@@ -101,7 +114,10 @@ class _Handler(socketserver.BaseRequestHandler):
         except Refused as r:
             text = raw.split(b"\r\n", 1)[0].decode("latin-1")
             self._log("deny", _target_for_log(text), r.reason)
-            c.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            try:
+                c.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
             return
         except OSError:
             return
@@ -109,14 +125,21 @@ class _Handler(socketserver.BaseRequestHandler):
             up = socket.create_connection((host, port), timeout=30)
         except OSError:
             self._log("deny", f"{host}:{port}", "upstream-unreachable")
-            c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            try:
+                c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
             return
+        n_up, n_down = 0, 0
         try:
             c.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             c.settimeout(None); up.settimeout(None)
-            n_up, n_down = _pump(c, up, rest)
-            self._log("allow", f"{host}:{port}", "", n_up, n_down)
+            try:
+                n_up, n_down = _pump(c, up, rest)
+            except OSError:
+                pass
         finally:
+            self._log("allow", f"{host}:{port}", "", n_up, n_down)
             up.close()
 
     def _log(self, decision, target, reason, up=0, down=0):
