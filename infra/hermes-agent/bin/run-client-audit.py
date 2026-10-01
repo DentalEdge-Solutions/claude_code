@@ -247,6 +247,16 @@ def main(argv=None, runner=None, root="/", now=None):
             print(json_result(status, reason, rc, ts if status != "refused" else None, list(results), vault_path))
         return rc
 
+    LIST_INTERNAL = json.dumps({"status": "failed", "reason": "internal"}, sort_keys=True)
+
+    def unexpected(e, results=()):
+        """--json only (plain mode re-raises): an exception outside the caught tuples still ends
+        in one JSON line. Only the type name is shown: the message may carry a customer id."""
+        print(f"run-client-audit: failed: unexpected {type(e).__name__}", file=sys.stderr)
+        if a.list:
+            print(LIST_INTERNAL); return 1
+        return emit("failed", "internal", 1, results)
+
     try:
         rec = L.eligible_client(a.client, root + REGISTRY)
     except (L.PrecheckError, ValueError, OSError, TypeError, AttributeError) as e:   # M12: malformed entry
@@ -254,6 +264,10 @@ def main(argv=None, runner=None, root="/", now=None):
         if a.list:
             print(json.dumps({"status": "refused", "reason": "precheck"}, sort_keys=True)); return 2
         return emit("refused", "precheck", 2)
+    except Exception as e:          # not BaseException: KeyboardInterrupt/SystemExit propagate
+        if not a.json:
+            raise
+        return unexpected(e)
     red = R.Redactor([], [rec["customer_id"]])
     say = lambda s: print(red.text(s), file=human)
     if a.list:
@@ -267,7 +281,9 @@ def main(argv=None, runner=None, root="/", now=None):
                     os.close(fd)
         except OSError as e:     # an entry vanished between listdir and stat (container-controlled dir)
             print(red.text(f"run-client-audit: list failed: {type(e).__name__}: {e}"), file=sys.stderr)
-            print(json.dumps({"status": "failed", "reason": "internal"}, sort_keys=True)); return 1
+            print(LIST_INTERNAL); return 1
+        except Exception as e:      # --list implies --json
+            return unexpected(e)
         print(json.dumps({"status": "ok", "audits": audits}, sort_keys=True))
         return 0
     try:
@@ -284,6 +300,10 @@ def main(argv=None, runner=None, root="/", now=None):
         steps = plan(rec, ts, root)          # re-reads the credential file: same refusal path
     except (L.PrecheckError, ValueError, OSError, TypeError, AttributeError) as e:
         print(red.text(f"run-client-audit: refused: {e}"), file=sys.stderr); return emit("refused", "precheck", 2)
+    except Exception as e:
+        if not a.json:
+            raise
+        return unexpected(e)
     if a.dry_run:
         for key, argv_, env in steps:
             shown = ["<script>" if len(x) > 200 else x for x in argv_]
@@ -299,6 +319,10 @@ def main(argv=None, runner=None, root="/", now=None):
     except (OSError, ValueError, TypeError, AttributeError) as e:          # Ruling 6 (+ M12)
         say(f"run-client-audit: failed: {type(e).__name__}: {e}")
         return emit("failed", "internal", 1, state["results"])
+    except Exception as e:          # _run's finally (transient removal, proxy stop) has already run
+        if not a.json:
+            raise
+        return unexpected(e, state["results"])
     return emit("ok" if rc == 0 else "failed", state["reason"], rc, state["results"], state["vault_path"])
 
 

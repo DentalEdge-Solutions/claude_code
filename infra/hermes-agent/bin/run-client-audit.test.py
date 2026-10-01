@@ -670,5 +670,72 @@ class TestList(Base):
         self.assertEqual(rc, 1)
 
 
+class TestJsonUnexpectedExceptions(Base):
+    """Fix round 1: an exception OUTSIDE the caught tuple still yields one JSON line under --json
+    (failed/internal, exit 1, only the type name on stderr); plain mode keeps its traceback."""
+    def call(self, argv, runner=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = RCA.main(argv, runner=runner or FakeRunner(self.root), root=self.root, now="2026-10-01_12-00-00")
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        return rc, json.loads(lines[0]), err.getvalue()
+
+    def test_eligible_client_keyerror(self):
+        def boom(*a):
+            raise KeyError(CID)
+        with mock.patch.object(RCA.L, "eligible_client", boom):
+            rc, j, err = self.call(["acme-dental", "--json"])
+        self.assertEqual((rc, j["status"], j["reason"], j["steps"]), (1, "failed", "internal", []))
+        self.assertIn("KeyError", err); self.assertNotIn(CID, err)
+
+    def test_precheck_keyerror(self):
+        def boom(*a, **k):
+            raise KeyError(CID)
+        with mock.patch.object(RCA.L, "package_matches", boom):
+            rc, j, err = self.call(["acme-dental", "--json"])
+        self.assertEqual((rc, j["status"], j["reason"], j["exit_code"], j["steps"]), (1, "failed", "internal", 1, []))
+        self.assertIn("KeyError", err); self.assertNotIn(CID, err)
+
+    def test_runner_runtimeerror_mid_run(self):
+        rc, j, err = self.call(["acme-dental", "--json"],
+                               FakeRunner(self.root, raise_on=("read:audit_search_terms", RuntimeError)))
+        self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "internal"))
+        self.assertEqual([s["name"] for s in j["steps"]], ["collect", "snapshot", "read"])
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertIn("RuntimeError", err); self.assertNotIn("boom", err)
+
+    def test_list_runtimeerror(self):
+        def boom(fd):
+            raise RuntimeError(CID)
+        os.makedirs(self.root + "/var/lib/hermes/vaults/acme-dental/audits")
+        with mock.patch.object(RCA.L, "list_audit_ts", boom):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = RCA.main(["acme-dental", "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        self.assertEqual((rc, out.getvalue()), (1, '{"reason": "internal", "status": "failed"}\n'))
+        self.assertNotIn(CID, err.getvalue())
+
+    def test_list_eligible_client_runtimeerror(self):
+        def boom(*a):
+            raise RuntimeError("x")
+        with mock.patch.object(RCA.L, "eligible_client", boom):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = RCA.main(["acme-dental", "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        self.assertEqual((rc, out.getvalue()), (1, '{"reason": "internal", "status": "failed"}\n'))
+
+    def test_plain_mode_still_propagates(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main(FakeRunner(self.root, raise_on=("read:audit_search_terms", RuntimeError)))
+        self.assertEqual(len(self.proxy_stops), 1)
+
+    def test_keyboard_interrupt_propagates_under_json(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_main(FakeRunner(self.root, raise_on=("draft", KeyboardInterrupt)), "--json")
+        self.assertEqual(len(self.proxy_stops), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
