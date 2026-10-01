@@ -6,8 +6,10 @@
 HTTP CONNECT to an allow-listed host:port is tunnelled; everything else gets 403 and the
 connection closes. It never terminates TLS and never logs content: one line per decision
 (target, decision, reason, byte counts). The drafter's network is `internal`, so this is
-its only way out: no proxy, no draft."""
-import argparse, ipaddress, re, select, socket, socketserver, sys
+its only way out: no proxy, no draft.
+
+Reasons: not-connect, bad-target, ip-literal, not-allowed, header-too-large, upstream-unreachable, client-gone."""
+import argparse, ipaddress, re, select, socket, socketserver, struct, sys
 
 MAX_HEADER = 8192
 IDLE_SECONDS = 300
@@ -77,22 +79,25 @@ def _target_for_log(head):
 
 def _pump(a, b, first=b""):
     up = down = 0
-    if first:
-        b.sendall(first); up += len(first)
-    socks = [a, b]
-    while True:
-        r, _, _ = select.select(socks, [], [], IDLE_SECONDS)
-        if not r:
-            return up, down
-        for s in r:
-            data = s.recv(65536)
-            if not data:
+    try:
+        if first:
+            b.sendall(first); up += len(first)
+        socks = [a, b]
+        while True:
+            r, _, _ = select.select(socks, [], [], IDLE_SECONDS)
+            if not r:
                 return up, down
-            (b if s is a else a).sendall(data)
-            if s is a:
-                up += len(data)
-            else:
-                down += len(data)
+            for s in r:
+                data = s.recv(65536)
+                if not data:
+                    return up, down
+                (b if s is a else a).sendall(data)
+                if s is a:
+                    up += len(data)
+                else:
+                    down += len(data)
+    except OSError:
+        return up, down
 
 
 class _Handler(socketserver.BaseRequestHandler):
@@ -130,17 +135,16 @@ class _Handler(socketserver.BaseRequestHandler):
             except OSError:
                 pass
             return
-        n_up, n_down = 0, 0
         try:
             c.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            c.settimeout(None); up.settimeout(None)
-            try:
-                n_up, n_down = _pump(c, up, rest)
-            except OSError:
-                pass
-        finally:
-            self._log("allow", f"{host}:{port}", "", n_up, n_down)
+        except OSError:
+            self._log("deny", f"{host}:{port}", "client-gone")
             up.close()
+            return
+        c.settimeout(None); up.settimeout(None)
+        n_up, n_down = _pump(c, up, rest)
+        self._log("allow", f"{host}:{port}", "", n_up, n_down)
+        up.close()
 
     def _log(self, decision, target, reason, up=0, down=0):
         print(f"egress-proxy: decision={decision} target={target} reason={reason} up={up} down={down}",

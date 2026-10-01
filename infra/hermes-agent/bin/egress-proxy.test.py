@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, io, os, socket, socketserver, sys, threading, unittest
+import importlib.util, io, os, socket, socketserver, struct, sys, threading, time, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("egp", os.path.join(HERE, "egress-proxy.py"))
 P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P)
@@ -68,8 +68,13 @@ class Echo(socketserver.BaseRequestHandler):
 
 
 class AbruptClose(socketserver.BaseRequestHandler):
-    """Finding 2: server that closes abruptly without echoing"""
+    """Finding 2: server that sends data then resets connection abruptly"""
     def handle(self):
+        try:
+            self.request.sendall(b"x")
+            self.request.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        except:
+            pass
         self.request.close()
 
 
@@ -86,9 +91,15 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
         self.abrupt_socket.bind(("127.0.0.1", 0))
         self.aport = self.abrupt_socket.getsockname()[1]
 
+        # Allocate dead port for upstream-unreachable test (Finding 5: dynamic allocation)
+        self.dead_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.dead_socket.bind(("127.0.0.1", 0))
+        self.dead_port = self.dead_socket.getsockname()[1]
+        self.dead_socket.close()
+
         self.log = io.StringIO()
-        # Allow echo port, abrupt port, and unused port for upstream-unreachable test
-        self.proxy = P.serve("127.0.0.1:0", P.parse_allow([f"localhost:{self.eport}", f"localhost:{self.aport}", "localhost:54321"]), log=self.log)
+        # Allow echo port, abrupt port, and dead port for upstream-unreachable test
+        self.proxy = P.serve("127.0.0.1:0", P.parse_allow([f"localhost:{self.eport}", f"localhost:{self.aport}", f"localhost:{self.dead_port}"]), log=self.log)
         threading.Thread(target=self.proxy.serve_forever, daemon=True).start()
         self.pport = self.proxy.server_address[1]
 
@@ -97,7 +108,7 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
             s.shutdown(); s.server_close()
         try:
             self.abrupt_socket.close()
-        except:
+        except OSError:
             pass
 
     def ask(self, line, then=b""):
@@ -109,6 +120,15 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
             c.sendall(then); body = c.recv(1024)
         c.close()
         return status, body
+
+    def wait_for_log_line(self, pattern, timeout=2.0):
+        """Finding 2: poll log buffer for expected line to avoid races"""
+        start = time.time()
+        while time.time() - start < timeout:
+            if pattern in self.log.getvalue():
+                return True
+            time.sleep(0.05)
+        return False
 
     def test_allowed_tunnel_carries_bytes(self):
         status, body = self.ask(f"CONNECT localhost:{self.eport} HTTP/1.1", then=b"hi")
@@ -160,16 +180,16 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
 
     def test_upstream_unreachable_502_and_logged(self):
         """Finding 5: upstream with nothing listening should get 502 and reason=upstream-unreachable"""
-        # Use a port that's allowed but nothing is listening
-        status, _ = self.ask(f"CONNECT localhost:54321 HTTP/1.1")
+        # Use the dead port allocated in setUp (Finding 5: dynamic allocation)
+        status, _ = self.ask(f"CONNECT localhost:{self.dead_port} HTTP/1.1")
         self.assertTrue(status.startswith(b"HTTP/1.1 502"), status)
         log = self.log.getvalue()
         self.assertIn("decision=deny", log)
         self.assertIn("reason=upstream-unreachable", log)
 
     def test_upstream_close_logs_allow_once(self):
-        """Finding 2: when upstream closes abruptly, allow line must still be logged"""
-        # Set up a server that closes immediately on the pre-allocated port
+        """Finding 2: when upstream closes abruptly, allow line must still be logged with byte counts"""
+        # Set up a server that sends data then resets connection
         self.abrupt_socket.close()  # Close the placeholder socket first
         abrupt = socketserver.TCPServer(("127.0.0.1", self.aport), AbruptClose)
         threading.Thread(target=abrupt.serve_forever, daemon=True).start()
@@ -188,14 +208,22 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
         abrupt.shutdown()
         abrupt.server_close()
 
-        # Should see exactly one decision=allow line
+        # Wait for allow log line to appear (Finding 2: wait for async log)
+        self.assertTrue(self.wait_for_log_line("decision=allow"),
+                       f"Expected allow line in log:\n{self.log.getvalue()}")
+
+        # Should see exactly one decision=allow line with byte counts captured despite error
         log = self.log.getvalue()
         allow_count = log.count("decision=allow")
         self.assertEqual(allow_count, 1, f"Expected 1 allow line, got {allow_count}:\n{log}")
+        # Byte counts should be captured even though connection was reset
+        self.assertRegex(log, r"down=\d+", "Expected byte counts in allow line")
 
-    def test_log_injection_with_newline_in_target(self):
-        """Finding 4: hostile target with newline should not create extra log lines"""
-        self.ask("CONNECT evil\nfake:443 HTTP/1.1")
+    def test_log_injection_with_trailing_newline_in_target(self):
+        """Finding 3: hostile target with trailing newline should not match old regex"""
+        # Use trailing newline: old match($) would have matched, fullmatch() correctly rejects
+        status, _ = self.ask("CONNECT localhost:443\n HTTP/1.1")
+        self.assertTrue(status.startswith(b"HTTP/1.1 403"), status)
         log = self.log.getvalue()
         self.assertIn("target=invalid", log)
         # Count decision lines - should be exactly 1
