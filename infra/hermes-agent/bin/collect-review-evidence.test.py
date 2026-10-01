@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import contextlib, importlib.util, io, json, os, sys, tempfile, unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import review_lib as R
@@ -434,40 +435,16 @@ class TestAuditsOnTheBox(Base):
     def test_d7_1_reports_audit_data_dirs_by_status_without_slugs(self):
         os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/acme-dental"))
         os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/ghost-client"))
-        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults"), exist_ok=True)
         out = CE.collect(self.host(), self.KEY)
         rows = out["items"]["D7.1"]["data"]["audit_data"]
         self.assertEqual(sorted(r["status"] for r in rows), ["active", "unregistered"])
         self.assertNotIn("ghost-client", json.dumps(out))
-
-    def test_d7_1_vault_rows_carry_the_registry_status_without_slugs(self):
-        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {
-            "acme-dental": {"customer_id": "1234567890", "status": "active"},
-            "gone-dental": {"customer_id": "2223334444", "status": "retired"}}}))
-        vaults = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults")
-        for n in ("acme-dental", "gone-dental", "stray-dental"):
-            os.makedirs(os.path.join(vaults, n))
-        out = CE.collect(self.host(), self.KEY)
-        rows = out["items"]["D7.1"]["data"]["vaults"]
-        self.assertEqual([r["status"] for r in rows], ["active", "retired", "unregistered"])
-        dump = json.dumps(out)
-        for slug in ("gone-dental", "stray-dental"):
-            self.assertNotIn(slug, dump)
 
 
     def _d7_setup(self):
         self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {
             "acme-dental": {"customer_id": "1234567890", "status": "active"},
             "gone-dental": {"customer_id": "2223334444", "status": "retired"}}}))
-        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults"), exist_ok=True)
-
-    def test_d7_1_reports_reports_dir_and_absent(self):
-        self._d7_setup()
-        d = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]
-        self.assertEqual(d["reports"], "absent")
-        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/reports"))
-        d = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]
-        self.assertEqual(set(d["reports"]) & {"owner", "group", "mode"}, {"owner", "group", "mode"})
 
     def test_d7_1_audit_logs_root_and_rows_by_status_without_slugs(self):
         self._d7_setup()
@@ -500,11 +477,98 @@ class TestAuditsOnTheBox(Base):
         self.assertEqual(out["items"]["D7.1"]["data"]["audit_logs"], {"root": "symlink", "rows": []})
         self.assertNotIn("ghost-client", json.dumps(out))
 
-    def test_d7_1_symlinked_reports_dir_is_reported(self):
-        self._d7_setup()
-        d = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data")
-        os.symlink(self.root, os.path.join(d, "reports"))
-        self.assertEqual(CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]["reports"], "symlink")
+class TestOptionBLayout(Base):
+    def test_d7_1_reads_the_new_paths_and_reports_old_data_absent(self):
+        for d in ("vaults", "reports", "draft-out"):
+            os.makedirs(os.path.join(self.root, "var/lib/hermes", d, "acme-dental"))
+        items = CE.collect(self.host(), self.KEY)["items"]
+        d = items["D7.1"]["data"]
+        self.assertEqual([r["status"] for r in d["vaults"]], ["active"])
+        self.assertEqual([r["status"] for r in d["reports_rows"]], ["active"])
+        self.assertEqual([r["status"] for r in d["draft_out_rows"]], ["active"])
+        self.assertEqual(d["old_data"], {"data/vaults": "absent", "data/reports": "absent"})
+        self.assertIn("vaults", d["parents"])
+        self.assertNotIn("reports", d)
+        self.assertNotIn("acme-dental", json.dumps(d))
+
+    def test_d7_1_client_rows_carry_status_owner_mode_without_slugs(self):
+        vaults = os.path.join(self.root, "var/lib/hermes/vaults")
+        for n in ("acme-dental", "gone-dental", "stray-dental"):
+            os.makedirs(os.path.join(vaults, n))
+        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {
+            "acme-dental": {"customer_id": "1234567890", "status": "active"},
+            "gone-dental": {"customer_id": "2223334444", "status": "retired"}}}))
+        out = CE.collect(self.host(), self.KEY)
+        rows = out["items"]["D7.1"]["data"]["vaults"]
+        self.assertEqual([r["status"] for r in rows], ["active", "retired", "unregistered"])
+        for r in rows:
+            self.assertEqual(set(r), {"status", "owner", "mode"})
+        for slug in ("gone-dental", "stray-dental"):
+            self.assertNotIn(slug, json.dumps(out))
+
+    def test_d7_1_flags_leftover_old_data(self):
+        os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults/acme-dental"))
+        d = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]
+        self.assertIsInstance(d["old_data"]["data/vaults"], dict)
+
+    def test_d7_1_symlinked_parent_is_reported_and_never_listed(self):
+        target = os.path.join(self.root, "elsewhere")
+        os.makedirs(os.path.join(target, "ghost-client"))
+        link = os.path.join(self.root, "var/lib/hermes/reports")
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+        out = CE.collect(self.host(), self.KEY)
+        d = out["items"]["D7.1"]["data"]
+        self.assertEqual(d["parents"]["reports"], "symlink")
+        self.assertEqual(d["reports_rows"], [])
+        self.assertNotIn("ghost-client", json.dumps(out))
+
+    def test_d7_1_non_directory_parent_does_not_raise(self):
+        self._w("/var/lib/hermes/draft-out", "not a directory")
+        d = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]
+        self.assertEqual(d["parents"]["draft-out"], "not-a-directory")
+        self.assertEqual(d["draft_out_rows"], [])
+
+    def test_d7_1_entry_vanishing_mid_listing_is_skipped(self):
+        vaults = os.path.join(self.root, "var/lib/hermes/vaults")
+        for n in ("acme-dental", "gone-dental"):
+            os.makedirs(os.path.join(vaults, n))
+        real = os.lstat
+
+        def flaky(p, *a, **k):
+            if str(p).endswith("gone-dental"):
+                raise FileNotFoundError(p)
+            return real(p, *a, **k)
+        with mock.patch.object(CE.os, "lstat", flaky):
+            rows = CE._client_rows(self.host(), {}, "/var/lib/hermes/vaults")
+        self.assertEqual(len(rows), 1)
+
+    def test_d4_1_probes_the_moved_data_and_the_key_file(self):
+        for p in ("/var/lib/hermes/vaults", "/var/lib/hermes/reports", "/var/lib/hermes/draft-out",
+                  "/var/lib/hermes/audit-data", "/var/lib/hermes/app-state", "/etc/hermes/.env.anthropic",
+                  "/opt/data/vaults", "/opt/data/reports", "/opt/data/home/.claude/settings.json"):
+            self.assertIn(p, CE.GATEWAY_PROBE_PATHS)
+
+    def test_d2_1_anthropic_key_file_is_authorised_and_its_state_reported(self):
+        self._w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-SECRETVALUE\n")
+        self.outputs[("find",)] = (0, "/etc/hermes/.env.anthropic\n", "")
+        rows = CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["files"]
+        row = [r for r in rows if r["path"] == "/etc/hermes/.env.anthropic"][0]
+        self.assertEqual((row["kind"], row["label"], row["anthropic_key_state"]), ("authorised-other", "anthropic-key", "real"))
+        self.assertNotIn("SECRETVALUE", json.dumps(rows))
+
+    def test_d2_1_anthropic_key_value_joins_the_secrets(self):
+        self._w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-SECRETVALUE\n")
+        self.outputs[("find",)] = (0, "/etc/hermes/.env.anthropic\n", "")
+        _, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn("sk-ant-api03-SECRETVALUE", secrets)
+
+    def test_d4_1_reports_anthropic_and_openrouter_env_names_only(self):
+        self.outputs[("docker", "exec")] = (0, "ANTHROPIC_API_KEY=sk-ant-XYZ\nOPENROUTER_API_KEY=or-ABC\nHOME=/x\n", "")
+        self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
+        d = CE.collect(self.host(), self.KEY)["items"]["D4.1"]["data"]
+        self.assertEqual(d["anthropic_env_names"], ["ANTHROPIC_API_KEY"])
+        self.assertEqual(d["openrouter_env_names"], ["OPENROUTER_API_KEY"])
 
 
 class TestKeyedBundle(Base):

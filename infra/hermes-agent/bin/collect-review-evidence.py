@@ -15,6 +15,7 @@ import argparse, fnmatch, getpass, grp, json, os, pwd, re, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import changeset_lib as C
+import client_audit_lib as CAL
 import package_lib as PK
 import review_lib as R
 
@@ -30,7 +31,11 @@ GATEWAY_FILTER = "label=com.docker.compose.service=hermes-agent"
 GATEWAY_PROBE_PATHS = ("/opt/governance", "/var/lib/hermes/governance",
                        "/projects/claude_google_ads/.env", "/opt/hermes-agent/.env.gaw",
                        "/opt/hermes-agent/.env.ga",
-                       "/etc/hermes/.env" + ".ga")
+                       "/etc/hermes/.env" + ".ga",
+                       "/var/lib/hermes/vaults", "/var/lib/hermes/reports", "/var/lib/hermes/draft-out",
+                       "/var/lib/hermes/audit-data", "/var/lib/hermes/app-state",
+                       "/etc/hermes/.env.anthropic", "/opt/data/vaults", "/opt/data/reports",
+                       "/opt/data/home/.claude/settings.json")
 GATEWAY_CONTROL_PATH = "/opt/registry/projects.yaml"
 SWEEP_NAMES = (".env*", "*.ga", "*.gaw", ".git-credentials", "hosts.yml", "credentials.json",
                "application_default_credentials.json", "id_rsa", "id_ecdsa", "id_ed25519")
@@ -40,7 +45,8 @@ HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history",
 # Non-Google secret files the box is meant to hold (README credential table). A sweep hit
 # at one of these paths is `authorised-other`; any other non-empty, non-Google hit is
 # `unlisted`, which the reviewer must see explained (review #3, not-on-checklist #3).
-AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env"}
+AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env",
+                    "/etc/hermes/.env.anthropic": "anthropic-key"}
 # Writable in-memory filesystems `find / -xdev` never crosses: the collector sweeps them
 # itself, by name and by content (review #3 §5 — the manual sweep went stale).
 MEMORY_FSTYPES = {"tmpfs", "ramfs"}
@@ -355,6 +361,11 @@ def d2_1(host, ctx):
                         row["kind"] = "empty"
                     elif p in AUTHORISED_OTHER:
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
+                        if p == "/etc/hermes/.env.anthropic":
+                            row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
+                            key = CAL.load_env_value(host.path(p), "ANTHROPIC_API_KEY")
+                            if key:
+                                ctx.setdefault("secrets", []).append(key)   # so assert_no_secret covers it
         except OSError as e:
             row["error"] = type(e).__name__
             if not is_example:
@@ -411,8 +422,11 @@ def d4_1(host, ctx):
               'else echo "$p absent"; fi; done')
     out = _ok(host, ["docker", "exec", gw, "sh", "-c", script, "sh", *GATEWAY_PROBE_PATHS, GATEWAY_CONTROL_PATH])
     env = _ok(host, ["docker", "exec", gw, "env"])
+    names = [l.split("=", 1)[0] for l in env.splitlines() if "=" in l]
     return {"paths": out.splitlines(),
-            "google_ads_env_names": sorted(l.split("=", 1)[0] for l in env.splitlines() if l.startswith("GOOGLE_ADS_"))}
+            "google_ads_env_names": sorted(n for n in names if n.startswith("GOOGLE_ADS_")),
+            "anthropic_env_names": sorted(n for n in names if n.startswith("ANTHROPIC_")),
+            "openrouter_env_names": sorted(n for n in names if n.startswith("OPENROUTER_"))}
 
 
 def d4_2(host, ctx):
@@ -555,14 +569,32 @@ def _audit_logs(host, reg):
     return {"root": row, "rows": rows}
 
 
+HERMES_VAR = "/var/lib/hermes"
+
+
+def _client_rows(host, reg, parent):
+    """One row per child of a client-data parent: registry status, owner, mode, never the name.
+    A symlinked or non-directory parent is not listed; a child that vanishes is skipped."""
+    root = host.path(parent)
+    rows = []
+    if os.path.isdir(root) and not os.path.islink(root):
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                st = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            rows.append({"status": _reg_status(reg, name), "owner": _owner(st.st_uid),
+                         "mode": oct(stat.S_IMODE(st.st_mode))})
+    return rows
+
+
 def d7_1(host, ctx):
     with open(host.path(GOV + "/registry/clients.json")) as f:     # one read for both row kinds
         reg = json.load(f).get("clients", {})
-    vaults = host.path(AGENT_DIR + "/data/vaults")
-    vault_rows = []
-    if os.path.isdir(vaults):
-        for n in sorted(os.listdir(vaults)):
-            vault_rows.append({"status": _reg_status(reg, n), **_stat(host, AGENT_DIR + "/data/vaults/" + n)})
     records = host.path(GOV + "/records")
     backups = sorted(n for n in os.listdir(host.path("/root")) if n.startswith("live-gate-")) \
         if os.path.isdir(host.path("/root")) else []
@@ -573,8 +605,13 @@ def d7_1(host, ctx):
             st = os.lstat(os.path.join(ad_root, name))
             audit.append({"status": _reg_status(reg, name),
                           "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
-    return {"vaults": vault_rows, "audit_data": audit,
-            "reports": _dir_row(host, AGENT_DIR + "/data/reports"),
+    return {"vaults": _client_rows(host, reg, HERMES_VAR + "/vaults"),
+            "reports_rows": _client_rows(host, reg, HERMES_VAR + "/reports"),
+            "draft_out_rows": _client_rows(host, reg, HERMES_VAR + "/draft-out"),
+            "parents": {d: _dir_row(host, f"{HERMES_VAR}/{d}") for d in ("vaults", "reports", "draft-out")},
+            "old_data": {"data/vaults": _dir_row(host, AGENT_DIR + "/data/vaults"),
+                         "data/reports": _dir_row(host, AGENT_DIR + "/data/reports")},
+            "audit_data": audit,
             "audit_logs": _audit_logs(host, reg),
             "records": sum(len(fs) for _, _, fs in os.walk(records)) if os.path.isdir(records) else 0,
             "root_backups": [{"dir": b, "files": len(os.listdir(host.path("/root/" + b)))} for b in backups]}
