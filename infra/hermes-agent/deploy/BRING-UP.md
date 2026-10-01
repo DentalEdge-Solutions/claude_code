@@ -1354,14 +1354,17 @@ Requires part 1 on the box. Still not live until review #6.
     `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
     `R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "<client>", "op": "run", "request_id": "%s"}' "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
     → `hermes-app-broker[ads-audit]: request=<uuid> op=run client=<client> status=refused reason=disabled`
-    `sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED` (switch off again before the next check)
-    b. Quota (the manifest allows one `run` per client per UTC day, counted from the broker's ledger, so
-    this works only on the SAME UTC day as step 10's audit, which spent the client's one run; otherwise
-    it would be admitted and start a real audit). First confirm that day:
-    `sudo grep '"event": "reserved"' /var/lib/hermes/app-state/ads-audit/state/ledger.jsonl | grep '"client": "<client>"' | grep -c "\"day\": \"$(date -u +%F)\""` → `1` or more (`0`: wait for the next day's first audit, or stop here).
+    Only when that line has appeared: `sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED` (switch off again before the next check). If no line appeared (the broker is stopped or slow), delete the request first with `sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json`, check `systemctl is-active hermes-app-broker@ads-audit`, and only then remove the switch: a request still in `requests/` is decided afresh once the switch is gone, and could start a real audit.
+    b. Quota (the manifest allows one `run` per client per UTC day. The broker refuses a second one only
+    while a `run` for that client is HELD today: a `list` request, a `run` that ended `busy` and a run
+    from another day do not count. If none is held, the request below would be admitted and start a
+    real, paid audit.) Ask the broker's own counter, as root, on the same UTC day as step 10's audit:
+    `sudo python3 -c 'import sys; sys.path.insert(0, "/opt/hermes-agent/bin"); import app_lib as A; print("HELD_RUNS=%d" % A.Ledger("/var/lib/hermes/app-state/ads-audit/state/ledger.jsonl").count(A.utcnow()[:10], "run", "<client>"))'`
+    → `HELD_RUNS=1` is the only output that means safe to paste the next line (paste it at once, not after midnight UTC). Any other output (`HELD_RUNS=0`, an error): skip the quota check for today and run it after the next day's first real audit.
     Then the same second-run request as in a:
     `R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "<client>", "op": "run", "request_id": "%s"}' "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
     → `... request=<uuid> op=run client=<client> status=refused reason=quota`
+    If no line appears, delete `requests/$R.json` as in a before doing anything else.
     c. Malformed request. It must be a well-named file (`<36 characters of 0-9a-f and ->.json`, a fresh
     uuid) with content the broker rejects (here `{}`: the keys are wrong): that is `refused/bad_request`.
     A badly named file (any other name) is only `dropped/bad_request`, which does not count:
