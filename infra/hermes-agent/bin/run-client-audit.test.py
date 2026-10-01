@@ -916,7 +916,7 @@ ENV_OK = {"ads-collector": "GOOGLE_ADS_REFRESH_TOKEN\nGOOGLE_ADS_CUSTOMER_ID\n"
           "ads-drafter": "ANTHROPIC_API_KEY\nSENTINEL_ENV=ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n",
           "egress-proxy": "SENTINEL_FILES=0\n"}
 EGRESS_OK = ("DIRECT_BLOCKED\nHTTP/1.1 403 Forbidden\nHTTP/1.1 200 Connection Established\n"
-             "WORK=out,reports,vault\nHOST_VISIBLE=0\n")
+             "DNS_BLOCKED\nWORK=out,reports,vault\nHOST_VISIBLE=0\n")
 
 
 class TestProbes(Base):
@@ -1145,9 +1145,12 @@ class TestProbes(Base):
         cases = {"direct route open": ["DIRECT_OPEN"] + L[1:],
                  "non-allowed host tunnelled": [L[0], "HTTP/1.1 200 Connection Established"] + L[2:],
                  "anthropic refused": L[:2] + ["HTTP/1.1 403 Forbidden"] + L[3:],
-                 "an extra dir under /work": L[:3] + ["WORK=other,out,reports,vault", L[4]],
-                 "host state visible": L[:4] + ["HOST_VISIBLE=1"],
-                 "no HOST_VISIBLE line": L[:4],
+                 "an outside name resolves (the DNS exit)": L[:3] + ["DNS_RESOLVES"] + L[4:],
+                 "no DNS line": L[:3] + L[4:],
+                 "a DNS line that is neither token": L[:3] + ["DNS_BLOCKED?"] + L[4:],
+                 "an extra dir under /work": L[:4] + ["WORK=other,out,reports,vault", L[5]],
+                 "host state visible": L[:5] + ["HOST_VISIBLE=1"],
+                 "no HOST_VISIBLE line": L[:5],
                  "no output": [],
                  "a traceback instead": ["Traceback (most recent call last):", "  x", "OSError: boom"]}
         for why, lines in cases.items():
@@ -1155,11 +1158,63 @@ class TestProbes(Base):
                 run, _ = self.fake_probe_runner({"ads-drafter": "\n".join(lines) + "\n"})
                 j = RCA.probe_egress(self.root, run)
                 self.assertFalse(j["matches_expected"], j)
-                self.assertEqual(set(j), {"direct", "non_allowed", "anthropic", "work_entries",
+                self.assertEqual(set(j), {"direct", "non_allowed", "anthropic", "dns", "work_entries",
                                           "host_visible", "matches_expected"})
+        for why in ("an outside name resolves (the DNS exit)", "no DNS line", "a DNS line that is neither token"):
+            run, _ = self.fake_probe_runner({"ads-drafter": "\n".join(cases[why]) + "\n"})
+            j = RCA.probe_egress(self.root, run)
+            self.assertEqual(j["dns"], "resolves", why)                      # blocked only when it says so
+            self.assertEqual({k: v for k, v in j.items() if k not in ("dns", "matches_expected")},
+                             {"direct": "blocked", "non_allowed": "HTTP/1.1 403 Forbidden",
+                              "anthropic": "HTTP/1.1 200 Connection Established",
+                              "work_entries": ["out", "reports", "vault"], "host_visible": False}, why)
         run, _ = self.fake_probe_runner({"ads-drafter": ""})
         j = RCA.probe_egress(self.root, run)
-        self.assertEqual((j["direct"], j["host_visible"]), ("open", True))   # unproven is not "blocked"
+        self.assertEqual((j["direct"], j["dns"], j["host_visible"]), ("open", "resolves", True))   # unproven is not "blocked"
+
+    def test_the_egress_probe_script_measures_dns_as_the_ci_drafter_test_does(self):
+        """deploy/audit-mounts-integration.test.py's drafter-egress test is the one that has run
+        on real Docker: the probe resolves the same outside name the same way, after the same
+        three connections, and prints the same two tokens."""
+        with open(os.path.join(os.path.dirname(HERE), "deploy", "audit-mounts-integration.test.py")) as f:
+            ci = f.read()
+        script = RCA._EGRESS_PROBE
+        self.assertIn("socket.getaddrinfo('example.com',443)", ci)                       # control: CI's own probe
+        self.assertIn('socket.getaddrinfo("example.com", 443)', script)
+        for token in ("DNS_RESOLVES", "DNS_BLOCKED", "DIRECT_BLOCKED"):
+            self.assertIn(token, ci); self.assertIn(token, script)
+        self.assertIn("print(dns())", ci); self.assertIn("print(dns())", script)
+        order = [script.index(x) for x in ('print(direct())', 'print(via("example.com:443"))',
+                                           'print(via("api.anthropic.com:443"))', "print(dns())", 'print("WORK="')]
+        self.assertEqual(order, sorted(order))
+
+    def test_the_egress_probe_script_runs_and_reports_every_line(self):
+        """The script itself under the local python3 (no Docker), with the network calls stubbed:
+        six lines, in the order probe_egress reads them."""
+        body = RCA._EGRESS_PROBE.split("<<'EOF'\n", 1)[1].rsplit("\nEOF", 1)[0]
+        stub = ("import os, socket\n"
+                "os.listdir = lambda p: ['vault', 'reports', 'out']\n"
+                "os.path.exists = lambda p: False\n"
+                "class S:\n"
+                "    def sendall(self, b): self.t = b\n"
+                "    def recv(self, n): return (b'HTTP/1.1 200 Connection Established\\r\\n\\r\\n' "
+                "if b'api.anthropic.com:443' in self.t else b'HTTP/1.1 403 Forbidden\\r\\n\\r\\n')\n"
+                "def cc(addr, timeout=None):\n"
+                "    if addr != ('egress-proxy', 3128): raise OSError('unreachable')\n"
+                "    return S()\n"
+                "def gai(host, port):\n"
+                "    raise socket.gaierror(-3, 'Temporary failure in name resolution')\n"
+                "socket.create_connection = cc; socket.getaddrinfo = gai\n")
+        p = subprocess.run([sys.executable, "-c", stub + body], capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = p.stdout.splitlines()
+        self.assertEqual(lines, ["DIRECT_BLOCKED", "HTTP/1.1 403 Forbidden", "HTTP/1.1 200 Connection Established",
+                                 "DNS_BLOCKED", "WORK=out,reports,vault", "HOST_VISIBLE=0"])
+        self.assertEqual("".join(l + "\n" for l in lines), EGRESS_OK)      # what the unit tests feed probe_egress
+        p = subprocess.run([sys.executable, "-c", stub.replace("    raise socket.gaierror(-3, 'Temporary failure in name resolution')",
+                                                               "    return [(2, 1, 6, '', ('93.184.216.34', 443))]") + body],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.stdout.splitlines()[3], "DNS_RESOLVES")
 
     def test_probe_dirs_are_removed_even_if_stopping_the_proxy_raises(self):
         def boom(root, logs, say):
@@ -1169,10 +1224,44 @@ class TestProbes(Base):
             RCA.probe_egress(self.root, run)
         self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
 
+    def _probe_runner(self, argv, timeout=10):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            r = RCA.probe_runner(argv, None, timeout)
+        return r, out.getvalue(), err.getvalue()
+
     def test_probe_runner_returns_rc_and_stdout_only(self):
-        self.assertEqual(RCA.probe_runner(["sh", "-c", "echo out; echo err >&2; exit 3"], None, 10), (3, "out\n"))
-        rc, out = RCA.probe_runner(["sh", "-c", r"printf 'A\377B\n'"], None, 10)   # not UTF-8: no exception
+        r, printed, err = self._probe_runner(["sh", "-c", "echo out; echo err >&2; exit 3"])
+        self.assertEqual(r, (3, "out\n"))
+        self.assertEqual(printed, "")                          # nothing of the child's reaches our stdout
+        (rc, out), printed, _ = self._probe_runner(["sh", "-c", r"printf 'A\377B\n'"])   # not UTF-8: no exception
         self.assertEqual(rc, 0); self.assertTrue(out.startswith("A") and out.endswith("B\n"), out)
+        self.assertEqual(printed, "")
+
+    def test_probe_runner_echoes_a_bounded_tail_of_stderr_to_stderr(self):
+        r, printed, err = self._probe_runner(["sh", "-c", "echo out; echo 'compose: no such service' >&2; exit 3"])
+        self.assertEqual((r, printed), ((3, "out\n"), ""))
+        self.assertIn("compose: no such service", err)
+        noisy = "import sys; sys.stderr.write('HEAD' + 'x' * 5000 + 'TAIL'); print('out')"
+        r, printed, err = self._probe_runner([sys.executable, "-c", noisy])
+        self.assertEqual((r, printed), ((0, "out\n"), ""))
+        self.assertIn("TAIL", err); self.assertNotIn("HEAD", err)
+        self.assertLessEqual(len(err), RCA.PROBE_STDERR_TAIL + 200)
+        r, printed, err = self._probe_runner(["sh", "-c", "echo out"])     # a quiet child: nothing echoed
+        self.assertEqual((r, printed, err), ((0, "out\n"), "", ""))
+
+    def test_a_probes_stdout_stays_one_json_object_when_its_containers_write_to_stderr(self):
+        def fake_run(argv, **kw):
+            out = next((o for s, o in ENV_OK.items() if s in argv), "")
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="Container x  Creating\nContainer x  Created\n")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(RCA.subprocess, "run", fake_run), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = RCA.main(["--probe-env"], root=self.root)
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())
+        self.assertTrue(json.loads(out.getvalue())["matches_declared"])
+        self.assertIn("Container x  Created", err.getvalue())
 
     def test_probe_runner_timeout_is_rc_124_and_removes_the_named_container(self):
         cmds = []
@@ -1180,6 +1269,9 @@ class TestProbes(Base):
             r = RCA.probe_runner(["sh", "-c", "sleep 5", "--name", "hermes-audit-x-draft"], None, 0.2)
             self.assertEqual(r, (124, ""))
             self.assertEqual(RCA.probe_runner(["sleep", "5"], None, 0.2), (124, ""))   # no name: nothing removed
+            r, printed, err = self._probe_runner(["sh", "-c", "echo stuck >&2; exec sleep 5"], timeout=0.5)
+            self.assertEqual((r, printed), ((124, ""), ""))
+            self.assertIn("stuck", err)                        # what it said before the timeout is not lost
         self.assertEqual(cmds, [["docker", "rm", "-f", "hermes-audit-x-draft"]])
 
     def test_probe_runner_interrupt_removes_the_named_container_and_propagates(self):
@@ -1223,7 +1315,7 @@ class TestProbeCli(Base):
         self.assertEqual(rc, 0, err)
         self.assertEqual(len(out.splitlines()), 1, out)
         self.assertEqual(json.loads(out), {"direct": "blocked", "non_allowed": "HTTP/1.1 403 Forbidden",
-                                           "anthropic": "HTTP/1.1 200 Connection Established",
+                                           "anthropic": "HTTP/1.1 200 Connection Established", "dns": "blocked",
                                            "work_entries": ["out", "reports", "vault"], "host_visible": False,
                                            "matches_expected": True})
         self.assertEqual(len(self.proxy_stops), 1)

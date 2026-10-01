@@ -330,27 +330,46 @@ def via(t):
     s = socket.create_connection(("egress-proxy", 3128), timeout=10)
     s.sendall(("CONNECT %s HTTP/1.1\r\nHost: x\r\n\r\n" % t).encode())
     return s.recv(128).split(b"\r\n")[0].decode()
+def dns():
+    try:
+        socket.getaddrinfo("example.com", 443); return "DNS_RESOLVES"
+    except OSError:
+        return "DNS_BLOCKED"
 print(direct()); print(via("example.com:443")); print(via("api.anthropic.com:443"))
+print(dns())
 print("WORK=" + ",".join(sorted(os.listdir("/work"))))
 print("HOST_VISIBLE=%d" % os.path.exists("/var/lib/hermes"))
 EOF'''
 _PROBE_DIRS = {"HERMES_AUDIT_DATA_DIR": "audit-data", "HERMES_REPORTS_DIR": "reports",
                "HERMES_VAULT_DIR": "vaults", "HERMES_DRAFT_OUT_DIR": "draft-out"}
+PROBE_STDERR_TAIL = 2000
 
 
 def probe_runner(argv, env, timeout):
     """(rc, stdout). As in real_runner, a timeout or an interrupt stops only the `docker compose`
     client, so a named `run` container is removed explicitly: the probes' names are fixed, and a
-    leftover one would refuse every later probe. Undecodable output is replaced, never raised."""
+    leftover one would refuse every later probe. Undecodable output is replaced, never raised.
+    The child's stderr (compose's progress, a failure's reason) is echoed to OUR stderr, its
+    last PROBE_STDERR_TAIL characters only; stdout stays the probe's one JSON object."""
     try:
         p = subprocess.run(argv, env=env, capture_output=True, text=True, errors="replace", timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        _probe_stderr(e.stderr)
         _probe_remove_named(argv)
         return 124, ""
     except (SystemExit, KeyboardInterrupt):
         _probe_remove_named(argv)
         raise
+    _probe_stderr(p.stderr)
     return p.returncode, p.stdout
+
+
+def _probe_stderr(text):
+    if isinstance(text, bytes):                 # what a timeout hands back, even in text mode
+        text = text.decode("utf-8", errors="replace")
+    if text:
+        tail = text[-PROBE_STDERR_TAIL:]
+        print(tail if tail.endswith("\n") else tail + "\n", end="", file=sys.stderr)
 
 
 def _probe_remove_named(argv):
@@ -473,11 +492,16 @@ def probe_egress(root, runner=None):
         get = lambda i: lines[i] if len(lines) > i else ""
         work = next((l[5:].split(",") for l in lines if l.startswith("WORK=")), [])
         host_visible = "HOST_VISIBLE=0" not in lines     # fail closed: hidden only when it says so
+        # The DNS exit (CVE-2024-29018: an old engine forwards an internal network's outside
+        # lookups): an outside name must not resolve. Fail closed: blocked only when it says so.
+        # (`egress-proxy` itself resolves, by Docker's internal DNS: lines 1 and 2 prove that.)
         j = {"direct": "blocked" if get(0) == "DIRECT_BLOCKED" else "open",
-             "non_allowed": get(1), "anthropic": get(2), "work_entries": work, "host_visible": host_visible}
+             "non_allowed": get(1), "anthropic": get(2),
+             "dns": "blocked" if get(3) == "DNS_BLOCKED" else "resolves",
+             "work_entries": work, "host_visible": host_visible}
         j["matches_expected"] = (j["direct"] == "blocked" and " 403" in j["non_allowed"]
-                                 and " 200" in j["anthropic"] and sorted(work) == ["out", "reports", "vault"]
-                                 and not host_visible)
+                                 and " 200" in j["anthropic"] and j["dns"] == "blocked"
+                                 and sorted(work) == ["out", "reports", "vault"] and not host_visible)
         return j
     finally:
         _probe_cleanup(root, base, proxy=True)
