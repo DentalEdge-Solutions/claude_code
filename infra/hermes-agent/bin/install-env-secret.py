@@ -9,15 +9,19 @@ a value without the expected prefix, and replaces or appends the one NAME= line.
 line is kept byte-for-byte. The new file is written beside the old one (O_EXCL), fsync'd, given
 its owner and mode on the fd, and renamed over it: a governed file is never half-written, and a
 bad input never replaces a good file (the 2026-09-30 registry lesson). Never prints a value."""
-import argparse, getpass, os, re, stat, sys
+import argparse, getpass, os, re, stat, sys, warnings
 
 NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
 def _tty_value():
+    # getpass silently falls back to echoing stdin (GetPassWarning) when /dev/tty or echo control
+    # is unavailable; turn that into "no value" so the tool refuses instead.
     try:
-        return getpass.getpass("value (hidden): ")
-    except (EOFError, OSError):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            return getpass.getpass("value (hidden): ")
+    except (EOFError, OSError, getpass.GetPassWarning):
         return None
 
 
@@ -28,31 +32,54 @@ def _lines(path):
         return [], None
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
         raise ValueError(f"{path} is a symlink or not a regular file")
-    with open(path, encoding="utf-8") as f:
-        return f.read().splitlines(keepends=True), st
+    # newline="" + split on "\n" only: CRLF, \x0c etc. in other lines survive byte-for-byte.
+    with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
+        return _split(f.read()), st
+
+
+def _split(text):
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
 
 
 def _is_assign(line, name):
-    s = line.lstrip()
+    s = line.lstrip(" \t")
     if s.startswith("export "):
-        s = s[len("export "):].lstrip()
+        s = s[len("export "):].lstrip(" \t")
     return s.startswith(name + "=")
 
 
+def _write_all(fd, data):
+    view = memoryview(data); total = 0
+    while total < len(data):
+        n = os.write(fd, view[total:])
+        if not n or n < 0:
+            raise OSError("short write: no progress")
+        total += n
+    if total != len(data):
+        raise OSError("short write")
+
+
 def _write(path, lines, mode, uid, gid):
+    data = "".join(lines).encode("utf-8", "surrogateescape")
     d = os.path.dirname(os.path.abspath(path))
     tmp = os.path.join(d, ".%s.%d.tmp" % (os.path.basename(path), os.getpid()))
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, "".join(lines).encode("utf-8"))
-        os.fsync(fd)
-        if uid is not None:
-            os.fchown(fd, uid, gid)
-        os.fchmod(fd, mode)
+        try:
+            _write_all(fd, data)
+            os.fsync(fd)
+            if uid is not None:
+                os.fchown(fd, uid, gid)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)                                  # exactly once
+        os.rename(tmp, path)
     except BaseException:
-        os.close(fd); os.unlink(tmp); raise
-    os.close(fd)
-    os.rename(tmp, path)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def main(argv=None, read_value=_tty_value):
@@ -68,6 +95,8 @@ def main(argv=None, read_value=_tty_value):
     s.add_argument("--owner-gid", type=int)
     a = ap.parse_args(argv)
     try:
+        if a.cmd == "set" and not a.prefix:
+            raise ValueError("refused: --prefix must not be empty")
         if not NAME_RE.match(a.name):
             raise ValueError("invalid variable name")
         lines, st = _lines(a.file)
@@ -81,6 +110,10 @@ def main(argv=None, read_value=_tty_value):
         v = read_value()
         if not v or "\n" in v or "\r" in v or not v.startswith(a.prefix):
             raise ValueError(f"refused: the value is empty, multi-line, or does not start with {a.prefix!r}")
+        try:
+            v.encode("utf-8")                             # strict: no lone surrogates
+        except UnicodeEncodeError:
+            raise ValueError("refused: the value is not valid UTF-8 text") from None
         new = f"{a.name}={v}\n"
         idx = next((i for i, l in enumerate(lines) if _is_assign(l, a.name)), None)
         if idx is None:                                   # append, keeping a final newline

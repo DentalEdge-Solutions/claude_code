@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, os, stat, tempfile, unittest
+import contextlib, importlib.util, io, os, stat, tempfile, unittest, warnings
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("ies", os.path.join(HERE, "install-env-secret.py"))
 S = importlib.util.module_from_spec(spec); spec.loader.exec_module(S)
@@ -67,6 +68,72 @@ class T(unittest.TestCase):
         self.assertNotIn("SECRET", text)
         self.assertEqual(open(self.f).read(), "A=1\n")
         self.assertEqual(open(stale).read(), "stale")   # the other run's temp is not touched
+
+    def _set(self, value, name="ANTHROPIC_API_KEY", prefix="sk-ant-"):
+        return self.run_(["set", "--file", self.f, "--name", name, "--prefix", prefix,
+                          "--mode", "0400"], value)
+
+    def _no_temps(self):
+        self.assertEqual([n for n in os.listdir(self.d) if n.endswith(".tmp")], [])
+
+    def test_rename_failure_removes_temp_and_keeps_original(self):
+        open(self.f, "w").write("A=1\n")
+        with mock.patch.object(S.os, "rename", side_effect=OSError("boom")):
+            rc, text = self._set("sk-ant-SECRET")
+        self.assertEqual(rc, 2); self.assertNotIn("SECRET", text)
+        self.assertEqual(open(self.f).read(), "A=1\n")
+        self._no_temps()
+
+    def test_no_progress_write_refused_and_cleaned_up(self):
+        open(self.f, "w").write("A=1\n")
+        with mock.patch.object(S.os, "write", return_value=0):
+            rc, _ = self._set("sk-ant-SECRET")
+        self.assertEqual(rc, 2)
+        self.assertEqual(open(self.f).read(), "A=1\n")
+        self._no_temps()
+
+    def test_short_write_is_completed_never_truncated(self):
+        real = os.write; calls = []
+        def short(fd, data):
+            calls.append(len(data))
+            return real(fd, bytes(data)[:3]) if len(calls) == 1 else real(fd, data)
+        with mock.patch.object(S.os, "write", side_effect=short):
+            rc, text = self._set("sk-ant-SECRET")
+        self.assertEqual(rc, 0, text); self.assertGreater(len(calls), 1)
+        self.assertEqual(open(self.f).read(), "ANTHROPIC_API_KEY=sk-ant-SECRET\n")
+
+    def test_getpass_stdin_fallback_is_refused(self):
+        def fallback(prompt=""):
+            warnings.warn("no tty", S.getpass.GetPassWarning)
+            return "sk-ant-FROMSTDIN"
+        with mock.patch.object(S.getpass, "getpass", side_effect=fallback):
+            self.assertIsNone(S._tty_value())
+            open(self.f, "w").write("A=1\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = S.main(["set", "--file", self.f, "--name", "ANTHROPIC_API_KEY",
+                             "--prefix", "sk-ant-", "--mode", "0400"])
+        self.assertEqual(rc, 2); self.assertEqual(open(self.f).read(), "A=1\n")
+
+    def test_empty_prefix_refused(self):
+        rc, _ = self._set("anything", prefix="")
+        self.assertEqual(rc, 2); self.assertFalse(os.path.exists(self.f))
+
+    def test_other_lines_preserved_byte_for_byte_crlf_and_formfeed(self):
+        raw = b"A=1\r\n\x0cANTHROPIC_API_KEY=keepme\nB=2\x0c\r\nANTHROPIC_API_KEY=old\r\nlast"
+        open(self.f, "wb").write(raw)
+        rc, _ = self._set("sk-ant-new")
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(self.f, "rb").read(),
+                         b"A=1\r\n\x0cANTHROPIC_API_KEY=keepme\nB=2\x0c\r\nANTHROPIC_API_KEY=sk-ant-new\nlast")
+
+    def test_lone_surrogate_value_refused_without_leaking(self):
+        open(self.f, "w").write("A=1\n")
+        rc, text = self._set("sk-ant-\udc80X")
+        self.assertEqual(rc, 2)
+        self.assertNotIn("udc80", text.lower()); self.assertNotIn("\udc80", text)
+        self.assertEqual(open(self.f).read(), "A=1\n")
+        self._no_temps()
 
 
 if __name__ == "__main__":
