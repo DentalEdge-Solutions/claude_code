@@ -253,9 +253,18 @@ _BROKER_WRITES = {"refused": ("inactive_client", "quota", "disabled"),
                   "failed": ("timeout", "interrupted", "internal")}
 
 
-def _same_json(a, b):
-    """Equal as JSON. Plain == is not enough here: it calls False equal to 0 and 1.0 equal to 1."""
-    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+def _same_json(r, want):
+    """Is the hostile `r` the same JSON as `want`, a value this module built? It walks `want`
+    and never `r`, so an `r` nested deeper than the interpreter recurses costs one type check
+    (re-serializing it would be a RecursionError). Types are compared exactly: plain == calls
+    False equal to 0 and 1.0 equal to 1."""
+    if type(r) is not type(want):
+        return False
+    if isinstance(want, dict):
+        return r.keys() == want.keys() and all(_same_json(r[k], v) for k, v in want.items())
+    if isinstance(want, list):
+        return len(r) == len(want) and all(map(_same_json, r, want))
+    return r == want
 
 
 def _broker_could_write(r, is_list):
@@ -290,7 +299,10 @@ def result_in_whitelist(r):
     produces is out. `r` is any JSON value and is hostile: this never raises."""
     if not isinstance(r, dict) or set(r) not in (_RUN_KEYS, _LIST_KEYS):
         return False, False
-    return True, bool(_broker_could_write(r, set(r) == _LIST_KEYS))
+    try:
+        return True, bool(_broker_could_write(r, set(r) == _LIST_KEYS))
+    except RecursionError:                    # belt and braces: no check above recurses into `r`
+        return True, False
 
 
 def write_json_atomic(dirpath, name, obj, mode=SPOOL_FILE_MODE, uid=None, gid=None, tmpdir=None):

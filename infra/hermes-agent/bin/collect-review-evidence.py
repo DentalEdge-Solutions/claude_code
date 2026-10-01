@@ -812,15 +812,30 @@ def _label(value, allowed):
     return value if isinstance(value, str) and value in allowed else "?"
 
 
+def _journal(host, unit):
+    return _ok(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
+
+
+def _journal_leaks(text, secrets, redactor):
+    """What a unit's journal must hold none of: lines of Google-credential-shaped text, lines
+    with a registered customer id, and (as D2.3 counts them) credential patterns and the
+    installed secret values themselves. Counts only, never a line."""
+    lines = text.splitlines()
+    return {"credential_text_lines": sum(1 for l in lines if R.looks_like_credential_text(l)),
+            "customer_id_lines": sum(1 for l in lines if redactor.has_customer_id(l)),
+            **_count_cred_text(text, secrets)}
+
+
 def d10_7(host, ctx):
-    """Counts only, never a line: the journal names clients and request ids by design."""
-    out = _ok(host, ["journalctl", "-u", f"hermes-app-broker@{APP}", "--since", "-30d", "-o", "cat", "--no-pager"])
-    counts, notes, other, cred, cids = {}, {}, 0, 0, 0
-    for line in out.splitlines():
+    """Counts only, never a line: the journal names clients and request ids by design. The
+    status/reason counts are the broker's; the leak counts cover the runner's journal too,
+    which is where run-client-audit's own output lands (its unit sets no StandardOutput)."""
+    broker = _journal(host, f"hermes-app-broker@{APP}")
+    runner = _journal(host, f"hermes-app-runner@{APP}")
+    counts, notes, other = {}, {}, 0
+    for line in broker.splitlines():
         if not line.strip():
             continue
-        cred += R.looks_like_credential_text(line)
-        cids += ctx["redactor"].has_customer_id(line)
         body = line[len(_BROKER_LINE):] if line.startswith(_BROKER_LINE) else ""
         say, note = _SAY_RE.fullmatch(body), _NOTE_RE.match(body)
         if say:
@@ -830,8 +845,13 @@ def d10_7(host, ctx):
             notes[note.group(1)] = notes.get(note.group(1), 0) + 1
         else:
             other += 1                                      # systemd's own lines, a traceback, anything else
+    # The values D2.1 read from the installed credential files (it runs first). With none
+    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
+    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
     return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
-            "credential_text_lines": cred, "customer_id_lines": cids}
+            "broker_journal": _journal_leaks(broker, secrets, ctx["redactor"]),
+            "runner_journal": _journal_leaks(runner, secrets, ctx["redactor"]),
+            "known_secrets_checked": len(secrets)}
 
 
 def d10_8(host, ctx):
@@ -842,20 +862,22 @@ def d10_8(host, ctx):
     d = host.path(APP_RESULTS)
     rows, bad = [], 0
     for n in sorted(os.listdir(d)):
+        # Everything done with one entry sits inside this guard: whatever a file holds, and
+        # whatever goes wrong judging it, costs that entry's row and never the other rows.
         try:
             obj = json.loads(A.read_capped(os.path.join(d, n), A.MAX_DONE_BYTES))
             if not isinstance(obj, dict):
                 raise ValueError("not an object")
-        except (OSError, ValueError, RecursionError):       # A.Refused is a ValueError
-            rows.append({"keys_ok": False, "values_ok": False}); bad += 1
-            continue
-        keys_ok, values_ok = A.result_in_whitelist(obj)
-        values_ok = values_ok and obj["request_id"] + ".json" == n
-        rows.append({"op": _label(obj.get("op"), A.KNOWN_OPS),
-                     "status": _label(obj.get("status"), A.STATUSES),
-                     "reason": _label(obj.get("reason"), A.BROKER_REASONS + A.COMMAND_REASONS),
-                     "keys_ok": keys_ok, "values_ok": values_ok})
-        bad += not (keys_ok and values_ok)
+            keys_ok, values_ok = A.result_in_whitelist(obj)
+            values_ok = values_ok and obj["request_id"] + ".json" == n
+            row = {"op": _label(obj.get("op"), A.KNOWN_OPS),
+                   "status": _label(obj.get("status"), A.STATUSES),
+                   "reason": _label(obj.get("reason"), A.BROKER_REASONS + A.COMMAND_REASONS),
+                   "keys_ok": keys_ok, "values_ok": values_ok}
+        except Exception:                                   # OSError, ValueError (A.Refused), RecursionError, ...
+            row = {"keys_ok": False, "values_ok": False}
+        rows.append(row)
+        bad += not (row["keys_ok"] and row["values_ok"])
     return {"results": rows, "out_of_whitelist": bad}
 
 

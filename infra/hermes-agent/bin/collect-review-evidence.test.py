@@ -607,8 +607,9 @@ class TestD10(Base):
         super().setUp()
         self.outputs[("run-client-audit", "--probe-env")] = (0, json.dumps({"matches_declared": True, "services": {}}), "")
         self.outputs[("run-client-audit", "--probe-egress")] = (0, json.dumps({"matches_expected": True}), "")
-        self.outputs[("journalctl",)] = (0, BROKER + "request=x op=run client=acme-dental status=refused reason=quota\n"
-                                            + BROKER + "request=y op=run client=acme-dental status=ok reason=-\n", "")
+        self._journal(broker=BROKER + "request=x op=run client=acme-dental status=refused reason=quota\n"
+                             + BROKER + "request=y op=run client=acme-dental status=ok reason=-\n",
+                      runner="Collecting...\nAudit complete.\n")
         self.res = os.path.join(self.root, CE.APP_RESULTS.lstrip("/")); os.makedirs(self.res)
         self.good = {"request_id": RID_A, "op": "run", "client": "acme-dental",
                      "status": "ok", "reason": None, "exit_code": 0, "ts": "2026-10-01_12-00-00", "steps": [],
@@ -619,6 +620,13 @@ class TestD10(Base):
     def _result(self, obj, name=None):
         with open(os.path.join(self.res, name or obj["request_id"] + ".json"), "w") as f:
             json.dump(obj, f)
+
+    def _journal(self, broker=None, runner=None):
+        """Each unit's journal text, or an (rc, out, err) tuple for a failing journalctl."""
+        for unit, out in (("broker", broker), ("runner", runner)):
+            if out is not None:
+                self.outputs[("journalctl", "-u", f"hermes-app-{unit}@ads-audit")] = \
+                    out if isinstance(out, tuple) else (0, out, "")
 
     def _item(self, iid):
         return CE.collect(self.host(), self.KEY)["items"][iid]
@@ -855,53 +863,106 @@ class TestD10(Base):
         self.assertNotIn("acme-dental", json.dumps(d))
 
     def test_d10_7_counts_every_kind_of_line_the_broker_writes(self):
-        self.outputs[("journalctl",)] = (
-            0, BROKER + f"request={RID_A} op=run client=acme-dental status=queued reason=-\n"
-               + BROKER + "request=- op=- client=- status=dropped reason=bad_request\n"
-               + BROKER + "request=- op=- client=- status=dropped reason=expired\n"
-               + BROKER + f"request={RID_A} op=run client=acme-dental status=dropped reason=duplicate\n"
-               + BROKER + f"request={RID_A} op=run client=acme-dental status=failed reason=proxy\n"
-               + BROKER + f"request={RID_A} op=run client=acme-dental status=busy reason=busy\n"
-               + BROKER + f"request={RID_B} op=- client=- status=refused reason=bad_request\n"
-               + BROKER + "warning: daily refusal cap reached (request dropped, not recorded)\n"
-               + BROKER + "error: could not remove a spool entry\n"
-               + BROKER + "error: a request could not be processed (left for the next pass)\n"
-               "Started hermes-app-broker@ads-audit.service.\n"
-               "Traceback (most recent call last):\n"
-               "\n", "")
+        self._journal(broker=(
+            BROKER + f"request={RID_A} op=run client=acme-dental status=queued reason=-\n"
+            + BROKER + "request=- op=- client=- status=dropped reason=bad_request\n"
+            + BROKER + "request=- op=- client=- status=dropped reason=expired\n"
+            + BROKER + f"request={RID_A} op=run client=acme-dental status=dropped reason=duplicate\n"
+            + BROKER + f"request={RID_A} op=run client=acme-dental status=failed reason=proxy\n"
+            + BROKER + f"request={RID_A} op=run client=acme-dental status=busy reason=busy\n"
+            + BROKER + f"request={RID_B} op=- client=- status=refused reason=bad_request\n"
+            + BROKER + "warning: daily refusal cap reached (request dropped, not recorded)\n"
+            + BROKER + "error: could not remove a spool entry\n"
+            + BROKER + "error: a request could not be processed (left for the next pass)\n"
+            "Started hermes-app-broker@ads-audit.service.\n"
+            "Traceback (most recent call last):\n"
+            "\n"))
         d = self._item("D10.7")["data"]
         self.assertEqual(d["journal_counts"],
                          {"queued/-": 1, "dropped/bad_request": 1, "dropped/expired": 1, "dropped/duplicate": 1,
                           "failed/proxy": 1, "busy/busy": 1, "refused/bad_request": 1})
         self.assertEqual(d["note_counts"], {"warning": 1, "error": 2})
         self.assertEqual(d["other_lines"], 2)
-        self.assertEqual((d["credential_text_lines"], d["customer_id_lines"]), (0, 0))
+        clean = {"credential_text_lines": 0, "customer_id_lines": 0, "pattern_hits": 0, "known_secret_hits": 0}
+        self.assertEqual((d["broker_journal"], d["runner_journal"]), (clean, clean))
 
     def test_d10_7_unknown_status_or_reason_is_a_question_mark_never_the_text(self):
-        self.outputs[("journalctl",)] = (
-            0, BROKER + "request=x op=run client=acme-dental status=weird-host-name reason=quota\n"
-               + BROKER + "request=x op=run client=acme-dental status=ok reason=some-free-text\n"
-               "something status=ok reason=quota but not a broker line\n", "")
+        self._journal(broker=BROKER + "request=x op=run client=acme-dental status=weird-host-name reason=quota\n"
+                             + BROKER + "request=x op=run client=acme-dental status=ok reason=some-free-text\n"
+                             "something status=ok reason=quota but not a broker line\n")
         it = self._item("D10.7")
         self.assertEqual(it["data"]["journal_counts"], {"?/quota": 1, "ok/?": 1})
         self.assertEqual(it["data"]["other_lines"], 1)
         self.assertNotIn("weird-host-name", json.dumps(it)); self.assertNotIn("some-free-text", json.dumps(it))
 
     def test_d10_7_counts_credential_text_and_customer_id_lines_never_the_lines(self):
-        self.outputs[("journalctl",)] = (
-            0, BROKER + "request=x op=run client=acme-dental status=ok reason=-\n"
-               f"oops GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n"
-               "customer 123-456-7890 failed\ncustomer 1234567890 failed\ncustomer 9999999999 is not ours\n", "")
+        self._journal(broker=BROKER + "request=x op=run client=acme-dental status=ok reason=-\n"
+                             f"oops GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n"
+                             "customer 123-456-7890 failed\ncustomer 1234567890 failed\ncustomer 9999999999 is not ours\n")
         it = self._item("D10.7")
-        self.assertEqual((it["data"]["credential_text_lines"], it["data"]["customer_id_lines"]), (1, 2))
+        self.assertEqual(it["data"]["broker_journal"], {"credential_text_lines": 1, "customer_id_lines": 2,
+                                                        "pattern_hits": 1, "known_secret_hits": 1})
+        self.assertEqual(it["data"]["runner_journal"], {"credential_text_lines": 0, "customer_id_lines": 0,
+                                                        "pattern_hits": 0, "known_secret_hits": 0})
         self.assertEqual(it["data"]["other_lines"], 4)
         out = json.dumps(it)
         for leak in (TOKEN, "1234567890", "123-456-7890", "9999999999", "oops"):
             self.assertNotIn(leak, out)
 
-    def test_d10_7_journalctl_failure_is_could_not_check(self):
-        self.outputs[("journalctl",)] = (1, "", "no journal")
-        self.assertEqual(self._item("D10.7")["status"], R.COULD_NOT_CHECK)
+    # The runner's journal is where run-client-audit's own output lands (the unit sets no
+    # StandardOutput), so it is the likelier place for a customer id or a credential.
+    CLIENT_SECRET = "GOCSPX-NOT-A-REAL-CLIENT-SECRET"                 # installed, and not Google-token shaped
+
+    def _install_client_secret(self):
+        self._w(CE.AGENT_DIR + "/.env.gaw", "GOOGLE_ADS_CREDENTIAL_ROLE=write\n"
+                f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\nGOOGLE_ADS_CLIENT_SECRET={self.CLIENT_SECRET}\n")
+
+    def test_d10_7_runner_journal_customer_id_is_counted_under_the_runner_key(self):
+        self._journal(runner="Collecting for customer 1234567890\nand again 123-456-7890\nAudit complete.\n")
+        b = CE.collect(self.host(), self.KEY)
+        d = b["items"]["D10.7"]["data"]
+        self.assertEqual(d["runner_journal"]["customer_id_lines"], 2)
+        self.assertEqual(d["broker_journal"]["customer_id_lines"], 0)
+        self.assertEqual(d["journal_counts"], {"refused/quota": 1, "ok/-": 1})      # broker-only, unchanged
+        self.assertEqual(d["other_lines"], 0)                                       # runner lines are not broker lines
+        out = json.dumps(b)
+        self.assertNotIn("1234567890", out); self.assertNotIn("123-456-7890", out)
+        self.assertNotIn("Collecting for customer", out)
+
+    def test_d10_7_runner_journal_installed_secret_value_is_counted_under_the_runner_key(self):
+        self._install_client_secret()
+        self._journal(runner=f"debug: secret is {self.CLIENT_SECRET}\nheader {self.CLIENT_SECRET} {self.CLIENT_SECRET}\n")
+        b = CE.collect(self.host(), self.KEY)
+        d = b["items"]["D10.7"]["data"]
+        self.assertEqual(d["runner_journal"], {"credential_text_lines": 0,          # not Google-shaped text:
+                                               "customer_id_lines": 0, "pattern_hits": 0,
+                                               "known_secret_hits": 3})             # only the known value finds it
+        self.assertEqual(d["broker_journal"]["known_secret_hits"], 0)
+        self.assertEqual(d["known_secrets_checked"], 2)                             # the token and the client secret
+        self.assertNotIn(self.CLIENT_SECRET, json.dumps(b))
+
+    def test_d10_7_broker_journal_installed_secret_value_is_counted_under_the_broker_key(self):
+        self._install_client_secret()
+        self._journal(broker=f"Traceback: {self.CLIENT_SECRET}\n")
+        d = self._item("D10.7")["data"]
+        self.assertEqual((d["broker_journal"]["known_secret_hits"], d["runner_journal"]["known_secret_hits"]), (1, 0))
+
+    def test_d10_7_reads_both_units_over_the_same_window(self):
+        host = self.host()
+        CE.collect(host, self.KEY)
+        calls = [c for c in host.calls if c[:2] == ["journalctl", "-u"]]
+        self.assertEqual([c[2] for c in calls], ["hermes-app-broker@ads-audit", "hermes-app-runner@ads-audit"])
+        self.assertEqual(calls[0][3:], calls[1][3:])
+        self.assertIn("-30d", calls[0])
+
+    def test_d10_7_a_failing_journalctl_for_either_unit_is_could_not_check(self):
+        for unit in ("broker", "runner"):
+            with self.subTest(unit=unit):
+                self.setUp()
+                self._journal(**{unit: (1, "", "no journal")})
+                it = self._item("D10.7")
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                self.assertIn("journalctl exited 1", it["reason"])
 
     # ---- D10.8 -------------------------------------------------------------------------
     def test_d10_8_flags_out_of_whitelist_results(self):
@@ -939,6 +1000,39 @@ class TestD10(Base):
                          {"op": "run", "status": "ok", "reason": "-", "keys_ok": True, "values_ok": False})
         self.assertEqual(d["results"][3:13], [unread] * 10)
         self.assertEqual(d["results"][13], {"op": "?", "status": "?", "reason": "?", "keys_ok": False, "values_ok": False})
+
+    def test_d10_8_deeply_nested_result_is_one_out_of_whitelist_row(self):
+        # Valid JSON nested about as deep as the interpreter recurses: it parses, and the whitelist
+        # check must not die on it (it once re-serialized the value, a few frames deeper). The
+        # sweep is wide because the depth that bites depends on how deep the caller's own stack is.
+        limit = sys.getrecursionlimit()
+        host = self.host()
+        for depth in list(range(limit - 150, limit + 10)) + [5000, 20000]:
+            for nest in ("[" * depth + "]" * depth, '{"a":' * depth + "1" + "}" * depth):
+                body = json.dumps(CE.A.refused_result(RID_C, "run", "acme-dental", "quota")).replace(
+                    '"steps": []', '"steps": ' + nest)
+                if len(body) > CE.A.MAX_DONE_BYTES:
+                    continue
+                with open(os.path.join(self.res, RID_C + ".json"), "w") as f:
+                    f.write(body)
+                with self.subTest(depth=depth, kind=nest[0]):
+                    d = CE.d10_8(host, {})
+                    self.assertEqual((len(d["results"]), d["out_of_whitelist"]), (3, 2))
+                    self.assertIs(d["results"][2]["values_ok"], False)
+
+    def test_d10_8_a_raise_from_the_whitelist_check_costs_one_row_never_the_item(self):
+        real = CE.A.result_in_whitelist
+
+        def flaky(obj):
+            if obj["request_id"] == RID_A:
+                raise RecursionError("maximum recursion depth exceeded")
+            return real(obj)
+        with mock.patch.object(CE.A, "result_in_whitelist", side_effect=flaky):
+            it = self._item("D10.8")
+        self.assertEqual(it["status"], R.OBSERVED)
+        self.assertEqual(it["data"], {"out_of_whitelist": 2, "results": [
+            {"keys_ok": False, "values_ok": False},
+            {"op": "run", "status": "ok", "reason": "?", "keys_ok": True, "values_ok": False}]})
 
     def test_d10_8_rows_never_carry_a_slug_a_request_id_or_free_text(self):
         self._result(dict(self.good, request_id=RID_C, client="other-client", reason="leaked 1234567890"))

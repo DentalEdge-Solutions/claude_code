@@ -438,6 +438,46 @@ class TestWhitelist(unittest.TestCase):
                         self.assertIs(values_ok, same or (k, v) in (("audits", []), ("steps", []),
                                                                     ("vault_path", None)))
 
+    @staticmethod
+    def _nested(depth, kind):
+        return "[" * depth + "]" * depth if kind == "array" else '{"a":' * depth + "1" + "}" * depth
+
+    def _deepest_parsable(self, kind):
+        lo, hi = 1, 1 << 21                       # json.loads parses `lo` levels and refuses `hi`
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            try:
+                json.loads(self._nested(mid, kind))
+                lo = mid
+            except RecursionError:
+                hi = mid
+        return lo
+
+    def test_never_raises_on_json_nested_as_deep_as_the_parser_allows(self):
+        # A value json.loads accepts must be judged, not re-serialized: json.dumps recurses a
+        # few frames deeper than json.loads, so there is a depth that parses and cannot be dumped.
+        # The sweep covers the interpreter's recursion limit and the parser's own limit.
+        limit = sys.getrecursionlimit()
+        bases = (A.map_done(REQ, done(), m()), A.refused_result(RID, "run", "acme-dental", "quota"),
+                 A.refused_result(RID, None, None, "bad_request"),
+                 self._list(0, {"status": "ok", "audits": ["2026-10-01_12-00-00"]}))
+        for kind in ("array", "object"):
+            top = self._deepest_parsable(kind)
+            depths = set(range(limit - 20, limit + 20)) | set(range(top - 10, top + 1)) \
+                | {top * i // 8 for i in range(1, 8)}
+            for depth in sorted(d for d in depths if 0 < d <= top):
+                v = json.loads(self._nested(depth, kind))
+                for base in bases:
+                    for k in base:
+                        with self.subTest(kind=kind, depth=depth, k=k):
+                            self.assertEqual(A.result_in_whitelist(dict(base, **{k: v})), (True, False))
+
+    def test_a_recursion_error_from_the_checks_is_out_of_whitelist_not_a_raise(self):
+        ok = A.map_done(REQ, done(), m())
+        with mock.patch.object(A, "_broker_could_write", side_effect=RecursionError):
+            self.assertEqual(A.result_in_whitelist(ok), (True, False))
+        self.assertEqual(A.result_in_whitelist(ok), (True, True))                  # control
+
 
 if __name__ == "__main__":
     unittest.main()
