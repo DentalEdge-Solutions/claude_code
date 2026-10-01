@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """One client's Google Ads trend-audit DRAFT on the box (spec 2026-09-29 ads-audits-on-the-box).
 
-  sudo run-client-audit <client> [--dry-run]
+  sudo run-client-audit <client> [--dry-run] [--json]
+  sudo run-client-audit <client> --list --json
+
+--json: exactly one JSON line on stdout (the broker's contract, Option B §3.5), every human line
+on stderr. --list: this client's audit timestamps (newest 24), no lock taken.
 
 Pre-checks, then: collect (one-shot ads-collector) -> snapshot (host) -> readers (one-shot
 ads-reader) -> egress-proxy up -> draft (claude -p in the one-shot ads-drafter, which sees only
@@ -75,6 +79,26 @@ def step_name(argv):
         return "proxy"
     return "snapshot" if any(a.endswith("ads-metrics-snapshot.py") for a in argv) else "vault-write"
     # (snapshot and vault-write argvs may start with RUN_AS_DATA_UID; neither test looks at argv[0])
+
+
+STEP_CLASSES = ("collect", "snapshot", "read", "proxy", "draft", "isolation", "vault-write")
+LIST_LIMIT = 24
+
+
+def step_class(name):
+    return name.split(":", 1)[0]
+
+
+def json_result(status, reason, rc, ts, results, vault_path):
+    agg = {}
+    for name, r, secs in results:
+        c = step_class(name)
+        prev = agg.get(c, {"name": c, "rc": 0, "seconds": 0.0})
+        r_int = r if isinstance(r, int) else 1
+        agg[c] = {"name": c, "rc": max(prev["rc"], r_int), "seconds": round(prev["seconds"] + secs, 1)}
+    steps = [agg[c] for c in STEP_CLASSES if c in agg]
+    return json.dumps({"status": status, "reason": reason, "exit_code": rc, "ts": ts,
+                       "steps": steps, "vault_path": vault_path}, sort_keys=True)
 
 
 def open_log(path):
@@ -207,16 +231,45 @@ def main(argv=None, runner=None, root="/", now=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("client")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--json", action="store_true")    # exactly one JSON line on stdout (the broker's contract)
+    ap.add_argument("--list", action="store_true")    # this client's audit timestamps; takes no lock
     a = ap.parse_args(argv)
+    if a.list and not a.json:
+        ap.error("--list requires --json")
     root = root.rstrip("/")
     runner = runner or real_runner
     ts = now or datetime.datetime.now(datetime.timezone.utc).strftime(TS_FMT)
+    human = sys.stderr if a.json else sys.stdout      # with --json every human line goes to stderr
+
+    def emit(status, reason, rc, results=(), vault_path=None):
+        """The single exit point of a run: with --json, its one stdout line."""
+        if a.json:
+            print(json_result(status, reason, rc, ts if status != "refused" else None, list(results), vault_path))
+        return rc
+
     try:
         rec = L.eligible_client(a.client, root + REGISTRY)
     except (L.PrecheckError, ValueError, OSError, TypeError, AttributeError) as e:   # M12: malformed entry
-        print(f"run-client-audit: refused: {e}", file=sys.stderr); return 2
+        print(f"run-client-audit: refused: {e}", file=sys.stderr)
+        if a.list:
+            print(json.dumps({"status": "refused", "reason": "precheck"}, sort_keys=True)); return 2
+        return emit("refused", "precheck", 2)
     red = R.Redactor([], [rec["customer_id"]])
-    say = lambda s: print(red.text(s))
+    say = lambda s: print(red.text(s), file=human)
+    if a.list:
+        try:
+            fd = L.open_dir_below(root + VAULTS, (rec["slug"], "audits"))
+            audits = []
+            if fd is not None:
+                try:
+                    audits = L.list_audit_ts(fd)[-LIST_LIMIT:]
+                finally:
+                    os.close(fd)
+        except OSError as e:     # an entry vanished between listdir and stat (container-controlled dir)
+            print(red.text(f"run-client-audit: list failed: {type(e).__name__}: {e}"), file=sys.stderr)
+            print(json.dumps({"status": "failed", "reason": "internal"}, sort_keys=True)); return 1
+        print(json.dumps({"status": "ok", "audits": audits}, sort_keys=True))
+        return 0
     try:
         L.check_secret_file(root + CRED, uid=OWNER_UID, mode=0o400)
         L.check_secret_file(root + ANTHROPIC_CRED, uid=OWNER_UID, mode=0o400)
@@ -230,23 +283,27 @@ def main(argv=None, runner=None, root="/", now=None):
         L.package_matches(root + APP_DIR, pin)
         steps = plan(rec, ts, root)          # re-reads the credential file: same refusal path
     except (L.PrecheckError, ValueError, OSError, TypeError, AttributeError) as e:
-        print(red.text(f"run-client-audit: refused: {e}"), file=sys.stderr); return 2
+        print(red.text(f"run-client-audit: refused: {e}"), file=sys.stderr); return emit("refused", "precheck", 2)
     if a.dry_run:
         for key, argv_, env in steps:
             shown = ["<script>" if len(x) > 200 else x for x in argv_]
             say(f"would run [{step_name(argv_)}] timeout={TIMEOUTS[key]}s: {' '.join(shown)}"
                 f" env={sorted(k for k in env if k != 'PATH')}")
-        return 0
+        return emit("ok", None, 0)
+    state = {"results": [], "reason": None, "vault_path": None}
     try:
         with L.AuditLock(root + LOCK):
-            return _run(steps, rec, ts, root, runner, say)
+            rc = _run(steps, rec, ts, root, runner, say, state)
     except L.PrecheckError as e:
-        print(f"run-client-audit: {e}", file=sys.stderr); return 3
+        print(f"run-client-audit: {e}", file=sys.stderr); return emit("busy", "busy", 3)
     except (OSError, ValueError, TypeError, AttributeError) as e:          # Ruling 6 (+ M12)
-        say(f"run-client-audit: failed: {type(e).__name__}: {e}"); return 1
+        say(f"run-client-audit: failed: {type(e).__name__}: {e}")
+        return emit("failed", "internal", 1, state["results"])
+    return emit("ok" if rc == 0 else "failed", state["reason"], rc, state["results"], state["vault_path"])
 
 
-def _run(steps, rec, ts, root, runner, say):
+def _run(steps, rec, ts, root, runner, say, state):
+    """state (main's) gets results as they happen, the failing class as "reason", and the vault path."""
     slug = rec["slug"]
     data = root + AUDIT_DATA + "/" + slug
     kw = ({"uid": os.geteuid(), "gid": os.getegid()} if DATA_UID is None
@@ -256,19 +313,23 @@ def _run(steps, rec, ts, root, runner, say):
         L.reset_dir(root + parent + "/" + slug, **kw)
     logs = root + AUDIT_LOGS + "/" + slug              # root-created, so rmtree is safe; 0711 so
     L.reset_dir(logs, uid=os.geteuid(), gid=os.getegid(), mode=0o711)   # 10000 reaches snapshot.stdout
-    results = []
+    results = state["results"]
     try:
         for i, (key, argv_, env) in enumerate(steps):
             name = step_name(argv_)
             if key == "snapshot":                                   # collection just finished
                 bad = L.error_files(data)
                 if bad:
+                    state["reason"] = "collect"
                     say(f"run-client-audit: collector errors, no draft: {bad}"); return _summary(results, 1, say)
                 if L.json_count(data) == 0:
+                    state["reason"] = "collect"
                     say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
             if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
                 named = L.others_named(read_transient(root, slug, ts), slug, list(L.V.load_registry(root + REGISTRY)))
                 if named:
+                    results.append(("isolation", 1, 0.0))
+                    state["reason"] = "isolation"
                     say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}; not written to the vault")
                     return _summary(results, 1, say)
             stem = os.path.join(logs, name.replace(":", "-"))
@@ -279,12 +340,15 @@ def _run(steps, rec, ts, root, runner, say):
                 rc = runner(argv_, env, TIMEOUTS[key], out, err)
             results.append((name, rc, round(time.monotonic() - t0, 1)))
             if rc != 0:
+                state["reason"] = step_class(name)
                 say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
                 return _summary(results, 1, say)
         vault_draft = f"{VAULTS}/{slug}/audits/{ts}-audit.md"
         if not vault_draft_is_file(root, slug, ts):   # uid 10000 can write the vault tree
+            state["reason"] = "vault-write"
             say("run-client-audit: vault-write reported success but the vault draft is missing")
             return _summary(results, 1, say)
+        state["vault_path"] = vault_draft
         say(f"run-client-audit: draft -> {vault_draft}  (data collected {ts} UTC)")
         return _summary(results, 0, say)
     finally:                        # the transient draft never outlives the run (I3); the proxy stops

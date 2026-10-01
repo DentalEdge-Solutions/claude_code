@@ -542,5 +542,133 @@ class TestOptionBLayout(Base):
                                         "2026-10-01_12-00-00-audit.md"))
 
 
+class TestJson(Base):
+    def run_json(self, runner, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = RCA.main(["acme-dental", "--json", *extra], runner=runner, root=self.root, now="2026-10-01_12-00-00")
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        return rc, json.loads(lines[0]), err.getvalue()
+
+    def test_ok(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root))
+        self.assertEqual((rc, j["status"], j["reason"], j["exit_code"]), (0, "ok", None, 0))
+        self.assertEqual(j["vault_path"], "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md")
+        self.assertEqual([s["name"] for s in j["steps"]],
+                         ["collect", "snapshot", "read", "proxy", "draft", "vault-write"])
+        self.assertEqual(set(j), {"status", "reason", "exit_code", "ts", "steps", "vault_path"})
+
+    def test_failed_step_names_its_class(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, fail_on="read:audit_search_terms"))
+        self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "read"))
+        self.assertIsNone(j["vault_path"])
+
+    def test_isolation_failure(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, draft_text="DRAFT names other-dental"))
+        self.assertEqual((j["status"], j["reason"]), ("failed", "isolation"))
+
+    def test_collector_errors_are_collect(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, error_file="x.ERROR.txt"))
+        self.assertEqual((j["status"], j["reason"]), ("failed", "collect"))
+
+    def test_precheck_refused(self):
+        os.chmod(self.root + "/var/lib/hermes/vaults", 0o755)
+        rc, j, err = self.run_json(FakeRunner(self.root))
+        self.assertEqual((rc, j["status"], j["reason"]), (2, "refused", "precheck"))
+
+    def test_unregistered_client_refused(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = RCA.main(["nobody", "--json"], runner=FakeRunner(self.root), root=self.root)
+        self.assertEqual(rc, 2)
+        self.assertEqual(json.loads(out.getvalue())["reason"], "precheck")
+
+    def test_busy(self):
+        import fcntl
+        fd = os.open(self.root + RCA.LOCK, os.O_RDWR | os.O_CREAT, 0o600); fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            rc, j, _ = self.run_json(FakeRunner(self.root))
+        finally:
+            os.close(fd)
+        self.assertEqual((rc, j["status"], j["reason"]), (3, "busy", "busy"))
+
+    def test_unexpected_error_is_internal(self):
+        rc, j, _ = self.run_json(FakeRunner(self.root, raise_on=("collect", OSError)))
+        self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "internal"))
+
+    def test_json_never_carries_a_customer_id_or_key(self):
+        rc, j, err = self.run_json(FakeRunner(self.root))
+        blob = json.dumps(j)
+        self.assertNotIn(CID, blob); self.assertNotIn("sk-ant", blob); self.assertNotIn(CID, err)
+
+    def test_dry_run_prints_one_line_and_runs_nothing(self):
+        r = FakeRunner(self.root)
+        rc, j, err = self.run_json(r, "--dry-run")
+        self.assertEqual((rc, j["status"], j["reason"], j["steps"], j["vault_path"]), (0, "ok", None, [], None))
+        self.assertEqual(r.calls, [])
+        self.assertIn("would run [draft]", err)
+
+    def test_plain_output_unchanged_without_json(self):
+        rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 0)
+        self.assertNotIn('"status"', text)
+
+
+class TestList(Base):
+    def run_list(self, client="acme-dental"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = RCA.main([client, "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        return rc, json.loads(out.getvalue())
+
+    def test_lists_timestamps_only_and_takes_no_lock(self):
+        a = self.root + "/var/lib/hermes/vaults/acme-dental/audits"; os.makedirs(a)
+        for ts in ("2026-09-01_10-00-00", "2026-09-30_10-00-00"):
+            open(f"{a}/{ts}-audit.md", "w").close()
+        open(f"{a}/readme.md", "w").close()
+        import fcntl
+        fd = os.open(self.root + RCA.LOCK, os.O_RDWR | os.O_CREAT, 0o600); fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            rc, j = self.run_list()
+        finally:
+            os.close(fd)
+        self.assertEqual((rc, j), (0, {"status": "ok", "audits": ["2026-09-01_10-00-00", "2026-09-30_10-00-00"]}))
+
+    def test_no_audits_yet(self):
+        self.assertEqual(self.run_list(), (0, {"status": "ok", "audits": []}))
+
+    def test_inactive_client_refused(self):
+        rc, j = self.run_list("nobody")
+        self.assertEqual((rc, j["status"]), (2, "refused"))
+
+    def test_list_requires_json(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                RCA.main(["acme-dental", "--list"], runner=FakeRunner(self.root), root=self.root)
+
+    def test_list_keeps_only_the_newest_24(self):
+        a = self.root + "/var/lib/hermes/vaults/acme-dental/audits"; os.makedirs(a)
+        all_ts = [f"2026-09-{d:02d}_10-00-00" for d in range(1, 31)]
+        for ts in all_ts:
+            open(f"{a}/{ts}-audit.md", "w").close()
+        self.assertEqual(self.run_list(), (0, {"status": "ok", "audits": all_ts[-24:]}))
+
+    def test_list_oserror_is_a_failed_list(self):
+        """Controller addition: an entry vanishing between listdir and stat (a container-controlled
+        dir) must still yield exactly one JSON line, not a traceback."""
+        os.makedirs(self.root + "/var/lib/hermes/vaults/acme-dental/audits")
+        def boom(fd):
+            raise FileNotFoundError("vanished")
+        with mock.patch.object(RCA.L, "list_audit_ts", boom):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = RCA.main(["acme-dental", "--list", "--json"], runner=FakeRunner(self.root), root=self.root)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        self.assertEqual(lines[0], '{"reason": "internal", "status": "failed"}')
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
