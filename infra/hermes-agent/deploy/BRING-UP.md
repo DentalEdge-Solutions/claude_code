@@ -1385,7 +1385,7 @@ Requires part 1 on the box. Still not live until review #6.
 ## A security review (checklist v1.11)
 
 Run it after parts 1 and 2 are applied and the rollback backups are shredded (part 2 step 10;
-the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL, a FAIL). The three live refusal checks of part 2 step 11 must have been run within the last 30 days (D10.7). Raw bundles live in the
+the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three live refusal checks of part 2 step 11 must have been run within the last 30 days (D10.7). Raw bundles live in the
 gitignored `security-reviews/`; only the report is committed.
 
 1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
