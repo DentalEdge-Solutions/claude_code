@@ -274,10 +274,8 @@ The same proxy pattern for the collector and reader, with a Google-APIs allow-li
 - **OpenRouter key:**
   - a per-key credit limit of **$10, monthly reset**;
   - the account is set to deny providers that collect data, with Zero Data Retention (ZDR) where available.
-    OpenRouter supports `provider.data_collection: "deny"` and `provider.zdr: true`.
-  - **Unverified:** Hermes's docs show no config key for OpenRouter provider preferences. Plan step 1 checks
-    the pinned image. If none exists, the account-level setting is what's in force, and the review records
-    which one is.
+    Hermes sends `provider_routing.data_collection` to OpenRouter as `provider.data_collection` (§13), so
+    `config.yaml` sets `deny`. Hermes has no `zdr` key: ZDR is enforced only by the account privacy setting.
   - If ZDR routing leaves no DeepSeek V3.2 endpoint, pick from the existing alternatives
     (`config.yaml.example`).
 - **No sudo.** The broker user has no sudoers entry and isn't in the docker group. Its only root path is the
@@ -441,8 +439,9 @@ governed files are replaced only by validating scripts):
   declared `env`.
 - Hermes self-evolution runs offline and proposes skill changes as PRs for human review. That's compatible
   with the read-only skill mount and the skill-eval pipeline.
-- OpenRouter: per-key `limit` with `limit_reset: monthly`; provider routing `data_collection: "deny"` and
-  `zdr: true`. The Hermes configuration docs show no OpenRouter provider-preference key.
+- OpenRouter: per-key `limit` with `limit_reset: monthly`; provider routing `data_collection: "deny"`. Hermes
+  reads that from `provider_routing.data_collection` in `config.yaml` (§13) and has no `zdr` key, so ZDR is
+  the account-level setting only.
 
 **Sources:**
 - Hermes docs: user-guide/features/tools, features/mcp, user-guide/security, reference/cli-commands,
