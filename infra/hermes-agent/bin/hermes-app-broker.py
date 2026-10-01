@@ -85,8 +85,31 @@ def _admit(ctx, req):
             ("per_box_day" in q and ctx.ledger.count(day, op) >= q["per_box_day"]):
         return _refuse(ctx, rid, op, client, "quota")
     ctx.ledger.append("reserved", rid, op, client, now=ctx.now())       # BEFORE the job exists
-    A.write_json_atomic(ctx.d("jobs"), rid + ".json", {"job_id": rid, "op": op, "client": client}, mode=0o600)
+    try:
+        A.write_json_atomic(ctx.d("jobs"), rid + ".json", {"job_id": rid, "op": op, "client": client},
+                            mode=0o600)
+    except Exception:
+        # No job: close the reservation result-first (it still counts against the quota). If
+        # even the result cannot be written, the reservation stays open for recover().
+        _note(ctx, "error: a job file could not be written (request failed)")
+        try:
+            _result(ctx, A.refused_result(rid, op, client, "internal", status="failed"))
+            ctx.ledger.append("resulted", rid, now=ctx.now())
+        except Exception:
+            _note(ctx, "error: a failed job could not be resulted (left for recover)")
+        return
     _say(ctx, rid, op, client, "queued", None)
+
+
+def _orphan_result(ctx, rid, op, client, p):
+    """A result with no ledger line: a crash fell between a refusal's result write and its
+    ledger append. Record it and drop the request; the first result stands, never re-decided."""
+    if not os.path.lexists(os.path.join(ctx.res_dir, rid + ".json")):
+        return False
+    ctx.ledger.append("refused", rid, op, client, now=ctx.now())
+    _say(ctx, rid, op, client, "dropped", "duplicate")
+    _unlink(ctx, p)
+    return True
 
 
 def _handle_request(ctx, n):
@@ -96,6 +119,8 @@ def _handle_request(ctx, n):
         req = A.parse_request(A.read_capped(p, A.MAX_REQUEST_BYTES), n, ctx.m)
     except A.Refused:
         if A.REQUEST_ID_RE.fullmatch(rid) and not ctx.ledger.seen(rid):
+            if _orphan_result(ctx, rid, None, None, p):
+                return
             _refuse(ctx, rid, None, None, "bad_request")
         else:
             _say(ctx, _rid_or_dash(rid), None, None, "dropped", "bad_request")
@@ -103,6 +128,8 @@ def _handle_request(ctx, n):
     if ctx.ledger.seen(rid):
         _say(ctx, rid, req["op"], req["client"], "dropped", "duplicate")   # the first result stands
         _unlink(ctx, p); return
+    if _orphan_result(ctx, rid, req["op"], req["client"], p):
+        return
     _admit(ctx, req)
     _unlink(ctx, p)
 

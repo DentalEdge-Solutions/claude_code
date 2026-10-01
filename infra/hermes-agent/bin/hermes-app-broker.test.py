@@ -365,5 +365,64 @@ class TestFixRound1(Base):
         self.assertFalse(any("junk" in l for l in self.logs))
 
 
+class TestFixRound2(Base):
+    """Review fix round 2: a failed job write closes its reservation; an orphan result stands."""
+
+    def ledger(self):
+        return A.Ledger(os.path.join(self.state, "state", "ledger.jsonl"))
+
+    def fail_dir_once(self, dirpath, times=1):
+        orig, state = A.write_json_atomic, {"left": times}
+
+        def flaky(d, name, obj, *a, **kw):
+            if d == dirpath and state["left"]:
+                state["left"] -= 1
+                raise OSError("disk full")
+            return orig(d, name, obj, *a, **kw)
+        A.write_json_atomic = flaky
+        self.addCleanup(setattr, A, "write_json_atomic", orig)
+
+    def test_failed_job_write_closes_the_reservation_failed_internal(self):
+        self.fail_dir_once(os.path.join(self.state, "jobs"))
+        rid = self.file(); B.drain_once(self.ctx)
+        r = self.result(rid)
+        self.assertEqual((r["status"], r["reason"], r["op"], r["client"]), ("failed", "internal", "run", "acme-dental"))
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(self.ledger().unresolved(), [])
+        self.assertEqual(self.ledger().count(self.day, "run", "acme-dental"), 1)   # a reservation counts
+        self.assertEqual(os.listdir(os.path.join(self.spool, "requests")), [])
+
+    def test_failed_job_and_result_write_leaves_the_reservation_for_recover(self):
+        self.fail_dir_once(os.path.join(self.state, "jobs"))
+        self.fail_dir_once(os.path.join(self.spool, "results"))
+        rid = self.file(); B.drain_once(self.ctx)
+        self.assertIsNone(self.result(rid))
+        self.assertEqual([x[0] for x in self.ledger().unresolved()], [rid])
+        B.recover(self.ctx)
+        self.assertEqual(self.result(rid)["reason"], "interrupted")
+        self.assertEqual(self.ledger().unresolved(), [])
+
+    def test_orphan_result_stands_and_is_recorded(self):
+        rid = self.file(client="nobody")
+        A.write_json_atomic(os.path.join(self.spool, "results"), rid + ".json",
+                            A.refused_result(rid, "run", "nobody", "disabled"))   # crash before ledger
+        B.drain_once(self.ctx)
+        self.assertEqual(self.result(rid)["reason"], "disabled")                  # not re-decided
+        self.assertTrue(self.ledger().seen(rid))
+        self.assertEqual(os.listdir(os.path.join(self.spool, "requests")), [])
+        self.file(rid=rid, client="acme-dental"); B.drain_once(self.ctx)          # replay after: still stands
+        self.assertEqual(self.result(rid)["reason"], "disabled")
+        self.assertEqual(self.jobs(), [])
+
+    def test_orphan_result_for_a_malformed_request_stands(self):
+        rid = "0f8e2c1a-1111-4222-8333-444455556666"
+        res = A.refused_result(rid, None, None, "disabled")
+        A.write_json_atomic(os.path.join(self.spool, "results"), rid + ".json", res)
+        open(os.path.join(self.spool, "requests", rid + ".json"), "w").write("{nope")
+        B.drain_once(self.ctx)
+        self.assertEqual(self.result(rid), res)
+        self.assertTrue(self.ledger().seen(rid))
+
+
 if __name__ == "__main__":
     unittest.main()
