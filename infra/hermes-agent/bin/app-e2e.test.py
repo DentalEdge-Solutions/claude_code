@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Option B end to end in temp dirs: MCP tool call -> spool -> broker -> job -> runner -> stub
 command -> done -> broker -> result -> MCP. No Docker, no root: the runner's owner is None."""
-import importlib.util, json, os, sys, tempfile, threading, unittest
+import importlib.util, json, os, sys, tempfile, unittest
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 
@@ -68,6 +68,8 @@ class E2E(unittest.TestCase):
         self.assertEqual(calls, [])
         r = json.load(open(os.path.join(self.spool, "results", n)))
         self.assertEqual((r["status"], r["reason"]), ("failed", "interrupted"))
+        self.assertEqual(os.listdir(os.path.join(self.state, "running")), [])
+        self.assertEqual(os.listdir(os.path.join(self.state, "jobs")), [])
 
 
 if __name__ == "__main__":

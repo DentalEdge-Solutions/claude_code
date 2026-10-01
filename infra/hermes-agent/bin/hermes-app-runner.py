@@ -9,7 +9,7 @@ spool. It executes exactly [manifest.command, <slug>, *manifest.ops[op].args] â€
 slug one argv element â€” after moving the job into running/. Anything found in running/ at
 start was cut off by a crash or reboot: it becomes an `interrupted` done file and is NEVER
 re-run. Done files are root:<app user> 0640 in the broker-owned done/ dir."""
-import argparse, os, pwd, signal, subprocess, sys, time
+import argparse, os, pwd, signal, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 
@@ -50,13 +50,38 @@ def _oldest(d):
     return sorted(names, key=lambda n: os.lstat(os.path.join(d, n)).st_mtime)
 
 
+def _note(text):
+    """A fixed-text journal line: never carries a file name or an exception message."""
+    print("hermes-app-runner: " + text, file=sys.stderr, flush=True)
+
+
+def _remove(p):
+    """Remove a bad job entry of any type; False (with a fixed note) if it cannot be removed."""
+    try:
+        if stat.S_ISDIR(os.lstat(p).st_mode):
+            os.rmdir(p)
+        else:
+            os.unlink(p)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        _note("error: a bad job entry could not be removed (skipped)")
+        return False
+
+
 def run_all(manifest, state, execute=_execute, owner=None):
     jobs, running = os.path.join(state, "jobs"), os.path.join(state, "running")
+    done_dir = os.path.join(state, "done")
     for n in _oldest(running):                              # cut off earlier: report, never re-run
-        _done(state, n[:-5], None, "", False, True, owner)
+        # A done file already there is the real result (the crash fell between the done write
+        # and this unlink): keep it, never overwrite it with `interrupted`.
+        if not os.path.lexists(os.path.join(done_dir, n)):
+            _done(state, n[:-5], None, "", False, True, owner)
         os.unlink(os.path.join(running, n))
+    skipped = set()                                         # unremovable entries: once per start
     while True:
-        names = _oldest(jobs)
+        names = [n for n in _oldest(jobs) if n not in skipped]
         if not names:
             return
         n = names[0]
@@ -64,8 +89,11 @@ def run_all(manifest, state, execute=_execute, owner=None):
         try:
             job = A.parse_job(A.read_capped(p, A.MAX_JOB_BYTES), n)
         except A.Refused:
-            _done(state, n[:-5], None, "", False, False, owner)   # the broker maps this to internal
-            os.unlink(p)
+            # Any non-job entry (malformed, a directory, a FIFO...): a done with rc None FIRST
+            # (the broker maps it to internal), then remove it. Never crash, never loop on it.
+            _done(state, n[:-5], None, "", False, False, owner)
+            if not _remove(p):
+                skipped.add(n)
             continue
         os.rename(p, os.path.join(running, n))              # moved BEFORE executing (broker recover)
         op = manifest.ops[job["op"]] if job["op"] in manifest.ops else None

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, json, os, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, sys, tempfile, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
@@ -181,6 +181,38 @@ class T(unittest.TestCase):
         p = os.path.join(self.state, "done", RID + ".json")
         d = A.parse_done(A.read_capped(p, A.MAX_DONE_BYTES), RID + ".json")
         self.assertEqual(d["stdout"], '{"status": "ok"}\n')
+
+    # --- final whole-branch review ---
+    def test_recovery_never_overwrites_an_existing_done(self):
+        open(os.path.join(self.state, "running", RID + ".json"), "w").write("{}")
+        real = {"job_id": RID, "rc": 0, "stdout": "real result", "timed_out": False, "interrupted": False}
+        open(os.path.join(self.state, "done", RID + ".json"), "w").write(json.dumps(real))
+        R.run_all(MAN, self.state, execute=self.execute)
+        self.assertEqual(self.done(), real)
+        self.assertEqual(os.listdir(os.path.join(self.state, "running")), [])
+        self.assertEqual(self.calls, [])
+
+    def test_a_directory_named_like_a_job_does_not_crash_the_runner(self):
+        os.mkdir(os.path.join(self.state, "jobs", RID + ".json"))
+        R.run_all(MAN, self.state, execute=self.execute)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(os.listdir(os.path.join(self.state, "jobs")), [])
+        d = self.done()
+        self.assertEqual((d["rc"], d["interrupted"]), (None, False))
+
+    def test_an_unremovable_bad_entry_is_skipped_and_later_jobs_still_run(self):
+        bad = os.path.join(self.state, "jobs", RID2 + ".json")
+        os.mkdir(bad); open(os.path.join(bad, "x"), "w").close()        # non-empty: cannot be removed
+        t = os.path.getmtime(bad) - 100
+        os.utime(bad, (t, t))                                           # oldest: handled first
+        self.job()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            R.run_all(MAN, self.state, execute=self.execute)           # returns: no crash, no loop
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.done()["rc"], 0)
+        self.assertEqual(self.done(RID2)["rc"], None)                   # the broker maps it to internal
+        self.assertIn("hermes-app-runner: error: a bad job entry could not be removed (skipped)", err.getvalue())
 
 
 if __name__ == "__main__":
