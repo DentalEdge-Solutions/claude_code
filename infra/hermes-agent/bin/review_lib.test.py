@@ -56,6 +56,14 @@ class TestRedactor(unittest.TestCase):
         with self.assertRaises(ValueError):
             R.Redactor.from_clients_json(self.clients)
 
+    def test_has_customer_id_plain_and_dashed_registered_only(self):
+        for text, want in (("id 1234567890 here", True), ("id 123-456-7890 here", True),
+                           ("x5555555555x", True), ("id 9999999999 is not registered", False),
+                           ("acme-dental", False), ("", False)):
+            with self.subTest(text=text):
+                self.assertIs(self.r.has_customer_id(text), want)
+        self.assertIs(R.Redactor([], []).has_customer_id("1234567890"), False)     # firing control
+
     def test_dashed_customer_id_in_registry_redacts_both_forms(self):
         # E4: clients.json can itself store a dashed customer_id. Both the dashed and
         # the plain-digit spelling must be redacted, not just the literal one on file.

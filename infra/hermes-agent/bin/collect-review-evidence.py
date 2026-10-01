@@ -11,11 +11,13 @@ should show, and the independent reviewer compares. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, fnmatch, getpass, grp, json, os, pwd, re, stat, subprocess, sys
+import argparse, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import app_lib as A
 import changeset_lib as C
 import client_audit_lib as CAL
+import host_layout as HL
 import package_lib as PK
 import review_lib as R
 
@@ -66,6 +68,28 @@ PSEUDO_FSTYPES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "deb
 CODE_PATHS = ("infra/hermes-agent/bin", "infra/hermes-agent/deploy", "infra/hermes-agent/registry",
               "infra/hermes-agent/docker-compose.yml", "infra/hermes-agent/Dockerfile")
 CHECKLIST = CHECKOUT + "/infra/hermes-agent/deploy/security-review/CHECKLIST.md"
+# The chat-triggered app (Option B spec 2026-09-30 §3, §6, §8.1): gateway MCP client -> broker
+# (unprivileged) -> runner (root) -> run-client-audit.
+APP = "ads-audit"
+APP_USER = "hermes-app-" + APP
+APP_UNITS = ("hermes-app-broker@.service", "hermes-app-runner@.service", "hermes-app-runner@.path")
+APP_RESULTS = "/var/lib/hermes/spool/apps/" + APP + "/results"
+# The probes start real containers: --probe-env's worst case is about 480 s, --probe-egress's 240 s.
+PROBE_TIMEOUT = 600
+# Spec §6's hardening list, plus what the unit's environment holds (the declared map gives the
+# broker and the runner no credential; a drop-in could add one without changing the unit file).
+ENV_PROPS = ("Environment", "EnvironmentFiles")
+BROKER_PROPS = ("User", "NoNewPrivileges", "CapabilityBoundingSet", "PrivateNetwork", "PrivateTmp",
+                "ProtectSystem", "ProtectHome", "ReadWritePaths", "UMask", "ActiveState") + ENV_PROPS
+# What the broker's journal lines may say (hermes-app-broker.py _say): a result's status, or
+# `queued` / `dropped`, which never become a result.
+JOURNAL_STATUSES = A.STATUSES + ("queued", "dropped")
+JOURNAL_REASONS = A.BROKER_REASONS + A.COMMAND_REASONS + ("expired", "-")
+_BROKER_LINE = "hermes-app-broker[" + APP + "]: "
+_SAY_RE = re.compile(r"request=\S+ op=\S+ client=\S+ status=(\S+) reason=(\S+)")
+_NOTE_RE = re.compile(r"(warning|error): ")
+_SECRET_MAP_RE = re.compile(r"(\s*)(env|headers):\s*(.*)")
+WITHHELD = "<withheld>"
 
 
 def _run_real(argv, timeout=60):
@@ -617,11 +641,232 @@ def d7_1(host, ctx):
             "root_backups": [{"dir": b, "files": len(os.listdir(host.path("/root/" + b)))} for b in backups]}
 
 
+# ---------------------------------------------------------------- D10 chat-triggered audits
+def _json_probe(host, flag):
+    """run-client-audit's probe: one JSON object on stdout, exit 0 (match) or 1 (mismatch).
+    Anything else — exit 3 with nothing while an audit holds the lock, 124 on a timeout, a
+    traceback — is could-not-check, with the exit code and never the output."""
+    rc, out, _ = host.run(["run-client-audit", flag], timeout=PROBE_TIMEOUT)
+    try:
+        probe = json.loads(out)
+    except (ValueError, RecursionError):
+        probe = None
+    if not isinstance(probe, dict):
+        raise CouldNotCheck(f"run-client-audit {flag} exited {rc} without a JSON object")
+    return {"rc": rc, "probe": probe}
+
+
+def d10_1(host, ctx):
+    return _json_probe(host, "--probe-env")
+
+
+def d10_2(host, ctx):
+    return _json_probe(host, "--probe-egress")
+
+
+def _env_names(value):
+    """The variable NAMES in a systemd Environment= value. A value never reaches the bundle."""
+    try:
+        return sorted({tok.partition("=")[0] for tok in shlex.split(value)})
+    except ValueError:
+        return R.COULD_NOT_CHECK
+
+
+def _unit_props(host, unit, props):
+    """`systemctl show -p` for the properties asked for, and nothing else it printed. systemd
+    prints a requested property even when empty, so one it did not print is could-not-check —
+    except EnvironmentFiles, which it prints once per file and not at all when there is none."""
+    out = _ok(host, ["systemctl", "show", unit, "-p", ",".join(props)])
+    got = {p: [] if p == "EnvironmentFiles" else R.COULD_NOT_CHECK for p in props}
+    for line in out.splitlines():
+        k, sep, v = line.partition("=")
+        if not sep or k not in got:
+            continue
+        if k == "EnvironmentFiles":
+            got[k].append(v)
+        else:
+            got[k] = _env_names(v) if k == "Environment" else v
+    return got
+
+
+def _same_file(host, a, b):
+    """True only when both files can be read and are byte-identical."""
+    try:
+        return PK.sha256_file(host.path(a)) == PK.sha256_file(host.path(b))
+    except OSError:
+        return False
+
+
+def _sudo_rules(host, user):
+    """`sudo -l -U <user>` as shape only: its text names the host, and its rules are not ours to print."""
+    rc, out, _ = host.run(["sudo", "-l", "-U", user])
+    lines = out.splitlines()
+    grant = next((i for i, l in enumerate(lines) if "may run the following commands" in l), None)
+    return {"rc": rc, "not_allowed": any("is not allowed to run sudo" in l for l in lines),
+            "command_lines": 0 if grant is None else sum(1 for l in lines[grant + 1:] if l.strip())}
+
+
+def d10_3(host, ctx):
+    # is-active exits non-zero for every state but `active`: the state is the answer, not a failure.
+    path_state = host.run(["systemctl", "is-active", f"hermes-app-runner@{APP}.path"])[1].strip()
+    return {"broker_unit": _unit_props(host, f"hermes-app-broker@{APP}", BROKER_PROPS),
+            "runner_unit": _unit_props(host, f"hermes-app-runner@{APP}", ENV_PROPS),
+            "installed_equal_repo": {u: _same_file(host, "/etc/systemd/system/" + u,
+                                                   CHECKOUT + "/infra/hermes-agent/deploy/" + u)
+                                     for u in APP_UNITS},
+            "broker_user_groups": _ok(host, ["id", "-nG", APP_USER]).split(),
+            "sudo_rules": _sudo_rules(host, APP_USER),
+            "runner_path_active": path_state or R.COULD_NOT_CHECK}
+
+
+def _exposes_app_state(source):
+    """A mount whose host side is app-state, a path inside it, or a directory above it."""
+    s, root = os.path.normpath(source), HL.DEFAULT_STATE_ROOT
+    return s == root or s.startswith(root + "/") or root.startswith(s.rstrip("/") + "/")
+
+
+def d10_4(host, ctx):
+    try:
+        problems = HL.check_app(APP, host.path(HL.DEFAULT_APPS_ROOT), host.path(HL.DEFAULT_STATE_ROOT),
+                                HL.system_resolver(layout=HL.app_layout(APP)), ancestor_top=host.root)
+    except HL.LayoutError as e:
+        raise CouldNotCheck(f"layout: {e}")
+    ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
+    mounting = not_inspected = 0
+    for cid in ids:
+        # A container that went away, or Mounts that are not what Docker prints, is counted —
+        # never allowed to fail the item or to pass as "mounts nothing".
+        rc, out, _ = host.run(["docker", "inspect", "--format", "{{json .Mounts}}", cid])
+        try:
+            mounts = json.loads(out) if rc == 0 else None
+        except (ValueError, RecursionError):
+            mounts = None
+        if not isinstance(mounts, list) or not all(isinstance(m, dict) and isinstance(m.get("Source"), str)
+                                                   for m in mounts):
+            not_inspected += 1
+        elif any(_exposes_app_state(m["Source"]) for m in mounts):
+            mounting += 1
+    return {"layout_problems": problems, "containers": len(ids),
+            "containers_mounting_app_state": mounting, "containers_not_inspected": not_inspected}
+
+
+def _mcp_block(host):
+    """config.yaml from `mcp_servers:` up to the next top-level key."""
+    lines, on = [], False
+    with open(host.path(AGENT_DIR + "/data/config.yaml"), encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("mcp_servers:"):
+                on = True
+            elif on and line[:1].strip() and not line.startswith("#"):
+                break
+            if on:
+                lines.append(line.rstrip("\n"))
+    return lines
+
+
+def _withhold_secret_maps(lines):
+    """Every value under an `env:` or `headers:` map withheld, its key kept. The block is meant
+    to hold no secret (`env: {}`); one put there by mistake must show as a key, never a value."""
+    out, depth = [], None
+    for line in lines:
+        indent = len(line) - len(line.lstrip())
+        if depth is not None and line.strip() and indent <= depth:
+            depth = None                                    # dedented: the map is over
+        if depth is not None:
+            if line.strip():
+                key, sep, _ = line.partition(":")
+                line = (key + ": " if sep else line[:indent]) + WITHHELD
+        else:
+            m = _SECRET_MAP_RE.fullmatch(line)
+            rest = m.group(3).strip() if m else "{}"
+            if not rest or rest.startswith("#"):
+                depth = indent                              # a block map: its entries follow
+            elif rest != "{}":
+                line = f"{m.group(1)}{m.group(2)}: {WITHHELD}"
+        out.append(line)
+    return out
+
+
+def _no_credential_lines(lines):
+    return [WITHHELD if R.looks_like_credential_text(l) else l for l in lines]
+
+
+def d10_6(host, ctx):
+    block = _no_credential_lines(_withhold_secret_maps(_mcp_block(host)))
+    # The tool list is information, not a boundary: when it cannot be had, it is empty with its
+    # exit code (None: no gateway container to ask), and the config block is still reported.
+    rc, gw, _ = host.run(["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER])
+    gw, listing, list_rc = gw.strip(), [], None
+    if rc == 0 and len(gw) == 64:
+        list_rc, out, _ = host.run(["docker", "exec", gw, "hermes", "mcp", "list"])
+        if list_rc == 0:
+            listing = _no_credential_lines(out.splitlines()[:40])
+    return {"mcp_block": block, "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
+
+
+def _label(value, allowed):
+    """A closed-set value as itself, null as `-`, anything else as `?`: free text, a name or a
+    wrong type from a file or a journal line never reaches the bundle."""
+    if value is None:
+        return "-"
+    return value if isinstance(value, str) and value in allowed else "?"
+
+
+def d10_7(host, ctx):
+    """Counts only, never a line: the journal names clients and request ids by design."""
+    out = _ok(host, ["journalctl", "-u", f"hermes-app-broker@{APP}", "--since", "-30d", "-o", "cat", "--no-pager"])
+    counts, notes, other, cred, cids = {}, {}, 0, 0, 0
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        cred += R.looks_like_credential_text(line)
+        cids += ctx["redactor"].has_customer_id(line)
+        body = line[len(_BROKER_LINE):] if line.startswith(_BROKER_LINE) else ""
+        say, note = _SAY_RE.fullmatch(body), _NOTE_RE.match(body)
+        if say:
+            k = f"{_label(say.group(1), JOURNAL_STATUSES)}/{_label(say.group(2), JOURNAL_REASONS)}"
+            counts[k] = counts.get(k, 0) + 1
+        elif note:
+            notes[note.group(1)] = notes.get(note.group(1), 0) + 1
+        else:
+            other += 1                                      # systemd's own lines, a traceback, anything else
+    return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
+            "credential_text_lines": cred, "customer_id_lines": cids}
+
+
+def d10_8(host, ctx):
+    """One row per entry in results/, whatever it is. An entry that cannot be read as a JSON
+    object (unreadable, not a regular file, too large, malformed) is a row and is out of
+    whitelist, as is a result stored under a name that is not its own request id. Rows carry
+    closed-set labels only: never the slug, the request id or a file name."""
+    d = host.path(APP_RESULTS)
+    rows, bad = [], 0
+    for n in sorted(os.listdir(d)):
+        try:
+            obj = json.loads(A.read_capped(os.path.join(d, n), A.MAX_DONE_BYTES))
+            if not isinstance(obj, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError, RecursionError):       # A.Refused is a ValueError
+            rows.append({"keys_ok": False, "values_ok": False}); bad += 1
+            continue
+        keys_ok, values_ok = A.result_in_whitelist(obj)
+        values_ok = values_ok and obj["request_id"] + ".json" == n
+        rows.append({"op": _label(obj.get("op"), A.KNOWN_OPS),
+                     "status": _label(obj.get("status"), A.STATUSES),
+                     "reason": _label(obj.get("reason"), A.BROKER_REASONS + A.COMMAND_REASONS),
+                     "keys_ok": keys_ok, "values_ok": values_ok})
+        bad += not (keys_ok and values_ok)
+    return {"results": rows, "out_of_whitelist": bad}
+
+
 PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6,
           "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3,
           "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4,
           "D5.1": d5_1, "D5.2": d5_2, "D5.3": d5_3, "D5.4": d5_4,
-          "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1}
+          "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1,
+          # D10.5 (the OpenRouter key limit and account privacy setting) is manual: no probe.
+          "D10.1": d10_1, "D10.2": d10_2, "D10.3": d10_3, "D10.4": d10_4, "D10.6": d10_6,
+          "D10.7": d10_7, "D10.8": d10_8}
 
 
 # ---------------------------------------------------------------- fingerprint (§5.1)

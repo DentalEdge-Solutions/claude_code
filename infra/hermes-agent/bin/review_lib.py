@@ -234,6 +234,11 @@ class Redactor:
             s = re.sub(rf"(?<![A-Za-z0-9]){re.escape(slug)}(?![A-Za-z0-9])", CLIENT, s)
         return s
 
+    def has_customer_id(self, s):
+        """True if `s` holds a registered customer id, plain or dashed: exactly what text() would
+        replace. For counting lines of a log that must hold none; never for printing them."""
+        return any(raw in s for raw, _ in self._cids)
+
     def obj(self, o):
         if isinstance(o, str):
             return self.text(o)
