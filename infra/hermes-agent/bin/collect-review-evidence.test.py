@@ -1099,6 +1099,18 @@ class TestReview5FollowUps(Base):
         self.assertIn("/run/docker/netns/abc123", out["namespace_handles"])
         self.assertNotIn("/run/docker/netns/abc123", out["unreadable"])
 
+    def test_nsfs_handle_from_the_real_findmnt_listing_reaches_namespace_handles(self):
+        # Through the real _mounts() output, not a hand-built list: findmnt lists the handle as an
+        # nsfs mount under a tmpfs /run. not_swept must stay what it was (nsfs is still not a target).
+        run = os.path.join(self.root, "run/docker/netns"); os.makedirs(run)
+        h = os.path.join(run, "abc123"); open(h, "w").close(); os.chmod(h, 0)
+        self.addCleanup(os.chmod, h, 0o600)
+        self.outputs[("findmnt",)] = (0, "/ ext4\n/run tmpfs\n/run/docker/netns/abc123 nsfs\n", "")
+        d = CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]
+        self.assertEqual(d["memory_sweep"]["namespace_handles"], ["/run/docker/netns/abc123"])
+        self.assertEqual(d["memory_sweep"]["unreadable"], [])
+        self.assertEqual(d["not_swept"], ["/run"])
+
     def test_d4_2_compares_with_the_last_pass(self):
         self.outputs[("systemctl", "is-active")] = (0, "active\n", "")
         self.outputs[("systemctl", "show", "hermes-docker-proxy")] = (0, "ExecStart=x\n", "")

@@ -246,16 +246,22 @@ def _sweep(host):
     return sorted(set(line for line in out.splitlines() if line))
 
 
-def _mounts(host):
+def _mounts(host, nsfs=None):
     """[(target, fstype)] for every mount `find / -xdev` does NOT cross, other than real
-    pseudo/virtual filesystems (final-review A2), or None when `findmnt` cannot be read."""
+    pseudo/virtual filesystems (final-review A2), or None when `findmnt` cannot be read.
+    `nsfs`, a set the caller passes, collects the targets of nsfs mounts (Docker namespace
+    handles), which are pseudo and so never in the result: _memory_sweep classifies them."""
     rc, out, _ = host.run(["findmnt", "-rn", "-o", "TARGET,FSTYPE"])
     if rc != 0:
         return None
     mounts = set()
     for line in out.splitlines():
         cols = line.split()
-        if len(cols) < 2 or cols[0] == "/" or cols[1] in PSEUDO_FSTYPES:
+        if len(cols) < 2 or cols[0] == "/":
+            continue
+        if cols[1] == "nsfs" and nsfs is not None:
+            nsfs.add(cols[0])
+        if cols[1] in PSEUDO_FSTYPES:
             continue
         mounts.add((cols[0], cols[1]))
     return sorted(mounts)
@@ -267,7 +273,7 @@ def _not_swept(host, mounts):
     return R.COULD_NOT_CHECK if mounts is None else sorted({t for t, _ in mounts})
 
 
-def _memory_sweep(host, mounts):
+def _memory_sweep(host, mounts, nsfs=()):
     """Sweep the writable in-memory mounts the root sweep skips: a file whose NAME is
     credential-shaped (SWEEP_NAMES), or whose CONTENT looks like a Google Ads credential.
     Paths only, never content. Each mount is walked without crossing into another mount
@@ -275,7 +281,7 @@ def _memory_sweep(host, mounts):
     if mounts is None:
         return R.COULD_NOT_CHECK
     targets = sorted(t for t, fs in mounts if fs in MEMORY_FSTYPES)
-    ns = {t for t, fs in mounts if fs == "nsfs"}      # Docker namespace handles: classified, not read
+    ns = {t for t, fs in mounts if fs == "nsfs"} | set(nsfs)   # Docker namespace handles: classified, not read
     names, contents, unreadable, handles = set(), set(), set(), set()
     for m in targets:
         top = host.path(m)
@@ -399,9 +405,10 @@ def d2_1(host, ctx):
             if not is_example:
                 row["kind"] = "unreadable"
         rows.append(row)
-    mounts = _mounts(host)
+    handles = set()
+    mounts = _mounts(host, nsfs=handles)
     return {"files": rows, "not_swept": _not_swept(host, mounts),
-            "memory_sweep": _memory_sweep(host, mounts)}
+            "memory_sweep": _memory_sweep(host, mounts, handles)}
 
 
 def _count_cred_text(text, secrets):
