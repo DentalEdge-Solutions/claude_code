@@ -51,8 +51,12 @@ class TestAuditMounts(unittest.TestCase):
         # so the compose file's ../../../claude-google-ads resolves as it does on the box.
         cls.agent = os.path.join(cls.tmp, "claude_code/infra/hermes-agent")
         shutil.copytree(AGENT, cls.agent, ignore=shutil.ignore_patterns("data", "security-reviews", ".env*"))
-        with open(os.path.join(cls.agent, ".env"), "w"):   # empty stand-in: config resolves every service's env_file
-            pass
+        # Stand-in .env: config resolves every service's env_file, and run-client-audit's probes
+        # call compose WITHOUT --env-file (as on the box), so their interpolation comes from here.
+        # The tests that pass --env-file /dev/null still interpolate from cls.env alone.
+        with open(os.path.join(cls.agent, ".env"), "w") as f:
+            f.write(f"HERMES_SPOOL_DIR={cls.tmp}\nHERMES_GOVERNANCE_DIR={cls.tmp}/governance\n"
+                    f"HERMES_AGENT_DIR={cls.agent}\nHERMES_ADS_REPO_DIR={cls.tmp}/claude-google-ads\n")
         app = os.path.join(cls.tmp, "claude-google-ads/code")
         os.makedirs(app)
         os.makedirs(os.path.join(cls.tmp, "claude-google-ads/audit_data"))   # as install-app-package creates it
@@ -166,6 +170,22 @@ class TestAuditMounts(unittest.TestCase):
             self.assertEqual(lines[3], "DNS_BLOCKED")
         finally:
             sh(*self.compose, "rm", "-sf", "egress-proxy", env=self.env, check=False)
+
+    def _rca(self):
+        import importlib.util
+        s = importlib.util.spec_from_file_location("rca_it", os.path.join(self.agent, "bin/run-client-audit.py"))
+        m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+        m.AGENT_DIR = self.agent            # compose file of the copied tree
+        m.PROBE_DIR = os.path.join(self.tmp, "probe")
+        return m
+
+    def test_probe_env_matches_the_declared_map(self):
+        j = self._rca().probe_env("")
+        self.assertTrue(j["matches_declared"], json.dumps(j, indent=1))
+
+    def test_probe_egress_matches_expected(self):
+        j = self._rca().probe_egress("")
+        self.assertTrue(j["matches_expected"], json.dumps(j, indent=1))
 
 
 @unittest.skipUnless(CAN, "needs root + Linux + docker")

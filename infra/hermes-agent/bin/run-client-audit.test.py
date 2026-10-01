@@ -910,5 +910,308 @@ class TestStopProxyKeepsTheDecisionLog(Base):
                 self.assertIn("proxy decision", open(self.logs + "/proxy.log").read())
 
 
+ENV_OK = {"ads-collector": "GOOGLE_ADS_REFRESH_TOKEN\nGOOGLE_ADS_CUSTOMER_ID\nSENTINEL_FILES=0\n",
+          "ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n",
+          "ads-drafter": "ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n",
+          "egress-proxy": "SENTINEL_FILES=0\n"}
+EGRESS_OK = ("DIRECT_BLOCKED\nHTTP/1.1 403 Forbidden\nHTTP/1.1 200 Connection Established\n"
+             "WORK=out,reports,vault\nHOST_VISIBLE=0\n")
+
+
+class TestProbes(Base):
+    def fake_probe_runner(self, outputs, rcs=None):
+        calls = []
+        def run(argv, env, timeout):
+            calls.append((argv, dict(env)))
+            for svc, out in outputs.items():
+                if svc in argv:
+                    return (rcs or {}).get(svc, 0), out
+            return 0, ""
+        return run, calls
+
+    def test_probe_env_uses_sentinels_and_never_opens_real_secret_files(self):
+        opened = []
+        real_open = open
+        def spy(p, *a, **k):
+            opened.append(str(p)); return real_open(p, *a, **k)
+        run, calls = self.fake_probe_runner(ENV_OK)
+        with mock.patch("builtins.open", spy):
+            j = RCA.probe_env(self.root, run)
+        self.assertTrue(j["matches_declared"], j)
+        self.assertFalse(any(p.endswith(".env.ga") or p.endswith(".env.anthropic") for p in opened))
+        for argv, env in calls:
+            for v in env.values():
+                self.assertNotIn("sk-ant-api03-x", v); self.assertNotIn(TOKEN, v)
+
+    def test_probe_env_flags_a_leak(self):
+        outs = dict(ENV_OK, **{"ads-drafter": "ANTHROPIC_API_KEY\nGOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n"})
+        run, _ = self.fake_probe_runner(outs)
+        self.assertFalse(RCA.probe_env(self.root, run)["matches_declared"])
+
+    def test_probe_egress_expected_and_cleans_up(self):
+        run, calls = self.fake_probe_runner({"ads-drafter": EGRESS_OK})
+        j = RCA.probe_egress(self.root, run)
+        self.assertTrue(j["matches_expected"], j)
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+
+    def test_probe_cleans_up_when_docker_fails(self):
+        def boom(argv, env, timeout):
+            raise OSError("docker down")
+        with self.assertRaises(OSError):
+            RCA.probe_egress(self.root, boom)
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+
+    # ---- beyond the brief's four -------------------------------------------------------------
+    def test_plan_without_the_new_parameters_reads_both_credential_files(self):
+        import client_audit_lib as L
+        rec = L.eligible_client("acme-dental", self.root + RCA.REGISTRY)
+        steps = RCA.plan(rec, "2026-10-01_12-00-00", self.root)
+        self.assertEqual(steps[0][2]["GOOGLE_ADS_REFRESH_TOKEN"], TOKEN)
+        self.assertEqual(dict((k, e) for k, _, e in steps)["draft"]["ANTHROPIC_API_KEY"], "sk-ant-api03-x")
+
+    def test_plan_with_sentinels_needs_no_credential_file(self):
+        os.remove(self.root + "/etc/hermes/.env" + ".ga"); os.remove(self.root + "/etc/hermes/.env.anthropic")
+        steps = RCA.plan({"slug": "probe", "customer_id": "0"}, "2000-01-01_00-00-00", self.root,
+                         cred_values={"GOOGLE_ADS_REFRESH_TOKEN": "S", "NOT_A_CRED_NAME": "x"}, anthropic_key="K")
+        self.assertEqual(steps[0][2]["GOOGLE_ADS_REFRESH_TOKEN"], "S")
+        self.assertNotIn("NOT_A_CRED_NAME", steps[0][2])
+        self.assertEqual(dict((k, e) for k, _, e in steps)["draft"]["ANTHROPIC_API_KEY"], "K")
+
+    def test_the_sentinel_is_never_a_literal_in_a_file_the_containers_mount(self):
+        """bin/ is mounted at /opt/cc-bin in ads-reader and egress-proxy, and the env probe greps
+        the mounts for the sentinel: a literal in the source (or folded into its .pyc) would be
+        reported as a leak on every run."""
+        import marshal
+        needle = RCA.SENTINEL.encode()
+        for name in sorted(os.listdir(HERE)):
+            path = os.path.join(HERE, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    self.assertNotIn(needle, f.read(), name)
+        with open(os.path.join(HERE, "run-client-audit.py"), "rb") as f:
+            code = compile(f.read(), "run-client-audit.py", "exec")
+        self.assertNotIn(needle, marshal.dumps(code))
+
+    def test_probe_env_runs_each_service_once_with_the_real_flags_and_throwaway_dirs(self):
+        seen = []
+        def run(argv, env, timeout):
+            self.assertTrue(os.path.isdir(self.root + RCA.PROBE_DIR + "/audit-data/probe"))
+            seen.append((argv, dict(env)))
+            return 0, next(o for s, o in ENV_OK.items() if s in argv)
+        j = RCA.probe_env(self.root, run)
+        self.assertEqual(sorted(j["services"]), sorted(RCA.DECLARED))
+        self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+        self.assertEqual(self.proxy_stops, [])                 # the env probe never starts the proxy
+        self.assertEqual(len(seen), 4)
+        for argv, env in seen:
+            svc = next(s for s in RCA.DECLARED if s in argv)
+            i = argv.index(svc)
+            self.assertEqual(argv[i - 2:i], ["--entrypoint", "sh"]); self.assertEqual(argv[i + 1], "-c")
+            self.assertEqual(len(argv), i + 3)                 # nothing after the probe script
+            self.assertIn(RCA.SENTINEL, argv[-1])
+            self.assertNotIn(RCA.SENTINEL, argv[:-1])          # a value only in env, as in an audit
+            self.assertNotIn("acme-dental", " ".join(argv) + " ".join(env.values()))
+            for k, v in env.items():
+                if k.startswith("HERMES_"):
+                    self.assertTrue(v.startswith(RCA.PROBE_DIR + "/") and v.endswith("/probe"), (k, v))
+            names = {argv[n + 1] for n, x in enumerate(argv[:i]) if x == "-e"}
+            if svc in ("ads-collector", "ads-reader"):
+                self.assertEqual(names, set(RCA.CRED_NAMES))
+                self.assertEqual(env["GOOGLE_ADS_REFRESH_TOKEN"], RCA.SENTINEL)
+                self.assertNotIn("ANTHROPIC_API_KEY", env)
+            elif svc == "ads-drafter":
+                self.assertIn("ANTHROPIC_API_KEY", names); self.assertEqual(env["ANTHROPIC_API_KEY"], RCA.SENTINEL)
+                self.assertFalse([k for k in env if k.startswith("GOOGLE_ADS_")])
+            else:
+                self.assertEqual(names, set()); self.assertEqual(sorted(env), ["PATH"])
+
+    def test_probe_env_fails_closed(self):
+        cases = {"sentinel found in a mounted file": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=2\n"}, {}),
+                 "no SENTINEL_FILES line": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\n"}, {}),
+                 "a SENTINEL_FILES line that is not a count": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0x\n"}, {}),
+                 "the container failed": ({}, {"ads-collector": 125}),
+                 "a declared credential is absent": ({"ads-drafter": "SENTINEL_FILES=0\n"}, {}),
+                 "the proxy holds a credential": ({"egress-proxy": "ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n"}, {}),
+                 "an OpenRouter key anywhere": ({"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nOPENROUTER_API_KEY\nSENTINEL_FILES=0\n"}, {}),
+                 "no output at all": ({s: "" for s in ENV_OK}, {})}
+        for why, (outs, rcs) in cases.items():
+            with self.subTest(why=why):
+                run, _ = self.fake_probe_runner(dict(ENV_OK, **outs), rcs)
+                j = RCA.probe_env(self.root, run)
+                self.assertFalse(j["matches_declared"], j)
+        run, _ = self.fake_probe_runner(dict(ENV_OK, **{"ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\n"}))
+        self.assertIs(RCA.probe_env(self.root, run)["services"]["ads-reader"]["sentinel_in_files"], True)
+
+    def test_probe_env_cleans_up_when_docker_fails(self):
+        def boom(argv, env, timeout):
+            raise OSError("docker down")
+        with self.assertRaises(OSError):
+            RCA.probe_env(self.root, boom)
+        self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+
+    def test_a_stale_probe_dir_is_replaced_and_a_failed_layout_leaves_nothing(self):
+        stale = self.root + RCA.PROBE_DIR + "/reports/probe/old.md"
+        os.makedirs(os.path.dirname(stale))
+        with open(stale, "w") as f:
+            f.write("x")
+        def run(argv, env, timeout):
+            self.assertFalse(os.path.exists(stale))
+            return 0, ""
+        RCA.probe_env(self.root, run)
+        calls = []
+        def reset(path, **kw):
+            calls.append(path)
+            if len(calls) == 2:
+                raise PermissionError("chown")
+            os.makedirs(path)
+        for probe in (RCA.probe_env, RCA.probe_egress):
+            del calls[:]
+            with mock.patch.object(RCA.L, "reset_dir", reset), self.assertRaises(PermissionError):
+                probe(self.root, run)
+            self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+
+    def test_probe_egress_starts_the_proxy_first_and_the_drafter_gets_no_key(self):
+        run, calls = self.fake_probe_runner({"ads-drafter": EGRESS_OK})
+        RCA.probe_egress(self.root, run)
+        (up, up_env), (draft, env) = calls
+        self.assertEqual(up[-4:], ["up", "-d", "--no-deps", "egress-proxy"])
+        i = draft.index("ads-drafter")
+        self.assertEqual(draft[i - 2:i], ["--entrypoint", "sh"]); self.assertEqual(draft[i + 1], "-c")
+        self.assertNotIn("ANTHROPIC_API_KEY", draft); self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("ANTHROPIC_API_KEY", up_env)
+        self.assertEqual(draft.count("-e"), 3)                # PROJECT, CLIENT, TS: every -e keeps its value
+        for n, x in enumerate(draft[:i]):
+            if x == "-e":
+                self.assertIn("=", draft[n + 1])
+        for blob in (" ".join(draft), " ".join(env.values())):
+            self.assertNotIn(RCA.SENTINEL, blob); self.assertNotIn("sk-ant", blob)
+        self.assertEqual(env["HERMES_VAULT_DIR"], RCA.PROBE_DIR + "/vaults/probe")
+        self.assertEqual(env["HERMES_DRAFT_OUT_DIR"], RCA.PROBE_DIR + "/draft-out/probe")
+        self.assertEqual(self.proxy_stops, [(self.root, self.root + RCA.PROBE_DIR)])
+
+    def test_probe_egress_fails_closed(self):
+        L = EGRESS_OK.splitlines()
+        cases = {"direct route open": ["DIRECT_OPEN"] + L[1:],
+                 "non-allowed host tunnelled": [L[0], "HTTP/1.1 200 Connection Established"] + L[2:],
+                 "anthropic refused": L[:2] + ["HTTP/1.1 403 Forbidden"] + L[3:],
+                 "an extra dir under /work": L[:3] + ["WORK=other,out,reports,vault", L[4]],
+                 "host state visible": L[:4] + ["HOST_VISIBLE=1"],
+                 "no HOST_VISIBLE line": L[:4],
+                 "no output": [],
+                 "a traceback instead": ["Traceback (most recent call last):", "  x", "OSError: boom"]}
+        for why, lines in cases.items():
+            with self.subTest(why=why):
+                run, _ = self.fake_probe_runner({"ads-drafter": "\n".join(lines) + "\n"})
+                j = RCA.probe_egress(self.root, run)
+                self.assertFalse(j["matches_expected"], j)
+                self.assertEqual(set(j), {"direct", "non_allowed", "anthropic", "work_entries",
+                                          "host_visible", "matches_expected"})
+        run, _ = self.fake_probe_runner({"ads-drafter": ""})
+        j = RCA.probe_egress(self.root, run)
+        self.assertEqual((j["direct"], j["host_visible"]), ("open", True))   # unproven is not "blocked"
+
+    def test_probe_dirs_are_removed_even_if_stopping_the_proxy_raises(self):
+        def boom(root, logs, say):
+            raise OSError("docker vanished")
+        run, _ = self.fake_probe_runner({"ads-drafter": EGRESS_OK})
+        with mock.patch.object(RCA, "stop_proxy", boom), self.assertRaises(OSError):
+            RCA.probe_egress(self.root, run)
+        self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+
+    def test_probe_runner_returns_rc_and_stdout_only(self):
+        self.assertEqual(RCA.probe_runner(["sh", "-c", "echo out; echo err >&2; exit 3"], None, 10), (3, "out\n"))
+        rc, out = RCA.probe_runner(["sh", "-c", r"printf 'A\377B\n'"], None, 10)   # not UTF-8: no exception
+        self.assertEqual(rc, 0); self.assertTrue(out.startswith("A") and out.endswith("B\n"), out)
+
+    def test_probe_runner_timeout_is_rc_124_and_removes_the_named_container(self):
+        cmds = []
+        with mock.patch.object(RCA, "_quiet", lambda argv: cmds.append(argv) or 0):
+            r = RCA.probe_runner(["sh", "-c", "sleep 5", "--name", "hermes-audit-x-draft"], None, 0.2)
+            self.assertEqual(r, (124, ""))
+            self.assertEqual(RCA.probe_runner(["sleep", "5"], None, 0.2), (124, ""))   # no name: nothing removed
+        self.assertEqual(cmds, [["docker", "rm", "-f", "hermes-audit-x-draft"]])
+
+    def test_probe_runner_interrupt_removes_the_named_container_and_propagates(self):
+        cmds = []
+        def interrupted(argv, **kw):
+            raise SystemExit(143)
+        with mock.patch.object(RCA, "_quiet", lambda argv: cmds.append(argv) or 0), \
+                mock.patch.object(RCA.subprocess, "run", interrupted), self.assertRaises(SystemExit):
+            RCA.probe_runner(["docker", "compose", "run", "--name", "hermes-audit-x-draft", "ads-drafter"], None, 5)
+        self.assertEqual(cmds, [["docker", "rm", "-f", "hermes-audit-x-draft"]])
+
+
+class TestProbeCli(Base):
+    def call(self, argv, outputs=None, **kw):
+        runs = []
+        def run(a, env, timeout):
+            runs.append(a)
+            return 0, next((o for s, o in (outputs or {}).items() if s in a), "")
+        def no_registry(*a):
+            raise AssertionError("a probe must not look up a client")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(RCA, "probe_runner", run), mock.patch.object(RCA.L, "eligible_client", no_registry), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = RCA.main(argv, runner=FakeRunner(self.root), root=self.root, **kw)
+        return rc, out.getvalue(), err.getvalue(), runs
+
+    def test_probe_env_prints_one_json_object_and_exits_0(self):
+        rc, out, err, runs = self.call(["--probe-env"], ENV_OK)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(out.splitlines()), 1, out)
+        j = json.loads(out)
+        self.assertEqual(set(j), {"services", "matches_declared"}); self.assertTrue(j["matches_declared"])
+        self.assertEqual(j["services"]["ads-drafter"],
+                         {"rc": 0, "env_names": ["ANTHROPIC_API_KEY"], "sentinel_in_files": False})
+        self.assertNotIn(RCA.SENTINEL, out)
+        self.assertEqual(len(runs), 4)
+
+    def test_probe_egress_prints_one_json_object_and_exits_0(self):
+        rc, out, err, runs = self.call(["--probe-egress"], {"ads-drafter": EGRESS_OK})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(out.splitlines()), 1, out)
+        self.assertEqual(json.loads(out), {"direct": "blocked", "non_allowed": "HTTP/1.1 403 Forbidden",
+                                           "anthropic": "HTTP/1.1 200 Connection Established",
+                                           "work_entries": ["out", "reports", "vault"], "host_visible": False,
+                                           "matches_expected": True})
+        self.assertEqual(len(self.proxy_stops), 1)
+
+    def test_a_mismatch_is_exit_1_with_the_json_still_printed(self):
+        for flag in ("--probe-env", "--probe-egress"):
+            rc, out, err, runs = self.call([flag], {})
+            self.assertEqual(rc, 1); self.assertEqual(len(out.splitlines()), 1, out)
+            j = json.loads(out)
+            self.assertIs(j.get("matches_declared", j.get("matches_expected")), False)
+
+    def test_a_probe_is_refused_rc_3_and_runs_nothing_while_an_audit_holds_the_lock(self):
+        import client_audit_lib as L
+        for flag in ("--probe-env", "--probe-egress"):
+            with L.AuditLock(self.root + RCA.LOCK):
+                rc, out, err, runs = self.call([flag], ENV_OK)
+            self.assertEqual((rc, out, runs), (3, "", []))
+            self.assertIn("another audit is running", err)
+            self.assertEqual(self.proxy_stops, [])            # the running audit's proxy is not touched
+            self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+
+    def test_usage_errors(self):
+        for argv in ([], ["--dry-run"], ["--json"], ["--list", "--json"],            # no client
+                     ["acme-dental", "--probe-env"], ["acme-dental", "--probe-egress"],   # a probe takes none
+                     ["--probe-env", "--probe-egress"], ["--probe-env", "--list", "--json"],
+                     ["--probe-egress", "--dry-run"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit) as cm:
+                self.call(argv, ENV_OK)
+            self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(self.proxy_stops, [])
+        self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
+
+    def test_the_app_runner_manifest_offers_no_probe(self):
+        with open(os.path.join(os.path.dirname(HERE), "registry/apps/ads-audit.json")) as f:
+            text = f.read()
+        self.assertEqual(sorted(json.loads(text)["ops"]), ["list", "run"])
+        self.assertNotIn("probe", text)
+
+
 if __name__ == "__main__":
     unittest.main()
