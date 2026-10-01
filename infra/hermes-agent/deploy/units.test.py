@@ -332,5 +332,35 @@ class TestExecStartProgramsAreExecutable(unittest.TestCase):
                              "`git update-index --chmod=+x %s`." % (unit_name, rel, mode, rel))
 
 
+class TestAppUnits(unittest.TestCase):
+    def directives(self, name):
+        return live_lines(unit(name))
+
+    def test_broker_is_sandboxed_and_unprivileged(self):
+        d = self.directives("hermes-app-broker@.service")
+        for want in ("User=hermes-app-%i", "Group=hermes-app-%i", "SupplementaryGroups=hermes",
+                     "NoNewPrivileges=true", "CapabilityBoundingSet=", "AmbientCapabilities=",
+                     "PrivateNetwork=true", "PrivateTmp=true", "ProtectSystem=strict", "ProtectHome=true",
+                     "UMask=0077", "RestrictAddressFamilies=AF_UNIX",
+                     "ReadWritePaths=/var/lib/hermes/spool/apps/%i /var/lib/hermes/app-state/%i"):
+            self.assertIn(want, d)
+        body = "\n".join(d)  # live directives only: the unit's comments legitimately say "never docker"
+        for banned in ("docker", "DOCKER_HOST", "sudo", "User=root"):
+            self.assertNotIn(banned, body)
+
+    def test_runner_is_a_root_oneshot_on_the_fixed_script(self):
+        d = self.directives("hermes-app-runner@.service")
+        self.assertIn("Type=oneshot", d)
+        self.assertIn("User=root", d)
+        self.assertIn("ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/hermes-app-runner.py --app %i", d)
+        # the runner relies on the cgroup kill to reap process-group survivors after a timeout TERM
+        self.assertIn("KillMode=control-group", d)
+
+    def test_path_unit_watches_jobs(self):
+        d = self.directives("hermes-app-runner@.path")
+        self.assertIn("DirectoryNotEmpty=/var/lib/hermes/app-state/%i/jobs", d)
+        self.assertIn("Unit=hermes-app-runner@%i.service", d)
+
+
 if __name__ == "__main__":
     unittest.main()

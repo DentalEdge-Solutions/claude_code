@@ -1,0 +1,14 @@
+[Unit]
+Description=Hermes app runner for %i (root; runs the manifest's one fixed command)
+
+[Service]
+# Option B spec 2026-09-30 §3.4. Root because the command it runs (run-client-audit) needs root.
+# It reads only job files written by hermes-app-%i, never the spool; per-job timeouts come from
+# the manifest, so this unit's own limit only bounds a pathological queue.
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/hermes-app-runner.py --app %i
+# systemd's default, stated because the runner relies on it to reap process-group survivors after a timeout TERM.
+KillMode=control-group
+TimeoutStartSec=6h
