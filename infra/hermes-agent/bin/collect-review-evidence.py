@@ -5,16 +5,24 @@
   sudo python3 bin/collect-review-evidence.py --fingerprint-only
   sudo python3 bin/collect-review-evidence.py --credentials-only
 
-READ-ONLY. It observes and reports; it never judges — CHECKLIST.md says what each item
-should show, and the independent reviewer compares. Three rules, each tested:
+It observes and reports; it never judges — CHECKLIST.md says what each item should show,
+and the independent reviewer compares. It changes nothing a review looks at, but the full
+bundle is NOT read-only: D10.1 and D10.2 run `run-client-audit --probe-env` and
+`--probe-egress`, which take the audit lock, start the audit containers (and the egress
+proxy), create and remove `/var/lib/hermes/probe`, and make one outbound CONNECT to
+`api.anthropic.com` through the proxy. `--fingerprint-only` and `--credentials-only` run no
+probe. Three rules, each tested:
   * nothing printed carries a credential value, a client slug or a customer id;
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, fnmatch, grp, json, os, pwd, re, stat, subprocess, sys
+import argparse, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import app_lib as A
 import changeset_lib as C
+import client_audit_lib as CAL
+import host_layout as HL
 import package_lib as PK
 import review_lib as R
 
@@ -30,7 +38,11 @@ GATEWAY_FILTER = "label=com.docker.compose.service=hermes-agent"
 GATEWAY_PROBE_PATHS = ("/opt/governance", "/var/lib/hermes/governance",
                        "/projects/claude_google_ads/.env", "/opt/hermes-agent/.env.gaw",
                        "/opt/hermes-agent/.env.ga",
-                       "/etc/hermes/.env" + ".ga")
+                       "/etc/hermes/.env" + ".ga",
+                       "/var/lib/hermes/vaults", "/var/lib/hermes/reports", "/var/lib/hermes/draft-out",
+                       "/var/lib/hermes/audit-data", "/var/lib/hermes/app-state",
+                       "/etc/hermes/.env.anthropic", "/opt/data/vaults", "/opt/data/reports",
+                       "/opt/data/home/.claude/settings.json")
 GATEWAY_CONTROL_PATH = "/opt/registry/projects.yaml"
 SWEEP_NAMES = (".env*", "*.ga", "*.gaw", ".git-credentials", "hosts.yml", "credentials.json",
                "application_default_credentials.json", "id_rsa", "id_ecdsa", "id_ed25519")
@@ -40,7 +52,8 @@ HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history",
 # Non-Google secret files the box is meant to hold (README credential table). A sweep hit
 # at one of these paths is `authorised-other`; any other non-empty, non-Google hit is
 # `unlisted`, which the reviewer must see explained (review #3, not-on-checklist #3).
-AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env"}
+AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env",
+                    "/etc/hermes/.env.anthropic": "anthropic-key"}
 # Writable in-memory filesystems `find / -xdev` never crosses: the collector sweeps them
 # itself, by name and by content (review #3 §5 — the manual sweep went stale).
 MEMORY_FSTYPES = {"tmpfs", "ramfs"}
@@ -60,6 +73,37 @@ PSEUDO_FSTYPES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "deb
 CODE_PATHS = ("infra/hermes-agent/bin", "infra/hermes-agent/deploy", "infra/hermes-agent/registry",
               "infra/hermes-agent/docker-compose.yml", "infra/hermes-agent/Dockerfile")
 CHECKLIST = CHECKOUT + "/infra/hermes-agent/deploy/security-review/CHECKLIST.md"
+# The chat-triggered app (Option B spec 2026-09-30 §3, §6, §8.1): gateway MCP client -> broker
+# (unprivileged) -> runner (root) -> run-client-audit.
+APP = "ads-audit"
+APP_USER = "hermes-app-" + APP
+APP_UNITS = ("hermes-app-broker@.service", "hermes-app-runner@.service", "hermes-app-runner@.path")
+APP_RESULTS = "/var/lib/hermes/spool/apps/" + APP + "/results"
+# The probes start real containers: --probe-env's worst case is about 480 s, --probe-egress's 240 s.
+PROBE_TIMEOUT = 600
+# Spec §6's hardening list, plus what the unit's environment holds (the declared map gives the
+# broker and the runner no credential; a drop-in could add one without changing the unit file).
+ENV_PROPS = ("Environment", "EnvironmentFiles")
+BROKER_PROPS = ("User", "NoNewPrivileges", "CapabilityBoundingSet", "PrivateNetwork", "PrivateTmp",
+                "ProtectSystem", "ProtectHome", "ReadWritePaths", "UMask", "ActiveState") + ENV_PROPS
+# What the broker's journal lines may say (hermes-app-broker.py _say): a result's status, or
+# `queued` / `dropped`, which never become a result.
+JOURNAL_STATUSES = A.STATUSES + ("queued", "dropped")
+JOURNAL_REASONS = A.BROKER_REASONS + A.COMMAND_REASONS + ("expired", "-")
+_BROKER_LINE = "hermes-app-broker[" + APP + "]: "
+_SAY_RE = re.compile(r"request=\S+ op=\S+ client=\S+ status=(\S+) reason=(\S+)")
+_NOTE_RE = re.compile(r"(warning|error): ")
+WITHHELD = "<withheld>"
+# D10.6: the gateway's live config (in ./data, which the gateway's uid owns: read as hostile) and
+# the template it is installed from. Only their `mcp_servers:` blocks are compared.
+MCP_BOX_CONFIG = AGENT_DIR + "/data/config.yaml"
+MCP_REPO_CONFIG = CHECKOUT + "/infra/hermes-agent/config.yaml.example"
+MCP_CONFIG_CAP = 64 * 1024
+MCP_LIST_LINES, MCP_LIST_WIDTH = 40, 200
+_MCP_KEY_RE = re.compile(r"""["']?mcp_servers["']?\s*:""")
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# systemd prints `argv[]=<the command line> ; ignore_errors=...` inside the ExecStart value.
+_ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=.*? ; "))
 
 
 def _run_real(argv, timeout=60):
@@ -115,9 +159,16 @@ def _stat(host, p):
             "mode": oct(stat.S_IMODE(st.st_mode)), "size": st.st_size}
 
 
-def context(host):
+def _tty_key():
+    try:
+        return getpass.getpass("review fingerprint key (hidden, from `pbcopy < ~/.config/hermes-review/fp.key`): ")
+    except (EOFError, OSError):
+        return ""
+
+
+def context(host, fp_key=None):
     """Loaded once per run. Raises ValueError when the redaction list cannot load."""
-    return {"redactor": R.Redactor.from_clients_json(host.path(GOV + "/registry/clients.json"))}
+    return {"redactor": R.Redactor.from_clients_json(host.path(GOV + "/registry/clients.json"), fp_key=fp_key)}
 
 
 # ---------------------------------------------------------------- D1 host exposure
@@ -209,16 +260,22 @@ def _sweep(host):
     return sorted(set(line for line in out.splitlines() if line))
 
 
-def _mounts(host):
+def _mounts(host, nsfs=None):
     """[(target, fstype)] for every mount `find / -xdev` does NOT cross, other than real
-    pseudo/virtual filesystems (final-review A2), or None when `findmnt` cannot be read."""
+    pseudo/virtual filesystems (final-review A2), or None when `findmnt` cannot be read.
+    `nsfs`, a set the caller passes, collects the targets of nsfs mounts (Docker namespace
+    handles), which are pseudo and so never in the result: _memory_sweep classifies them."""
     rc, out, _ = host.run(["findmnt", "-rn", "-o", "TARGET,FSTYPE"])
     if rc != 0:
         return None
     mounts = set()
     for line in out.splitlines():
         cols = line.split()
-        if len(cols) < 2 or cols[0] == "/" or cols[1] in PSEUDO_FSTYPES:
+        if len(cols) < 2 or cols[0] == "/":
+            continue
+        if cols[1] == "nsfs" and nsfs is not None:
+            nsfs.add(cols[0])
+        if cols[1] in PSEUDO_FSTYPES:
             continue
         mounts.add((cols[0], cols[1]))
     return sorted(mounts)
@@ -230,7 +287,7 @@ def _not_swept(host, mounts):
     return R.COULD_NOT_CHECK if mounts is None else sorted({t for t, _ in mounts})
 
 
-def _memory_sweep(host, mounts):
+def _memory_sweep(host, mounts, nsfs=()):
     """Sweep the writable in-memory mounts the root sweep skips: a file whose NAME is
     credential-shaped (SWEEP_NAMES), or whose CONTENT looks like a Google Ads credential.
     Paths only, never content. Each mount is walked without crossing into another mount
@@ -238,7 +295,8 @@ def _memory_sweep(host, mounts):
     if mounts is None:
         return R.COULD_NOT_CHECK
     targets = sorted(t for t, fs in mounts if fs in MEMORY_FSTYPES)
-    names, contents, unreadable = set(), set(), set()
+    ns = {t for t, fs in mounts if fs == "nsfs"} | set(nsfs)   # Docker namespace handles: classified, not read
+    names, contents, unreadable, handles = set(), set(), set(), set()
     for m in targets:
         top = host.path(m)
         try:
@@ -263,6 +321,9 @@ def _memory_sweep(host, mounts):
             for n in files:
                 full = os.path.join(root, n)
                 shown = shown_of(full)
+                if shown in ns:
+                    handles.add(shown)
+                    continue
                 try:
                     st = os.lstat(full)
                     if not stat.S_ISREG(st.st_mode):
@@ -275,7 +336,7 @@ def _memory_sweep(host, mounts):
                 except OSError:
                     unreadable.add(shown)
     return {"mounts": targets, "name_hits": sorted(names), "content_hits": sorted(contents),
-            "unreadable": sorted(unreadable)}
+            "unreadable": sorted(unreadable), "namespace_handles": sorted(handles)}
 
 
 def _shared_sweep(host, ctx):
@@ -348,14 +409,24 @@ def d2_1(host, ctx):
                         row["kind"] = "empty"
                     elif p in AUTHORISED_OTHER:
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
+                        name = "OPENROUTER_API_KEY"                 # the gateway .env: Hermes's own key
+                        if p == "/etc/hermes/.env.anthropic":
+                            row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
+                            name = "ANTHROPIC_API_KEY"
+                        # The value is loaded only to join the known secrets (assert_no_secret,
+                        # D2.2, D2.3, D10.7 look for it); it is never reported.
+                        key = CAL.load_env_value(host.path(p), name)
+                        if key:
+                            ctx.setdefault("secrets", []).append(key)
         except OSError as e:
             row["error"] = type(e).__name__
             if not is_example:
                 row["kind"] = "unreadable"
         rows.append(row)
-    mounts = _mounts(host)
+    handles = set()
+    mounts = _mounts(host, nsfs=handles)
     return {"files": rows, "not_swept": _not_swept(host, mounts),
-            "memory_sweep": _memory_sweep(host, mounts)}
+            "memory_sweep": _memory_sweep(host, mounts, handles)}
 
 
 def _count_cred_text(text, secrets):
@@ -404,14 +475,53 @@ def d4_1(host, ctx):
               'else echo "$p absent"; fi; done')
     out = _ok(host, ["docker", "exec", gw, "sh", "-c", script, "sh", *GATEWAY_PROBE_PATHS, GATEWAY_CONTROL_PATH])
     env = _ok(host, ["docker", "exec", gw, "env"])
+    names = [l.split("=", 1)[0] for l in env.splitlines() if "=" in l]
     return {"paths": out.splitlines(),
-            "google_ads_env_names": sorted(l.split("=", 1)[0] for l in env.splitlines() if l.startswith("GOOGLE_ADS_"))}
+            "google_ads_env_names": sorted(n for n in names if n.startswith("GOOGLE_ADS_")),
+            "anthropic_env_names": sorted(n for n in names if n.startswith("ANTHROPIC_")),
+            "openrouter_env_names": sorted(n for n in names if n.startswith("OPENROUTER_"))}
+
+
+LAST_PASS_EXECSTART = None      # the last passing review's proxy execstart_sha256, set by main()
+
+
+def _drop_ins(host, unit):
+    """The unit's drop-in files, from a `systemctl show` call of its own: a drop-in changes what
+    the unit runs (ExecStart, User, Environment) with the unit file byte-identical. A list of
+    paths, empty when there is none; could-not-check when systemd did not print the property."""
+    for line in _ok(host, ["systemctl", "show", unit, "-p", "DropInPaths"]).splitlines():
+        if line.startswith("DropInPaths="):
+            return line[len("DropInPaths="):].split()
+    return R.COULD_NOT_CHECK
+
+
+def _argv_sha256(execstart):
+    """sha256 of the `argv[]=...` segment of the ExecStart line(s), or None when there is none.
+    Unlike the whole line, it does not carry `start_time` or `pid`, so a restart leaves it
+    unchanged. The segment runs up to ` ; ignore_errors=`, the field systemd prints next (the
+    last one on the line, so an argument that itself holds ` ; ` cannot end it early); only
+    when that field is absent, up to the next ` ; `."""
+    segments = []
+    for line in execstart.splitlines():
+        m = _ARGV_RES[0].search(line)
+        if m:
+            segments.append(m.group(0)[:-len(" ; ignore_errors=")])
+            continue
+        m = _ARGV_RES[1].search(line)
+        if m:
+            segments.append(m.group(0)[:-len(" ; ")])
+    return PK.sha256_bytes("\n".join(segments).encode()) if segments else None
 
 
 def d4_2(host, ctx):
     active = host.run(["systemctl", "is-active", "hermes-docker-proxy"])[1].strip()
     execstart = _ok(host, ["systemctl", "show", "hermes-docker-proxy", "-p", "ExecStart"])
-    return {"active": active, "execstart_sha256": PK.sha256_bytes(execstart.encode())}
+    sha = PK.sha256_bytes(execstart.encode())
+    return {"active": active, "execstart_sha256": sha, "last_pass_execstart_sha256": LAST_PASS_EXECSTART,
+            "matches_last_pass": None if LAST_PASS_EXECSTART is None else sha == LAST_PASS_EXECSTART,
+            # The baseline for the NEXT review, not compared in this one.
+            "execstart_argv_sha256": _argv_sha256(execstart),
+            "drop_in_paths": _drop_ins(host, "hermes-docker-proxy")}
 
 
 def d4_3(host, ctx):
@@ -534,6 +644,27 @@ def _dir_row(host, p):
     return {"owner": _owner(st.st_uid), "group": _group(st.st_gid), "mode": oct(stat.S_IMODE(st.st_mode))}
 
 
+def _file_modes(cdir, st):
+    """Counts of the entries inside one client directory by "owner group mode", never names.
+    A symlink or non-directory is not listed; an entry that vanishes is skipped and a
+    directory that cannot be listed gives no counts, never an exception out of D7.1."""
+    files = {}
+    if not stat.S_ISDIR(st.st_mode):               # lstat: a symlink is not S_ISDIR
+        return files
+    try:
+        names = os.listdir(cdir)
+    except OSError:
+        return files
+    for fn in names:
+        try:
+            fst = os.lstat(os.path.join(cdir, fn))
+        except OSError:
+            continue
+        k = f"{_owner(fst.st_uid)} {_group(fst.st_gid)} {oct(stat.S_IMODE(fst.st_mode))}"
+        files[k] = files.get(k, 0) + 1
+    return files
+
+
 def _audit_logs(host, reg):
     """The audit-logs root plus one row per child: registry status, owner, mode, never the name.
     A symlinked root is reported as such and never listed."""
@@ -544,18 +675,37 @@ def _audit_logs(host, reg):
         for name in sorted(os.listdir(host.path(root))):
             st = os.lstat(os.path.join(host.path(root), name))
             rows.append({"status": _reg_status(reg, name),
-                         "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
+                         "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode)),
+                         "files": _file_modes(os.path.join(host.path(root), name), st)})
     return {"root": row, "rows": rows}
+
+
+HERMES_VAR = "/var/lib/hermes"
+
+
+def _client_rows(host, reg, parent):
+    """One row per child of a client-data parent: registry status, owner, mode, never the name.
+    A symlinked or non-directory parent is not listed; a child that vanishes is skipped."""
+    root = host.path(parent)
+    rows = []
+    if os.path.isdir(root) and not os.path.islink(root):
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                st = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            rows.append({"status": _reg_status(reg, name), "owner": _owner(st.st_uid),
+                         "mode": oct(stat.S_IMODE(st.st_mode))})
+    return rows
 
 
 def d7_1(host, ctx):
     with open(host.path(GOV + "/registry/clients.json")) as f:     # one read for both row kinds
         reg = json.load(f).get("clients", {})
-    vaults = host.path(AGENT_DIR + "/data/vaults")
-    vault_rows = []
-    if os.path.isdir(vaults):
-        for n in sorted(os.listdir(vaults)):
-            vault_rows.append({"status": _reg_status(reg, n), **_stat(host, AGENT_DIR + "/data/vaults/" + n)})
     records = host.path(GOV + "/records")
     backups = sorted(n for n in os.listdir(host.path("/root")) if n.startswith("live-gate-")) \
         if os.path.isdir(host.path("/root")) else []
@@ -566,18 +716,280 @@ def d7_1(host, ctx):
             st = os.lstat(os.path.join(ad_root, name))
             audit.append({"status": _reg_status(reg, name),
                           "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
-    return {"vaults": vault_rows, "audit_data": audit,
-            "reports": _dir_row(host, AGENT_DIR + "/data/reports"),
+    return {"vaults": _client_rows(host, reg, HERMES_VAR + "/vaults"),
+            "reports_rows": _client_rows(host, reg, HERMES_VAR + "/reports"),
+            "draft_out_rows": _client_rows(host, reg, HERMES_VAR + "/draft-out"),
+            "parents": {d: _dir_row(host, f"{HERMES_VAR}/{d}") for d in ("vaults", "reports", "draft-out")},
+            "old_data": {"data/vaults": _dir_row(host, AGENT_DIR + "/data/vaults"),
+                         "data/reports": _dir_row(host, AGENT_DIR + "/data/reports")},
+            "audit_data": audit,
             "audit_logs": _audit_logs(host, reg),
             "records": sum(len(fs) for _, _, fs in os.walk(records)) if os.path.isdir(records) else 0,
             "root_backups": [{"dir": b, "files": len(os.listdir(host.path("/root/" + b)))} for b in backups]}
+
+
+# ---------------------------------------------------------------- D10 chat-triggered audits
+def _json_probe(host, flag):
+    """run-client-audit's probe: one JSON object on stdout, exit 0 (match) or 1 (mismatch).
+    Anything else — exit 3 with nothing while an audit holds the lock, 124 on a timeout, a
+    traceback — is could-not-check, with the exit code and never the output."""
+    rc, out, _ = host.run(["run-client-audit", flag], timeout=PROBE_TIMEOUT)
+    try:
+        probe = json.loads(out)
+    except (ValueError, RecursionError):
+        probe = None
+    if not isinstance(probe, dict):
+        raise CouldNotCheck(f"run-client-audit {flag} exited {rc} without a JSON object")
+    return {"rc": rc, "probe": probe}
+
+
+def d10_1(host, ctx):
+    return _json_probe(host, "--probe-env")
+
+
+def d10_2(host, ctx):
+    return _json_probe(host, "--probe-egress")
+
+
+def _env_names(value):
+    """The variable NAMES in a systemd Environment= value. A value never reaches the bundle: a
+    token that is not NAME=value (no `=`, or what precedes it is not a variable name) is `?`."""
+    try:
+        return sorted({tok.partition("=")[0] if "=" in tok and _ENV_NAME_RE.fullmatch(tok.partition("=")[0])
+                       else "?" for tok in shlex.split(value)})
+    except ValueError:
+        return R.COULD_NOT_CHECK
+
+
+def _unit_props(host, unit, props):
+    """`systemctl show -p` for the properties asked for, and nothing else it printed. systemd
+    prints a requested property even when empty, so one it did not print is could-not-check —
+    except EnvironmentFiles, which it prints once per file and not at all when there is none."""
+    out = _ok(host, ["systemctl", "show", unit, "-p", ",".join(props)])
+    got = {p: [] if p == "EnvironmentFiles" else R.COULD_NOT_CHECK for p in props}
+    for line in out.splitlines():
+        k, sep, v = line.partition("=")
+        if not sep or k not in got:
+            continue
+        if k == "EnvironmentFiles":
+            got[k].append(v)
+        else:
+            got[k] = _env_names(v) if k == "Environment" else v
+    return got
+
+
+def _same_file(host, a, b):
+    """True only when both files can be read and are byte-identical."""
+    try:
+        return PK.sha256_file(host.path(a)) == PK.sha256_file(host.path(b))
+    except OSError:
+        return False
+
+
+def _sudo_rules(host, user):
+    """`sudo -l -U <user>` as shape only: its text names the host, and its rules are not ours to print."""
+    rc, out, _ = host.run(["sudo", "-l", "-U", user])
+    lines = out.splitlines()
+    grant = next((i for i, l in enumerate(lines) if "may run the following commands" in l), None)
+    return {"rc": rc, "not_allowed": any("is not allowed to run sudo" in l for l in lines),
+            "command_lines": 0 if grant is None else sum(1 for l in lines[grant + 1:] if l.strip())}
+
+
+def d10_3(host, ctx):
+    # is-active exits non-zero for every state but `active`: the state is the answer, not a failure.
+    path_state = host.run(["systemctl", "is-active", f"hermes-app-runner@{APP}.path"])[1].strip()
+    return {"broker_unit": _unit_props(host, f"hermes-app-broker@{APP}", BROKER_PROPS),
+            "runner_unit": _unit_props(host, f"hermes-app-runner@{APP}", ENV_PROPS),
+            "installed_equal_repo": {u: _same_file(host, "/etc/systemd/system/" + u,
+                                                   CHECKOUT + "/infra/hermes-agent/deploy/" + u)
+                                     for u in APP_UNITS},
+            # The instances of those three templates: equal unit files prove nothing with a drop-in.
+            "drop_in_paths": {u: _drop_ins(host, u) for u in (t.replace("@.", f"@{APP}.") for t in APP_UNITS)},
+            "broker_user_groups": _ok(host, ["id", "-nG", APP_USER]).split(),
+            "sudo_rules": _sudo_rules(host, APP_USER),
+            "runner_path_active": path_state or R.COULD_NOT_CHECK}
+
+
+def _exposes_app_state(source):
+    """A mount whose host side is app-state, a path inside it, or a directory above it."""
+    s, root = os.path.normpath(source), HL.DEFAULT_STATE_ROOT
+    return s == root or s.startswith(root + "/") or root.startswith(s.rstrip("/") + "/")
+
+
+def d10_4(host, ctx):
+    try:
+        problems = HL.check_app(APP, host.path(HL.DEFAULT_APPS_ROOT), host.path(HL.DEFAULT_STATE_ROOT),
+                                HL.system_resolver(layout=HL.app_layout(APP)), ancestor_top=host.root)
+    except HL.LayoutError as e:
+        raise CouldNotCheck(f"layout: {e}")
+    ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
+    mounting = not_inspected = 0
+    for cid in ids:
+        # A container that went away, or Mounts that are not what Docker prints, is counted —
+        # never allowed to fail the item or to pass as "mounts nothing".
+        rc, out, _ = host.run(["docker", "inspect", "--format", "{{json .Mounts}}", cid])
+        try:
+            mounts = json.loads(out) if rc == 0 else None
+        except (ValueError, RecursionError):
+            mounts = None
+        if not isinstance(mounts, list) or not all(isinstance(m, dict) and isinstance(m.get("Source"), str)
+                                                   for m in mounts):
+            not_inspected += 1
+        elif any(_exposes_app_state(m["Source"]) for m in mounts):
+            mounting += 1
+    return {"layout_problems": problems, "containers": len(ids),
+            "containers_mounting_app_state": mounting, "containers_not_inspected": not_inspected}
+
+
+def _mcp_block(path, what):
+    """A config file's `mcp_servers:` block as lines: from that top-level key to the next one,
+    each line without its trailing whitespace, and without the blank lines and column-0 comments
+    that trail the block (they sit between it and whatever follows). A second `mcp_servers:`
+    key later in the file is part of the result, so it can never go unseen. [] when there is no
+    such key. The read refuses a symlink, anything but a regular file and a file over
+    MCP_CONFIG_CAP, and never blocks: a refusal is could-not-check. `what` names the file in
+    that reason, never its content."""
+    try:
+        text = A.read_capped(path, MCP_CONFIG_CAP).decode("utf-8", errors="replace")
+    except (A.Refused, OSError) as e:
+        raise CouldNotCheck(f"{what}: {e if isinstance(e, A.Refused) else type(e).__name__}")
+    lines, on = [], False
+    for line in text.splitlines():
+        if _MCP_KEY_RE.match(line):
+            on = True
+        elif line[:1].strip() and not line.startswith("#"):
+            on = False                                      # another top-level key: the block is over
+        if on:
+            lines.append(line.rstrip())
+    while lines and (not lines[-1] or lines[-1].startswith("#")):
+        lines.pop()
+    return lines
+
+
+def _block_sha256(lines):
+    return PK.sha256_bytes("\n".join(lines).encode())
+
+
+def _no_credential_lines(lines):
+    return [WITHHELD if R.looks_like_credential_text(l) else l for l in lines]
+
+
+def _cut_listing(lines, secrets):
+    """Each line cut to MCP_LIST_WIDTH, except one that holds a known secret value: that line is
+    kept whole, so the whole-bundle refusal (assert_no_secret in main) still fires on it and no
+    part of a secret that straddles the cut is ever printed. A secret never spans lines, so the
+    line cap needs no such care."""
+    known = [s for s in secrets if len(s) >= 8]
+    return [l if any(s in l for s in known) else l[:MCP_LIST_WIDTH] for l in lines]
+
+
+def d10_6(host, ctx):
+    """The box's block is free text from the reviewed party, so none of it is emitted: only
+    whether it equals the committed block (the same lines, as _mcp_block gives them: comments
+    and blank lines inside the block count), how many lines it has and their sha256."""
+    box = _mcp_block(host.path(MCP_BOX_CONFIG), "data/config.yaml")
+    repo = _mcp_block(host.path(MCP_REPO_CONFIG), "config.yaml.example")
+    if not repo:
+        raise CouldNotCheck("config.yaml.example: no mcp_servers block")
+    # The tool list is information, not a boundary: when it cannot be had, it is empty with its
+    # exit code (None: no gateway container to ask), and the comparison is still reported. It is
+    # the gateway's own text: capped in lines and in line length.
+    rc, gw, _ = host.run(["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER])
+    gw, listing, list_rc = gw.strip(), [], None
+    if rc == 0 and len(gw) == 64:
+        list_rc, out, _ = host.run(["docker", "exec", gw, "hermes", "mcp", "list"])
+        if list_rc == 0:
+            listing = _cut_listing(_no_credential_lines(out.splitlines()[:MCP_LIST_LINES]),
+                                   ctx.get("secrets", []))
+    return {"mcp_block": {"equals_repo": box == repo, "lines": len(box), "sha256": _block_sha256(box)},
+            "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
+
+
+def _label(value, allowed):
+    """A closed-set value as itself, null as `-`, anything else as `?`: free text, a name or a
+    wrong type from a file or a journal line never reaches the bundle."""
+    if value is None:
+        return "-"
+    return value if isinstance(value, str) and value in allowed else "?"
+
+
+def _journal(host, unit):
+    return _ok(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
+
+
+def _journal_leaks(text, secrets, redactor):
+    """What a unit's journal must hold none of: lines of Google-credential-shaped text, lines
+    with a registered customer id, and (as D2.3 counts them) credential patterns and the
+    installed secret values themselves. Counts only, never a line."""
+    lines = text.splitlines()
+    return {"credential_text_lines": sum(1 for l in lines if R.looks_like_credential_text(l)),
+            "customer_id_lines": sum(1 for l in lines if redactor.has_customer_id(l)),
+            **_count_cred_text(text, secrets)}
+
+
+def d10_7(host, ctx):
+    """Counts only, never a line: the journal names clients and request ids by design. The
+    status/reason counts are the broker's; the leak counts cover the runner's journal too,
+    which is where run-client-audit's own output lands (its unit sets no StandardOutput)."""
+    broker = _journal(host, f"hermes-app-broker@{APP}")
+    runner = _journal(host, f"hermes-app-runner@{APP}")
+    counts, notes, other = {}, {}, 0
+    for line in broker.splitlines():
+        if not line.strip():
+            continue
+        body = line[len(_BROKER_LINE):] if line.startswith(_BROKER_LINE) else ""
+        say, note = _SAY_RE.fullmatch(body), _NOTE_RE.match(body)
+        if say:
+            k = f"{_label(say.group(1), JOURNAL_STATUSES)}/{_label(say.group(2), JOURNAL_REASONS)}"
+            counts[k] = counts.get(k, 0) + 1
+        elif note:
+            notes[note.group(1)] = notes.get(note.group(1), 0) + 1
+        else:
+            other += 1                                      # systemd's own lines, a traceback, anything else
+    # The values D2.1 read from the installed credential files (it runs first). With none
+    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
+    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
+    return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
+            "broker_journal": _journal_leaks(broker, secrets, ctx["redactor"]),
+            "runner_journal": _journal_leaks(runner, secrets, ctx["redactor"]),
+            "known_secrets_checked": len(secrets)}
+
+
+def d10_8(host, ctx):
+    """One row per entry in results/, whatever it is. An entry that cannot be read as a JSON
+    object (unreadable, not a regular file, too large, malformed) is a row and is out of
+    whitelist, as is a result stored under a name that is not its own request id. Rows carry
+    closed-set labels only: never the slug, the request id or a file name."""
+    d = host.path(APP_RESULTS)
+    rows, bad = [], 0
+    for n in sorted(os.listdir(d)):
+        # Everything done with one entry sits inside this guard: whatever a file holds, and
+        # whatever goes wrong judging it, costs that entry's row and never the other rows.
+        try:
+            obj = json.loads(A.read_capped(os.path.join(d, n), A.MAX_DONE_BYTES))
+            if not isinstance(obj, dict):
+                raise ValueError("not an object")
+            keys_ok, values_ok = A.result_in_whitelist(obj)
+            values_ok = values_ok and obj["request_id"] + ".json" == n
+            row = {"op": _label(obj.get("op"), A.KNOWN_OPS),
+                   "status": _label(obj.get("status"), A.STATUSES),
+                   "reason": _label(obj.get("reason"), A.BROKER_REASONS + A.COMMAND_REASONS),
+                   "keys_ok": keys_ok, "values_ok": values_ok}
+        except Exception:                                   # OSError, ValueError (A.Refused), RecursionError, ...
+            row = {"keys_ok": False, "values_ok": False}
+        rows.append(row)
+        bad += not (row["keys_ok"] and row["values_ok"])
+    return {"results": rows, "out_of_whitelist": bad}
 
 
 PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6,
           "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3,
           "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4,
           "D5.1": d5_1, "D5.2": d5_2, "D5.3": d5_3, "D5.4": d5_4,
-          "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1}
+          "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1,
+          # D10.5 (the OpenRouter key limit and account privacy setting) is manual: no probe.
+          "D10.1": d10_1, "D10.2": d10_2, "D10.3": d10_3, "D10.4": d10_4, "D10.6": d10_6,
+          "D10.7": d10_7, "D10.8": d10_8}
 
 
 # ---------------------------------------------------------------- fingerprint (§5.1)
@@ -652,9 +1064,9 @@ def box_fingerprint(host, ctx):
 
 
 # ---------------------------------------------------------------- assembly
-def collect_with_secrets(host):
+def collect_with_secrets(host, fp_key):
     """The bundle (redacted) and every credential value seen, for assert_no_secret."""
-    ctx = context(host)
+    ctx = context(host, fp_key)
     items = {}
     for iid, fn in PROBES.items():
         try:
@@ -668,23 +1080,52 @@ def collect_with_secrets(host):
     except CouldNotCheck as e:
         secrets, creds = [], {R.COULD_NOT_CHECK: str(e)}
     bundle = {"schema": 1, "kind": "box", "collected_at": R.utc_now(), "items": items,
-              "fingerprint": box_fingerprint(host, ctx), "credentials": creds}
+              "fingerprint": box_fingerprint(host, ctx), "credentials": creds,
+              "cid_fingerprint": "hmac-sha256/12", "cid_key_id": R.key_id(fp_key)}
     return ctx["redactor"].obj(bundle), ctx.get("secrets", []) + secrets
 
 
-def collect(host):
-    return collect_with_secrets(host)[0]
+def collect(host, fp_key):
+    return collect_with_secrets(host, fp_key)[0]
 
 
-def main(argv=None, host=None):
+def main(argv=None, host=None, read_key=_tty_key):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--fingerprint-only", action="store_true")
     g.add_argument("--credentials-only", action="store_true")
+    ap.add_argument("--fp-key-tty", action="store_true")
+    ap.add_argument("--last-pass-execstart")
     a = ap.parse_args(argv)
+    if a.last_pass_execstart is None:
+        return _main(a, host, read_key)
+    if not re.fullmatch(r"[0-9a-f]{64}", a.last_pass_execstart):
+        print("collect-review-evidence: --last-pass-execstart must be 64 lowercase hex characters",
+              file=sys.stderr)
+        return 2
+    global LAST_PASS_EXECSTART
+    prior, LAST_PASS_EXECSTART = LAST_PASS_EXECSTART, a.last_pass_execstart
+    try:
+        return _main(a, host, read_key)
+    finally:
+        LAST_PASS_EXECSTART = prior            # never leaks into a later call without the flag
+
+
+def _main(a, host, read_key):
+    fp_key = None
+    if a.fp_key_tty:
+        try:
+            fp_key = R.load_fp_key(read_key())
+        except ValueError as e:
+            print(f"collect-review-evidence: {e}", file=sys.stderr)
+            return 2
+    if not (a.fingerprint_only or a.credentials_only) and fp_key is None:
+        print("collect-review-evidence: the full bundle needs --fp-key-tty (Option B §8: keyed cid fingerprints)",
+              file=sys.stderr)
+        return 2
     host = host or Host()
     try:
-        ctx = context(host)
+        ctx = context(host, fp_key)
     except ValueError as e:
         print(f"collect-review-evidence: {e} — refusing to print anything I cannot redact", file=sys.stderr)
         return 2
@@ -707,9 +1148,9 @@ def main(argv=None, host=None):
             return 2
         out = R.credential_set(infos)
     else:
-        out, secrets = collect_with_secrets(host)
+        out, secrets = collect_with_secrets(host, fp_key)
     text = json.dumps(ctx["redactor"].obj(out), indent=2, sort_keys=True)
-    R.assert_no_secret(text, secrets)
+    R.assert_no_secret(text, secrets + ([fp_key.hex()] if fp_key else []))
     print(text)
     return rc
 

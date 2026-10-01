@@ -1344,7 +1344,34 @@ Requires part 1 on the box. Still not live until review #6.
     before review #6's evidence collection; keep them until then only if you still need to roll back):
     `sudo shred -u /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2`
     `sudo ls /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2` → both `No such file or directory`
-11. Rollback (only if part 2 must be undone):
+11. Live refusal checks (review D10.7 needs one each of `refused/disabled`, `refused/quota` and
+    `refused/bad_request` in the broker journal, 30 days back; the broker journal shows the client
+    short name by design). They place a request file in the spool the way the gateway's MCP tool does
+    (`requests/<uuid>.json`, as the broker's own user, which owns that directory) and read the journal
+    line the broker writes for it (it polls every 2 s). None runs an audit. Each line is one paste;
+    `<client>` is the client of step 10's chat audit.
+    a. Kill switch, then a request while it is set (any `run` request is refused before anything else is checked):
+    `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
+    `R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "<client>", "op": "run", "request_id": "%s"}' "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
+    → `hermes-app-broker[ads-audit]: request=<uuid> op=run client=<client> status=refused reason=disabled`
+    Only when that line has appeared: `sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED` (switch off again before the next check). If no line appeared (the broker is stopped or slow), delete the request first with `sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json`, check `systemctl is-active hermes-app-broker@ads-audit`, and only then remove the switch: a request still in `requests/` is decided afresh once the switch is gone, and could start a real audit.
+    b. Quota (the manifest allows one `run` per client per UTC day. The broker refuses a second one only
+    while a `run` for that client is HELD today: a `list` request, a `run` that ended `busy` and a run
+    from another day do not count. If none is held, the request below would be admitted and start a
+    real, paid audit.) Ask the broker's own counter, as root, on the same UTC day as step 10's audit:
+    `sudo python3 -c 'import sys; sys.path.insert(0, "/opt/hermes-agent/bin"); import app_lib as A; print("HELD_RUNS=%d" % A.Ledger("/var/lib/hermes/app-state/ads-audit/state/ledger.jsonl").count(A.utcnow()[:10], "run", "<client>"))'`
+    → `HELD_RUNS=1` is the only output that means safe to paste the next line (paste it at once, not after midnight UTC). Any other output (`HELD_RUNS=0`, an error): skip the quota check for today and run it after the next day's first real audit.
+    Then the same second-run request as in a:
+    `R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "<client>", "op": "run", "request_id": "%s"}' "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
+    → `... request=<uuid> op=run client=<client> status=refused reason=quota`
+    If no line appears, delete `requests/$R.json` as in a before doing anything else.
+    c. Malformed request. It must be a well-named file (`<36 characters of 0-9a-f and ->.json`, a fresh
+    uuid) with content the broker rejects (here `{}`: the keys are wrong): that is `refused/bad_request`.
+    A badly named file (any other name) is only `dropped/bad_request`, which does not count:
+    `R=$(cat /proc/sys/kernel/random/uuid); printf '{}' | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
+    → `hermes-app-broker[ads-audit]: request=<uuid> op=- client=- status=refused reason=bad_request`
+    Confirm all three at once: `sudo journalctl -u hermes-app-broker@ads-audit --since -30d -o cat --no-pager | grep -oE 'status=refused reason=(disabled|quota|bad_request)' | sort | uniq -c` → one line each. Each refusal also leaves a result file in `results/` (the review's D10.8 lists them; they are in the whitelist).
+12. Rollback (only if part 2 must be undone):
     `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
     `sudo systemctl disable --now hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path`
     `sudo systemctl stop hermes-app-runner@ads-audit.service` (stopping the path unit does not stop an in-flight runner)
@@ -1355,6 +1382,24 @@ Requires part 1 on the box. Still not live until review #6.
     `cd /opt/hermes-agent && sudo docker compose up -d --build --force-recreate hermes-agent`
     Revoke the dedicated OpenRouter key created in step 5, in its console. The app user and the
     layout directories are left in place (harmless). Delete the backups as in step 10.
+
+---
+
+## A security review
+
+Run it after parts 1 and 2 are applied and the rollback backups are shredded (part 2 step 10;
+the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three live refusal checks of part 2 step 11 must have been run within the last 30 days (D10.7). The chat audit of part 2 step 10 must have returned `ok` within the last 7 days (D10.8: the broker deletes a result 7 days after writing it): collect the evidence within 7 days of that audit, or run another chat audit first. Raw bundles live in the
+gitignored `security-reviews/`; only the report is committed.
+
+1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
+2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`, then `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
+3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):
+   `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <review #5 execstart_sha256> > ~/bundle-box.json`
+   (the collector re-runs both probes as D10.1 and D10.2, so this step takes as long as step 2 again; `--last-pass-execstart` is the last PASS report's D4.2 `execstart_sha256`, 64 lowercase hex characters.)
+   Once the key is pasted, clear the laptop's clipboard: `pbcopy < /dev/null`.
+4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file, and refuses one with any group or other access: it is `0600`; the ads repo checked out at the pin, with `.claude/settings.json` stashed).
+5. Copy the box bundle to the laptop's `security-reviews/`, and delete it from the box. Check that both bundles show the same `cid_key_id`.
+6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`) and D10.8's statement that the `ok` run came from chat.
 
 ---
 

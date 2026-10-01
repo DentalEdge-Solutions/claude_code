@@ -11,7 +11,7 @@ pipe would hide it — found 2026-09-26), and DISCARDS stderr, where the Google 
 raw account ids (a D9 item). D6: rebuilds the package from the verified commit and reports
 its hash. Customer ids are redacted from everything printed.
 """
-import argparse, hashlib, importlib.util, json, os, subprocess, sys, tempfile
+import argparse, hashlib, importlib.util, json, os, stat, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import review_lib as R
@@ -49,9 +49,9 @@ def access_digest(rows):
                                          key=R.canon))).hexdigest()
 
 
-def run_audit(customer):
+def run_audit(customer, fp_key=None):
     p = subprocess.run([AUDIT_SH, "--all", "--customer", customer], capture_output=True, text=True)
-    red = R.Redactor([], [customer])
+    red = R.Redactor([], [customer], fp_key=fp_key)
     try:
         rows = parse_audit(p.stdout)
         return red.obj({"rc": p.returncode, "rows": rows, "digest": access_digest(rows),
@@ -83,11 +83,24 @@ def main(argv=None):
     ap.add_argument("--customer", required=True)
     ap.add_argument("--access-digest", action="store_true")
     ap.add_argument("--package-project"); ap.add_argument("--package-repo"); ap.add_argument("--package-commit")
+    ap.add_argument("--fp-key-file", default=os.path.expanduser("~/.config/hermes-review/fp.key"))
     a = ap.parse_args(argv)
     if not a.customer.isdigit():
         print("collect-review-evidence-laptop: --customer must be digits", file=sys.stderr)
         return 1
-    audit = run_audit(a.customer)
+    key = None
+    if not a.access_digest:                                  # the digest carries no cids
+        try:
+            with open(a.fp_key_file) as f:
+                mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+                if mode & 0o077:                                 # spec §8: the key file is 0600
+                    raise ValueError(f"{a.fp_key_file} is mode {mode:04o}; it must be 0600 "
+                                     "(no group or other access): chmod 600 it")
+                key = R.load_fp_key(f.read())
+        except (OSError, ValueError) as e:
+            print(f"collect-review-evidence-laptop: cannot use the review key: {e}", file=sys.stderr)
+            return 2
+    audit = run_audit(a.customer, key)
     if a.access_digest:
         print(audit.get("digest", R.COULD_NOT_CHECK))
         return 0 if "digest" in audit and audit["rc"] == 0 else 2
@@ -100,7 +113,8 @@ def main(argv=None):
             items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": str(e)}
     else:
         items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": "no --package-* arguments"}
-    print(json.dumps({"schema": 1, "kind": "laptop", "collected_at": R.utc_now(), "items": items}, indent=2, sort_keys=True))
+    print(json.dumps({"schema": 1, "kind": "laptop", "collected_at": R.utc_now(),
+                      "cid_fingerprint": "hmac-sha256/12", "cid_key_id": R.key_id(key), "items": items}, indent=2, sort_keys=True))
     return 0
 
 

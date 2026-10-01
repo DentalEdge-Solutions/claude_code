@@ -321,5 +321,163 @@ class TestFixRound1(unittest.TestCase):
         self.assertEqual(A.map_done(REQ, done(), m())["status"], "ok")
 
 
+class TestWhitelist(unittest.TestCase):
+    VP = "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"
+
+    def _run(self, rc, **payload):
+        p = {"status": A.RC_STATUS[rc], "reason": None, "exit_code": rc, "ts": None, "steps": [], "vault_path": None}
+        p.update(payload)
+        return A.map_done(REQ, done(rc=rc, stdout=json.dumps(p)), m())
+
+    def _list(self, rc, payload):
+        return A.map_done(dict(REQ, op="list"), done(rc=rc, stdout=json.dumps(payload)), m())
+
+    def test_result_in_whitelist(self):
+        ok = A.refused_result("0f8e2c1a-1111-4222-8333-444455556666", "run", "acme", "quota")
+        self.assertEqual(A.result_in_whitelist(ok), (True, True))
+        self.assertEqual(A.result_in_whitelist(dict(ok, reason="free text")), (True, False))
+        self.assertEqual(A.result_in_whitelist(dict(ok, extra=1)), (False, False))
+
+    def test_everything_the_broker_writes_is_in_whitelist(self):
+        step = {"name": "proxy", "rc": 1, "seconds": 2.5}
+        written = [A.refused_result(RID, None, None, "bad_request")]
+        written += [A.refused_result(RID, op, "acme-dental", r)
+                    for op in A.KNOWN_OPS for r in ("disabled", "inactive_client", "quota")]
+        written += [A.refused_result(RID, op, "acme-dental", r, status="failed")
+                    for op in A.KNOWN_OPS for r in ("internal", "interrupted", "timeout")]
+        written += [
+            A.map_done(REQ, done(), m()),                                          # ok, with its vault path
+            self._run(0, ts="2026-10-01_12-00-00"),                                # ok, nothing written
+            self._run(3, reason="busy"),
+            self._run(2, reason="precheck"),
+            self._run(1, reason="proxy", ts="2026-10-01_12-00-00", steps=[dict(step, name="collect", rc=0), step]),
+            self._run(1, reason="internal"),
+            A.map_done(REQ, done(rc=None, stdout="", timed_out=True), m()),
+            A.map_done(REQ, done(rc=None, stdout="", interrupted=True), m()),
+            A.map_done(REQ, done(stdout="not json"), m()),
+            self._list(0, {"status": "ok", "audits": []}),
+            self._list(0, {"status": "ok", "audits": ["2026-10-01_12-00-00"] * A.LIST_LIMIT}),
+            self._list(2, {"status": "refused", "reason": "precheck"}),
+            self._list(1, {"status": "failed", "reason": "internal"}),
+        ]
+        expect = [("refused", "bad_request")] + [("refused", r) for _ in A.KNOWN_OPS
+                                                 for r in ("disabled", "inactive_client", "quota")] \
+            + [("failed", r) for _ in A.KNOWN_OPS for r in ("internal", "interrupted", "timeout")] \
+            + [("ok", None), ("ok", None), ("busy", "busy"), ("refused", "precheck"), ("failed", "proxy"),
+               ("failed", "internal"), ("failed", "timeout"), ("failed", "interrupted"), ("failed", "internal"),
+               ("ok", None), ("ok", None), ("refused", "precheck"), ("failed", "internal")]
+        self.assertEqual([(r["status"], r["reason"]) for r in written], expect)   # the fixtures are what they claim
+        for r in written:
+            with self.subTest(r=r):
+                self.assertEqual(A.result_in_whitelist(json.loads(json.dumps(r))), (True, True))
+
+    def test_what_the_broker_cannot_write_is_out(self):
+        ok = A.map_done(REQ, done(), m())
+        lst = self._list(0, {"status": "ok", "audits": ["2026-10-01_12-00-00"]})
+        refused = A.refused_result(RID, "run", "acme-dental", "quota")
+        bad = [
+            dict(ok, reason="free text"), dict(ok, status="done"), dict(ok, status=["ok"]), dict(ok, reason=["x"]),
+            dict(ok, reason={"a": 1}), dict(ok, status="failed"), dict(ok, exit_code=1), dict(ok, exit_code="0"),
+            dict(ok, exit_code=True), dict(ok, exit_code=0.0), dict(ok, exit_code=None),
+            dict(ok, ts="2026-10-01_12-00-00\n"), dict(ok, ts="yesterday"), dict(ok, ts=None), dict(ok, ts=5),
+            dict(ok, vault_path=self.VP + "\n"), dict(ok, vault_path=self.VP.replace("acme-dental", "other-dental")),
+            dict(ok, vault_path=self.VP.replace("12-00-00", "12-00-01")), dict(ok, vault_path="/etc/passwd"),
+            dict(ok, vault_path=["x"]),
+            dict(ok, steps=["rm -rf /"]), dict(ok, steps="collect"), dict(ok, steps=None),
+            dict(ok, steps=[{"name": "collect", "rc": 0, "seconds": 1, "note": "free text"}]),
+            dict(ok, steps=[{"name": "free text", "rc": 0, "seconds": 1}]),
+            dict(ok, steps=[{"name": "collect", "rc": "0", "seconds": 1}]),
+            dict(ok, steps=[{"name": "collect", "rc": 0, "seconds": True}]),
+            dict(ok, steps=[{"name": "collect", "rc": 0, "seconds": 1}] * (len(A.STEP_CLASSES) + 1)),
+            dict(ok, request_id="not-a-request-id"), dict(ok, request_id=RID + "\n"), dict(ok, request_id=7),
+            dict(ok, client="Not A Slug"), dict(ok, client="acme-dental\n"), dict(ok, client=["acme-dental"]),
+            dict(ok, client=None), dict(ok, op="list"), dict(ok, op="undo"), dict(ok, op=None), dict(ok, op=["run"]),
+            dict(refused, reason="duplicate"),                    # journalled, never written as a result
+            dict(refused, reason="precheck"),                     # a run's precheck carries exit code 2
+            dict(refused, reason="timeout"), dict(refused, status="failed"), dict(refused, status="ok", reason=None),
+            dict(refused, status="busy", reason="busy"), dict(refused, steps=[{"name": "collect", "rc": 0, "seconds": 1}]),
+            dict(refused, op=None), dict(refused, client=None), dict(refused, op=None, client=None),
+            dict(refused, reason="bad_request"),                  # bad_request never knows the op or the client
+            dict(A.refused_result(RID, None, None, "bad_request"), ts="2026-10-01_12-00-00"),
+            dict(self._run(1, reason="proxy"), reason="timeout"), dict(self._run(3, reason="busy"), reason=None),
+            dict(lst, audits=["../etc"]), dict(lst, audits=["2026-10-01_12-00-00\n"]), dict(lst, audits=[7]),
+            dict(lst, audits="2026-10-01_12-00-00"), dict(lst, audits=None),
+            dict(lst, audits=["2026-10-01_12-00-00"] * (A.LIST_LIMIT + 1)),
+            dict(lst, reason="quota"), dict(lst, status="refused", reason="quota"), dict(lst, status="busy", reason="busy"),
+            dict(lst, op="run"), dict(lst, op=None, client=None, status="refused", reason="bad_request", audits=[]),
+            dict(lst, status="failed", reason="proxy", audits=[]),
+        ]
+        for r in bad:
+            with self.subTest(r=r):
+                self.assertEqual(A.result_in_whitelist(json.loads(json.dumps(r))), (True, False))
+
+    def test_wrong_keys_and_non_objects(self):
+        ok = A.map_done(REQ, done(), m())
+        missing = dict(ok); del missing["steps"]
+        both = dict(ok, audits=[])
+        for r in (None, True, 0, 1.5, "ok", [], [ok], {}, missing, both, dict(ok, note="x"), {"status": "ok"}):
+            with self.subTest(r=r):
+                self.assertEqual(A.result_in_whitelist(r), (False, False))
+
+    def test_never_raises_on_any_json_value_in_any_field(self):
+        hostile = (None, True, False, 0, -1, 1.5, 10 ** 30, "", "X y", "\n", [], [[]], [None], ["x"], {}, {"a": [1]},
+                   [{"name": ["collect"], "rc": {}, "seconds": []}], [{"name": None, "rc": None, "seconds": None}])
+        bases = (A.map_done(REQ, done(), m()), A.refused_result(RID, "run", "acme-dental", "quota"),
+                 self._run(1, reason="proxy"), self._list(0, {"status": "ok", "audits": ["2026-10-01_12-00-00"]}),
+                 A.refused_result(RID, "list", "acme-dental", "quota"), A.refused_result(RID, None, None, "bad_request"))
+        for base in bases:
+            for k in base:
+                for v in hostile:
+                    r = dict(base, **{k: v})
+                    with self.subTest(k=k, v=v):
+                        keys_ok, values_ok = A.result_in_whitelist(r)
+                        self.assertIs(keys_ok, True)
+                        # Only the unchanged value is in whitelist (compared as JSON: False is not 0),
+                        # plus the three substitutions that give another result the broker can write.
+                        same = json.dumps(r, sort_keys=True) == json.dumps(base, sort_keys=True)
+                        self.assertIs(values_ok, same or (k, v) in (("audits", []), ("steps", []),
+                                                                    ("vault_path", None)))
+
+    @staticmethod
+    def _nested(depth, kind):
+        return "[" * depth + "]" * depth if kind == "array" else '{"a":' * depth + "1" + "}" * depth
+
+    def _deepest_parsable(self, kind):
+        lo, hi = 1, 1 << 21                       # json.loads parses `lo` levels and refuses `hi`
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            try:
+                json.loads(self._nested(mid, kind))
+                lo = mid
+            except RecursionError:
+                hi = mid
+        return lo
+
+    def test_never_raises_on_json_nested_as_deep_as_the_parser_allows(self):
+        # A value json.loads accepts must be judged, not re-serialized: json.dumps recurses a
+        # few frames deeper than json.loads, so there is a depth that parses and cannot be dumped.
+        # The sweep covers the interpreter's recursion limit and the parser's own limit.
+        limit = sys.getrecursionlimit()
+        bases = (A.map_done(REQ, done(), m()), A.refused_result(RID, "run", "acme-dental", "quota"),
+                 A.refused_result(RID, None, None, "bad_request"),
+                 self._list(0, {"status": "ok", "audits": ["2026-10-01_12-00-00"]}))
+        for kind in ("array", "object"):
+            top = self._deepest_parsable(kind)
+            depths = set(range(limit - 20, limit + 20)) | set(range(top - 10, top + 1)) \
+                | {top * i // 8 for i in range(1, 8)}
+            for depth in sorted(d for d in depths if 0 < d <= top):
+                v = json.loads(self._nested(depth, kind))
+                for base in bases:
+                    for k in base:
+                        with self.subTest(kind=kind, depth=depth, k=k):
+                            self.assertEqual(A.result_in_whitelist(dict(base, **{k: v})), (True, False))
+
+    def test_a_recursion_error_from_the_checks_is_out_of_whitelist_not_a_raise(self):
+        ok = A.map_done(REQ, done(), m())
+        with mock.patch.object(A, "_broker_could_write", side_effect=RecursionError):
+            self.assertEqual(A.result_in_whitelist(ok), (True, False))
+        self.assertEqual(A.result_in_whitelist(ok), (True, True))                  # control
+
+
 if __name__ == "__main__":
     unittest.main()

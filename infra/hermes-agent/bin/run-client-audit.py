@@ -3,9 +3,14 @@
 
   sudo run-client-audit <client> [--dry-run] [--json]
   sudo run-client-audit <client> --list --json
+  sudo run-client-audit --probe-env | --probe-egress
 
 --json: exactly one JSON line on stdout (the broker's contract, Option B §3.5), every human line
 on stderr. --list: this client's audit timestamps (newest 24), no lock taken.
+--probe-env / --probe-egress (security review; no client, not an app-runner op): one JSON object
+on stdout measuring which audit container holds which credential NAME, and what the drafter can
+reach. Sentinel values and throwaway empty dirs: no credential file and no client data is read.
+Exit 0 as declared/expected, 1 not, 3 an audit is running.
 
 Pre-checks, then: collect (one-shot ads-collector) -> snapshot (host) -> readers (one-shot
 ads-reader) -> egress-proxy up -> draft (claude -p in the one-shot ads-drafter, which sees only
@@ -18,7 +23,7 @@ Nothing shown carries a customer id or credential value; each step's stdout and 
 /var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
 to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
 file there is created O_EXCL|O_NOFOLLOW: root never follows a container-planted symlink."""
-import argparse, datetime, json, os, re, signal, stat, subprocess, sys, time
+import argparse, datetime, json, os, re, shutil, signal, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import changeset_lib as C
 import client_audit_lib as L
@@ -257,13 +262,16 @@ def _compose(root):
             "--profile", "tools"]
 
 
-def plan(rec, ts, root):
-    """[(timeout_key, argv, env)] — env holds only what the step needs, plus PATH."""
+def plan(rec, ts, root, cred_values=None, anthropic_key=None):
+    """[(timeout_key, argv, env)] — env holds only what the step needs, plus PATH.
+    cred_values / anthropic_key (the probes' sentinels) replace the two credential files' content:
+    when given, that file is not opened."""
     slug, cid = rec["slug"], rec["customer_id"]
     collected_at = _iso(ts)
     data = AUDIT_DATA + "/" + slug
     base = {"PATH": os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")}
-    cred = {**base, **{k: v for k, v in L.load_cred_env(root + CRED).items() if k in CRED_NAMES},
+    creds = L.load_cred_env(root + CRED) if cred_values is None else cred_values
+    cred = {**base, **{k: v for k, v in creds.items() if k in CRED_NAMES},
             "GOOGLE_ADS_CUSTOMER_ID": cid, "HERMES_AUDIT_DATA_DIR": data,
             "HERMES_REPORTS_DIR": REPORTS + "/" + slug}
     eflags = [x for n in CRED_NAMES for x in ("-e", n)]
@@ -277,7 +285,8 @@ def plan(rec, ts, root):
     steps += [("read", run(f"read-{r}") + ["ads-reader", "--report", r, "--project", PROJECT], cred)
               for r in READERS]
     steps.append(("proxy", _compose(root) + ["up", "-d", "--no-deps", "egress-proxy"], base))
-    key = L.load_env_value(root + ANTHROPIC_CRED, "ANTHROPIC_API_KEY") or ""
+    key = ((L.load_env_value(root + ANTHROPIC_CRED, "ANTHROPIC_API_KEY") or "") if anthropic_key is None
+           else anthropic_key)
     draft_env = {**base, "ANTHROPIC_API_KEY": key, "HERMES_VAULT_DIR": VAULTS + "/" + slug,
                  "HERMES_REPORTS_DIR": REPORTS + "/" + slug, "HERMES_DRAFT_OUT_DIR": DRAFT_OUT + "/" + slug}
     # Non-secret, validated values inline (M9): slug (eligible_client), PROJECT (constant), ts (_iso).
@@ -292,16 +301,240 @@ def plan(rec, ts, root):
     return steps
 
 
+# ---- Security-review probes (Option B part 3): which container gets which credential, and what
+# the drafter can reach. plan()'s real argv and env, with sentinel values and throwaway dirs.
+PROBE_DIR = "/var/lib/hermes/probe"
+PROBE_SLUG = "probe"
+# Joined at run time, never one literal: bin/ is mounted at /opt/cc-bin in ads-reader and
+# egress-proxy, and _ENV_PROBE greps the mounts for this value. A literal here (or one the
+# compiler folds into the .pyc) would be found there and reported as a leak on every run.
+SENTINEL = "".join(("HERMESPROBE", "SENTINEL0123456789"))
+DECLARED = {"ads-collector": ["GOOGLE_ADS_"], "ads-reader": ["GOOGLE_ADS_"],
+            "ads-drafter": ["ANTHROPIC_"], "egress-proxy": []}
+_CRED_SHAPED = r"(GOOGLE_ADS_|ANTHROPIC_|OPENROUTER_)"
+# Three measurements: the credential-shaped env NAMES; the names of every variable whose VALUE
+# holds the sentinel, whatever it is called (spec §8: "in any environment or mounted file"); the
+# count of mounted files that hold it.
+_ENV_PROBE = ("env | cut -d= -f1 | grep -E '^" + _CRED_SHAPED + "' | sort; "
+              "env | grep -F " + SENTINEL + " | cut -d= -f1 | sed 's/^/SENTINEL_ENV=/'; "
+              "n=$(grep -rlF " + SENTINEL + " /projects /work /opt/cc-bin /opt/skills /opt/registry 2>/dev/null | wc -l); "
+              "echo SENTINEL_FILES=$n")
+_EGRESS_PROBE = r'''python3 - <<'EOF'
+import os, socket
+def direct():
+    try:
+        socket.create_connection(("1.1.1.1", 443), timeout=5); return "DIRECT_OPEN"
+    except OSError:
+        return "DIRECT_BLOCKED"
+def via(t):
+    s = socket.create_connection(("egress-proxy", 3128), timeout=10)
+    s.sendall(("CONNECT %s HTTP/1.1\r\nHost: x\r\n\r\n" % t).encode())
+    return s.recv(128).split(b"\r\n")[0].decode()
+def dns():
+    try:
+        socket.getaddrinfo("example.com", 443); return "DNS_RESOLVES"
+    except OSError:
+        return "DNS_BLOCKED"
+print(direct()); print(via("example.com:443")); print(via("api.anthropic.com:443"))
+print(dns())
+print("WORK=" + ",".join(sorted(os.listdir("/work"))))
+print("HOST_VISIBLE=%d" % os.path.exists("/var/lib/hermes"))
+EOF'''
+_PROBE_DIRS = {"HERMES_AUDIT_DATA_DIR": "audit-data", "HERMES_REPORTS_DIR": "reports",
+               "HERMES_VAULT_DIR": "vaults", "HERMES_DRAFT_OUT_DIR": "draft-out"}
+PROBE_STDERR_TAIL = 2000
+
+
+def probe_runner(argv, env, timeout):
+    """(rc, stdout). As in real_runner, a timeout or an interrupt stops only the `docker compose`
+    client, so a named `run` container is removed explicitly: the probes' names are fixed, and a
+    leftover one would refuse every later probe. Undecodable output is replaced, never raised.
+    The child's stderr (compose's progress, a failure's reason) is echoed to OUR stderr, its
+    last PROBE_STDERR_TAIL characters only; stdout stays the probe's one JSON object."""
+    try:
+        p = subprocess.run(argv, env=env, capture_output=True, text=True, errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        _probe_stderr(e.stderr)
+        _probe_remove_named(argv)
+        return 124, ""
+    except (SystemExit, KeyboardInterrupt):
+        _probe_remove_named(argv)
+        raise
+    _probe_stderr(p.stderr)
+    return p.returncode, p.stdout
+
+
+def _probe_stderr(text):
+    if isinstance(text, bytes):                 # what a timeout hands back, even in text mode
+        text = text.decode("utf-8", errors="replace")
+    if text:
+        tail = text[-PROBE_STDERR_TAIL:]
+        print(tail if tail.endswith("\n") else tail + "\n", end="", file=sys.stderr)
+
+
+def _probe_remove_named(argv):
+    if "--name" in argv:
+        _quiet(["docker", "rm", "-f", argv[argv.index("--name") + 1]])
+
+
+def _probe_layout(base):
+    """Throwaway, empty per-client dirs: the probes never mount a real client's data."""
+    if os.path.lexists(base):
+        shutil.rmtree(base)
+    kw = ({"uid": os.geteuid(), "gid": os.getegid()} if DATA_UID is None
+          else {"uid": DATA_UID, "gid": DATA_GID})
+    for d in sorted(set(_PROBE_DIRS.values())):
+        L.reset_dir(f"{base}/{d}/{PROBE_SLUG}", **kw)
+
+
+def _probe_cleanup(root, base, proxy):
+    """The probes' `finally`, as _run's: SIGTERM is held while it runs, and the throwaway dirs go
+    even if stopping the proxy raises. proxy.log lands in those dirs and is removed with them; a
+    failed `rm -sf egress-proxy` still warns on stderr."""
+    held = (signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            if BLOCK_TERM_IN_CLEANUP else None)
+    try:
+        try:
+            if proxy:
+                stop_proxy(root, base, lambda s: print(s, file=sys.stderr))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+    finally:
+        if held is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, held)
+
+
+def _probe_steps(root):
+    """{service: (argv, env)}: plan()'s own first step for each audit service, the credential
+    values replaced by SENTINEL and the per-client dirs by the throwaway ones."""
+    rec = {"slug": PROBE_SLUG, "customer_id": "0000000000"}
+    steps = plan(rec, "2000-01-01_00-00-00", root,
+                 cred_values={n: SENTINEL for n in CRED_NAMES}, anthropic_key=SENTINEL)
+    out = {}
+    for key, argv, env in steps:
+        if key not in ("collect", "read", "draft"):
+            continue
+        env = {k: (f"{PROBE_DIR}/{_PROBE_DIRS[k]}/{PROBE_SLUG}" if k in _PROBE_DIRS else v)
+               for k, v in env.items()}
+        svc = next(s for s in ("ads-collector", "ads-reader", "ads-drafter") if s in argv)
+        out.setdefault(svc, (argv, env))            # one of each service is enough
+    return out
+
+
+def _override(argv, svc, script):
+    """Same run argv (flags, -e names, --name), entrypoint replaced by sh -c <script>."""
+    i = argv.index(svc)
+    return argv[:i] + ["--entrypoint", "sh", svc, "-c", script]
+
+
+def probe_env(root, runner=None):
+    runner = runner or probe_runner
+    base = root + PROBE_DIR
+    try:
+        _probe_layout(base)
+        services = {}
+        steps = _probe_steps(root)
+        proxy_env = {"PATH": os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")}
+        steps["egress-proxy"] = (_compose(root) + ["run", "--rm", "--no-deps", "-T", "egress-proxy"], proxy_env)
+        for svc, (argv, env) in sorted(steps.items()):
+            rc, out = runner(_override(argv, svc, _ENV_PROBE), env, 120)
+            lines = out.splitlines()
+            names = sorted(l for l in lines if re.match(_CRED_SHAPED, l))
+            # Fail closed: "no sentinel in the mounted files" only when the container says exactly
+            # that. A missing or malformed count (the script died early) reads as found.
+            clean = any(re.fullmatch(r"SENTINEL_FILES=\s*0+", l) for l in lines)
+            # Names only, never a value: anything after SENTINEL_ENV= that is not an env name (a
+            # multi-line value's continuation line) is shown as a placeholder, and matches nothing.
+            held = sorted(n if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n) else "<not a name>"
+                          for n in (l[len("SENTINEL_ENV="):] for l in lines if l.startswith("SENTINEL_ENV=")))
+            services[svc] = {"rc": rc, "env_names": names, "sentinel_env_names": held,
+                             "sentinel_in_files": not clean}
+        ok = set(services) == set(DECLARED) and all(_matches(svc, s) for svc, s in services.items())
+        return {"services": services, "matches_declared": ok}
+    finally:
+        _probe_cleanup(root, base, proxy=False)
+
+
+def _matches(svc, s):
+    """A service matches the declared map when it ran, holds no sentinel in any mounted file,
+    and every credential-shaped env name it holds, and every env name whose value holds the
+    sentinel, has a declared prefix. With a declared prefix it must hold at least one of each
+    (the sentinel reaching it also proves the value scan ran); with none, none of either."""
+    if s["rc"] != 0 or s["sentinel_in_files"]:
+        return False
+    prefixes = DECLARED[svc]
+    names, held = s["env_names"], s["sentinel_env_names"]
+    if not prefixes:
+        return names == [] and held == []
+    return bool(names) and bool(held) and all(any(n.startswith(p) for p in prefixes) for n in names + held)
+
+
+def probe_egress(root, runner=None):
+    runner = runner or probe_runner
+    base = root + PROBE_DIR
+    try:
+        _probe_layout(base)
+        argv, env = _probe_steps(root)["ads-drafter"]
+        env = {k: v for k, v in env.items() if k != "ANTHROPIC_API_KEY"}   # the probe needs no key
+        clean, skip = [], False                                            # drop "-e ANTHROPIC_API_KEY" as a pair
+        for i, x in enumerate(argv):
+            if skip:
+                skip = False
+            elif x == "-e" and argv[i + 1:i + 2] == ["ANTHROPIC_API_KEY"]:
+                skip = True
+            else:
+                clean.append(x)
+        runner(_compose(root) + ["up", "-d", "--no-deps", "egress-proxy"], env, 60)
+        _, out = runner(_override(clean, "ads-drafter", _EGRESS_PROBE), env, 120)
+        # Positional, as the script prints them; a line that is missing (the proxy never came up,
+        # the script died) is "", which matches nothing below.
+        lines = out.splitlines()
+        get = lambda i: lines[i] if len(lines) > i else ""
+        work = next((l[5:].split(",") for l in lines if l.startswith("WORK=")), [])
+        host_visible = "HOST_VISIBLE=0" not in lines     # fail closed: hidden only when it says so
+        # The DNS exit (CVE-2024-29018: an old engine forwards an internal network's outside
+        # lookups): an outside name must not resolve. Fail closed: blocked only when it says so.
+        # (`egress-proxy` itself resolves, by Docker's internal DNS: lines 1 and 2 prove that.)
+        j = {"direct": "blocked" if get(0) == "DIRECT_BLOCKED" else "open",
+             "non_allowed": get(1), "anthropic": get(2),
+             "dns": "blocked" if get(3) == "DNS_BLOCKED" else "resolves",
+             "work_entries": work, "host_visible": host_visible}
+        j["matches_expected"] = (j["direct"] == "blocked" and " 403" in j["non_allowed"]
+                                 and " 200" in j["anthropic"] and j["dns"] == "blocked"
+                                 and sorted(work) == ["out", "reports", "vault"] and not host_visible)
+        return j
+    finally:
+        _probe_cleanup(root, base, proxy=True)
+
+
 def main(argv=None, runner=None, root="/", now=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("client")
+    ap.add_argument("client", nargs="?")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")    # exactly one JSON line on stdout (the broker's contract)
-    ap.add_argument("--list", action="store_true")    # this client's audit timestamps; takes no lock
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--list", action="store_true")  # this client's audit timestamps; takes no lock
+    mode.add_argument("--probe-env", action="store_true")      # review probes: no client, one JSON object
+    mode.add_argument("--probe-egress", action="store_true")
     a = ap.parse_args(argv)
     if a.list and not a.json:
         ap.error("--list requires --json")
+    probe = a.probe_env or a.probe_egress
+    if probe and (a.client is not None or a.dry_run):
+        ap.error("--probe-env / --probe-egress take no client and no --dry-run")
+    if not probe and a.client is None:
+        ap.error("a client is required")
     root = root.rstrip("/")
+    if probe:
+        # Under the audit lock: the probes share the audits' egress-proxy (probe_egress stops it)
+        # and fixed container names, so one must never run beside an audit or another probe.
+        try:
+            with L.AuditLock(root + LOCK):
+                j = (probe_env if a.probe_env else probe_egress)(root)
+        except L.PrecheckError as e:
+            print(f"run-client-audit: {e}", file=sys.stderr); return 3
+        print(json.dumps(j, sort_keys=True))
+        return 0 if j.get("matches_declared", j.get("matches_expected")) else 1
     runner = runner or real_runner
     ts = now or datetime.datetime.now(datetime.timezone.utc).strftime(TS_FMT)
     human = sys.stderr if a.json else sys.stdout      # with --json every human line goes to stderr

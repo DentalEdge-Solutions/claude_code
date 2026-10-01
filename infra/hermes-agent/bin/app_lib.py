@@ -243,6 +243,68 @@ def map_done(req, done, manifest):
         return refused_result(rid, op, client, "internal", status="failed")
 
 
+_RUN_KEYS = frozenset(refused_result("", "run", None, None))        # read off the builders, never restated
+_LIST_KEYS = frozenset(refused_result("", "list", None, None))
+_RUN_PAYLOAD = _RUN_KEYS - {"request_id", "op", "client"}           # what _run_result takes from the command
+# What the broker decides by itself for a request that parsed, written through refused_result
+# with an empty payload (bad_request, for one that did not parse, has no op and no client). Every
+# other (status, reason) comes from the command, through _run_result or _list_result.
+_BROKER_WRITES = {"refused": ("inactive_client", "quota", "disabled"),
+                  "failed": ("timeout", "interrupted", "internal")}
+
+
+def _same_json(r, want):
+    """Is the hostile `r` the same JSON as `want`, a value this module built? It walks `want`
+    and never `r`, so an `r` nested deeper than the interpreter recurses costs one type check
+    (re-serializing it would be a RecursionError). Types are compared exactly: plain == calls
+    False equal to 0 and 1.0 equal to 1."""
+    if type(r) is not type(want):
+        return False
+    if isinstance(want, dict):
+        return r.keys() == want.keys() and all(_same_json(r[k], v) for k, v in want.items())
+    if isinstance(want, list):
+        return len(r) == len(want) and all(map(_same_json, r, want))
+    return r == want
+
+
+def _broker_could_write(r, is_list):
+    rid, op, client, status, reason = (r[k] for k in ("request_id", "op", "client", "status", "reason"))
+    if not (isinstance(rid, str) and REQUEST_ID_RE.fullmatch(rid) and isinstance(status, str)
+            and (reason is None or isinstance(reason, str))):
+        return False
+    if op is None or client is None:
+        # Only a request that never parsed has no op and no client, and then it has neither.
+        return _same_json(r, refused_result(rid, None, None, "bad_request"))
+    if not (isinstance(op, str) and op == ("list" if is_list else "run") and _slug(client)):
+        return False
+    if reason in _BROKER_WRITES.get(status, ()) and _same_json(r, refused_result(rid, op, client, reason, status)):
+        return True
+    req = {"request_id": rid, "client": client}
+    try:
+        if is_list:
+            rc, p = (0, {"status": status, "audits": r["audits"]}) if status == "ok" else \
+                (2, {"status": status, "reason": reason})
+            return _same_json(r, _list_result(req, rc, p))
+        rc = r["exit_code"]
+        return _int(rc, -255, 255) and _same_json(r, _run_result(req, rc, {k: r[k] for k in _RUN_PAYLOAD}))
+    except Refused:
+        return False
+
+
+def result_in_whitelist(r):
+    """(keys_ok, values_ok) for a result file, re-checked independently of the broker (review
+    D10.8). keys_ok: exactly a run result's keys or a list result's. values_ok: the broker could
+    have written exactly this, through refused_result, _run_result or _list_result — so free
+    text, a wrong type, another client's vault path or a status/reason pair the broker never
+    produces is out. `r` is any JSON value and is hostile: this never raises."""
+    if not isinstance(r, dict) or set(r) not in (_RUN_KEYS, _LIST_KEYS):
+        return False, False
+    try:
+        return True, bool(_broker_could_write(r, set(r) == _LIST_KEYS))
+    except RecursionError:                    # belt and braces: no check above recurses into `r`
+        return True, False
+
+
 def write_json_atomic(dirpath, name, obj, mode=SPOOL_FILE_MODE, uid=None, gid=None, tmpdir=None):
     """`tmpdir` (default: dirpath) holds the temp file until the rename. It MUST be on the same
     filesystem as dirpath, or os.replace is not atomic (it fails with EXDEV instead)."""

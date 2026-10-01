@@ -56,6 +56,14 @@ class TestRedactor(unittest.TestCase):
         with self.assertRaises(ValueError):
             R.Redactor.from_clients_json(self.clients)
 
+    def test_has_customer_id_plain_and_dashed_registered_only(self):
+        for text, want in (("id 1234567890 here", True), ("id 123-456-7890 here", True),
+                           ("x5555555555x", True), ("id 9999999999 is not registered", False),
+                           ("acme-dental", False), ("", False)):
+            with self.subTest(text=text):
+                self.assertIs(self.r.has_customer_id(text), want)
+        self.assertIs(R.Redactor([], []).has_customer_id("1234567890"), False)     # firing control
+
     def test_dashed_customer_id_in_registry_redacts_both_forms(self):
         # E4: clients.json can itself store a dashed customer_id. Both the dashed and
         # the plain-digit spelling must be redacted, not just the literal one on file.
@@ -352,6 +360,33 @@ class TestNoSecret(unittest.TestCase):
 
     def test_control_clean_text_passes(self):
         R.assert_no_secret("bundle " + R.sha12(TOKEN), [TOKEN])
+
+
+class TestKeyedFingerprints(unittest.TestCase):
+    KEY = bytes.fromhex("11" * 32)
+
+    def test_hmac12_is_keyed_and_12_hex(self):
+        a, b = R.hmac12(self.KEY, "1234567890"), R.hmac12(bytes.fromhex("22" * 32), "1234567890")
+        self.assertEqual(len(a), 12); self.assertNotEqual(a, b)
+        self.assertNotEqual(a, R.sha12("1234567890"))
+
+    def test_redactor_uses_the_key_for_cids_only(self):
+        red = R.Redactor(["acme"], ["123-456-7890"], fp_key=self.KEY)
+        out = red.text("acct 1234567890 and 123-456-7890")
+        self.assertEqual(out.count("cid:" + R.hmac12(self.KEY, "1234567890")), 2)
+        self.assertNotIn(R.sha12("1234567890"), out)
+
+    def test_no_key_keeps_sha12(self):
+        self.assertIn(R.sha12("1234567890"), R.Redactor([], ["1234567890"]).text("1234567890"))
+
+    def test_load_fp_key(self):
+        self.assertEqual(R.load_fp_key(" " + "ab" * 32 + "\n"), bytes.fromhex("ab" * 32))
+        for bad in ("", "ab" * 31, "zz" * 32, "ab" * 33):
+            with self.assertRaises(ValueError):
+                R.load_fp_key(bad)
+
+    def test_key_id(self):
+        self.assertEqual(len(R.key_id(self.KEY)), 8)
 
 
 if __name__ == "__main__":

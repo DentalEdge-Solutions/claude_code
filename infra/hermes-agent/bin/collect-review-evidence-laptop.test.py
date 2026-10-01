@@ -59,7 +59,66 @@ class TestAuditRun(unittest.TestCase):
         self.assertEqual(out["stderr_lines_discarded"], 1)
 
 
+KEY_HEX = "11" * 32
+
+
 class TestMain(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.keyfile = os.path.join(self.tmp.name, "fp.key")
+        with open(self.keyfile, "w") as f:
+            f.write(KEY_HEX + "\n")
+        os.chmod(self.keyfile, 0o600)                            # as review-fp-key.py creates it
+
+    def test_key_file_sets_cid_key_id(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
+        with mock.patch.object(L.subprocess, "run", return_value=fake):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = L.main(["--customer", "1234567890", "--fp-key-file", self.keyfile])
+        self.assertEqual(rc, 0)
+        b = json.loads(buf.getvalue())
+        self.assertEqual(b["cid_key_id"], R.key_id(bytes.fromhex(KEY_HEX)))
+        self.assertEqual(b["cid_fingerprint"], "hmac-sha256/12")
+        self.assertNotIn(KEY_HEX, buf.getvalue())
+
+    def test_missing_or_bad_key_file_refuses(self):
+        bad = os.path.join(self.tmp.name, "bad.key")
+        with open(bad, "w") as f:
+            f.write("nothex")
+        os.chmod(bad, 0o600)                                     # refused for its content, not its mode
+        for path in (os.path.join(self.tmp.name, "absent.key"), bad):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                rc = L.main(["--customer", "1234567890", "--fp-key-file", path])
+            self.assertEqual(rc, 2)
+            self.assertIn("collect-review-evidence-laptop:", err.getvalue())
+
+    def test_key_file_readable_by_group_or_other_refuses(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
+        for mode in (0o640, 0o604, 0o660, 0o644, 0o610, 0o601, 0o602):
+            os.chmod(self.keyfile, mode)
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(L.subprocess, "run", return_value=fake) as run, \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = L.main(["--customer", "1234567890", "--fp-key-file", self.keyfile])
+            with self.subTest(mode=oct(mode)):
+                self.assertEqual(rc, 2)
+                self.assertEqual(out.getvalue(), "")
+                self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
+                self.assertIn("collect-review-evidence-laptop:", err.getvalue())
+                self.assertIn("0600", err.getvalue())
+                self.assertNotIn(KEY_HEX, err.getvalue())
+                run.assert_not_called()                          # refused before the audit runs
+        for mode in (0o600, 0o400):                              # control: owner-only modes are used
+            os.chmod(self.keyfile, mode)
+            out = io.StringIO()
+            with mock.patch.object(L.subprocess, "run", return_value=fake), contextlib.redirect_stdout(out):
+                rc = L.main(["--customer", "1234567890", "--fp-key-file", self.keyfile])
+            self.assertEqual(rc, 0, oct(mode))
+            self.assertEqual(json.loads(out.getvalue())["cid_key_id"], R.key_id(bytes.fromhex(KEY_HEX)))
+
     def test_non_digit_customer_refused(self):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
@@ -91,7 +150,7 @@ class TestMain(unittest.TestCase):
         with mock.patch.object(L.subprocess, "run", return_value=fake):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                L.main(["--customer", "1234567890"])
+                L.main(["--customer", "1234567890", "--fp-key-file", self.keyfile])
         self.assertRegex(json.loads(buf.getvalue())["collected_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
     def test_package_items_need_all_three_args(self):
@@ -99,7 +158,7 @@ class TestMain(unittest.TestCase):
         with mock.patch.object(L.subprocess, "run", return_value=fake):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                rc = L.main(["--customer", "1234567890", "--package-project", "p"])
+                rc = L.main(["--customer", "1234567890", "--package-project", "p", "--fp-key-file", self.keyfile])
             bundle = json.loads(buf.getvalue())
             self.assertEqual(bundle["items"]["D6.3"]["status"], R.COULD_NOT_CHECK)
             self.assertIn("no --package-* arguments", bundle["items"]["D6.3"]["reason"])
