@@ -31,7 +31,8 @@ job → runner) and §7 (failure handling). The defect is follow-up 1 in
   (fixed text) and start `warning: ` so the review collector's `_NOTE_RE` counts them as notes.
 - No change to `deploy/security-review/CHECKLIST.md` (any change there needs a version bump above 1.11), to the
   units under `deploy/`, to `bin/hermes-app-runner.py`, or to `bin/app_lib.py`.
-- One entry must never stop a pass: no exception leaves `sweep_jobs`.
+- One entry must never stop a pass: no filesystem error leaves `sweep_jobs`. (A logger that raises is outside
+  it, as for every other journal line the broker writes.)
 
 ## Review Focus
 
@@ -258,9 +259,9 @@ def sweep_jobs(ctx):
    In `step`, call the sweep first on every pass:
 
 ```python
+    sweep_jobs(ctx)
     if n % RECOVER_EVERY == 0:
         recover(ctx)
-    sweep_jobs(ctx)
     drain_once(ctx)
     collect_once(ctx)
     expire_results(ctx)
@@ -294,6 +295,8 @@ git commit -m "fix(hermes): broker sweeps stray entries out of jobs/ every pass 
 - **What this does not fix:** an entry the broker cannot remove (a non-empty directory, which only the app user
   or root can create in `jobs/`) still leaves the directory non-empty. It gets one journal line. The same is
   true of a matching-name entry the runner cannot remove. Both need the app user or root to plant them.
+  The sweep also works only while the broker is running: with the broker stopped or failed, a stray entry
+  planted by root or the app user still spins the root runner.
 - **No checklist change:** the two new journal lines start `warning: `, which the collector's `_NOTE_RE` already
   counts under `note_counts`; checklist D10.7 already says fixed-text lines are expected.
 - **Fingerprint:** `bin/` is in the box fingerprint, so this must be on `main` before the box rollout.

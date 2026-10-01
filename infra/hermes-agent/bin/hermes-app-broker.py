@@ -267,8 +267,9 @@ def sweep_jobs(ctx):
         except FileNotFoundError:
             pass
         except OSError:
-            # A non-empty directory (only this user or root can make one here). Say so once per
-            # process and never let it stop a pass.
+            # Anything that cannot be removed: a non-empty directory (only this user or root can
+            # make one here), a permission error, an entry that changed type after the lstat. Say
+            # so once per process and never let it stop a pass.
             if not ctx.stray_noted:
                 _note(ctx, "warning: a stray entry in jobs/ cannot be removed (left in place)")
                 ctx.stray_noted = True
@@ -323,10 +324,12 @@ def expire_results(ctx, max_age=7 * 86400):
 def step(ctx, n):
     """Pass n of the loop. recover() runs on the first pass and every RECOVER_EVERY passes:
     it is safe at any time, since it skips any id with a file in jobs/, running/ or done/.
-    sweep_jobs() runs on every pass: a stray entry in jobs/ must not outlive one interval."""
+    sweep_jobs() runs on every pass: a stray entry in jobs/ must not outlive one interval. It
+    runs FIRST, so a recover() that dies (an unreadable ledger) cannot keep the stray entry in
+    place; recover() only looks at matching names, which the sweep never touches."""
+    sweep_jobs(ctx)
     if n % RECOVER_EVERY == 0:
         recover(ctx)
-    sweep_jobs(ctx)
     drain_once(ctx)
     collect_once(ctx)
     expire_results(ctx)

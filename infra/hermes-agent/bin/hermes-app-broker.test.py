@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, io, json, os, sys, tempfile, time, unittest
+import importlib.util, io, json, os, socket, sys, tempfile, time, unittest
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 spec = importlib.util.spec_from_file_location("brk", os.path.join(HERE, "hermes-app-broker.py"))
@@ -541,7 +541,7 @@ class TestStrayJobs(Base):
         self.touch("leftover")
         self.touch(".y.json.new.tmp")                      # a FRESH dot-file: no age test in jobs/
         self.touch("0f8e2c1a.json")                        # .json, but not a request id
-        os.symlink("/etc/hostname", self.jp("link"))
+        os.symlink("/etc/hostname", self.jp("link"))         # the no-follow cases have their own test
         os.mkfifo(self.jp("fifo"))
         os.mkdir(self.jp("emptydir"))
         B.step(self.ctx, 1)                                # 1: not a recover() pass; the sweep runs anyway
@@ -549,6 +549,73 @@ class TestStrayJobs(Base):
         self.assertEqual(len(self.notes("warning: stray entries in jobs/ were removed")), 1)
         for name in ("leftover", ".y.json.new.tmp", "0f8e2c1a", "link", "fifo", "emptydir"):
             self.assertFalse(any(name in l for l in self.logs), name)
+
+    def test_the_sweep_runs_before_recover(self):
+        """A recover() that dies (an unreadable ledger) must not leave the stray entry behind."""
+        self.touch("leftover")
+        real = B.recover
+        def boom(ctx):
+            raise OSError("ledger")
+        B.recover = boom
+        self.addCleanup(setattr, B, "recover", real)
+        with self.assertRaises(OSError):
+            B.step(self.ctx, 0)                            # 0: a recover() pass
+        self.assertEqual(self.jobs(), [])
+
+    def outside(self):
+        """A file and a non-empty directory outside jobs/, for links to point at."""
+        out = tempfile.mkdtemp()
+        f, d = os.path.join(out, "target"), os.path.join(out, "targetdir")
+        os.mkdir(d)
+        for p in (f, os.path.join(d, "inside")):
+            with open(p, "w") as fh:
+                fh.write("keep")
+        return out, f, d
+
+    def assert_intact(self, f, d):
+        with open(f) as fh:
+            self.assertEqual(fh.read(), "keep")
+        self.assertEqual(os.listdir(d), ["inside"])
+        with open(os.path.join(d, "inside")) as fh:
+            self.assertEqual(fh.read(), "keep")
+
+    def test_symlinks_are_unlinked_never_followed(self):
+        out, f, d = self.outside()
+        os.symlink(f, self.jp("tofile"))
+        os.symlink(d, self.jp("todir"))                    # a link to a NON-EMPTY directory
+        os.symlink(os.path.join(out, "absent"), self.jp("dangling"))
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), [])                  # all three links gone
+        self.assert_intact(f, d)                           # and neither target touched
+        self.assertEqual(len(self.notes("warning: stray entries in jobs/ were removed")), 1)
+        self.assertEqual(self.notes("cannot be removed (left in place)"), [])
+
+    def test_a_socket_is_removed(self):
+        if not hasattr(socket, "AF_UNIX"):
+            self.skipTest("no unix sockets on this platform")
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(os.path.join(self.state, "jobs"))         # bind by a relative name: the path limit is ~104 bytes
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(s.close)
+        s.bind("sock")
+        os.chdir(cwd)
+        self.assertEqual(self.jobs(), ["sock"])
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), [])
+
+    def test_a_matching_name_is_left_alone_whatever_its_type(self):
+        """The sweep decides by name only: a matching entry of any type is the runner's."""
+        out, f, d = self.outside()
+        names = sorted(self.RID[:-1] + c + ".json" for c in "abc")
+        os.mkdir(self.jp(names[0]))
+        os.mkfifo(self.jp(names[1]))
+        os.symlink(f, self.jp(names[2]))
+        B.sweep_jobs(self.ctx)
+        self.assertEqual(self.jobs(), names)
+        self.assertTrue(os.path.islink(self.jp(names[2])))
+        self.assert_intact(f, d)
+        self.assertEqual(self.logs, [])
 
     def test_a_queued_job_survives_the_sweep(self):
         rid = self.file()
