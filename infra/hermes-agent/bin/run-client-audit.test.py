@@ -790,6 +790,32 @@ class TestSigterm(Base):
         self.assertEqual(cmds, [["docker", "rm", "-f", "hermes-audit-x-draft"]])
         self.assertIn("docker rm -f hermes-audit-x-draft", open(d + "/e").read())
 
+    def test_second_term_during_cleanup_cannot_cut_stop_proxy_short(self):
+        """Carried fix: as the real entrypoint, SIGTERM is blocked for _run's finally, so a TERM that
+        lands while the proxy is being stopped is delivered only after stop_proxy has finished."""
+        old = signal.signal(signal.SIGTERM, RCA._on_sigterm)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        steps = []
+        def stop(root, logs, say):
+            steps.append("start")
+            os.kill(os.getpid(), signal.SIGTERM)          # the runner's TERM arrives mid-cleanup
+            for _ in range(1000):                          # bytecode boundaries for a handler to run
+                pass
+            steps.append("rm")
+        with mock.patch.object(RCA, "BLOCK_TERM_IN_CLEANUP", True), \
+                mock.patch.object(RCA, "stop_proxy", stop), self.assertRaises(SystemExit) as cm:
+            self.run_main(FakeRunner(self.root))
+        self.assertEqual(steps, ["start", "rm"])           # stop_proxy ran to completion
+        self.assertEqual(cm.exception.code, 143)            # the pending TERM still lands, after cleanup
+        self.assertNotIn(signal.SIGTERM, signal.pthread_sigmask(signal.SIG_BLOCK, []))   # mask restored
+
+    def test_cleanup_does_not_touch_the_signal_mask_under_tests(self):
+        seen = []
+        with mock.patch.object(RCA, "stop_proxy",
+                               lambda r, l, s: seen.append(signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []))):
+            self.run_main(FakeRunner(self.root))
+        self.assertEqual(seen, [False])
+
     def test_cleanup_commands_are_bounded_to_20s(self):
         seen = []
         def fake_run(argv, **kw):
@@ -850,6 +876,24 @@ class TestStopProxyKeepsTheDecisionLog(Base):
         self.assertEqual(open(target).read(), "keep")
         self.assertTrue(any("rm" in a for a, _ in argvs))
         self.assertTrue(self.said and "WARNING" in self.said[0])
+
+    def test_failed_proxy_log_write_does_not_skip_rm(self):
+        """Carried fix: an OSError writing/flushing/closing proxy.log (disk full) must not skip `rm -sf`."""
+        class Full:
+            def write(self, _): raise OSError(28, "No space left on device")
+            def flush(self): raise OSError(28, "No space left on device")
+            def close(self): raise OSError(28, "No space left on device")
+            def fileno(self): return 2
+        argvs = []
+        def fake_run(argv, **kw):
+            argvs.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+        with mock.patch.object(RCA, "open_log", lambda p: Full()), \
+                mock.patch.object(RCA.subprocess, "run", fake_run):
+            rc = REAL_STOP_PROXY(self.root, self.logs, self.said.append)
+        self.assertEqual(rc, 0)
+        self.assertTrue(any(a[-3:] == ["rm", "-sf", "egress-proxy"] for a in argvs), argvs)
+        self.assertTrue(any("proxy.log" in m and "WARNING" in m for m in self.said), self.said)
 
     def test_real_run_writes_proxy_log_on_every_exit(self):
         for kw in ({}, {"fail_on": "collect"}, {"raise_on": ("draft", OSError)}):
