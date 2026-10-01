@@ -16,6 +16,13 @@ import vault_lib as V
 
 MAX_PER_PASS = 64
 REQUEST_MAX_AGE = 3600
+# Ledger-recorded refusals per UTC day, independent of the manifest. Every well-named bad
+# request would otherwise append a permanent ledger line. Beyond the cap a refusal is dropped
+# with a fixed journal line and NO ledger entry and NO result, so the duplicate/replay guarantee
+# for those ids is best-effort only (a later replay of a dropped id is decided afresh).
+# Reservations are never capped by this: they are bounded by the manifest quotas.
+REFUSAL_CAP_PER_DAY = 1000
+RECOVER_EVERY = 30          # --watch passes between recover() runs (and on the first pass)
 
 
 class Ctx:
@@ -25,6 +32,7 @@ class Ctx:
         self.req_dir = os.path.join(spool, "requests")
         self.res_dir = os.path.join(spool, "results")
         self.ledger = A.Ledger(os.path.join(state, "state", "ledger.jsonl"))
+        self.idx = None         # A.LedgerIndex, rebuilt by one read at the start of each pass
         self.dir_noted = False
 
     def d(self, name):
@@ -39,6 +47,22 @@ def _say(ctx, rid, op, client, status, reason):
 def _note(ctx, text):
     """A fixed-text journal line: never carries a hostile name or an exception message."""
     ctx.log(f"hermes-app-broker[{ctx.m.app}]: {text}")
+
+
+def _load_index(ctx):
+    ctx.idx = ctx.ledger.index()
+
+
+def _append(ctx, event, rid, op=None, client=None):
+    """Every ledger write in a pass goes through here, so the pass's index stays exact."""
+    ctx.idx.apply(ctx.ledger.append(event, rid, op, client, now=ctx.now()))
+
+
+def _refusal_capped(ctx):
+    if ctx.idx.refused_on(ctx.now()[:10]) < REFUSAL_CAP_PER_DAY:
+        return False
+    _note(ctx, "warning: daily refusal cap reached (request dropped, not recorded)")
+    return True
 
 
 def _rid_or_dash(rid):
@@ -70,8 +94,10 @@ def _active(ctx, client):
 def _refuse(ctx, rid, op, client, reason):
     # The result FIRST: if it cannot be written nothing is recorded, and the request (still in
     # requests/) is retried next pass. Rewriting the same result on a retry is idempotent.
+    if _refusal_capped(ctx):
+        return
     _result(ctx, A.refused_result(rid, op, client, reason))
-    ctx.ledger.append("refused", rid, op, client, now=ctx.now())
+    _append(ctx, "refused", rid, op, client)
 
 
 def _admit(ctx, req):
@@ -81,10 +107,10 @@ def _admit(ctx, req):
     if not _active(ctx, client):
         return _refuse(ctx, rid, op, client, "inactive_client")
     day, q = ctx.now()[:10], ctx.m.ops[op]["quota"]
-    if ("per_client_day" in q and ctx.ledger.count(day, op, client) >= q["per_client_day"]) or \
-            ("per_box_day" in q and ctx.ledger.count(day, op) >= q["per_box_day"]):
+    if ("per_client_day" in q and ctx.idx.count(day, op, client) >= q["per_client_day"]) or \
+            ("per_box_day" in q and ctx.idx.count(day, op) >= q["per_box_day"]):
         return _refuse(ctx, rid, op, client, "quota")
-    ctx.ledger.append("reserved", rid, op, client, now=ctx.now())       # BEFORE the job exists
+    _append(ctx, "reserved", rid, op, client)                           # BEFORE the job exists
     try:
         # The temp file lives in state/ (broker-owned, same filesystem), never in jobs/: a temp
         # file stranded there by a crash would hold the runner's DirectoryNotEmpty= true forever.
@@ -96,7 +122,7 @@ def _admit(ctx, req):
         _note(ctx, "error: a job file could not be written (request failed)")
         try:
             _result(ctx, A.refused_result(rid, op, client, "internal", status="failed"))
-            ctx.ledger.append("resulted", rid, now=ctx.now())
+            _append(ctx, "resulted", rid)
         except Exception:
             _note(ctx, "error: a failed job could not be resulted (left for recover)")
         return
@@ -108,8 +134,9 @@ def _orphan_result(ctx, rid, op, client, p):
     ledger append. Record it and drop the request; the first result stands, never re-decided."""
     if not os.path.lexists(os.path.join(ctx.res_dir, rid + ".json")):
         return False
-    ctx.ledger.append("refused", rid, op, client, now=ctx.now())
-    _say(ctx, rid, op, client, "dropped", "duplicate")
+    if not _refusal_capped(ctx):           # over the cap: dropped unrecorded (best-effort replay guard)
+        _append(ctx, "refused", rid, op, client)
+        _say(ctx, rid, op, client, "dropped", "duplicate")
     _unlink(ctx, p)
     return True
 
@@ -120,14 +147,14 @@ def _handle_request(ctx, n):
     try:
         req = A.parse_request(A.read_capped(p, A.MAX_REQUEST_BYTES), n, ctx.m)
     except A.Refused:
-        if A.REQUEST_ID_RE.fullmatch(rid) and not ctx.ledger.seen(rid):
+        if A.REQUEST_ID_RE.fullmatch(rid) and not ctx.idx.seen(rid):
             if _orphan_result(ctx, rid, None, None, p):
                 return
             _refuse(ctx, rid, None, None, "bad_request")
         else:
             _say(ctx, _rid_or_dash(rid), None, None, "dropped", "bad_request")
         _unlink(ctx, p); return
-    if ctx.ledger.seen(rid):
+    if ctx.idx.seen(rid):
         _say(ctx, rid, req["op"], req["client"], "dropped", "duplicate")   # the first result stands
         _unlink(ctx, p); return
     if _orphan_result(ctx, rid, req["op"], req["client"], p):
@@ -141,6 +168,7 @@ def drain_once(ctx):
         names = os.listdir(ctx.req_dir)
     except FileNotFoundError:
         return
+    _load_index(ctx)                                     # one ledger read per pass
     now = time.time()
     todo = []
     for n in names:
@@ -200,8 +228,8 @@ def _collect_one(ctx, n, open_):
     # leaves the reservation open and the done file in place, so the next pass retries.
     _result(ctx, result)
     if result["status"] == "busy":
-        ctx.ledger.append("released", rid, now=ctx.now())
-    ctx.ledger.append("resulted", rid, now=ctx.now())
+        _append(ctx, "released", rid)
+    _append(ctx, "resulted", rid)
     _unlink(ctx, p)
 
 
@@ -222,7 +250,8 @@ def collect_once(ctx):
         for n in os.listdir(ctx.d(d)):
             if n.startswith(".") and n.endswith(".tmp"):
                 _sweep_stale_dotfile(ctx, os.path.join(ctx.d(d), n), now)
-    open_ = {r: (o, c) for r, o, c in ctx.ledger.unresolved()}      # once per pass
+    _load_index(ctx)
+    open_ = {r: (o, c) for r, o, c in ctx.idx.unresolved()}         # once per pass
     for n in sorted(os.listdir(ctx.d("done"))):
         p = os.path.join(ctx.d("done"), n)
         if n.startswith("."):                      # the runner's in-flight atomic-write temp file
@@ -235,13 +264,14 @@ def collect_once(ctx):
 
 
 def recover(ctx):
-    for rid, op, client in ctx.ledger.unresolved():
+    _load_index(ctx)
+    for rid, op, client in ctx.idx.unresolved():
         name = rid + ".json"
         if any(os.path.exists(os.path.join(ctx.d(d), name)) for d in ("jobs", "running", "done")):
             continue
         try:
             _result(ctx, A.refused_result(rid, op, client, "interrupted", status="failed"))
-            ctx.ledger.append("resulted", rid, now=ctx.now())
+            _append(ctx, "resulted", rid)
         except Exception:
             _note(ctx, "error: an interrupted reservation could not be resulted (retried at next recover)")
 
@@ -255,6 +285,16 @@ def expire_results(ctx, max_age=7 * 86400):
                 os.unlink(p)
         except FileNotFoundError:
             pass
+
+
+def step(ctx, n):
+    """Pass n of the loop. recover() runs on the first pass and every RECOVER_EVERY passes:
+    it is safe at any time, since it skips any id with a file in jobs/, running/ or done/."""
+    if n % RECOVER_EVERY == 0:
+        recover(ctx)
+    drain_once(ctx)
+    collect_once(ctx)
+    expire_results(ctx)
 
 
 def main(argv=None):
@@ -272,13 +312,12 @@ def main(argv=None):
     m = A.load_manifest(os.path.join(a.manifest_dir, a.app + ".json"), a.app)
     ctx = Ctx(m, A.spool_dir(a.app, a.apps_root), A.state_dir(a.app, a.state_root), a.registry,
               log=lambda s: print(s, flush=True))
-    recover(ctx)
+    n = 0
     while True:
-        drain_once(ctx)
-        collect_once(ctx)
-        expire_results(ctx)
+        step(ctx, n)
         if a.once:
             return 0
+        n += 1
         time.sleep(a.interval)
 
 

@@ -149,6 +149,47 @@ class TestLedger(unittest.TestCase):
         self.assertTrue(L.seen("a" * 36))
 
 
+class TestLedgerIndex(unittest.TestCase):
+    """The broker's per-pass in-memory index must answer exactly what the Ledger methods do."""
+
+    def check(self, L, idx, rids, days, ops, clients):
+        for r in rids:
+            self.assertEqual(idx.seen(r), L.seen(r), r)
+            self.assertEqual(idx.reserved(r), L.reserved(r), r)
+        for d in days:
+            for o in ops:
+                for c in clients + [None]:
+                    self.assertEqual(idx.count(d, o, c), L.count(d, o, c), (d, o, c))
+        self.assertEqual(idx.unresolved(), L.unresolved())
+
+    def test_index_matches_the_ledger_on_a_mixed_log_and_after_appends(self):
+        p = os.path.join(tempfile.mkdtemp(), "ledger.jsonl"); L = A.Ledger(p)
+        a, b, c, d, e = ("%s" % ch * 36 for ch in "abcde")
+        L.append("released", c, now="2026-10-01T09:00:00Z")            # before its reservation: no effect
+        L.append("reserved", a, "run", "acme", now="2026-10-01T10:00:00Z")
+        L.append("reserved", b, "run", "other", now="2026-10-01T11:00:00Z")
+        L.append("reserved", c, "list", "acme", now="2026-10-01T11:30:00Z")
+        L.append("released", b, now="2026-10-01T11:05:00Z")
+        L.append("refused", d, None, None, now="2026-10-01T12:00:00Z")
+        L.append("reserved", e, "run", "acme", now="2026-10-02T10:00:00Z")
+        L.append("resulted", e, now="2026-10-02T10:10:00Z")
+        L.append("reserved", b, "run", "other", now="2026-10-02T11:00:00Z")  # re-reserved after release
+        open(p, "a").write('{"event": "res')                           # torn last line
+        idx = L.index()
+        rids, days = [a, b, c, d, e, "f" * 36], ["2026-10-01", "2026-10-02", "2026-10-03"]
+        ops, clients = ["run", "list"], ["acme", "other"]
+        self.check(L, idx, rids, days, ops, clients)
+        self.assertEqual(idx.refused_on("2026-10-01"), 1)
+        self.assertEqual(idx.refused_on("2026-10-02"), 0)
+        for ev in (("released", a, None, None, "2026-10-02T12:00:00Z"),
+                   ("reserved", "f" * 36, "list", "other", "2026-10-03T08:00:00Z"),
+                   ("resulted", c, None, None, "2026-10-03T09:00:00Z"),
+                   ("refused", "g" * 36, None, None, "2026-10-03T09:30:00Z")):
+            idx.apply(L.append(ev[0], ev[1], ev[2], ev[3], now=ev[4]))
+            self.check(L, idx, rids + ["g" * 36], days, ops, clients)
+        self.assertEqual(idx.refused_on("2026-10-03"), 1)
+
+
 class TestWrite(unittest.TestCase):
     def test_atomic_mode(self):
         d = tempfile.mkdtemp()

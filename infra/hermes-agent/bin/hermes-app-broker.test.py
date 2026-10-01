@@ -449,5 +449,76 @@ class TestFinalFix(Base):
         self.assertEqual(self.jobs(), [".y.json.new.tmp"])
 
 
+class TestFinalFixLedger(Base):
+    """Final whole-branch review: hostile requests cannot grow the ledger without bound or make
+    each pass re-read it once per request; recover() also runs periodically in --watch."""
+
+    def ledger_lines(self):
+        p = os.path.join(self.state, "state", "ledger.jsonl")
+        return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
+
+    def test_the_ledger_is_read_once_per_pass_not_once_per_request(self):
+        reads, real = [], A.Ledger._events
+
+        def counting(self_):
+            reads.append(1); return real(self_)
+        A.Ledger._events = counting
+        self.addCleanup(setattr, A.Ledger, "_events", real)
+        for _ in range(20):
+            self.file(client="nobody")
+        for _ in range(10):
+            self.file(raw=b"{nope")
+        B.drain_once(self.ctx)
+        self.assertEqual(len([e for e in self.ledger_lines() if e["event"] == "refused"]), 30)
+        self.assertEqual(len(reads), 1)
+
+    def test_refusals_beyond_the_daily_cap_leave_no_ledger_line(self):
+        self.addCleanup(setattr, B, "REFUSAL_CAP_PER_DAY", B.REFUSAL_CAP_PER_DAY)
+        B.REFUSAL_CAP_PER_DAY = 3
+        rids = [self.file(client="nobody") for _ in range(5)]
+        B.drain_once(self.ctx)
+        self.assertEqual(len(self.ledger_lines()), 3)
+        self.assertEqual(os.listdir(os.path.join(self.spool, "requests")), [])
+        self.assertEqual(sum(self.result(r) is not None for r in rids), 3)
+        self.assertEqual(self.logs.count(
+            "hermes-app-broker[ads-audit]: warning: daily refusal cap reached (request dropped, not recorded)"), 2)
+        self.file(raw=b"{nope"); B.drain_once(self.ctx)                    # bad_request: also capped
+        self.assertEqual(len(self.ledger_lines()), 3)
+        ok = self.file(); B.drain_once(self.ctx)                            # reservations never capped
+        self.assertEqual(self.jobs(), [ok + ".json"])
+        self.assertEqual([e["event"] for e in self.ledger_lines()][-1], "reserved")
+        self.day = "2026-10-02"                                             # a new UTC day: recorded again
+        r = self.file(client="nobody"); B.drain_once(self.ctx)
+        self.assertEqual(self.result(r)["reason"], "inactive_client")
+        self.assertEqual(len(self.ledger_lines()), 5)
+
+    def test_quota_still_holds_within_one_pass(self):
+        a, b = self.file(), self.file()                                     # same client, same pass
+        B.drain_once(self.ctx)
+        self.assertEqual(len(self.jobs()), 1)
+        self.assertEqual(sum((self.result(r) or {}).get("reason") == "quota" for r in (a, b)), 1)
+
+    def test_replay_within_one_pass_is_dropped(self):
+        rid = self.file(client="nobody"); B.drain_once(self.ctx)
+        self.file(rid=rid); B.drain_once(self.ctx)
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(self.result(rid)["reason"], "inactive_client")
+
+    def test_watch_runs_recover_every_n_passes(self):
+        rid = self.file(); B.drain_once(self.ctx)
+        os.unlink(os.path.join(self.state, "jobs", rid + ".json"))         # the job vanished
+        for n in range(1, B.RECOVER_EVERY):
+            B.step(self.ctx, n)
+        self.assertIsNone(self.result(rid))
+        B.step(self.ctx, B.RECOVER_EVERY)
+        self.assertEqual(self.result(rid)["reason"], "interrupted")
+
+    def test_first_pass_recovers(self):
+        rid = self.file(); B.drain_once(self.ctx)
+        os.unlink(os.path.join(self.state, "jobs", rid + ".json"))
+        B.step(self.ctx, 0)
+        self.assertEqual(self.result(rid)["reason"], "interrupted")
+
+
 if __name__ == "__main__":
     unittest.main()

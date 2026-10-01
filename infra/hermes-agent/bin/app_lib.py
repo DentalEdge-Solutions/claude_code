@@ -289,8 +289,9 @@ class Ledger:
 
     def append(self, event, request_id, op=None, client=None, now=None):
         now = now or utcnow()
-        line = json.dumps({"event": event, "request_id": request_id, "op": op, "client": client,
-                           "at": now, "day": now[:10]}, sort_keys=True) + "\n"
+        e = {"event": event, "request_id": request_id, "op": op, "client": client,
+             "at": now, "day": now[:10]}
+        line = json.dumps(e, sort_keys=True) + "\n"
         fd = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             size = os.fstat(fd).st_size
@@ -301,6 +302,14 @@ class Ledger:
             os.write(fd, line.encode("utf-8")); os.fsync(fd)
         finally:
             os.close(fd)
+        return e          # for LedgerIndex.apply: the index sees exactly what was written
+
+    def index(self):
+        """One read of the file into a LedgerIndex (the broker builds one per pass)."""
+        idx = LedgerIndex()
+        for e in self._events():
+            idx.apply(e)
+        return idx
 
     def seen(self, rid):
         return any(e.get("request_id") == rid for e in self._events())
@@ -331,3 +340,65 @@ class Ledger:
             elif e.get("event") in ("resulted", "released"):
                 open_.pop(e["request_id"], None)
         return list(open_.values())
+
+
+class LedgerIndex:
+    """In-memory view of a Ledger, built by one read and kept current by apply() on every
+    append, so the broker's hot path never re-reads the file per request. It answers exactly
+    what the Ledger methods answer, including their file-order rules: a release cancels only
+    an EARLIER reservation, and a result or release closes only an EARLIER one."""
+
+    def __init__(self):
+        self._seen = set()
+        self._first_reserved = {}             # rid -> (op, client) of its first reservation
+        self._held = {}                       # rid -> {(day, op, client)} counted reservations
+        self._per_client = collections.Counter()   # (day, op, client) -> held rids
+        self._per_box = collections.Counter()      # (day, op) -> held rids
+        self._box_keys = {}                   # rid -> {(day, op)}
+        self._open = {}                       # rid -> (rid, op, client), insertion-ordered
+        self._refused = collections.Counter()      # day -> refused events
+
+    def apply(self, e):
+        rid, ev = e.get("request_id"), e.get("event")
+        if not isinstance(rid, str):
+            return
+        self._seen.add(rid)
+        if ev == "reserved":
+            self._first_reserved.setdefault(rid, (e.get("op"), e.get("client")))
+            self._open[rid] = (rid, e.get("op"), e.get("client"))
+            try:
+                k, b = (e.get("day"), e.get("op"), e.get("client")), (e.get("day"), e.get("op"))
+                if k not in self._held.setdefault(rid, set()):
+                    self._held[rid].add(k); self._per_client[k] += 1
+                if b not in self._box_keys.setdefault(rid, set()):
+                    self._box_keys[rid].add(b); self._per_box[b] += 1
+            except TypeError:                 # a non-string field (a corrupt line) never matches
+                pass
+        elif ev == "released":
+            for k in self._held.pop(rid, ()):
+                self._per_client[k] -= 1
+            for b in self._box_keys.pop(rid, ()):
+                self._per_box[b] -= 1
+            self._open.pop(rid, None)
+        elif ev == "resulted":
+            self._open.pop(rid, None)
+        elif ev == "refused":
+            try:
+                self._refused[e.get("day")] += 1
+            except TypeError:
+                pass
+
+    def seen(self, rid):
+        return rid in self._seen
+
+    def reserved(self, rid):
+        return self._first_reserved.get(rid)
+
+    def count(self, day, op, client=None):
+        return self._per_box[(day, op)] if client is None else self._per_client[(day, op, client)]
+
+    def unresolved(self):
+        return list(self._open.values())
+
+    def refused_on(self, day):
+        return self._refused[day]
