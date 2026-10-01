@@ -429,5 +429,67 @@ class TestApply(Base):
             self.assertEqual(f.read(), '{"clients": {"slug-1": {}}}\n')
 
 
+class TestAppLayout(unittest.TestCase):
+    """Option B §3: one chat-trigger app's spool and state, laid out by the same engine."""
+
+    def resolver(self):
+        me, gid = os.geteuid(), os.getegid()
+        return H.Resolver({"root": me, "hermes-app-ads-audit": me},
+                          {"root": gid, "hermes": gid, "hermes-app-ads-audit": gid})
+
+    def tmp(self):
+        t = os.path.realpath(tempfile.mkdtemp(prefix="app-layout-"))
+        self.addCleanup(shutil.rmtree, t, True)
+        return t
+
+    def test_entries_and_modes(self):
+        e = {(x.root_key, x.relpath): (x.owner, x.group, x.mode) for x in H.app_layout("ads-audit")}
+        self.assertEqual(e[("apps", "ads-audit/requests")], ("hermes-app-ads-audit", "hermes", 0o3770))
+        self.assertEqual(e[("apps", "ads-audit/results")], ("hermes-app-ads-audit", "hermes", 0o2750))
+        self.assertEqual(e[("state", "ads-audit")], ("root", "hermes-app-ads-audit", 0o750))
+        self.assertEqual(e[("state", "ads-audit/running")], ("root", "hermes-app-ads-audit", 0o750))
+        for d in ("state", "jobs", "done"):
+            self.assertEqual(e[("state", "ads-audit/" + d)], ("hermes-app-ads-audit",) * 2 + (0o700,))
+
+    def test_bad_app_name_refused(self):
+        with self.assertRaises(H.LayoutError):
+            H.app_layout("../x")
+
+    def test_plan_on_empty_tree_creates_everything(self):
+        t = self.tmp()
+        steps = H.plan_app("ads-audit", os.path.join(t, "spool/apps"), os.path.join(t, "app-state"),
+                           self.resolver(), ancestor_uids=(os.geteuid(), 0), ancestor_top=t)
+        self.assertTrue(all(s.action == "create" for s in steps if s.entry is not None))
+        self.assertEqual(sum(1 for s in steps if s.entry is not None), len(H.app_layout("ads-audit")))
+
+    def test_apply_app_builds_a_layout_check_app_accepts(self):
+        t = self.tmp()
+        os.mkdir(os.path.join(t, "spool"))
+        os.chmod(os.path.join(t, "spool"), 0o755)
+        a = ("ads-audit", os.path.join(t, "spool/apps"), os.path.join(t, "app-state"),
+             self.resolver())
+        kw = dict(ancestor_uids=(os.geteuid(), 0), ancestor_top=t)
+        self.assertNotEqual(H.check_app(*a, **kw), [])
+        old = os.umask(0o077)
+        try:
+            created = H.apply_app(*a, geteuid=AS_ROOT, **kw)
+        finally:
+            os.umask(old)
+        self.assertEqual(len(created), len(H.app_layout("ads-audit")))
+        self.assertEqual(H.check_app(*a, **kw), [])
+        self.assertEqual(H.apply_app(*a, geteuid=AS_ROOT, **kw), [])
+
+    def test_apply_app_refuses_when_not_root_and_creates_nothing(self):
+        t = self.tmp()
+        with self.assertRaises(H.LayoutError):
+            H.apply_app("ads-audit", os.path.join(t, "apps"), os.path.join(t, "app-state"),
+                        self.resolver(), ancestor_uids=(os.geteuid(), 0), ancestor_top=t,
+                        geteuid=lambda: 1000)
+        self.assertEqual(os.listdir(t), [])
+
+    def test_mutation_layout_unchanged(self):
+        self.assertEqual(len(H.LAYOUT), 13)
+
+
 if __name__ == "__main__":
     unittest.main()

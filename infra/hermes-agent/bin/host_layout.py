@@ -15,13 +15,16 @@ A store with the wrong owner is a store someone else laid down, and it is not sa
 Spec: docs/superpowers/specs/2026-09-21-f10-governance-store-and-spool-layout-design.md
 §3.2 (store), §3.3 (spool), §4.1 (this module).
 """
-import collections, grp, os, pwd, stat, sys
+import collections, grp, os, pwd, re, stat, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import governance_lib
 
 DEFAULT_STORE_ROOT = "/var/lib/hermes/governance"
 DEFAULT_SPOOL_ROOT = "/var/lib/hermes/spool"
+DEFAULT_APPS_ROOT = "/var/lib/hermes/spool/apps"
+DEFAULT_STATE_ROOT = "/var/lib/hermes/app-state"
+_APP_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 DIR, FILE = "dir", "file"
 
@@ -84,11 +87,33 @@ class Resolver:
         return self._groups[name]
 
 
-def system_resolver(getpwnam=pwd.getpwnam, getgrnam=grp.getgrnam):
-    """Resolve every name the table uses. A name that does not resolve is left out, so the
-    refusal comes from Resolver.uid/gid naming it, at the point it is needed."""
+def app_layout(app):
+    """Option B §3: one app's spool and state. The app dir under state/ is root-owned so only
+    root can create or remove DISABLED; running/ is root's but group-readable, so the broker
+    sees an in-flight job and never calls it interrupted."""
+    if not _APP_RE.match(app):
+        raise LayoutError("invalid app name %r" % app)
+    u = "hermes-app-" + app
+    return (
+        Entry("apps", "", DIR, "root", "hermes", 0o750, None),
+        Entry("apps", app, DIR, "root", "hermes", 0o750, None),
+        Entry("apps", app + "/requests", DIR, u, "hermes", 0o3770, None),
+        Entry("apps", app + "/results", DIR, u, "hermes", 0o2750, None),
+        Entry("state", "", DIR, "root", "root", 0o755, None),
+        Entry("state", app, DIR, "root", u, 0o750, None),
+        Entry("state", app + "/state", DIR, u, u, 0o700, None),
+        Entry("state", app + "/jobs", DIR, u, u, 0o700, None),
+        Entry("state", app + "/done", DIR, u, u, 0o700, None),
+        Entry("state", app + "/running", DIR, "root", u, 0o750, None),
+    )
+
+
+def system_resolver(getpwnam=pwd.getpwnam, getgrnam=grp.getgrnam, layout=LAYOUT):
+    """Resolve every name the table uses (`layout`; the mutation LAYOUT by default, an
+    app_layout() for --app). A name that does not resolve is left out, so the refusal
+    comes from Resolver.uid/gid naming it, at the point it is needed."""
     users, groups = {}, {}
-    for e in LAYOUT:
+    for e in layout:
         if e.owner not in users:
             try:
                 users[e.owner] = getpwnam(e.owner).pw_uid
@@ -108,9 +133,13 @@ def system_resolver(getpwnam=pwd.getpwnam, getgrnam=grp.getgrnam):
     return Resolver(users, groups)
 
 
+def _path(entry, roots):
+    root = roots[entry.root_key]
+    return root if not entry.relpath else os.path.join(root, entry.relpath)
+
+
 def entry_path(entry, store_root, spool_root):
-    root = store_root if entry.root_key == "store" else spool_root
-    return os.path.join(root, entry.relpath) if entry.relpath else root
+    return _path(entry, {"store": store_root, "spool": spool_root})
 
 
 def expected(entry):
@@ -184,15 +213,22 @@ def plan(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/")
         raise LayoutError("the governance store %r and the spool %r overlap — they must "
                           "be separate trees, neither inside the other"
                           % (store_root, spool_root))
+    return _plan_entries(LAYOUT, {"store": store_root, "spool": spool_root}, resolver,
+                         ancestor_uids, ancestor_top)
+
+
+def _plan_entries(layout, roots, resolver, ancestor_uids, ancestor_top):
+    """The per-entry dry run over any table. `roots` maps root_key to path, in the order
+    the roots' ancestors are reported."""
     steps, seen = [], set()
-    for root in (store_root, spool_root):
+    for root in roots.values():
         for path, detail in check_ancestors(root, ancestor_uids, ancestor_top):
-            if (path, detail) not in seen:          # the two roots share ancestors
+            if (path, detail) not in seen:          # the roots share ancestors
                 seen.add((path, detail))
                 steps.append(Step("mismatch", path, detail, False, None))
     missing = []
-    for e in LAYOUT:
-        p = entry_path(e, store_root, spool_root)
+    for e in layout:
+        p = _path(e, roots)
         if any(p.startswith(m + os.sep) for m in missing):
             steps.append(Step("create", p, "missing, expected %s %s"
                               % (e.kind, expected(e)), True, e))
@@ -252,7 +288,13 @@ def apply(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/"
     if geteuid() != 0:
         raise LayoutError("--apply must run as root: it creates entries owned by users "
                           "other than the caller. Nothing was created.")
-    steps = plan(store_root, spool_root, resolver, ancestor_uids, ancestor_top)
+    return _apply_steps(plan(store_root, spool_root, resolver, ancestor_uids, ancestor_top),
+                        resolver)
+
+
+def _apply_steps(steps, resolver):
+    """apply()'s creation engine over any plan: refuse on any mismatch, resolve every name,
+    then create parent-first with rollback. See apply() for the guarantees."""
     bad = ["%s: %s" % (s.path, s.detail) for s in steps if s.action == "mismatch"]
     if bad:
         raise LayoutError(
@@ -298,3 +340,25 @@ def apply(store_root, spool_root, resolver, ancestor_uids=(0,), ancestor_top="/"
                 exc.args = exc.args + (note,)
         raise
     return created
+
+
+def plan_app(app, apps_root, state_root, resolver, ancestor_uids=(0,), ancestor_top="/"):
+    for r in (apps_root, state_root):
+        if not os.path.isabs(r):
+            raise LayoutError("%r is not an absolute path" % r)
+    return _plan_entries(app_layout(app), {"apps": apps_root, "state": state_root},
+                         resolver, ancestor_uids, ancestor_top)
+
+
+def check_app(app, apps_root, state_root, resolver, ancestor_uids=(0,), ancestor_top="/"):
+    return ["%s: %s" % (s.path, s.detail)
+            for s in plan_app(app, apps_root, state_root, resolver, ancestor_uids, ancestor_top)
+            if s.action == "mismatch" or (s.action == "create" and not s.implied)]
+
+
+def apply_app(app, apps_root, state_root, resolver, ancestor_uids=(0,), ancestor_top="/",
+              geteuid=os.geteuid):
+    if geteuid() != 0:
+        raise LayoutError("--apply must run as root. Nothing was created.")
+    return _apply_steps(plan_app(app, apps_root, state_root, resolver, ancestor_uids, ancestor_top),
+                        resolver)

@@ -106,5 +106,58 @@ class TestCli(Base):
         self.assertNotIn("Traceback", err)
 
 
+class TestCliApp(Base):
+    def setUp(self):
+        super().setUp()
+        gid = os.getgid()
+        self.resolver = H.Resolver(
+            users={"root": self.uid, "hermes-broker": self.uid, "hermes-app-ads-audit": self.uid},
+            groups={"root": gid, "hermes": gid, "hermes-broker": gid, "hermes-app-ads-audit": gid})
+
+    def run_app(self, *flags, geteuid=os.geteuid):
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["--app", "ads-audit", "--apps-root", os.path.join(self.base, "apps"),
+                "--state-root", os.path.join(self.base, "app-state")] + list(flags)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = CLI.main(argv, resolver_factory=lambda: self.resolver,
+                          ancestor_uids=(0, self.uid), ancestor_top=self.base,
+                          geteuid=geteuid)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_app_check_reports_missing(self):
+        rc, _, err = self.run_app("--check")
+        self.assertEqual(rc, 2)
+        self.assertIn("missing", err)
+
+    def test_app_apply_then_check_passes(self):
+        rc, out, err = self.run_app("--apply", geteuid=lambda: 0)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("app layout OK", out)
+        rc, out, err = self.run_app("--check")
+        self.assertEqual((rc, err), (0, ""))
+
+    def test_a_bad_app_name_is_refused(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = CLI.main(["--app", "../x", "--check"], resolver_factory=lambda: self.resolver)
+        self.assertEqual(rc, 2)
+        self.assertIn("invalid app name", err.getvalue())
+
+    def test_the_default_resolver_covers_the_app_names(self):
+        """Without a factory, the CLI must resolve the app's own user and group, not only
+        the mutation layout's names, or --check could never pass on a real host."""
+        seen = {}
+        def fake(layout=H.LAYOUT, **_):
+            seen["names"] = {e.owner for e in layout} | {e.group for e in layout}
+            return self.resolver
+        with patch.object(CLI.H, "system_resolver", side_effect=fake):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                CLI.main(["--app", "ads-audit", "--apps-root", os.path.join(self.base, "apps"),
+                          "--state-root", os.path.join(self.base, "app-state"), "--check"],
+                         ancestor_uids=(0, self.uid), ancestor_top=self.base)
+        self.assertIn("hermes-app-ads-audit", seen["names"])
+
+
 if __name__ == "__main__":
     unittest.main()

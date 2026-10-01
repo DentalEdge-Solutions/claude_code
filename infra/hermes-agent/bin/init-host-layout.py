@@ -8,6 +8,8 @@ Operator-run, host-side, the same governed-operator-CLI pattern as
     init-host-layout.py --apply    create what is missing (root only; refuses on
                                    anything that exists and is wrong — never repairs)
     init-host-layout.py --check    verify only; the broker unit's first ExecStartPre
+    init-host-layout.py --app NAME (--check | --apply)
+                                   one chat-trigger app's spool and state (Option B §3)
 
 Exit 0 ok · 1 usage · 2 refusal or drift. The layout itself is bin/host_layout.py.
 """
@@ -26,6 +28,9 @@ def main(argv=None, resolver_factory=None, ancestor_uids=(0,), ancestor_top="/",
         description="Create or verify the governance store and spool layout.")
     ap.add_argument("--store-root", default=H.DEFAULT_STORE_ROOT)
     ap.add_argument("--spool-root", default=H.DEFAULT_SPOOL_ROOT)
+    ap.add_argument("--app", help="lay out one chat-trigger app's spool and state (Option B)")
+    ap.add_argument("--apps-root", default=H.DEFAULT_APPS_ROOT)
+    ap.add_argument("--state-root", default=H.DEFAULT_STATE_ROOT)
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true",
                       help="create what is missing (root only)")
@@ -36,6 +41,23 @@ def main(argv=None, resolver_factory=None, ancestor_uids=(0,), ancestor_top="/",
         return EXIT_OK if e.code == 0 else EXIT_USAGE
     kw = dict(ancestor_uids=ancestor_uids, ancestor_top=ancestor_top)
     try:
+        if args.app:
+            # The system resolver must cover the app's own user and group, not only the
+            # mutation table's names, or --check could never pass on a real host.
+            layout = H.app_layout(args.app)
+            resolver = (resolver_factory or (lambda: H.system_resolver(layout=layout)))()
+            a = (args.app, args.apps_root, args.state_root, resolver)
+            if args.apply:
+                for p in H.apply_app(*a, geteuid=geteuid, **kw):
+                    print("created  %s" % p)
+            problems = H.check_app(*a, **kw)
+            if problems:
+                print("init-host-layout: the app layout does not match:", file=sys.stderr)
+                for p in problems:
+                    print("  - %s" % p, file=sys.stderr)
+                return EXIT_REFUSED
+            print("init-host-layout: app layout OK")
+            return EXIT_OK
         resolver = (resolver_factory or H.system_resolver)()
         if args.apply:
             for p in H.apply(args.store_root, args.spool_root, resolver,
