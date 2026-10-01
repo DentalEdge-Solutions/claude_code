@@ -11,7 +11,7 @@ pipe would hide it — found 2026-09-26), and DISCARDS stderr, where the Google 
 raw account ids (a D9 item). D6: rebuilds the package from the verified commit and reports
 its hash. Customer ids are redacted from everything printed.
 """
-import argparse, hashlib, importlib.util, json, os, subprocess, sys, tempfile
+import argparse, hashlib, importlib.util, json, os, stat, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import review_lib as R
@@ -92,6 +92,10 @@ def main(argv=None):
     if not a.access_digest:                                  # the digest carries no cids
         try:
             with open(a.fp_key_file) as f:
+                mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+                if mode & 0o077:                                 # spec §8: the key file is 0600
+                    raise ValueError(f"{a.fp_key_file} is mode {mode:04o}; it must be 0600 "
+                                     "(no group or other access): chmod 600 it")
                 key = R.load_fp_key(f.read())
         except (OSError, ValueError) as e:
             print(f"collect-review-evidence-laptop: cannot use the review key: {e}", file=sys.stderr)
