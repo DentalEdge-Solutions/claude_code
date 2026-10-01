@@ -11,7 +11,7 @@ should show, and the independent reviewer compares. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, fnmatch, grp, json, os, pwd, re, stat, subprocess, sys
+import argparse, fnmatch, getpass, grp, json, os, pwd, re, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import changeset_lib as C
@@ -115,9 +115,16 @@ def _stat(host, p):
             "mode": oct(stat.S_IMODE(st.st_mode)), "size": st.st_size}
 
 
-def context(host):
+def _tty_key():
+    try:
+        return getpass.getpass("review fingerprint key (hidden, from `pbcopy < ~/.config/hermes-review/fp.key`): ")
+    except (EOFError, OSError):
+        return ""
+
+
+def context(host, fp_key=None):
     """Loaded once per run. Raises ValueError when the redaction list cannot load."""
-    return {"redactor": R.Redactor.from_clients_json(host.path(GOV + "/registry/clients.json"))}
+    return {"redactor": R.Redactor.from_clients_json(host.path(GOV + "/registry/clients.json"), fp_key=fp_key)}
 
 
 # ---------------------------------------------------------------- D1 host exposure
@@ -652,9 +659,9 @@ def box_fingerprint(host, ctx):
 
 
 # ---------------------------------------------------------------- assembly
-def collect_with_secrets(host):
+def collect_with_secrets(host, fp_key):
     """The bundle (redacted) and every credential value seen, for assert_no_secret."""
-    ctx = context(host)
+    ctx = context(host, fp_key)
     items = {}
     for iid, fn in PROBES.items():
         try:
@@ -668,23 +675,36 @@ def collect_with_secrets(host):
     except CouldNotCheck as e:
         secrets, creds = [], {R.COULD_NOT_CHECK: str(e)}
     bundle = {"schema": 1, "kind": "box", "collected_at": R.utc_now(), "items": items,
-              "fingerprint": box_fingerprint(host, ctx), "credentials": creds}
+              "fingerprint": box_fingerprint(host, ctx), "credentials": creds,
+              "cid_fingerprint": "hmac-sha256/12", "cid_key_id": R.key_id(fp_key)}
     return ctx["redactor"].obj(bundle), ctx.get("secrets", []) + secrets
 
 
-def collect(host):
-    return collect_with_secrets(host)[0]
+def collect(host, fp_key):
+    return collect_with_secrets(host, fp_key)[0]
 
 
-def main(argv=None, host=None):
+def main(argv=None, host=None, read_key=_tty_key):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--fingerprint-only", action="store_true")
     g.add_argument("--credentials-only", action="store_true")
+    ap.add_argument("--fp-key-tty", action="store_true")
     a = ap.parse_args(argv)
+    fp_key = None
+    if a.fp_key_tty:
+        try:
+            fp_key = R.load_fp_key(read_key())
+        except ValueError as e:
+            print(f"collect-review-evidence: {e}", file=sys.stderr)
+            return 2
+    if not (a.fingerprint_only or a.credentials_only) and fp_key is None:
+        print("collect-review-evidence: the full bundle needs --fp-key-tty (Option B §8: keyed cid fingerprints)",
+              file=sys.stderr)
+        return 2
     host = host or Host()
     try:
-        ctx = context(host)
+        ctx = context(host, fp_key)
     except ValueError as e:
         print(f"collect-review-evidence: {e} — refusing to print anything I cannot redact", file=sys.stderr)
         return 2
@@ -707,9 +727,9 @@ def main(argv=None, host=None):
             return 2
         out = R.credential_set(infos)
     else:
-        out, secrets = collect_with_secrets(host)
+        out, secrets = collect_with_secrets(host, fp_key)
     text = json.dumps(ctx["redactor"].obj(out), indent=2, sort_keys=True)
-    R.assert_no_secret(text, secrets)
+    R.assert_no_secret(text, secrets + ([fp_key.hex()] if fp_key else []))
     print(text)
     return rc
 

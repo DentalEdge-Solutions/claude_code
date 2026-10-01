@@ -23,6 +23,8 @@ class FakeHost(CE.Host):
 
 
 class Base(unittest.TestCase):
+    KEY = bytes.fromhex("11" * 32)
+
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self._w(CE.GOV + "/registry/clients.json",
@@ -51,48 +53,48 @@ class Base(unittest.TestCase):
 
 class TestBundle(Base):
     def test_foreign_tool_output_is_redacted(self):
-        out = json.dumps(CE.collect(self.host()))
+        out = json.dumps(CE.collect(self.host(), self.KEY))
         self.assertNotIn("acme-dental", out)
         self.assertIn("log/<client>.jsonl", out)
 
     def test_no_credential_value_or_customer_id_anywhere(self):
-        out = json.dumps(CE.collect(self.host()))
+        out = json.dumps(CE.collect(self.host(), self.KEY))
         self.assertNotIn(TOKEN, out)
         self.assertNotIn("1234567890", out)
         self.assertIn(R.sha12(TOKEN), out)                          # control: fingerprint present
 
     def test_failed_command_is_could_not_check(self):
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D1.2"]["status"], R.COULD_NOT_CHECK)   # ufw: not in fake outputs
         self.assertEqual(items["D1.1"]["status"], R.OBSERVED)          # control: ss answered
 
     def test_gateway_not_running_is_could_not_check(self):
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D4.1"]["status"], R.COULD_NOT_CHECK)
 
     def test_missing_clients_json_refuses_to_print(self):
         os.remove(os.path.join(self.root, CE.GOV.lstrip("/"), "registry/clients.json"))
-        self.assertEqual(CE.main([], host=self.host()), 2)
+        self.assertEqual(CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32), 2)
 
     def test_every_checklist_box_id_has_a_probe_and_nothing_else_runs(self):
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(sorted(items), sorted(CE.PROBES))
 
     def test_backup_dir_named_after_a_client_is_redacted(self):
         self._w("/root/live-gate-acme-dental-20260901/note.txt", "hi")
-        out = json.dumps(CE.collect(self.host()))
+        out = json.dumps(CE.collect(self.host(), self.KEY))
         self.assertNotIn("acme-dental", out)
         self.assertIn("live-gate-<client>-20260901", out)
 
     def test_docker_group_absent_is_empty(self):
         self.outputs[("getent", "group", "docker")] = (2, "", "")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D1.6"]["status"], R.OBSERVED)
         self.assertEqual(items["D1.6"]["data"], {"docker_group_members": []})
 
     def test_getent_failure_is_could_not_check(self):
         self.outputs[("getent", "group", "docker")] = (1, "", "boom")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D1.6"]["status"], R.COULD_NOT_CHECK)
 
     # ---- A1: the sweep must be honest about a non-zero find, even rc 1 with output ----
@@ -101,14 +103,14 @@ class TestBundle(Base):
         self.outputs[("find",)] = (1, CE.AGENT_DIR + "/.env.gaw\n",
                                    "find: '/proc/1234/fd': Permission denied\n"
                                    "find: '/proc/5678/task': Permission denied\n")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D2.1"]["status"], R.COULD_NOT_CHECK)
         self.assertIn("exited 1", items["D2.1"]["reason"])
         self.assertIn("2 stderr lines", items["D2.1"]["reason"])
         self.assertNotIn("Permission denied", items["D2.1"]["reason"])
 
     def test_find_rc0_control_still_observed(self):
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D2.1"]["status"], R.OBSERVED)   # control
 
     def test_d6_2_find_nonzero_is_could_not_check_never_leaks_stderr_text(self):
@@ -119,7 +121,7 @@ class TestBundle(Base):
         self.outputs[("find", "/", "-xdev")] = (
             0, CE.AGENT_DIR + "/.env.gaw\n" + CE.AGENT_DIR + "/.env.gaw.example\n", "")
         self.outputs[("find", "/root")] = (1, "", "find: '/root/x': Permission denied\n")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D6.2"]["status"], R.COULD_NOT_CHECK)
         self.assertIn("exited 1", items["D6.2"]["reason"])
         self.assertIn("1 stderr lines", items["D6.2"]["reason"])
@@ -130,12 +132,12 @@ class TestBundle(Base):
 
     def test_not_swept_lists_non_pseudo_mounts_other_than_root(self):
         self.outputs[("findmnt",)] = (0, "/ ext4\n/proc proc\n/dev/shm tmpfs\n/boot ext4\n", "")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D2.1"]["data"]["not_swept"], ["/boot", "/dev/shm"])
 
     def test_not_swept_could_not_check_when_findmnt_fails_but_item_stays_observed(self):
         # findmnt is not in the fake outputs -> falls through to (127, "", "not found")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D2.1"]["status"], R.OBSERVED)           # control
         self.assertEqual(items["D2.1"]["data"]["not_swept"], "could-not-check")
 
@@ -143,7 +145,7 @@ class TestBundle(Base):
 
     def test_sweep_runs_only_once_per_full_collect(self):
         h = self.host()
-        CE.collect(h)
+        CE.collect(h, self.KEY)
         sweep_calls = [c for c in h.calls if c[:3] == ["find", "/", "-xdev"]]
         self.assertEqual(len(sweep_calls), 1)
 
@@ -162,7 +164,7 @@ class TestBundle(Base):
     def test_unparsed_credential_shaped_hit_is_flagged_and_credentials_only_exits_2(self):
         self.outputs[("find",)] = (0, CE.AGENT_DIR + "/.env.leaked\n", "")
         self._w(CE.AGENT_DIR + "/.env.leaked", f"leaked during debugging: {TOKEN}\n")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         rows = items["D2.1"]["data"]["files"]
         self.assertEqual([r["kind"] for r in rows], ["unparsed"])
         self.assertNotIn("credential", rows[0])
@@ -194,7 +196,7 @@ class TestBundle(Base):
     def test_d1_1_includes_tcp_and_udp_prefixed(self):
         self.outputs[("ss",)] = (0, "tcp LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*\n"
                                      "udp UNCONN 0 0 0.0.0.0:41641 0.0.0.0:*\n", "")
-        items = CE.collect(self.host())["items"]
+        items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D1.1"]["data"]["listeners"],
                          ["tcp 0.0.0.0:22", "udp 0.0.0.0:41641"])
 
@@ -272,11 +274,11 @@ class TestTighteningAfterReview3(Base):
     APP_ENV = CE.APP_HOST_DIRS["claude_google_ads"] + "/.env"
 
     def _rows(self):
-        return {r["path"]: r for r in CE.collect(self.host())["items"]["D2.1"]["data"]["files"]}
+        return {r["path"]: r for r in CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["files"]}
 
     # ---- a: freshness ----------------------------------------------------------
     def test_bundle_carries_collected_at_utc(self):
-        b = CE.collect(self.host())
+        b = CE.collect(self.host(), self.KEY)
         self.assertRegex(b["collected_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
     def test_collected_at_is_not_part_of_the_fingerprint(self):
@@ -289,7 +291,7 @@ class TestTighteningAfterReview3(Base):
         self._w("/dev/shm/.env.stash", "FOO=1\n")
         self._w("/run/user/1000/notes.txt", f"pasted {TOKEN}\n")
         self._w("/run/user/1000/clean.txt", "nothing here\n")
-        out = CE.collect(self.host())
+        out = CE.collect(self.host(), self.KEY)
         ms = out["items"]["D2.1"]["data"]["memory_sweep"]
         self.assertEqual(ms["mounts"], ["/dev/shm", "/run/user/1000"])
         self.assertEqual(ms["name_hits"], ["/dev/shm/.env.stash"])
@@ -299,7 +301,7 @@ class TestTighteningAfterReview3(Base):
     def test_memory_sweep_clean_control(self):
         self.outputs[("findmnt",)] = (0, "/ ext4\n/dev/shm tmpfs\n", "")
         self._w("/dev/shm/sem.x", "nothing\n")
-        ms = CE.collect(self.host())["items"]["D2.1"]["data"]["memory_sweep"]
+        ms = CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["memory_sweep"]
         self.assertEqual((ms["mounts"], ms["name_hits"], ms["content_hits"]), (["/dev/shm"], [], []))
 
     def test_memory_sweep_reports_an_unenterable_dir_instead_of_skipping_it(self):
@@ -310,7 +312,7 @@ class TestTighteningAfterReview3(Base):
         locked = os.path.join(self.root, "dev/shm/locked")
         os.chmod(locked, 0)
         try:
-            ms = CE.collect(self.host())["items"]["D2.1"]["data"]["memory_sweep"]
+            ms = CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["memory_sweep"]
         finally:
             os.chmod(locked, 0o700)
         self.assertEqual(ms["unreadable"], ["/dev/shm/locked"])
@@ -325,12 +327,12 @@ class TestTighteningAfterReview3(Base):
             return real(p, *a, **k)
         from unittest import mock
         with mock.patch.object(CE.os, "lstat", side_effect=flaky):
-            items = CE.collect(self.host())["items"]
+            items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D2.1"]["status"], R.OBSERVED)
         self.assertEqual(items["D2.1"]["data"]["memory_sweep"]["mounts"], ["/run"])
 
     def test_memory_sweep_could_not_check_when_findmnt_fails_item_stays_observed(self):
-        items = CE.collect(self.host())["items"]                   # findmnt not faked
+        items = CE.collect(self.host(), self.KEY)["items"]                   # findmnt not faked
         self.assertEqual(items["D2.1"]["status"], R.OBSERVED)
         self.assertEqual(items["D2.1"]["data"]["memory_sweep"], R.COULD_NOT_CHECK)
 
@@ -368,18 +370,18 @@ class TestTighteningAfterReview3(Base):
 
     def test_d6_1_empty_env_is_not_extra(self):
         self._install_package("")
-        row = CE.collect(self.host())["items"]["D6.1"]["data"]["claude_google_ads"]
+        row = CE.collect(self.host(), self.KEY)["items"]["D6.1"]["data"]["claude_google_ads"]
         self.assertEqual(row["extra"], [])
         self.assertEqual(row["env_file"], {"present": True, "size": 0})
 
     def test_d6_1_non_empty_env_is_extra(self):
         self._install_package("GOOGLE_ADS_DEVELOPER_TOKEN=x\n")
-        row = CE.collect(self.host())["items"]["D6.1"]["data"]["claude_google_ads"]
+        row = CE.collect(self.host(), self.KEY)["items"]["D6.1"]["data"]["claude_google_ads"]
         self.assertEqual(row["extra"], [".env"])
 
     def test_d6_1_absent_env_control(self):
         self._install_package(None)
-        row = CE.collect(self.host())["items"]["D6.1"]["data"]["claude_google_ads"]
+        row = CE.collect(self.host(), self.KEY)["items"]["D6.1"]["data"]["claude_google_ads"]
         self.assertEqual((row["extra"], row["env_file"]), ([], {"present": False, "size": 0}))
 
     # ---- e: every home in /etc/passwd, and more history kinds --------------------------
@@ -388,13 +390,13 @@ class TestTighteningAfterReview3(Base):
                                "hermes-broker:x:998:998::/var/lib/hermes-broker:/usr/sbin/nologin\n")
         self._w("/var/lib/hermes-broker/.psql_history", f"\\set t {TOKEN}\n")
         self._w("/root/.bash_history", "ls\n")
-        h = CE.collect(self.host())["items"]["D2.2"]["data"]["histories"]
+        h = CE.collect(self.host(), self.KEY)["items"]["D2.2"]["data"]["histories"]
         self.assertEqual(h["/var/lib/hermes-broker/.psql_history"]["pattern_hits"], 1)
         self.assertEqual(h["/root/.bash_history"]["pattern_hits"], 0)      # control
 
     def test_history_sweep_without_passwd_falls_back_to_root_and_home(self):
         self._w("/home/alice/.bash_history", "ls\n")
-        h = CE.collect(self.host())["items"]["D2.2"]["data"]["histories"]
+        h = CE.collect(self.host(), self.KEY)["items"]["D2.2"]["data"]["histories"]
         self.assertIn("/home/alice/.bash_history", h)
 
 
@@ -433,7 +435,7 @@ class TestAuditsOnTheBox(Base):
         os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/acme-dental"))
         os.makedirs(os.path.join(self.root, "var/lib/hermes/audit-data/ghost-client"))
         os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults"), exist_ok=True)
-        out = CE.collect(self.host())
+        out = CE.collect(self.host(), self.KEY)
         rows = out["items"]["D7.1"]["data"]["audit_data"]
         self.assertEqual(sorted(r["status"] for r in rows), ["active", "unregistered"])
         self.assertNotIn("ghost-client", json.dumps(out))
@@ -445,7 +447,7 @@ class TestAuditsOnTheBox(Base):
         vaults = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/vaults")
         for n in ("acme-dental", "gone-dental", "stray-dental"):
             os.makedirs(os.path.join(vaults, n))
-        out = CE.collect(self.host())
+        out = CE.collect(self.host(), self.KEY)
         rows = out["items"]["D7.1"]["data"]["vaults"]
         self.assertEqual([r["status"] for r in rows], ["active", "retired", "unregistered"])
         dump = json.dumps(out)
@@ -461,10 +463,10 @@ class TestAuditsOnTheBox(Base):
 
     def test_d7_1_reports_reports_dir_and_absent(self):
         self._d7_setup()
-        d = CE.collect(self.host())["items"]["D7.1"]["data"]
+        d = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]
         self.assertEqual(d["reports"], "absent")
         os.makedirs(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data/reports"))
-        d = CE.collect(self.host())["items"]["D7.1"]["data"]
+        d = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]
         self.assertEqual(set(d["reports"]) & {"owner", "group", "mode"}, {"owner", "group", "mode"})
 
     def test_d7_1_audit_logs_root_and_rows_by_status_without_slugs(self):
@@ -472,7 +474,7 @@ class TestAuditsOnTheBox(Base):
         base = os.path.join(self.root, "var/lib/hermes/audit-logs")
         for n in ("acme-dental", "gone-dental", "stray-dental"):
             os.makedirs(os.path.join(base, n))
-        out = CE.collect(self.host())
+        out = CE.collect(self.host(), self.KEY)
         al = out["items"]["D7.1"]["data"]["audit_logs"]
         self.assertEqual(set(al["root"]) & {"owner", "group", "mode"}, {"owner", "group", "mode"})
         self.assertEqual([r["status"] for r in al["rows"]], ["active", "retired", "unregistered"])
@@ -484,7 +486,7 @@ class TestAuditsOnTheBox(Base):
 
     def test_d7_1_audit_logs_absent_root(self):
         self._d7_setup()
-        al = CE.collect(self.host())["items"]["D7.1"]["data"]["audit_logs"]
+        al = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]["audit_logs"]
         self.assertEqual(al, {"root": "absent", "rows": []})
 
     def test_d7_1_symlinked_audit_logs_root_is_reported_not_followed(self):
@@ -494,7 +496,7 @@ class TestAuditsOnTheBox(Base):
         link = os.path.join(self.root, "var/lib/hermes/audit-logs")
         os.makedirs(os.path.dirname(link), exist_ok=True)
         os.symlink(target, link)
-        out = CE.collect(self.host())
+        out = CE.collect(self.host(), self.KEY)
         self.assertEqual(out["items"]["D7.1"]["data"]["audit_logs"], {"root": "symlink", "rows": []})
         self.assertNotIn("ghost-client", json.dumps(out))
 
@@ -502,7 +504,31 @@ class TestAuditsOnTheBox(Base):
         self._d7_setup()
         d = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "data")
         os.symlink(self.root, os.path.join(d, "reports"))
-        self.assertEqual(CE.collect(self.host())["items"]["D7.1"]["data"]["reports"], "symlink")
+        self.assertEqual(CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]["reports"], "symlink")
+
+
+class TestKeyedBundle(Base):
+    def test_cids_are_keyed_and_key_id_recorded(self):
+        b = CE.collect(self.host(), self.KEY)
+        self.assertEqual(b["cid_fingerprint"], "hmac-sha256/12")
+        self.assertEqual(b["cid_key_id"], R.key_id(self.KEY))
+        self.assertNotIn("cid:" + R.sha12("1234567890"), json.dumps(b))
+
+    def test_fingerprint_does_not_depend_on_the_key(self):
+        a = CE.collect(self.host(), self.KEY)["fingerprint"]
+        b = CE.collect(self.host(), bytes.fromhex("22" * 32))["fingerprint"]
+        self.assertEqual(a, b)
+
+    def test_full_bundle_without_key_refuses(self):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(CE.main([], host=self.host()), 2)
+            self.assertEqual(CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "nothex"), 2)
+
+    def test_key_never_printed(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32)
+        self.assertNotIn("11" * 32, out.getvalue())
 
 
 if __name__ == "__main__":
