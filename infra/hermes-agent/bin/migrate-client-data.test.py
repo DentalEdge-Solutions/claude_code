@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+import contextlib, hashlib, importlib.util, io, os, stat, tempfile, unittest
+from unittest import mock
+HERE = os.path.dirname(os.path.abspath(__file__))
+spec = importlib.util.spec_from_file_location("mcd", os.path.join(HERE, "migrate-client-data.py"))
+M = importlib.util.module_from_spec(spec); spec.loader.exec_module(M)
+
+
+class T(unittest.TestCase):
+    def setUp(self):
+        self.t = tempfile.mkdtemp()
+        self.agent = os.path.join(self.t, "agent"); self.dest = os.path.join(self.t, "dest")
+        v = os.path.join(self.agent, "data/vaults/acme/audits"); os.makedirs(v)
+        open(os.path.join(v, "2026-09-30_10-00-00-audit.md"), "w").write("draft")
+        open(os.path.join(self.agent, "data/vaults/acme/timeline.md"), "w").write("t")
+        os.chmod(os.path.join(self.agent, "data/vaults/acme"), 0o700)
+        r = os.path.join(self.agent, "data/reports/claude_google_ads"); os.makedirs(r)
+        open(os.path.join(r, "x.md"), "w").write("r")
+        for tree in ("vaults", "reports"):
+            os.makedirs(os.path.join(self.dest, tree)); os.chmod(os.path.join(self.dest, tree), 0o711)
+        M.ROOT_UID = os.geteuid()
+
+    def run_(self, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = M.main(["--agent-dir", self.agent, "--dest-root", self.dest, *extra])
+        return rc, out.getvalue()
+
+    def test_dry_run_changes_nothing(self):
+        rc, text = self.run_()
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults")))
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "vaults/acme")))
+        self.assertNotIn("draft", text.replace("drafts", ""))
+
+    def test_apply_copies_verifies_and_removes(self):
+        rc, text = self.run_("--apply")
+        self.assertEqual(rc, 0, text)
+        got = os.path.join(self.dest, "vaults/acme/audits/2026-09-30_10-00-00-audit.md")
+        self.assertEqual(open(got).read(), "draft")
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.dest, "vaults/acme")).st_mode), 0o700)
+        self.assertFalse(os.path.exists(os.path.join(self.agent, "data/vaults")))
+        self.assertFalse(os.path.exists(os.path.join(self.agent, "data/reports")))
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "reports/claude_google_ads")))
+
+    def test_mtime_and_mode_preserved(self):
+        f = os.path.join(self.agent, "data/vaults/acme/timeline.md")
+        os.chmod(f, 0o640); os.utime(f, ns=(1_000_000_000_000_000_000, 1_100_000_000_000_000_000))
+        rc, text = self.run_("--apply")
+        self.assertEqual(rc, 0, text)
+        st = os.stat(os.path.join(self.dest, "vaults/acme/timeline.md"))
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o640)
+        self.assertEqual(st.st_mtime_ns, 1_100_000_000_000_000_000)
+
+    def test_verify_mismatch_keeps_source(self):
+        real = M._sha256
+        def flaky(p):
+            return "0" * 64 if p.startswith(self.dest) else real(p)
+        with mock.patch.object(M, "_sha256", flaky):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/acme")))
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/reports")))
+        # the operator is told which destination dir to remove, never contents
+        self.assertIn(os.path.join(self.dest, "vaults", "acme"), text)
+        self.assertNotIn("draft", text.replace("drafts", ""))
+
+    def test_copy_failure_partway_names_created_dirs_and_keeps_source(self):
+        os.makedirs(os.path.join(self.agent, "data/vaults/beta"))
+        real = M._copy_client
+        def boom(src, dst, entries):
+            real(src, dst, entries)
+            if dst.endswith("beta"):
+                raise OSError("disk full")
+        with mock.patch.object(M, "_copy_client", boom):
+            rc, text = self.run_("--apply")
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/acme")))
+        self.assertIn(os.path.join(self.dest, "vaults", "acme"), text)
+        self.assertIn(os.path.join(self.dest, "vaults", "beta"), text)
+
+    def test_symlink_in_source_refused_before_copying(self):
+        os.symlink("/etc/passwd", os.path.join(self.agent, "data/vaults/acme/evil"))
+        rc, _ = self.run_("--apply")
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "vaults/acme")))
+
+    def test_symlink_in_reports_refused_before_copying(self):
+        os.symlink("/etc/passwd", os.path.join(self.agent, "data/reports/evil"))
+        rc, _ = self.run_("--apply")
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "vaults/acme")))
+        self.assertTrue(os.path.isdir(os.path.join(self.agent, "data/vaults/acme")))
+
+    def test_swap_to_symlink_after_walk_is_not_followed(self):
+        secret = os.path.join(self.t, "secret"); open(secret, "w").write("SECRET")
+        src = os.path.join(self.agent, "data/vaults/acme")
+        entries = M._walk(src)
+        f = os.path.join(src, "timeline.md")
+        os.remove(f); os.symlink(secret, f)
+        dst = os.path.join(self.dest, "vaults/acme")
+        with self.assertRaises(M.Refused):
+            M._copy_client(src, dst, entries)
+        for dp, _, fns in os.walk(dst):
+            for n in fns:
+                self.assertNotEqual(open(os.path.join(dp, n)).read(), "SECRET")
+
+    def test_swap_dir_to_symlink_after_walk_is_not_followed(self):
+        other = os.path.join(self.t, "other"); os.makedirs(other)
+        open(os.path.join(other, "2026-09-30_10-00-00-audit.md"), "w").write("SECRET")
+        src = os.path.join(self.agent, "data/vaults/acme")
+        entries = M._walk(src)
+        import shutil
+        shutil.rmtree(os.path.join(src, "audits")); os.symlink(other, os.path.join(src, "audits"))
+        dst = os.path.join(self.dest, "vaults/acme")
+        with self.assertRaises(M.Refused):
+            M._copy_client(src, dst, entries)
+
+    def test_client_that_is_a_file_refused(self):
+        open(os.path.join(self.agent, "data/vaults/stray"), "w").write("x")
+        rc, _ = self.run_("--apply")
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "vaults/acme")))
+
+    def test_existing_destination_refused(self):
+        os.makedirs(os.path.join(self.dest, "vaults/acme"))
+        rc, _ = self.run_("--apply")
+        self.assertEqual(rc, 2)
+
+    def test_bad_dest_parent_refused(self):
+        os.chmod(os.path.join(self.dest, "vaults"), 0o755)
+        rc, _ = self.run_("--apply")
+        self.assertEqual(rc, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
