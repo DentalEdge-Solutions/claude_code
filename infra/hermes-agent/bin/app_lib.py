@@ -243,8 +243,10 @@ def map_done(req, done, manifest):
         return refused_result(rid, op, client, "internal", status="failed")
 
 
-def write_json_atomic(dirpath, name, obj, mode=SPOOL_FILE_MODE, uid=None, gid=None):
-    fd, tmp = tempfile.mkstemp(dir=dirpath, prefix="." + name + ".", suffix=".tmp")
+def write_json_atomic(dirpath, name, obj, mode=SPOOL_FILE_MODE, uid=None, gid=None, tmpdir=None):
+    """`tmpdir` (default: dirpath) holds the temp file until the rename. It MUST be on the same
+    filesystem as dirpath, or os.replace is not atomic (it fails with EXDEV instead)."""
+    fd, tmp = tempfile.mkstemp(dir=tmpdir or dirpath, prefix="." + name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             if uid is not None:

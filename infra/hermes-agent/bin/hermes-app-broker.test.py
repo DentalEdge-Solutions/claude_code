@@ -424,5 +424,30 @@ class TestFixRound2(Base):
         self.assertTrue(self.ledger().seen(rid))
 
 
+class TestFinalFix(Base):
+    """Final whole-branch review: a stale temp file in jobs/ must never wedge the path unit."""
+
+    def test_job_temp_file_is_written_outside_jobs(self):
+        seen, real = [], A.tempfile.mkstemp
+
+        def spy(*a, **kw):
+            seen.append(kw.get("dir")); return real(*a, **kw)
+        A.tempfile.mkstemp = spy
+        self.addCleanup(setattr, A.tempfile, "mkstemp", real)
+        rid = self.file(); B.drain_once(self.ctx)
+        self.assertEqual(self.jobs(), [rid + ".json"])
+        self.assertNotIn(os.path.join(self.state, "jobs"), seen)
+        self.assertIn(os.path.join(self.state, "state"), seen)
+
+    def test_stale_temp_files_in_jobs_are_swept_fresh_ones_kept(self):
+        jobs = os.path.join(self.state, "jobs")
+        old, new = os.path.join(jobs, ".x.json.old.tmp"), os.path.join(jobs, ".y.json.new.tmp")
+        open(old, "w").close(); open(new, "w").close()
+        t = time.time() - B.REQUEST_MAX_AGE - 10
+        os.utime(old, (t, t))
+        B.collect_once(self.ctx)
+        self.assertEqual(self.jobs(), [".y.json.new.tmp"])
+
+
 if __name__ == "__main__":
     unittest.main()

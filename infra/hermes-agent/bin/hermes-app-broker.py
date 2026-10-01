@@ -86,8 +86,10 @@ def _admit(ctx, req):
         return _refuse(ctx, rid, op, client, "quota")
     ctx.ledger.append("reserved", rid, op, client, now=ctx.now())       # BEFORE the job exists
     try:
+        # The temp file lives in state/ (broker-owned, same filesystem), never in jobs/: a temp
+        # file stranded there by a crash would hold the runner's DirectoryNotEmpty= true forever.
         A.write_json_atomic(ctx.d("jobs"), rid + ".json", {"job_id": rid, "op": op, "client": client},
-                            mode=0o600)
+                            mode=0o600, tmpdir=ctx.d("state"))
     except Exception:
         # No job: close the reservation result-first (it still counts against the quota). If
         # even the result cannot be written, the reservation stays open for recover().
@@ -203,17 +205,28 @@ def _collect_one(ctx, n, open_):
     _unlink(ctx, p)
 
 
+def _sweep_stale_dotfile(ctx, p, now):
+    """An atomic-write temp file older than REQUEST_MAX_AGE was stranded by a crash."""
+    try:
+        if now - os.lstat(p).st_mtime > REQUEST_MAX_AGE:
+            _unlink(ctx, p)
+    except FileNotFoundError:
+        pass
+
+
 def collect_once(ctx):
     now = time.time()
+    # Stale temp files in jobs/ (older brokers wrote them there; a crash strands them) and in
+    # state/: a leftover in jobs/ keeps the runner's path unit re-triggering on nothing.
+    for d in ("jobs", "state"):
+        for n in os.listdir(ctx.d(d)):
+            if n.startswith(".") and n.endswith(".tmp"):
+                _sweep_stale_dotfile(ctx, os.path.join(ctx.d(d), n), now)
     open_ = {r: (o, c) for r, o, c in ctx.ledger.unresolved()}      # once per pass
     for n in sorted(os.listdir(ctx.d("done"))):
         p = os.path.join(ctx.d("done"), n)
         if n.startswith("."):                      # the runner's in-flight atomic-write temp file
-            try:
-                if now - os.lstat(p).st_mtime > REQUEST_MAX_AGE:
-                    _unlink(ctx, p)
-            except FileNotFoundError:
-                pass
+            _sweep_stale_dotfile(ctx, p, now)
             continue
         try:
             _collect_one(ctx, n, open_)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json, os, stat, tempfile, unittest
 HERE = os.path.dirname(os.path.abspath(__file__)); import sys; sys.path.insert(0, HERE)
+from unittest import mock
 import app_lib as A
 
 MANIFEST = os.path.join(os.path.dirname(HERE), "registry", "apps", "ads-audit.json")
@@ -156,6 +157,19 @@ class TestWrite(unittest.TestCase):
         self.assertEqual(json.load(open(p)), {"a": 1})
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o640)
         self.assertEqual([n for n in os.listdir(d) if n.endswith(".tmp")], [])
+
+    def test_tmpdir_keeps_the_temp_file_out_of_the_target_dir(self):
+        d, t = tempfile.mkdtemp(), tempfile.mkdtemp()
+        seen = []
+        real = A.tempfile.mkstemp
+
+        def spy(*a, **kw):
+            seen.append(kw.get("dir")); return real(*a, **kw)
+        with mock.patch.object(A.tempfile, "mkstemp", spy):
+            A.write_json_atomic(d, RID + ".json", {"a": 1}, tmpdir=t)
+        self.assertEqual(seen, [t])
+        self.assertEqual(json.load(open(os.path.join(d, RID + ".json"))), {"a": 1})
+        self.assertEqual(os.listdir(t), [])
 
 
 class TestHardening(unittest.TestCase):

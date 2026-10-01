@@ -356,6 +356,15 @@ class TestAppUnits(unittest.TestCase):
         # the runner relies on the cgroup kill to reap process-group survivors after a timeout TERM
         self.assertIn("KillMode=control-group", d)
 
+    def test_runner_never_hits_a_start_limit_and_outlasts_a_full_queue(self):
+        # A path unit re-triggers the runner while jobs/ is non-empty; a start limit would fail
+        # the path unit and stall every later job silently.
+        unit_section = unit("hermes-app-runner@.service").split("[Service]")[0]
+        self.assertIn("[Unit]", unit_section)
+        self.assertIn("StartLimitIntervalSec=0", live_lines(unit_section))
+        # worst ads-audit queue: 5 runs x 7200 s + 60 lists x 60 s = 11 h; the unit limit must exceed it.
+        self.assertIn("TimeoutStartSec=12h", self.directives("hermes-app-runner@.service"))
+
     def test_path_unit_watches_jobs(self):
         d = self.directives("hermes-app-runner@.path")
         self.assertIn("DirectoryNotEmpty=/var/lib/hermes/app-state/%i/jobs", d)
