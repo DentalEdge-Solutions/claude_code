@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, stat, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, signal, stat, subprocess, sys, tempfile, threading, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import package_lib as PK
 spec = importlib.util.spec_from_file_location("rca", os.path.join(HERE, "run-client-audit.py"))
 RCA = importlib.util.module_from_spec(spec); spec.loader.exec_module(RCA)
+REAL_STOP_PROXY = RCA.stop_proxy      # Base stubs the module attribute; the real one is tested below
 
 TOKEN = "1//0gFAKEREFRESHTOKENabcdefghijklmnop"
 CID = "1234567890"
@@ -78,7 +79,7 @@ class Base(unittest.TestCase):
             os.makedirs(R(parent), exist_ok=True); os.chmod(R(parent), 0o711)
         os.makedirs(R("/var/lib/hermes/vaults/acme-dental"), exist_ok=True)
         self.proxy_stops = []
-        RCA.stop_proxy = lambda root: self.proxy_stops.append(root)
+        RCA.stop_proxy = lambda root, logs, say: self.proxy_stops.append((root, logs))
         RCA.PIN_OVERRIDE = self.pin          # tests bypass projects.yaml; main() reads the pin otherwise
         RCA.OWNER_UID = os.geteuid()         # tests are not root
         RCA.DATA_UID = RCA.DATA_GID = None   # skip chown to 10000 in tests
@@ -485,7 +486,8 @@ class TestOptionBLayout(Base):
                 self.run_main(r)
                 names = [RCA.step_name(c["argv"]) for c in r.calls]
                 self.assertEqual(names[names.index("draft") - 1], "proxy")
-                self.assertEqual(len(self.proxy_stops), 1)
+                self.assertEqual(self.proxy_stops,
+                                 [(self.root, self.root + "/var/lib/hermes/audit-logs/acme-dental")])
 
     def test_proxy_stopped_even_if_removing_the_transient_draft_raises(self):
         def boom(root, slug, ts):
@@ -735,6 +737,133 @@ class TestJsonUnexpectedExceptions(Base):
         with self.assertRaises(KeyboardInterrupt):
             self.run_main(FakeRunner(self.root, raise_on=("draft", KeyboardInterrupt)), "--json")
         self.assertEqual(len(self.proxy_stops), 1)
+
+
+def Term(_msg):
+    """What the SIGTERM handler raises, as FakeRunner's raise_on factory."""
+    return SystemExit(143)
+
+
+class TestSigterm(Base):
+    """Spec §7: a host-runner timeout (SIGTERM, then SIGKILL after a grace) must not skip cleanup."""
+    def test_handler_raises_systemexit_143_once(self):
+        old = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        with self.assertRaises(SystemExit) as cm:
+            RCA._on_sigterm(signal.SIGTERM, None)
+        self.assertEqual(cm.exception.code, 143)
+        # a second TERM (the runner's process-group kill reaching us again) must not cut cleanup short
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
+    def test_sigterm_mid_run_still_stops_proxy_and_removes_the_transient_draft(self):
+        r = FakeRunner(self.root, raise_on=("vault-write", Term))   # the draft is on disk by then
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(r)
+        self.assertEqual(cm.exception.code, 143)
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertEqual(os.listdir(self.root + "/var/lib/hermes/draft-out/acme-dental"), [])
+
+    def test_sigterm_under_json_prints_one_failed_internal_line(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as cm:
+            RCA.main(["acme-dental", "--json"], runner=FakeRunner(self.root, raise_on=("draft", Term)),
+                     root=self.root, now="2026-10-01_12-00-00")
+        self.assertEqual(cm.exception.code, 143)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        j = json.loads(lines[0])
+        self.assertEqual((j["status"], j["reason"]), ("failed", "internal"))
+        self.assertEqual(len(self.proxy_stops), 1)
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_real_sigterm_during_a_named_run_step_removes_its_container(self):
+        old = signal.signal(signal.SIGTERM, RCA._on_sigterm)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        d = tempfile.mkdtemp(); cmds = []
+        t = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGTERM)); t.start()
+        self.addCleanup(t.cancel)
+        with RCA.open_log(d + "/o") as out, RCA.open_log(d + "/e") as err, self.assertRaises(SystemExit) as cm:
+            RCA.real_runner(["sh", "-c", "sleep 5", "--name", "hermes-audit-x-draft"], None, 10, out, err,
+                            cleanup=lambda a: cmds.append(a) or 0)
+        self.assertEqual(cm.exception.code, 143)
+        self.assertEqual(cmds, [["docker", "rm", "-f", "hermes-audit-x-draft"]])
+        self.assertIn("docker rm -f hermes-audit-x-draft", open(d + "/e").read())
+
+    def test_cleanup_commands_are_bounded_to_20s(self):
+        seen = []
+        def fake_run(argv, **kw):
+            seen.append(kw.get("timeout"))
+            return subprocess.CompletedProcess(argv, 0)
+        with mock.patch.object(RCA.subprocess, "run", fake_run):
+            RCA._quiet(["docker", "rm", "-f", "x"])
+        self.assertTrue(seen and all(t is not None and t <= 20 for t in seen), seen)
+
+
+class TestStopProxyKeepsTheDecisionLog(Base):
+    """Spec §5.2 / D10.2: the proxy's host+decision log is captured before `rm -sf` destroys it."""
+    def setUp(self):
+        super().setUp()
+        self.logs = self.root + "/var/lib/hermes/audit-logs/acme-dental"
+        os.makedirs(self.logs)
+        self.said = []
+
+    def call(self, rm_rc=0, logs_rc=0):
+        argvs = []
+        def fake_run(argv, **kw):
+            argvs.append((argv, kw.get("timeout")))
+            if "logs" in argv:
+                kw["stdout"].write("egress-proxy  | CONNECT api.anthropic.com:443 allow 1234 5678\n")
+                kw["stdout"].flush()
+                return subprocess.CompletedProcess(argv, logs_rc)
+            return subprocess.CompletedProcess(argv, rm_rc)
+        with mock.patch.object(RCA.subprocess, "run", fake_run):
+            rc = REAL_STOP_PROXY(self.root, self.logs, self.said.append)
+        return rc, argvs
+
+    def test_logs_captured_before_rm_with_both_rcs(self):
+        rc, argvs = self.call()
+        self.assertEqual(rc, 0)
+        self.assertEqual([("logs" in a, "rm" in a) for a, _ in argvs], [(True, False), (False, True)])
+        self.assertIn("--no-color", argvs[0][0]); self.assertEqual(argvs[0][0][-1], "egress-proxy")
+        self.assertEqual(argvs[1][0][-3:], ["rm", "-sf", "egress-proxy"])
+        self.assertTrue(all(t is not None and t <= 20 for _, t in argvs), argvs)
+        p = self.logs + "/proxy.log"
+        st = os.lstat(p)
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        text = open(p).read()
+        self.assertIn("CONNECT api.anthropic.com:443 allow", text)
+        self.assertIn("logs rc 0", text); self.assertIn("rm -sf egress-proxy rc 0", text)
+        self.assertEqual(self.said, [])
+
+    def test_failed_rm_is_recorded_and_warned(self):
+        rc, _ = self.call(rm_rc=1)
+        self.assertEqual(rc, 1)
+        self.assertIn("rm -sf egress-proxy rc 1", open(self.logs + "/proxy.log").read())
+        self.assertEqual(len(self.said), 1); self.assertIn("WARNING", self.said[0])
+        self.assertIn("egress-proxy", self.said[0])
+
+    def test_planted_proxy_log_is_not_followed_and_rm_still_runs(self):
+        target = os.path.join(tempfile.mkdtemp(), "t"); open(target, "w").write("keep")
+        os.symlink(target, self.logs + "/proxy.log")
+        rc, argvs = self.call()
+        self.assertEqual(open(target).read(), "keep")
+        self.assertTrue(any("rm" in a for a, _ in argvs))
+        self.assertTrue(self.said and "WARNING" in self.said[0])
+
+    def test_real_run_writes_proxy_log_on_every_exit(self):
+        for kw in ({}, {"fail_on": "collect"}, {"raise_on": ("draft", OSError)}):
+            with self.subTest(kw=kw):
+                calls = []
+                def fake_run(argv, **k):
+                    calls.append(argv)
+                    if "logs" in argv:
+                        k["stdout"].write("proxy decision\n")
+                    return subprocess.CompletedProcess(argv, 0)
+                with mock.patch.object(RCA, "stop_proxy", REAL_STOP_PROXY), \
+                        mock.patch.object(RCA.subprocess, "run", fake_run):
+                    self.run_main(FakeRunner(self.root, **kw))
+                self.assertIn("proxy decision", open(self.logs + "/proxy.log").read())
 
 
 if __name__ == "__main__":

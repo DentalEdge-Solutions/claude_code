@@ -538,7 +538,9 @@ def probe_egress(root, runner=probe_runner):
                                  and not host_visible)
         return j
     finally:
-        stop_proxy(root)
+        # stop_proxy(root, logs, say) since the part-1 final review: proxy.log lands in the probe's
+        # temp layout, which is removed with it; a failed rm still warns on stderr.
+        stop_proxy(root, base, lambda s: print(s, file=sys.stderr))
         shutil.rmtree(base, ignore_errors=True)
 ```
 

@@ -10,14 +10,15 @@ on stderr. --list: this client's audit timestamps (newest 24), no lock taken.
 Pre-checks, then: collect (one-shot ads-collector) -> snapshot (host) -> readers (one-shot
 ads-reader) -> egress-proxy up -> draft (claude -p in the one-shot ads-drafter, which sees only
 this client's vault, reports and draft-out dirs) -> the check that the draft names no other
-client -> vault-write. The proxy is stopped and the transient draft removed on every exit.
+client -> vault-write. The proxy is stopped (its decision log kept as proxy.log first) and the
+transient draft removed on every exit, a SIGTERM from the host runner's timeout included (§7).
 Stops at the first failure. Exit: 0 draft written, 1 a step failed, 2 a pre-check refused,
 3 another audit is running.
 Nothing shown carries a customer id or credential value; each step's stdout and stderr go to
 /var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
 to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
 file there is created O_EXCL|O_NOFOLLOW: root never follows a container-planted symlink."""
-import argparse, datetime, json, os, re, stat, subprocess, sys, time
+import argparse, datetime, json, os, re, signal, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import changeset_lib as C
 import client_audit_lib as L
@@ -40,6 +41,7 @@ PROJECT = "claude_google_ads"
 TS_FMT = "%Y-%m-%d_%H-%M-%S"   # file names; the snapshot gets the same instant in ISO (M8)
 COLLECTORS = ("audit_discovery", "negatives_audit", "audit_assets_rsa", "assess_supplemental")
 READERS = ("account_overview", "audit_search_terms", "audit_analyze")
+CLEANUP_TIMEOUT = 20          # each cleanup command (logs capture, rm -sf, rm -f): bounded inside the runner's grace
 TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "proxy": 60, "draft": 1200, "vault-write": 120}
 CRED_NAMES = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
               "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
@@ -148,16 +150,55 @@ def vault_draft_is_file(root, slug, ts):
         os.close(fd)
 
 
-def stop_proxy(root):
-    """Always called from _run's finally; harmless when the proxy never started."""
-    return _quiet(_compose(root) + ["rm", "-sf", "egress-proxy"])
+def stop_proxy(root, logs, say):
+    """Always called from _run's finally; harmless when the proxy never started. The proxy's
+    host/decision/byte-count log (§5.2) lives only in the container: capture it into
+    <logs>/proxy.log (open_log: new, 0600, never a planted symlink) BEFORE `rm -sf` destroys it,
+    with both return codes. A failed rm is a warning on screen: the proxy may still be up."""
+    compose = _compose(root)
+    path = os.path.join(logs, "proxy.log")
+    try:
+        f = open_log(path)
+    except OSError as e:
+        f = None
+        say(f"run-client-audit: WARNING: cannot create {path} ({type(e).__name__}); "
+            f"the egress-proxy decision log is not kept")
+    try:
+        if f is not None:
+            try:
+                logs_rc = subprocess.run(compose + ["logs", "--no-color", "egress-proxy"], stdout=f, stderr=f,
+                                         timeout=CLEANUP_TIMEOUT).returncode
+            except (subprocess.TimeoutExpired, OSError) as e:
+                logs_rc = type(e).__name__
+            f.write(f"\n[run-client-audit] docker compose logs rc {logs_rc}\n")
+            f.flush()
+        rm_rc = _quiet(compose + ["rm", "-sf", "egress-proxy"])
+        if f is not None:
+            f.write(f"[run-client-audit] docker compose rm -sf egress-proxy rc {rm_rc}\n")
+    finally:
+        if f is not None:
+            f.close()
+    if rm_rc != 0:
+        say(f"run-client-audit: WARNING: stopping egress-proxy failed (rc {rm_rc}); see {path} "
+            f"and run `docker compose rm -sf egress-proxy`")
+    return rm_rc
 
 
 def _quiet(argv):
     try:
-        return subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode
+        return subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=CLEANUP_TIMEOUT).returncode
     except (subprocess.TimeoutExpired, OSError) as e:
         return type(e).__name__
+
+
+def _on_sigterm(signum, frame):
+    """The host runner's timeout sends SIGTERM (SIGKILL after a grace). Python's default exits
+    without running `finally`; raising SystemExit(143) unwinds through _run's finally (transient
+    draft, proxy) and real_runner's named-container removal. One-shot: a second TERM must not cut
+    that cleanup short."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(128 + signal.SIGTERM)
 
 
 def real_runner(argv, env, timeout, out, err, cleanup=None):
@@ -168,12 +209,20 @@ def real_runner(argv, env, timeout, out, err, cleanup=None):
         return subprocess.run(argv, env=env, stdout=out, stderr=err, timeout=timeout).returncode
     except subprocess.TimeoutExpired:
         err.write(f"\n[run-client-audit] timed out after {timeout}s\n")
-        if "--name" in argv:
-            name = argv[argv.index("--name") + 1]
-            rc = (cleanup or _quiet)(["docker", "rm", "-f", name])
-            err.write(f"[run-client-audit] docker rm -f {name}: rc {rc}\n")
-        err.flush()
+        _remove_named(argv, err, cleanup)
         return 124
+    except (SystemExit, KeyboardInterrupt):     # SIGTERM (_on_sigterm) or ^C mid-step: same removal
+        err.write("\n[run-client-audit] interrupted\n")
+        _remove_named(argv, err, cleanup)
+        raise
+
+
+def _remove_named(argv, err, cleanup):
+    if "--name" in argv:
+        name = argv[argv.index("--name") + 1]
+        rc = (cleanup or _quiet)(["docker", "rm", "-f", name])
+        err.write(f"[run-client-audit] docker rm -f {name}: rc {rc}\n")
+    err.flush()
 
 
 def _iso(ts):
@@ -316,6 +365,12 @@ def main(argv=None, runner=None, root="/", now=None):
             rc = _run(steps, rec, ts, root, runner, say, state)
     except L.PrecheckError as e:
         print(f"run-client-audit: {e}", file=sys.stderr); return emit("busy", "busy", 3)
+    except SystemExit as e:         # SIGTERM (_on_sigterm): cleanup has run; keep the one-JSON-line contract
+        if e.code != 128 + signal.SIGTERM:
+            raise
+        print("run-client-audit: failed: terminated (SIGTERM)", file=sys.stderr)
+        emit("failed", "internal", e.code, state["results"])
+        raise
     except (OSError, ValueError, TypeError, AttributeError) as e:          # Ruling 6 (+ M12)
         say(f"run-client-audit: failed: {type(e).__name__}: {e}")
         return emit("failed", "internal", 1, state["results"])
@@ -379,7 +434,7 @@ def _run(steps, rec, ts, root, runner, say, state):
         try:
             remove_transient(root, slug, ts)
         finally:                    # even if the removal raises, the proxy must not outlive the run
-            stop_proxy(root)
+            stop_proxy(root, logs, say)
 
 
 def _summary(results, rc, say):
@@ -389,4 +444,5 @@ def _summary(results, rc, say):
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _on_sigterm)      # the real entrypoint only; tests call main()
     sys.exit(main())
