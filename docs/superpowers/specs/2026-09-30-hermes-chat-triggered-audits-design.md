@@ -121,13 +121,13 @@ A result is written by the broker to `results/<request_id>.json`, and every fiel
 ```json
 {"request_id": "…", "op": "run", "client": "<slug>", "status": "ok|refused|failed|busy",
  "reason": "<enum|null>", "exit_code": 0, "ts": "YYYY-MM-DD_HH-MM-SS|null",
- "steps": [{"name": "collect|snapshot|read|draft|isolation|vault-write", "rc": 0, "seconds": 0}],
+ "steps": [{"name": "collect|snapshot|read|proxy|draft|isolation|vault-write", "rc": 0, "seconds": 0}],
  "vault_path": "/var/lib/hermes/vaults/<slug>/audits/<ts>-audit.md|null",
  "audits": ["<ts>", "…"]}
 ```
 
 `audits` is present only for `list`. `reason` enums: `bad_request`, `duplicate`, `inactive_client`,
-`quota`, `disabled`, `precheck`, `timeout`, `interrupted`, `internal`, and for `failed` the step name.
+`quota`, `disabled`, `precheck`, `busy`, `timeout`, `interrupted`, `internal`, and for `failed` the step name.
 
 ### 3.3 Broker drain
 
@@ -212,7 +212,8 @@ mode.
 
 **Migration** (`bin/migrate-client-data.py`, a BRING-UP step):
 1. Stop the gateway.
-2. Copy the vaults and reports with owners and modes preserved.
+2. Copy the vaults with owners, modes and mtimes preserved. Reports are not migrated: they are per run and
+   rebuilt by the next audit, so `data/reports` is only removed.
 3. Verify per-file size and sha256 against the source.
 4. Only then remove `data/vaults` and `data/reports`.
 

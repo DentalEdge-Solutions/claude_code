@@ -212,6 +212,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m      # thread-per-connection: bound what a flood of CONNECTs can take
+    pids_limit: 128
     networks: [default, drafter-net]
     volumes:
       - ./bin:/opt/cc-bin:ro

@@ -19,6 +19,29 @@ def sh(*a, env=None, check=True):
     return subprocess.run(list(a), capture_output=True, text=True, env=env, check=check)
 
 
+ANTHROPIC_FAKE = "sk-ant-integration-fake"
+
+
+def seams_root(root, agent, cred_names):
+    """The box-shaped root plan() reads (TestOrchestratorSeams): <root>/opt/hermes-agent -> agent,
+    the Google READ credential (every name but the customer id, 0400) and, since Option B, the
+    Anthropic key file (0400) that plan() reads for the draft step. Pure file setup: importable
+    and runnable without root or Docker."""
+    os.makedirs(os.path.join(root, "opt")); os.makedirs(os.path.join(root, "etc/hermes"))
+    os.symlink(agent, os.path.join(root, "opt/hermes-agent"))
+    cred = os.path.join(root, "etc/hermes", ".env" + ".ga")
+    with open(cred, "w") as f:
+        for n in cred_names:
+            if n != "GOOGLE_ADS_CUSTOMER_ID":             # plan() sets it from the registry
+                f.write(f"{n}=fake-{n.lower()}\n")
+        f.write("GOOGLE_ADS_CREDENTIAL_ROLE=read\n")
+    os.chmod(cred, 0o400)
+    anth = os.path.join(root, "etc/hermes", ".env" + ".anthropic")
+    with open(anth, "w") as f:
+        f.write(f"ANTHROPIC_API_KEY={ANTHROPIC_FAKE}\n")
+    os.chmod(anth, 0o400)
+
+
 @unittest.skipUnless(CAN, "needs root + Linux + docker")
 class TestAuditMounts(unittest.TestCase):
     @classmethod
@@ -56,8 +79,8 @@ class TestAuditMounts(unittest.TestCase):
         cls.compose = ["docker", "compose", "--env-file", "/dev/null", "-f",
                        os.path.join(cls.agent, "docker-compose.yml"), "--profile", "tools"]
 
-    def run_svc(self, *args):
-        return sh(*self.compose, "run", "--rm", "--no-deps", "-T", *args, env=self.env, check=False)
+    def run_svc(self, *args, env=None):
+        return sh(*self.compose, "run", "--rm", "--no-deps", "-T", *args, env=env or self.env, check=False)
 
     def test_collector_can_write_audit_data(self):
         r = self.run_svc("ads-collector", "code/stub_write.py")
@@ -105,14 +128,16 @@ class TestAuditMounts(unittest.TestCase):
                   "touch /work/reports/x 2>/dev/null && echo REPORTS_W; "
                   "touch /work/out/draft.md && echo OUT_W; touch /etc/x 2>/dev/null && echo ROOTFS_W; "
                   "test -e /var/lib/hermes && echo HOST_VISIBLE; env | cut -d= -f1 | grep -E '^GOOGLE_ADS_' || true")
-        r = self.run_svc("ads-drafter", script)
+        # Non-vacuous: the compose CLIENT holds a Google credential name; the drafter must not.
+        r = self.run_svc("ads-drafter", script, env=dict(self.env, GOOGLE_ADS_DEVELOPER_TOKEN="probe"))
         self.assertEqual(r.returncode, 0, r.stderr)
         out = r.stdout.split()
         self.assertEqual(out[0], "10000")
         self.assertIn("VAULT_R", out); self.assertIn("OUT_W", out)
         for bad in ("VAULT_W", "REPORTS_W", "ROOTFS_W", "HOST_VISIBLE"):
             self.assertNotIn(bad, out)
-        self.assertFalse(any(x.startswith("GOOGLE_ADS_") for x in out))
+        self.assertFalse(any(x.startswith("GOOGLE_ADS_") for x in out), out)
+        self.assertNotIn("GOOGLE_ADS_DEVELOPER_TOKEN", r.stdout)
 
     def test_drafter_has_no_route_out_except_the_proxy(self):
         sh(*self.compose, "up", "-d", "--no-deps", "egress-proxy", env=self.env)
@@ -125,13 +150,20 @@ class TestAuditMounts(unittest.TestCase):
                      "  s=socket.create_connection(('egress-proxy',3128),timeout=10)\n"
                      "  s.sendall(('CONNECT %s HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n'%target).encode())\n"
                      "  return s.recv(64).split(b'\\r\\n')[0].decode()\n"
-                     "print(direct()); print(via('example.com:443')); print(via('api.anthropic.com:443'))\n")
+                     "def dns():\n"
+                     "  try: socket.getaddrinfo('example.com',443); return 'DNS_RESOLVES'\n"
+                     "  except OSError: return 'DNS_BLOCKED'\n"
+                     "print(direct()); print(via('example.com:443')); print(via('api.anthropic.com:443'))\n"
+                     "print(dns())\n")
             r = self.run_svc("ads-drafter", f"python3 -c \"{probe}\"")
             self.assertEqual(r.returncode, 0, r.stderr)
             lines = r.stdout.splitlines()
             self.assertEqual(lines[0], "DIRECT_BLOCKED")
             self.assertIn("403", lines[1])
             self.assertIn("200", lines[2])
+            # CVE-2024-29018: Docker < 26.0.0 (25.0.4, 23.0.11) forwards an internal network's
+            # external DNS lookups, a covert exit. The drafter must not resolve an outside name.
+            self.assertEqual(lines[3], "DNS_BLOCKED")
         finally:
             sh(*self.compose, "rm", "-sf", "egress-proxy", env=self.env, check=False)
 
@@ -166,15 +198,7 @@ class TestOrchestratorSeams(unittest.TestCase):
         # only the symlink-resolved path (what run-client-audit must pass, 2026-09-30 box run)
         # reaches tmp/claude-google-ads. An earlier layout resolved either way and hid the bug.
         cls.root = os.path.join(cls.tmp, "deep", "root")
-        os.makedirs(os.path.join(cls.root, "opt")); os.makedirs(os.path.join(cls.root, "etc/hermes"))
-        os.symlink(agent, os.path.join(cls.root, "opt/hermes-agent"))
-        cred = os.path.join(cls.root, "etc/hermes", ".env" + ".ga")
-        with open(cred, "w") as f:
-            for n in cls.RCA.CRED_NAMES:
-                if n != "GOOGLE_ADS_CUSTOMER_ID":             # plan() sets it from the registry
-                    f.write(f"{n}=fake-{n.lower()}\n")
-            f.write("GOOGLE_ADS_CREDENTIAL_ROLE=read\n")
-        os.chmod(cred, 0o400)
+        seams_root(cls.root, agent, cls.RCA.CRED_NAMES)
         cls.RCA.AUDIT_DATA = os.path.join(cls.tmp, "audit-data")   # the one knob: keep CI's /var clean
         cls.slug = "it-seams"
         data = os.path.join(cls.RCA.AUDIT_DATA, cls.slug)
@@ -190,6 +214,8 @@ class TestOrchestratorSeams(unittest.TestCase):
         steps = self.RCA.plan({"slug": self.slug, "customer_id": "1234567890"}, ts, self.root)
         key, argv, env = steps[0]
         self.assertEqual(key, "collect")
+        self.assertFalse([k for k in env if k.startswith("ANTHROPIC")], sorted(env))   # host side
+        self.assertEqual(dict((k, e) for k, _, e in steps)["draft"]["ANTHROPIC_API_KEY"], ANTHROPIC_FAKE)
         self.assertNotIn("--env-file", argv)
         logs = os.path.join(self.tmp, "logs"); os.makedirs(logs)
         with self.RCA.open_log(logs + "/o") as out, self.RCA.open_log(logs + "/e") as err:
