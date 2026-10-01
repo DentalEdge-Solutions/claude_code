@@ -1329,6 +1329,14 @@ Requires part 1 on the box. Still not live until review #6.
 9. Kill switch (for the review and for emergencies):
    on:  `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
    off: `sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED`
+   The switch only refuses NEW requests: jobs already queued in `jobs/` and a run in flight
+   still go ahead. To stop queued work too, stop the runner's path unit and the runner itself:
+   `sudo systemctl stop hermes-app-runner@ads-audit.path hermes-app-runner@ads-audit.service`
+   (an in-flight run is cut off and later reported `interrupted`, never re-run; queued jobs wait
+   in `jobs/` and run when `sudo systemctl start hermes-app-runner@ads-audit.path` is issued).
+   To discard the queued jobs instead, with both units stopped:
+   `sudo find /var/lib/hermes/app-state/ads-audit/jobs -mindepth 1 -delete` — the broker then
+   reports each one `interrupted` (its periodic recover, within about a minute).
 10. First chat audit: `sudo docker compose exec -it hermes-agent hermes chat`, then ask
     "Run the Google Ads audit for <client>." Expect `ok` within ~5 min (or `pending`; ask for its
     status later). Journal: `journalctl -u hermes-app-broker@ads-audit -n 20`.

@@ -449,6 +449,8 @@ def _run(steps, rec, ts, root, runner, say, state):
     finally:                        # the transient draft never outlives the run (I3); the proxy stops
         held = (signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})   # a TERM landing now waits
                 if BLOCK_TERM_IN_CLEANUP else None)                           # until stop_proxy is done
+        # By design the cleanup children (docker logs/rm) inherit this blocked SIGTERM; each is
+        # bounded by CLEANUP_TIMEOUT, so a TERM can delay but never wedge the cleanup.
         try:
             try:
                 remove_transient(root, slug, ts)
