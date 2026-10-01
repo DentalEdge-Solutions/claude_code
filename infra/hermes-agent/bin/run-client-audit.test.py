@@ -45,11 +45,11 @@ class FakeRunner:
                 open(os.path.join(ad, self.error_file), "w").write("boom")
         ts = env.get("TS") or next((a[3:] for a in argv if a.startswith("TS=")), None)
         if name == "draft":
-            d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
+            d = self.root + "/var/lib/hermes/draft-out/acme-dental"
             os.makedirs(d, exist_ok=True)
             open(os.path.join(d, ts + "-audit.md"), "w").write(self.draft_text)
         if name == "vault-write":
-            v = self.root + "/opt/hermes-agent/data/vaults/acme-dental/audits"
+            v = self.root + "/var/lib/hermes/vaults/acme-dental/audits"
             os.makedirs(v, exist_ok=True)
             open(os.path.join(v, ts + "-audit.md"), "w").write(self.draft_text)
         return 0
@@ -66,7 +66,7 @@ class Base(unittest.TestCase):
             "acme-dental": {"customer_id": CID, "status": "active", "project": "claude_google_ads"},
             "other-dental": {"customer_id": "9998887777", "status": "active", "project": "claude_google_ads"}}}))
         w("/etc/hermes/.env" + ".ga", f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\nGOOGLE_ADS_CREDENTIAL_ROLE=read\n", 0o400)
-        w("/opt/hermes-agent/.env", "ANTHROPIC_API_KEY=sk-ant-api03-x\n")
+        w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-x\n", 0o400)
         app = "/opt/projects/claude-google-ads"
         files = {"code/a.py": b"x"}
         w(app + "/code/a.py", "x")
@@ -74,7 +74,11 @@ class Base(unittest.TestCase):
         open(R(app + "/" + PK.MANIFEST_NAME), "wb").write(PK.manifest_bytes(m))
         self.pin = PK.manifest_hash(m)
         os.makedirs(R("/run/lock"), exist_ok=True)
-        os.makedirs(R("/opt/hermes-agent/data"), exist_ok=True)   # the box always has data/
+        for parent in ("/var/lib/hermes/vaults", "/var/lib/hermes/reports", "/var/lib/hermes/draft-out"):
+            os.makedirs(R(parent), exist_ok=True); os.chmod(R(parent), 0o711)
+        os.makedirs(R("/var/lib/hermes/vaults/acme-dental"), exist_ok=True)
+        self.proxy_stops = []
+        RCA.stop_proxy = lambda root: self.proxy_stops.append(root)
         RCA.PIN_OVERRIDE = self.pin          # tests bypass projects.yaml; main() reads the pin otherwise
         RCA.OWNER_UID = os.geteuid()         # tests are not root
         RCA.DATA_UID = RCA.DATA_GID = None   # skip chown to 10000 in tests
@@ -94,8 +98,8 @@ class TestHappyPath(Base):
         self.assertEqual(rc, 0, text)
         names = [RCA.step_name(c["argv"]) for c in r.calls]
         self.assertEqual(names, [f"collect:{c}" for c in RCA.COLLECTORS] + ["snapshot"]
-                         + [f"read:{x}" for x in RCA.READERS] + ["draft", "vault-write"])
-        self.assertIn("data/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md", text)
+                         + [f"read:{x}" for x in RCA.READERS] + ["proxy", "draft", "vault-write"])
+        self.assertIn("/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md", text)
 
     def test_credential_only_as_env_names_and_never_on_screen(self):
         r = FakeRunner(self.root)
@@ -122,7 +126,7 @@ class TestHappyPath(Base):
         self.assertTrue(os.path.exists(os.path.join(logs, "snapshot.stderr")))
         self.assertEqual(os.stat(logs).st_mode & 0o777, 0o711)
         names = os.listdir(logs)
-        self.assertEqual(len(names), 2 * 10)                      # stdout + stderr for each step
+        self.assertEqual(len(names), 2 * 11)                      # stdout + stderr for each step (incl. proxy)
         for n in names:
             self.assertEqual(os.lstat(os.path.join(logs, n)).st_mode & 0o777, 0o600, n)
         # the collector's rw mount holds no logs/ (C1): nothing there is ever opened as root
@@ -151,13 +155,14 @@ class TestHappyPath(Base):
         fch, ch = [], []
         def rec_fchown(fd, uid, gid):
             fch.append((os.fstat(fd).st_ino, uid, gid))
+        # the test user cannot own the vault dir as 10000: that pre-check is not this test's subject
         with mock.patch.object(RCA.os, "fchown", rec_fchown), \
-             mock.patch.object(RCA.os, "chown", lambda p, u, g: ch.append((p, u, g))):
+             mock.patch.object(RCA.os, "chown", lambda p, u, g: ch.append((p, u, g))), \
+             mock.patch.object(RCA.L, "check_client_dir", lambda p, uid: None):
             rc, text = self.run_main(FakeRunner(self.root))
         self.assertEqual(rc, 0, text)
         snap = os.stat(self.root + "/var/lib/hermes/audit-logs/acme-dental/snapshot.stdout").st_ino
-        rep = os.stat(self.root + "/opt/hermes-agent/data/reports").st_ino
-        self.assertEqual(sorted(fch), sorted([(rep, 10000, 10000), (snap, 10000, 10000)]))   # nothing else
+        self.assertEqual(sorted(fch), [(snap, 10000, 10000)])   # nothing else
         self.assertFalse(any(p.startswith(self.root + "/var/lib/hermes/audit-logs") and u == 10000
                              for p, u, g in ch), ch)
 
@@ -172,8 +177,8 @@ class TestHappyPath(Base):
                 rc = super().__call__(argv, env, timeout, out, err)
                 name = RCA.step_name(argv)
                 if name == s.where:
-                    d = {"draft": s.root + "/opt/hermes-agent/data/audits/claude_google_ads",
-                         "vault-write": s.root + "/opt/hermes-agent/data/vaults/acme-dental/audits"}[name]
+                    d = {"draft": s.root + "/var/lib/hermes/draft-out/acme-dental",
+                         "vault-write": s.root + "/var/lib/hermes/vaults/acme-dental/audits"}[name]
                     os.remove(os.path.join(d, ts + "-audit.md"))
                     os.symlink(secret, os.path.join(d, ts + "-audit.md"))
                 return rc
@@ -215,170 +220,8 @@ class TestHappyPath(Base):
 
     def test_transient_draft_is_removed_after_vault_write(self):
         self.run_main(FakeRunner(self.root))
-        d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
+        d = self.root + "/var/lib/hermes/draft-out/acme-dental"
         self.assertEqual(os.listdir(d), [])
-
-
-class TestRootNeverFollowsGatewaySymlinks(Base):
-    """F1: the gateway (uid 10000) owns data/; root must not follow a symlink it plants there."""
-    REPORTS = "/opt/hermes-agent/data/reports/claude_google_ads"
-    AUDITS = "/opt/hermes-agent/data/audits/claude_google_ads"
-
-    def test_symlinked_reports_dir_fails_before_any_reader_and_deletes_nothing(self):
-        outside = tempfile.mkdtemp(); keep = os.path.join(outside, "keep.md")
-        open(keep, "w").write("keep\n")
-        os.makedirs(os.path.dirname(self.root + self.REPORTS))
-        os.symlink(outside, self.root + self.REPORTS)
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertTrue(os.path.exists(keep))
-        self.assertFalse([c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")])
-        self.assertEqual(len([l for l in text.splitlines() if "failed" in l]), 1, text)
-        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
-
-    def test_symlinked_reports_parent_fails_the_same_way(self):
-        outside = tempfile.mkdtemp(); os.makedirs(outside + "/claude_google_ads")
-        keep = outside + "/claude_google_ads/keep.md"; open(keep, "w").write("keep\n")
-        os.makedirs(self.root + "/opt/hermes-agent/data", exist_ok=True)
-        os.symlink(outside, self.root + "/opt/hermes-agent/data/reports")
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text); self.assertTrue(os.path.exists(keep))
-        self.assertFalse([c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")])
-
-    def test_symlinked_md_in_reports_removes_the_link_not_its_target(self):
-        outside = tempfile.mkdtemp(); target = os.path.join(outside, "t.md")
-        open(target, "w").write("target\n")
-        os.makedirs(self.root + self.REPORTS)
-        open(self.root + self.REPORTS + "/old.md", "w").write("stale\n")
-        os.symlink(target, self.root + self.REPORTS + "/evil.md")
-        rc, text = self.run_main(FakeRunner(self.root))
-        self.assertEqual(rc, 0, text)
-        self.assertFalse(os.path.lexists(self.root + self.REPORTS + "/evil.md"))
-        self.assertFalse(os.path.lexists(self.root + self.REPORTS + "/old.md"))
-        self.assertEqual(open(target).read(), "target\n")
-
-    def test_symlinked_audits_dir_draft_is_neither_read_nor_removed(self):
-        outside = tempfile.mkdtemp()
-        os.makedirs(os.path.dirname(self.root + self.AUDITS))
-        os.symlink(outside, self.root + self.AUDITS)
-        # the fake analyst writes through the planted link; the text would trip the name check if read
-        r = FakeRunner(self.root, draft_text="compare with other-dental")
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        planted = os.path.join(outside, "2026-10-01_12-00-00-audit.md")
-        self.assertTrue(os.path.exists(planted), text)                       # not removed
-        self.assertNotIn("other-dental", text)                               # not read
-        self.assertNotIn("vault-write", [RCA.step_name(c["argv"]) for c in r.calls])
-        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
-
-    def test_symlinked_vault_audits_dir_is_not_trusted(self):
-        outside = tempfile.mkdtemp()
-        v = self.root + "/opt/hermes-agent/data/vaults/acme-dental"
-        os.makedirs(v); os.symlink(outside, v + "/audits")
-        rc, text = self.run_main(FakeRunner(self.root))
-        self.assertEqual(rc, 1, text); self.assertNotIn("draft ->", text)
-        self.assertNotIn("Traceback", text)
-
-
-class TestReportsDirOwnership(Base):
-    """2026-09-30: docker created a missing data/reports as root; the reader (uid 10000) got EACCES."""
-    DATA = "/opt/hermes-agent/data"
-
-    def _readers(self, r):
-        return [c for c in r.calls if RCA.step_name(c["argv"]).startswith("read:")]
-
-    def _reports_fchowns(self, r, uid):
-        """Run main with fchown recording (fd is resolved to an inode INSIDE the patch), chown a no-op."""
-        want = os.stat(self.root + self.DATA + "/reports").st_ino if os.path.exists(self.root + self.DATA + "/reports") else None
-        calls = []
-        def rec(fd, u, g):
-            calls.append((os.fstat(fd).st_ino, u, g))
-        with mock.patch.object(RCA.os, "fchown", rec), mock.patch.object(RCA.os, "chown"):
-            rc, text = self.run_main(r)
-        return rc, text, calls, want
-
-    def _reports_ino(self):
-        return os.stat(self.root + self.DATA + "/reports").st_ino
-
-    def test_missing_reports_dir_is_created_0700_and_handed_to_the_container_uid(self):
-        RCA.DATA_UID = RCA.DATA_GID = 10000
-        old = os.umask(0o000)                      # mkdir alone would yield 0700 & ~0 = 0700; make fchmod matter below
-        try:
-            r = FakeRunner(self.root)
-            rc, text, calls, _ = self._reports_fchowns(r, 10000)
-        finally:
-            os.umask(old)
-        self.assertEqual(rc, 0, text)
-        self.assertEqual(stat.S_IMODE(os.stat(self.root + self.DATA + "/reports").st_mode), 0o700)
-        self.assertIn((self._reports_ino(), 10000, 10000), calls)     # the REPORTS dir, not the snapshot log
-        self.assertTrue(self._readers(r))
-
-    def test_new_reports_dir_mode_is_forced_by_fchmod_not_left_to_mkdir(self):
-        RCA.DATA_UID = RCA.DATA_GID = 10000
-        real_mkdir = os.mkdir
-        def loose_mkdir(path, mode=0o777, *, dir_fd=None):
-            real_mkdir(path, 0o755, dir_fd=dir_fd)             # a mkdir that ignores the requested 0700
-        with mock.patch.object(RCA.os, "mkdir", loose_mkdir):
-            rc, text, calls, _ = self._reports_fchowns(FakeRunner(self.root), 10000)
-        self.assertEqual(rc, 0, text)
-        self.assertEqual(stat.S_IMODE(os.stat(self.root + self.DATA + "/reports").st_mode), 0o700)
-
-    def test_existing_reports_dir_owned_by_the_container_uid_is_fixed_to_0700(self):
-        RCA.DATA_UID = RCA.DATA_GID = os.geteuid()
-        rp = self.root + self.DATA + "/reports"
-        os.makedirs(rp); os.chmod(rp, 0o755)
-        r = FakeRunner(self.root)
-        rc, text, calls, _ = self._reports_fchowns(r, RCA.DATA_UID)
-        self.assertEqual(rc, 0, text)
-        self.assertEqual(stat.S_IMODE(os.stat(rp).st_mode), 0o700)
-        self.assertIn((self._reports_ino(), RCA.DATA_UID, RCA.DATA_GID), calls)
-        self.assertTrue(self._readers(r))
-
-    def test_missing_data_dir_fails_closed_before_any_reader(self):
-        os.rmdir(self.root + self.DATA)
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r))
-        self.assertIn("data/ is missing", text); self.assertNotIn("Traceback", text)
-        self.assertFalse(os.path.exists(self.root + self.DATA))
-
-    def test_symlink_planted_between_mkdir_and_open_is_refused(self):
-        outside = tempfile.mkdtemp()
-        real_mkdir = os.mkdir
-        def racy_mkdir(path, mode=0o777, *, dir_fd=None):
-            if path == "reports":
-                os.symlink(outside, path, dir_fd=dir_fd)
-                raise FileExistsError(path)
-            return real_mkdir(path, mode, dir_fd=dir_fd)
-        r = FakeRunner(self.root)
-        with mock.patch.object(RCA.os, "mkdir", racy_mkdir):
-            rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r)); self.assertEqual(os.listdir(outside), [])
-        self.assertEqual(stat.S_IMODE(os.stat(outside).st_mode), 0o700)   # mkdtemp's mode, untouched
-
-    def test_reports_dir_owned_by_someone_else_fails_before_any_reader(self):
-        os.makedirs(self.root + self.DATA + "/reports")
-        RCA.DATA_UID = RCA.DATA_GID = os.geteuid() + 1
-        r = FakeRunner(self.root)
-        with mock.patch.object(RCA.os, "fchown", lambda *a: None), mock.patch.object(RCA.os, "chown"):
-            rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r))
-        self.assertIn("sudo chown 10000:hermes /opt/hermes-agent/data/reports && sudo chmod 700 /opt/hermes-agent/data/reports", text)
-        self.assertNotIn("Traceback", text); self.assertNotIn(CID, text)
-
-    def test_symlinked_reports_dir_is_still_refused(self):
-        outside = tempfile.mkdtemp()
-        os.makedirs(self.root + self.DATA, exist_ok=True)
-        os.symlink(outside, self.root + self.DATA + "/reports")
-        r = FakeRunner(self.root)
-        rc, text = self.run_main(r)
-        self.assertEqual(rc, 1, text)
-        self.assertFalse(self._readers(r)); self.assertEqual(os.listdir(outside), [])
 
 
 class TestTimeouts(Base):
@@ -387,13 +230,14 @@ class TestTimeouts(Base):
         r = FakeRunner(self.root)
         self.assertEqual(self.run_main(r)[0], 0)
         runs = [c["argv"] for c in r.calls if "run" in c["argv"] and "docker" in c["argv"]]
-        self.assertEqual(len(runs), len(RCA.COLLECTORS) + len(RCA.READERS))
+        self.assertEqual(len(runs), len(RCA.COLLECTORS) + len(RCA.READERS) + 1)   # + the drafter
         for a in runs:
             name = a[a.index("--name") + 1]
             slug = RCA.step_name(a).replace(":", "-")
             self.assertEqual(name, f"hermes-audit-2026-10-01_12-00-00-{slug}")
             self.assertRegex(name, r"^[a-z0-9_-]+$")
-            self.assertLess(a.index("--name"), a.index("ads-collector" if "ads-collector" in a else "ads-reader"))
+            svc = next(x for x in ("ads-collector", "ads-reader", "ads-drafter") if x in a)
+            self.assertLess(a.index("--name"), a.index(svc))
 
     def test_timed_out_run_step_removes_its_container(self):
         d = tempfile.mkdtemp()
@@ -436,7 +280,11 @@ class TestDraftAndSnapshotArgs(Base):
         a = d["argv"]
         for kv in ("PROJECT=claude_google_ads", "CLIENT=acme-dental", "TS=2026-10-01_12-00-00"):
             self.assertEqual(a[a.index(kv) - 1], "-e", kv)
-        self.assertEqual(sorted(d["env"]), ["PATH"])
+        self.assertEqual(a[a.index("ANTHROPIC_API_KEY") - 1], "-e")           # a name only
+        self.assertEqual(d["env"]["ANTHROPIC_API_KEY"], "sk-ant-api03-x")    # the value only in env
+        self.assertFalse(any(k.startswith("GOOGLE_ADS_") for k in d["env"]), d["env"])
+        self.assertFalse(any("GOOGLE_ADS_" in x for x in a), a)
+        self.assertFalse(any("sk-ant" in x for x in a), a)
 
     def test_a_malformed_ts_is_refused(self):
         import client_audit_lib as L
@@ -472,7 +320,7 @@ class TestFailClosed(Base):
         self.assertFalse(os.path.exists(ad + "/stale.json"))
 
     def test_transient_draft_is_removed_when_a_later_step_fails(self):
-        d = self.root + "/opt/hermes-agent/data/audits/claude_google_ads"
+        d = self.root + "/var/lib/hermes/draft-out/acme-dental"
         for runner in (FakeRunner(self.root, fail_on="vault-write"),
                        FakeRunner(self.root, raise_on=("vault-write", OSError))):
             rc, text = self.run_main(runner)
@@ -485,8 +333,8 @@ class TestFailClosed(Base):
         self.assertEqual(rc, 1)
         self.assertIn("other-dental", text)
         self.assertNotIn("vault-write", [RCA.step_name(c["argv"]) for c in r.calls])
-        self.assertFalse(os.path.exists(self.root + "/opt/hermes-agent/data/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"))
-        self.assertEqual(os.listdir(self.root + "/opt/hermes-agent/data/audits/claude_google_ads"), [])
+        self.assertFalse(os.path.exists(self.root + "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"))
+        self.assertEqual(os.listdir(self.root + "/var/lib/hermes/draft-out/acme-dental"), [])
 
 
 class TestPrechecks(Base):
@@ -498,7 +346,8 @@ class TestPrechecks(Base):
         self.assertEqual(rc, 2); self.assertEqual(r.calls, [])
 
     def test_dummy_anthropic_key_refused(self):
-        open(self.root + "/opt/hermes-agent/.env", "w").write("ANTHROPIC_API_KEY=dummy-key-this-wave\n")
+        p = self.root + "/etc/hermes/.env.anthropic"
+        os.chmod(p, 0o600); open(p, "w").write("ANTHROPIC_API_KEY=dummy\n"); os.chmod(p, 0o400)
         r = FakeRunner(self.root)
         rc, text = self.run_main(r)
         self.assertEqual(rc, 2); self.assertEqual(r.calls, []); self.assertIn("Anthropic", text)
@@ -521,6 +370,8 @@ class TestPrechecks(Base):
         self.assertEqual(rc, 0); self.assertEqual(r.calls, [])
         self.assertIn("ads-collector", text)
         self.assertNotIn(TOKEN, text); self.assertNotIn(CID, text)
+        self.assertIn("ANTHROPIC_API_KEY", text)          # the draft's env NAME is shown...
+        self.assertNotIn("sk-ant-api03-x", text)          # ...never its value
 
 
 class TestUnexpectedFailure(Base):
@@ -575,6 +426,7 @@ class TestComposePathResolution(Base):
     so the collector failed to mount its .env mask. The compose file path must be resolved."""
     def _box_layout(self):
         import shutil
+        os.makedirs(self.root + "/opt/hermes-agent", exist_ok=True)   # setUp no longer needs data/ under it
         real = self.root + "/opt/projects/claude_code/infra/hermes-agent"
         os.makedirs(os.path.dirname(real), exist_ok=True)
         shutil.move(self.root + "/opt/hermes-agent", real)
@@ -591,15 +443,104 @@ class TestComposePathResolution(Base):
                 self.assertEqual(f, os.path.realpath(real + "/docker-compose.yml"), key)
                 self.assertNotIn("/opt/hermes-agent/", f)
 
-    def test_draft_exec_still_targets_the_hermes_agent_project(self):
-        self._box_layout()
+    def test_draft_run_targets_the_drafter_in_the_hermes_agent_project(self):
+        real = self._box_layout()
         import client_audit_lib as L
         rec = L.eligible_client("acme-dental", self.root + RCA.REGISTRY)
         draft = [a for k, a, e in RCA.plan(rec, "2026-10-01_12-00-00", self.root) if k == "draft"][0]
         f = draft[draft.index("-f") + 1]
+        self.assertEqual(f, os.path.realpath(real + "/docker-compose.yml"))
+        self.assertIn("run", draft); self.assertIn("ads-drafter", draft)
+        self.assertNotIn("exec", draft); self.assertNotIn("hermes-agent", draft)   # not the gateway
         # compose derives the project name from the file's directory: it must stay "hermes-agent",
-        # or `exec` would not find the running gateway (container hermes-agent-hermes-agent-1).
+        # so the one-shot drafter joins the project's networks (and reaches egress-proxy).
         self.assertEqual(os.path.basename(os.path.dirname(f)), "hermes-agent")
+
+class TestOptionBLayout(Base):
+    def test_draft_gets_one_client_dirs_and_the_key_by_name(self):
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 0, text)
+        d = [c for c in r.calls if RCA.step_name(c["argv"]) == "draft"][0]
+        self.assertEqual(d["env"]["HERMES_VAULT_DIR"], "/var/lib/hermes/vaults/acme-dental")
+        self.assertEqual(d["env"]["HERMES_REPORTS_DIR"], "/var/lib/hermes/reports/acme-dental")
+        self.assertEqual(d["env"]["HERMES_DRAFT_OUT_DIR"], "/var/lib/hermes/draft-out/acme-dental")
+        self.assertIn("ANTHROPIC_API_KEY", d["argv"])
+        self.assertNotIn("sk-ant-api03-x", " ".join(d["argv"]))
+        self.assertNotIn("sk-ant-api03-x", text)
+
+    def test_readers_get_the_per_client_reports_dir(self):
+        r = FakeRunner(self.root)
+        self.run_main(r)
+        for c in r.calls:
+            if RCA.step_name(c["argv"]).startswith("read:"):
+                self.assertEqual(c["env"]["HERMES_REPORTS_DIR"], "/var/lib/hermes/reports/acme-dental")
+
+    def test_proxy_started_before_draft_and_stopped_on_every_exit(self):
+        for kw in ({}, {"fail_on": "draft"}, {"draft_text": "DRAFT names other-dental"},
+                   {"raise_on": ("draft", OSError)}):
+            with self.subTest(kw=kw):
+                self.proxy_stops.clear()
+                r = FakeRunner(self.root, **kw)
+                self.run_main(r)
+                names = [RCA.step_name(c["argv"]) for c in r.calls]
+                self.assertEqual(names[names.index("draft") - 1], "proxy")
+                self.assertEqual(len(self.proxy_stops), 1)
+
+    def test_proxy_stopped_even_if_removing_the_transient_draft_raises(self):
+        def boom(root, slug, ts):
+            raise OSError("draft-out vanished")
+        with mock.patch.object(RCA, "remove_transient", boom):
+            rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 1, text); self.assertNotIn("Traceback", text)
+        self.assertEqual(len(self.proxy_stops), 1)
+
+    def test_proxy_not_started_when_collection_fails(self):
+        r = FakeRunner(self.root, fail_on="collect")
+        self.run_main(r)
+        self.assertNotIn("proxy", [RCA.step_name(c["argv"]) for c in r.calls])
+
+    def test_reports_and_draft_out_reset_each_run(self):
+        stale = self.root + "/var/lib/hermes/reports/acme-dental/old.md"
+        os.makedirs(os.path.dirname(stale)); open(stale, "w").close()
+        self.run_main(FakeRunner(self.root))
+        self.assertFalse(os.path.exists(stale))
+
+    def test_bad_host_parent_refused_before_any_step(self):
+        os.chmod(self.root + "/var/lib/hermes/vaults", 0o755)
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 2); self.assertEqual(r.calls, [])
+
+    def test_missing_client_vault_refused_before_any_step(self):
+        os.rmdir(self.root + "/var/lib/hermes/vaults/acme-dental")
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r)
+        self.assertEqual(rc, 2); self.assertEqual(r.calls, [])
+
+    def test_anthropic_key_file_wrong_mode_refused(self):
+        os.chmod(self.root + "/etc/hermes/.env.anthropic", 0o600)
+        rc, text = self.run_main(FakeRunner(self.root))
+        self.assertEqual(rc, 2)
+
+    def test_symlink_in_draft_out_is_neither_read_nor_removed(self):
+        """The drafter (uid 10000) plants a symlink where the draft should be: root must refuse
+        to read it (rc 1, nothing reaches the vault) and must not unlink its target."""
+        outside = tempfile.mkdtemp(); target = os.path.join(outside, "secret.md")
+        open(target, "w").write("secret")
+        fake = FakeRunner(self.root)
+        def runner(argv, env, timeout, out, err):
+            if RCA.step_name(argv) == "draft":        # plant instead of writing a draft
+                d = self.root + "/var/lib/hermes/draft-out/acme-dental"
+                os.symlink(target, os.path.join(d, "2026-10-01_12-00-00-audit.md"))
+                return 0
+            return fake(argv, env, timeout, out, err)
+        rc, text = self.run_main(runner)
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(open(target).read(), "secret")
+        self.assertFalse(os.path.exists(self.root + "/var/lib/hermes/vaults/acme-dental/audits/"
+                                        "2026-10-01_12-00-00-audit.md"))
+
 
 if __name__ == "__main__":
     unittest.main()

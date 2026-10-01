@@ -4,14 +4,16 @@
   sudo run-client-audit <client> [--dry-run]
 
 Pre-checks, then: collect (one-shot ads-collector) -> snapshot (host) -> readers (one-shot
-ads-reader) -> draft (claude -p in the gateway, as run-trend-audit.sh) -> vault-write -> the
-check that the draft names no other client. Stops at the first failure. Exit: 0 draft
-written, 1 a step failed, 2 a pre-check refused, 3 another audit is running.
+ads-reader) -> egress-proxy up -> draft (claude -p in the one-shot ads-drafter, which sees only
+this client's vault, reports and draft-out dirs) -> the check that the draft names no other
+client -> vault-write. The proxy is stopped and the transient draft removed on every exit.
+Stops at the first failure. Exit: 0 draft written, 1 a step failed, 2 a pre-check refused,
+3 another audit is running.
 Nothing shown carries a customer id or credential value; each step's stdout and stderr go to
 /var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
 to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
 file there is created O_EXCL|O_NOFOLLOW: root never follows a container-planted symlink."""
-import argparse, datetime, errno, json, os, re, stat, subprocess, sys, time
+import argparse, datetime, json, os, re, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import changeset_lib as C
 import client_audit_lib as L
@@ -24,33 +26,38 @@ CRED = "/etc/hermes/.env" + ".ga"
 APP_DIR = "/opt/projects/claude-google-ads"
 AUDIT_DATA = "/var/lib/hermes/audit-data"
 AUDIT_LOGS = "/var/lib/hermes/audit-logs"   # root-only; never mounted into anything
+VAULTS = "/var/lib/hermes/vaults"           # Option B §4: client data out of the gateway
+REPORTS = "/var/lib/hermes/reports"
+DRAFT_OUT = "/var/lib/hermes/draft-out"
+ANTHROPIC_CRED = "/etc/hermes/.env" + ".anthropic"
+HOST_PARENTS = (VAULTS, REPORTS, DRAFT_OUT)
 LOCK = "/run/lock/hermes-client-audit.lock"
 PROJECT = "claude_google_ads"
 TS_FMT = "%Y-%m-%d_%H-%M-%S"   # file names; the snapshot gets the same instant in ISO (M8)
 COLLECTORS = ("audit_discovery", "negatives_audit", "audit_assets_rsa", "assess_supplemental")
 READERS = ("account_overview", "audit_search_terms", "audit_analyze")
-TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "draft": 1200, "vault-write": 120}
+TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "proxy": 60, "draft": 1200, "vault-write": 120}
 CRED_NAMES = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
               "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
 OWNER_UID = 0                 # the credential file's owner; tests override
 DATA_UID = DATA_GID = 10000   # the containers' uid; tests set None to skip chown
 PIN_OVERRIDE = None           # tests only
-# vault-write runs on the HOST but writes files the gateway (uid 10000) must read next month
+# vault-write runs on the HOST but writes files the drafter (uid 10000) must read next month
 # (trend mode): run it AS that uid, or the vault fills with root-owned files. The snapshot runs
 # as that uid too: it reads files the collector container controls (F2). Tests set [].
 RUN_AS_DATA_UID = ["setpriv", "--reuid=10000", "--regid=10000", "--clear-groups"]
 
 # Verbatim from run-trend-audit.sh (spec §2 step 5): the analyst, its model and its limits.
 # One change (I2): `timeout -k 30 1150` stops claude INSIDE the container before the host's
-# 1200 s timeout, which can only kill the `docker compose exec` client; -k 30 sends SIGKILL if
-# claude ignores SIGTERM, still inside 1200 s (F3).
+# 1200 s timeout, which can only kill the `docker compose run` client (the named container is
+# then removed, I2); -k 30 sends SIGKILL if claude ignores SIGTERM, still inside 1200 s (F3).
+# Option B: the paths are the ads-drafter's mounts (/work/vault ro, /work/reports ro, /work/out).
 DRAFT_SCRIPT = r'''
   set -eu
-  skill="/opt/data/skills/claude-code-ads-analyst/SKILL.md"
-  vault="/opt/data/vaults/$CLIENT"; reports="/opt/data/reports/$PROJECT"
+  skill="/opt/skills/claude-code-ads-analyst/SKILL.md"
+  vault="/work/vault"; reports="/work/reports"
   ls "$reports"/*.md >/dev/null 2>&1 || { echo "no reports for $PROJECT" >&2; exit 1; }
-  mkdir -p "/opt/data/audits/$PROJECT"
-  out="/opt/data/audits/$PROJECT/$TS-audit.md"
+  out="/work/out/$TS-audit.md"
   timeout -k 30 1150 claude -p "Read and follow $skill EXACTLY, INCLUDING its Trend mode. Produce the Google Ads audit DRAFT for project $PROJECT. Fresh scrubbed reports: $reports/. THIS client'\''s prior history (read for trend deltas): $vault/metrics/, $vault/audits/, $vault/timeline.md (may be empty on the first run = establish baseline). SOP/benchmark docs: /projects/$PROJECT/. Read ONLY within $vault, $reports, and /projects/$PROJECT. Do NOT attempt ExitPlanMode and do NOT narrate your tools or environment; BEGIN your response with the DRAFT banner and output ONLY the deliverable markdown." \
     --allowedTools "Read,Grep,Glob" --permission-mode plan --model claude-opus-4-8 > "$out"
   echo "$out"
@@ -62,8 +69,10 @@ def step_name(argv):
         return "collect:" + os.path.basename(argv[-1])[:-3]
     if "ads-reader" in argv:
         return "read:" + argv[argv.index("--report") + 1]
-    if "exec" in argv:
+    if "ads-drafter" in argv:
         return "draft"
+    if "egress-proxy" in argv and "up" in argv:
+        return "proxy"
     return "snapshot" if any(a.endswith("ads-metrics-snapshot.py") for a in argv) else "vault-write"
     # (snapshot and vault-write argvs may start with RUN_AS_DATA_UID; neither test looks at argv[0])
 
@@ -74,63 +83,11 @@ def open_log(path):
     return os.fdopen(fd, "w")
 
 
-# Everything below data/ is the gateway's (uid 10000): any component can be a planted symlink.
-# Root reaches it only through L.open_dir_below from the trusted checkout, then acts on names
-# relative to that fd (F1). data/ itself cannot be swapped: its parent is the root-owned checkout.
-def _data_dir(root, *parts):
-    return L.open_dir_below(root + AGENT_DIR, ("data",) + parts)
-
-
-REPORTS_FIX = ("sudo chown 10000:hermes /opt/hermes-agent/data/reports"
-               " && sudo chmod 700 /opt/hermes-agent/data/reports")
-
-
-def ensure_reports_dir(root):
-    """data/reports is bind-mounted into ads-reader (uid 10000). A missing source is created by
-    docker as root:root 0755 and the reader then gets EACCES (2026-09-30), so make it ours first.
-    Reached through the symlink-refusing walk; an existing dir owned by anyone else fails closed."""
-    data_fd = _data_dir(root)
-    if data_fd is None:      # docker would create it root-owned: the same bug one level up
-        raise ValueError(f"data/ is missing under the agent dir {AGENT_DIR}; create it 10000:hermes 0700")
-    try:
-        try:
-            os.mkdir("reports", 0o700, dir_fd=data_fd)
-            created = True
-        except FileExistsError:
-            created = False
-        fd = os.open("reports", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=data_fd)
-    except OSError as e:
-        if e.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
-            raise L.UnsafePathError("data/reports is a symlink or not a directory")
-        raise
-    finally:
-        os.close(data_fd)
-    try:
-        if DATA_UID is None:
-            return
-        if not created and os.fstat(fd).st_uid != DATA_UID:
-            raise ValueError(f"data/reports is not owned by the container uid {DATA_UID}; fix: {REPORTS_FIX}")
-        os.fchown(fd, DATA_UID, DATA_GID)         # owner proven (or ours just now): fix group and mode
-        os.fchmod(fd, 0o700)
-    finally:
-        os.close(fd)
-
-
-def clear_reports(root):
-    """Remove last run's *.md from data/reports/<project>. unlink never follows the final name."""
-    fd = _data_dir(root, "reports", PROJECT)
-    if fd is None:
-        return
-    try:
-        for f in os.listdir(fd):
-            if f.endswith(".md"):
-                os.unlink(f, dir_fd=fd)
-    finally:
-        os.close(fd)
-
-
-def read_transient(root, ts):
-    fd = _data_dir(root, "audits", PROJECT)
+# draft-out/<slug> and vaults/<slug> are uid 10000's (the drafter and vault-write write them), so
+# any name below the root-owned 0711 parent can be a planted symlink: reach them only through
+# L.open_dir_below and act relative to that fd (F1).
+def read_transient(root, slug, ts):
+    fd = L.open_dir_below(root + DRAFT_OUT, (slug,))
     if fd is None:
         raise FileNotFoundError("the transient draft is missing")
     try:
@@ -138,13 +95,13 @@ def read_transient(root, ts):
     finally:
         os.close(fd)
     with os.fdopen(ffd, encoding="utf-8", errors="replace") as f:
-        if not stat.S_ISREG(os.fstat(ffd).st_mode):          # a planted FIFO must not hang root
+        if not stat.S_ISREG(os.fstat(ffd).st_mode):
             raise L.UnsafePathError("the transient draft is not a regular file")
         return f.read()
 
 
-def remove_transient(root, ts):
-    fd = _data_dir(root, "audits", PROJECT)
+def remove_transient(root, slug, ts):
+    fd = L.open_dir_below(root + DRAFT_OUT, (slug,))
     if fd is None:
         return
     try:
@@ -156,7 +113,7 @@ def remove_transient(root, ts):
 
 
 def vault_draft_is_file(root, slug, ts):
-    fd = _data_dir(root, "vaults", slug, "audits")
+    fd = L.open_dir_below(root + VAULTS, (slug, "audits"))
     if fd is None:
         return False
     try:
@@ -165,6 +122,11 @@ def vault_draft_is_file(root, slug, ts):
         return False
     finally:
         os.close(fd)
+
+
+def stop_proxy(root):
+    """Always called from _run's finally; harmless when the proxy never started."""
+    return _quiet(_compose(root) + ["rm", "-sf", "egress-proxy"])
 
 
 def _quiet(argv):
@@ -213,10 +175,11 @@ def plan(rec, ts, root):
     data = AUDIT_DATA + "/" + slug
     base = {"PATH": os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")}
     cred = {**base, **{k: v for k, v in L.load_cred_env(root + CRED).items() if k in CRED_NAMES},
-            "GOOGLE_ADS_CUSTOMER_ID": cid, "HERMES_AUDIT_DATA_DIR": data}
+            "GOOGLE_ADS_CUSTOMER_ID": cid, "HERMES_AUDIT_DATA_DIR": data,
+            "HERMES_REPORTS_DIR": REPORTS + "/" + slug}
     eflags = [x for n in CRED_NAMES for x in ("-e", n)]
-    run = lambda step: (_compose(root) + ["run", "--rm", "--no-deps", "-T", "--name", f"hermes-audit-{ts}-{step}"]
-                        + eflags)                     # named, so a timeout can remove it (I2)
+    named = lambda step: _compose(root) + ["run", "--rm", "--no-deps", "-T", "--name", f"hermes-audit-{ts}-{step}"]
+    run = lambda step: named(step) + eflags          # Google credential: collector and reader ONLY
     steps = [("collect", run(f"collect-{c}") + ["ads-collector", f"code/{c}.py"], cred) for c in COLLECTORS]
     # The snapshot reads collector-controlled audit-data/<slug>/*.json: never as root (F2). Its
     # stdout is still the root-created, fchown'd snapshot.stdout fd.
@@ -224,15 +187,19 @@ def plan(rec, ts, root):
                                "--audit-data", root + data, "--customer", cid, "--collected-at", collected_at], base))
     steps += [("read", run(f"read-{r}") + ["ads-reader", "--report", r, "--project", PROJECT], cred)
               for r in READERS]
+    steps.append(("proxy", _compose(root) + ["up", "-d", "--no-deps", "egress-proxy"], base))
+    key = L.load_env_value(root + ANTHROPIC_CRED, "ANTHROPIC_API_KEY") or ""
+    draft_env = {**base, "ANTHROPIC_API_KEY": key, "HERMES_VAULT_DIR": VAULTS + "/" + slug,
+                 "HERMES_REPORTS_DIR": REPORTS + "/" + slug, "HERMES_DRAFT_OUT_DIR": DRAFT_OUT + "/" + slug}
     # Non-secret, validated values inline (M9): slug (eligible_client), PROJECT (constant), ts (_iso).
-    steps.append(("draft", _compose(root) + ["exec", "-e", f"PROJECT={PROJECT}", "-e", f"CLIENT={slug}",
-                                             "-e", f"TS={ts}", "-T", "hermes-agent", "sh", "-lc", DRAFT_SCRIPT],
-                  base))
+    steps.append(("draft", named("draft") + ["-e", "ANTHROPIC_API_KEY", "-e", f"PROJECT={PROJECT}",
+                                             "-e", f"CLIENT={slug}", "-e", f"TS={ts}",
+                                             "ads-drafter", DRAFT_SCRIPT], draft_env))
     steps.append(("vault-write", RUN_AS_DATA_UID + ["python3", root + AGENT_DIR + "/bin/vault-write.py", "--client", slug,
-                                  "--audit-file", root + f"{AGENT_DIR}/data/audits/{PROJECT}/{ts}-audit.md",
+                                  "--audit-file", root + f"{DRAFT_OUT}/{slug}/{ts}-audit.md",
                                   "--metrics-file", root + AUDIT_LOGS + "/" + slug + "/snapshot.stdout", "--ts", ts,
                                   "--registry", root + REGISTRY],
-                  {**base, "VAULT_ROOT": root + AGENT_DIR + "/data/vaults", "TS": ts}))
+                  {**base, "VAULT_ROOT": root + VAULTS, "TS": ts}))
     return steps
 
 
@@ -252,8 +219,13 @@ def main(argv=None, runner=None, root="/", now=None):
     say = lambda s: print(red.text(s))
     try:
         L.check_secret_file(root + CRED, uid=OWNER_UID, mode=0o400)
-        if L.anthropic_key_state(root + AGENT_DIR + "/.env") != "real":
-            raise L.PrecheckError("the gateway .env has no real Anthropic key")
+        L.check_secret_file(root + ANTHROPIC_CRED, uid=OWNER_UID, mode=0o400)
+        if L.anthropic_key_state(root + ANTHROPIC_CRED) != "real":
+            raise L.PrecheckError(f"{ANTHROPIC_CRED} holds no real Anthropic key")
+        for parent in HOST_PARENTS:
+            L.check_host_parent(root + parent, uid=OWNER_UID)
+        L.check_client_dir(root + VAULTS + "/" + rec["slug"],
+                           uid=os.geteuid() if DATA_UID is None else DATA_UID)
         pin = PIN_OVERRIDE or C.read_package(root + AGENT_DIR + "/registry/projects.yaml", PROJECT)["sha256"]
         L.package_matches(root + APP_DIR, pin)
         steps = plan(rec, ts, root)          # re-reads the credential file: same refusal path
@@ -280,6 +252,8 @@ def _run(steps, rec, ts, root, runner, say):
     kw = ({"uid": os.geteuid(), "gid": os.getegid()} if DATA_UID is None
           else {"uid": DATA_UID, "gid": DATA_GID})
     L.reset_dir(data, **kw)
+    for parent in (REPORTS, DRAFT_OUT):               # last run's reports/draft never leak into this one
+        L.reset_dir(root + parent + "/" + slug, **kw)
     logs = root + AUDIT_LOGS + "/" + slug              # root-created, so rmtree is safe; 0711 so
     L.reset_dir(logs, uid=os.geteuid(), gid=os.getegid(), mode=0o711)   # 10000 reaches snapshot.stdout
     results = []
@@ -292,11 +266,8 @@ def _run(steps, rec, ts, root, runner, say):
                     say(f"run-client-audit: collector errors, no draft: {bad}"); return _summary(results, 1, say)
                 if L.json_count(data) == 0:
                     say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
-            if key == "read" and name.endswith(READERS[0]):          # before the first reader
-                ensure_reports_dir(root)  # owned by the container uid, or rc 1 before any reader
-                clear_reports(root)       # a symlinked reports dir raises UnsafePathError: rc 1
             if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
-                named = L.others_named(read_transient(root, ts), slug, list(L.V.load_registry(root + REGISTRY)))
+                named = L.others_named(read_transient(root, slug, ts), slug, list(L.V.load_registry(root + REGISTRY)))
                 if named:
                     say(f"run-client-audit: ASSERTION FAIL — the draft names other clients: {named}; not written to the vault")
                     return _summary(results, 1, say)
@@ -310,14 +281,17 @@ def _run(steps, rec, ts, root, runner, say):
             if rc != 0:
                 say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
                 return _summary(results, 1, say)
-        vault_draft = f"{AGENT_DIR}/data/vaults/{slug}/audits/{ts}-audit.md"
-        if not vault_draft_is_file(root, slug, ts):   # the gateway can write the vault tree
+        vault_draft = f"{VAULTS}/{slug}/audits/{ts}-audit.md"
+        if not vault_draft_is_file(root, slug, ts):   # uid 10000 can write the vault tree
             say("run-client-audit: vault-write reported success but the vault draft is missing")
             return _summary(results, 1, say)
         say(f"run-client-audit: draft -> {vault_draft}  (data collected {ts} UTC)")
         return _summary(results, 0, say)
-    finally:                        # the transient draft never outlives the run (I3)
-        remove_transient(root, ts)
+    finally:                        # the transient draft never outlives the run (I3); the proxy stops
+        try:
+            remove_transient(root, slug, ts)
+        finally:                    # even if the removal raises, the proxy must not outlive the run
+            stop_proxy(root)
 
 
 def _summary(results, rc, say):
