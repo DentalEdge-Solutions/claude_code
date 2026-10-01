@@ -162,3 +162,56 @@ class AuditLock:
     def __exit__(self, *exc):
         fcntl.flock(self.fd, fcntl.LOCK_UN)
         os.close(self.fd)
+
+
+TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}$")
+_AUDIT_NAME_RE = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})-audit\.md$")
+
+
+def load_env_value(path, name):
+    """One NAME=value from an env file, parsed as DATA with load_cred_env's rules."""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            if line.startswith(name + "="):
+                v = line.split("=", 1)[1]
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]
+                return v
+    return None
+
+
+def check_host_parent(path, uid=0, mode=0o711):
+    """A host parent like /var/lib/hermes/vaults: a real directory, owned by root, exactly
+    0711 — traversable by uid 10000, listable and renamable by root only."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise PrecheckError(f"{path} is missing; create it root:root {oct(mode)}")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise PrecheckError(f"{path} is a symlink or not a directory")
+    if st.st_uid != uid or stat.S_IMODE(st.st_mode) != mode:
+        raise PrecheckError(f"{path} must be owner uid {uid}, mode {oct(mode)}; "
+                            f"is uid {st.st_uid}, mode {oct(stat.S_IMODE(st.st_mode))}")
+
+
+def check_client_dir(path, uid):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise PrecheckError(f"{path} is missing; register the client's vault first")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise PrecheckError(f"{path} is a symlink or not a directory")
+    if st.st_uid != uid:
+        raise PrecheckError(f"{path} must be owned by uid {uid}; is uid {st.st_uid}")
+
+
+def list_audit_ts(dir_fd):
+    out = []
+    for name in os.listdir(dir_fd):
+        m = _AUDIT_NAME_RE.match(name)
+        if m and stat.S_ISREG(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+            out.append(m.group(1))
+    return sorted(out)

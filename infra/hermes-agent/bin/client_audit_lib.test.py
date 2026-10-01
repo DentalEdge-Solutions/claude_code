@@ -199,5 +199,48 @@ class TestLock(Base):
             pass
 
 
+class TestOptionBHelpers(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def test_load_env_value_parses_as_data(self):
+        p = os.path.join(self.d, "e")
+        open(p, "w").write('export ANTHROPIC_API_KEY="sk-ant-x"\r\nOTHER=1\n')
+        self.assertEqual(L.load_env_value(p, "ANTHROPIC_API_KEY"), "sk-ant-x")
+        self.assertIsNone(L.load_env_value(p, "MISSING"))
+
+    def test_check_host_parent(self):
+        p = os.path.join(self.d, "vaults"); os.mkdir(p); os.chmod(p, 0o711)
+        L.check_host_parent(p, uid=os.geteuid())                       # ok
+        os.chmod(p, 0o755)
+        with self.assertRaises(L.PrecheckError):
+            L.check_host_parent(p, uid=os.geteuid())
+        link = os.path.join(self.d, "link"); os.symlink(p, link)
+        with self.assertRaises(L.PrecheckError):
+            L.check_host_parent(link, uid=os.geteuid())
+        with self.assertRaises(L.PrecheckError):
+            L.check_host_parent(os.path.join(self.d, "absent"), uid=os.geteuid())
+
+    def test_check_client_dir(self):
+        p = os.path.join(self.d, "acme"); os.mkdir(p)
+        L.check_client_dir(p, uid=os.geteuid())
+        with self.assertRaises(L.PrecheckError):
+            L.check_client_dir(p, uid=os.geteuid() + 1)
+        link = os.path.join(self.d, "l"); os.symlink(p, link)
+        with self.assertRaises(L.PrecheckError):
+            L.check_client_dir(link, uid=os.geteuid())
+
+    def test_list_audit_ts_regular_files_only(self):
+        a = os.path.join(self.d, "audits"); os.mkdir(a)
+        for n in ("2026-09-30_10-00-00-audit.md", "2026-10-01_09-00-00-audit.md", "notes.md"):
+            open(os.path.join(a, n), "w").close()
+        os.symlink("/etc/passwd", os.path.join(a, "2026-10-02_00-00-00-audit.md"))
+        fd = os.open(a, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            self.assertEqual(L.list_audit_ts(fd), ["2026-09-30_10-00-00", "2026-10-01_09-00-00"])
+        finally:
+            os.close(fd)
+
+
 if __name__ == "__main__":
     unittest.main()
