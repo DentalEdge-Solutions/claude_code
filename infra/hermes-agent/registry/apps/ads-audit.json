@@ -1,0 +1,11 @@
+{
+  "app": "ads-audit",
+  "user": "hermes-app-ads-audit",
+  "command": "/usr/local/sbin/run-client-audit",
+  "ops": {
+    "run": {"args": ["--json"], "timeout": 7200, "quota": {"per_client_day": 1, "per_box_day": 5}},
+    "list": {"args": ["--list", "--json"], "timeout": 60, "quota": {"per_box_day": 60}}
+  },
+  "tools": {"run": "ads_audit_run", "status": "ads_audit_status", "list": "ads_audit_list"},
+  "wait_seconds": {"run": 300, "list": 60}
+}
