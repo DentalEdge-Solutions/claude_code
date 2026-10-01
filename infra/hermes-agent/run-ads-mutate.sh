@@ -103,7 +103,7 @@ trap 'rm -f "$tmp_out"' EXIT INT TERM
 # before rc is captured.
 rc=0
 # F9: --env-file /dev/null — Compose must never open .env here. On the VPS this runs as
-# hermes-broker and .env is 600 root:root (it holds ANTHROPIC_API_KEY); Compose aborts on an
+# hermes-broker and .env is 600 root:root (it holds the OpenRouter key); Compose aborts on an
 # unreadable .env even when every variable is exported (spec 2026-09-22 §2, M4). The
 # interpolation inputs come from the environment instead: the broker unit on the VPS,
 # hostenv.sh (parsing .env as data) locally.

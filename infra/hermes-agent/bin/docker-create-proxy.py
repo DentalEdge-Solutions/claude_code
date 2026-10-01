@@ -517,7 +517,7 @@ def container_target(path):
 def is_mutator_shaped(doc, cid):
     """Pure. (True, reason) only when the proxy is configured AND dockerd's inspect of `cid`
     shows the pinned image AND the pinned entrypoint — the two values create already enforces.
-    The image alone is not enough: claude-auth-init, the gateway and ads-mutator all run
+    The image alone is not enough: the gateway and ads-mutator (and, before Option B part 2, claude-auth-init) all run
     `hermes-agent-claude`. Reasons are fixed strings; nothing from `doc` is ever quoted, because
     the gateway's inspect carries its API keys.
 

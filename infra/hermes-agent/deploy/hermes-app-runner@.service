@@ -1,0 +1,19 @@
+[Unit]
+Description=Hermes app runner for %i (root; runs the manifest's one fixed command)
+# The .path unit re-starts this unit while jobs/ is non-empty. A start limit would fail the
+# path unit after a few quick empty starts and stall every later job silently: no limit.
+StartLimitIntervalSec=0
+
+[Service]
+# Option B spec 2026-09-30 §3.4. Root because the command it runs (run-client-audit) needs root.
+# It reads only job files written by hermes-app-%i, never the spool; per-job timeouts come from
+# the manifest, so this unit's own limit only bounds a pathological queue: one start drains the
+# whole queue, and the worst legitimate ads-audit queue is 5 runs x 7200 s + 60 lists x 60 s
+# = 11 h, so the limit is 12 h.
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/hermes-app-runner.py --app %i
+# systemd's default, stated because the runner relies on it to reap process-group survivors after a timeout TERM.
+KillMode=control-group
+TimeoutStartSec=12h

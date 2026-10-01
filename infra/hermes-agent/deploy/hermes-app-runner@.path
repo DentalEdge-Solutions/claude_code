@@ -1,0 +1,9 @@
+[Unit]
+Description=Start the Hermes app runner for %i when the broker queues a job
+
+[Path]
+DirectoryNotEmpty=/var/lib/hermes/app-state/%i/jobs
+Unit=hermes-app-runner@%i.service
+
+[Install]
+WantedBy=paths.target

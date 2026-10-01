@@ -274,10 +274,8 @@ The same proxy pattern for the collector and reader, with a Google-APIs allow-li
 - **OpenRouter key:**
   - a per-key credit limit of **$10, monthly reset**;
   - the account is set to deny providers that collect data, with Zero Data Retention (ZDR) where available.
-    OpenRouter supports `provider.data_collection: "deny"` and `provider.zdr: true`.
-  - **Unverified:** Hermes's docs show no config key for OpenRouter provider preferences. Plan step 1 checks
-    the pinned image. If none exists, the account-level setting is what's in force, and the review records
-    which one is.
+    Hermes sends `provider_routing.data_collection` to OpenRouter as `provider.data_collection` (§13), so
+    `config.yaml` sets `deny`. Hermes has no `zdr` key: ZDR is enforced only by the account privacy setting.
   - If ZDR routing leaves no DeepSeek V3.2 endpoint, pick from the existing alternatives
     (`config.yaml.example`).
 - **No sudo.** The broker user has no sudoers entry and isn't in the docker group. Its only root path is the
@@ -441,8 +439,9 @@ governed files are replaced only by validating scripts):
   declared `env`.
 - Hermes self-evolution runs offline and proposes skill changes as PRs for human review. That's compatible
   with the read-only skill mount and the skill-eval pipeline.
-- OpenRouter: per-key `limit` with `limit_reset: monthly`; provider routing `data_collection: "deny"` and
-  `zdr: true`. The Hermes configuration docs show no OpenRouter provider-preference key.
+- OpenRouter: per-key `limit` with `limit_reset: monthly`; provider routing `data_collection: "deny"`. Hermes
+  reads that from `provider_routing.data_collection` in `config.yaml` (§13) and has no `zdr` key, so ZDR is
+  the account-level setting only.
 
 **Sources:**
 - Hermes docs: user-guide/features/tools, features/mcp, user-guide/security, reference/cli-commands,
@@ -450,3 +449,13 @@ governed files are replaced only by validating scripts):
 - NousResearch/hermes-agent issues #97111, #88857, #91415
 - NousResearch/hermes-agent-self-evolution README
 - OpenRouter docs: provider selection, provider logging, API key creation
+
+## 13. Measurements (part 2, Task 1 — 2026-10-01)
+
+Measured against the pinned image `nousresearch/hermes-agent@sha256:f7b3…` as built into local `hermes-agent-claude` (Hermes code at `/opt/hermes`).
+
+| Question | Result | Consequence |
+|---|---|---|
+| Hermes provider-routing key | `provider_routing.data_collection` (string, e.g. `deny`) is read from `config.yaml` (`gateway/run.py:5405-5413` loader; `gateway/run.py:14793` and `:20321` pass `provider_data_collection=pr.get("data_collection")`; `cli.py:4001-4007`) and emitted as `provider.data_collection` in the OpenRouter request (`agent/chat_completion_helpers.py:186-187`, built by `_provider_preferences_for_agent`, injected as `extra_body["provider"]` at `:2050-2054`). Sibling keys read: `only`, `ignore`, `order`, `sort`, `require_parameters`. No `zdr` key exists anywhere in Hermes. Cron path also reads it (`cron/scheduler.py:3146`). | `config.yaml.example` sets `provider_routing.data_collection: deny`. There is no per-request ZDR switch in Hermes, so true zero-data-retention must come from the account-level OpenRouter setting plus (optionally) `provider_routing.only` pinned to ZDR providers; D10.5 records the account setting. |
+| ZDR endpoint for the control-plane model (`deepseek/deepseek-v3.2`) | The per-model `/models/<id>/endpoints` listing has NO retention/ZDR/data-policy field (endpoint keys: context_length, latency_last_30m, max_completion_tokens, max_prompt_tokens, model_id, model_name, name, native_tools, pricing, provider_name, quantization, status, supported_parameters, supports_*, tag, throughput_last_30m, uptime_*). It lists 13 providers: GMICloud, SiliconFlow, DeepInfra, AtlasCloud, Venice, Baidu, DigitalOcean, Alibaba, Friendli, Google, Phala, Mara, SambaNova. The separate public `GET /api/v1/endpoints/zdr` list (923 endpoints) contains deepseek-v3.2 for 8 providers: DeepInfra, DigitalOcean, Google, Mara, Phala, SambaNova, SiliconFlow, Venice. Not ZDR-listed: GMICloud, AtlasCloud, Baidu, Alibaba, Friendli. | Model kept: ZDR-capable endpoints exist. Pin with `provider_routing.only` to a subset of the 8 above if strict ZDR is wanted (the ZDR list is the source; the models listing does not show it). Alternates, by the same list: `qwen/qwen3-235b-a22b-2507` has ZDR endpoints (Nebius, Venice, Google, Novita, DeepInfra, Parasail); `z-ai/glm-4.6` has (Venice, Novita, Z.AI, DeepInfra); `nousresearch/hermes-4-70b` has none (and `/models/.../endpoints` returned no endpoint list for it). |
+| MCP `tools.include` | yes: `/opt/hermes/tools/mcp_tool.py:5045` (`include_set = _normalize_name_filter(tools_filter.get("include"), "mcp_servers.<name>.tools.include")`), enforced by `_should_register` at `:5050-5054` (include is a whitelist, takes precedence over `exclude`; non-listed tools are never registered). Code read only; no behavioural run. | `tools.include` is used in `config.yaml.example` as defence in depth alongside the server exposing only its three tools. |

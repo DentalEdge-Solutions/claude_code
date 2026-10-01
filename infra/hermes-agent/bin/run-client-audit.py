@@ -42,6 +42,7 @@ TS_FMT = "%Y-%m-%d_%H-%M-%S"   # file names; the snapshot gets the same instant 
 COLLECTORS = ("audit_discovery", "negatives_audit", "audit_assets_rsa", "assess_supplemental")
 READERS = ("account_overview", "audit_search_terms", "audit_analyze")
 CLEANUP_TIMEOUT = 20          # each cleanup command (logs capture, rm -sf, rm -f): bounded inside the runner's grace
+BLOCK_TERM_IN_CLEANUP = False   # set by the real entrypoint only: SIGTERM is held while _run's finally cleans up
 TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "proxy": 60, "draft": 1200, "vault-write": 120}
 CRED_NAMES = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
               "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
@@ -163,6 +164,16 @@ def stop_proxy(root, logs, say):
         f = None
         say(f"run-client-audit: WARNING: cannot create {path} ({type(e).__name__}); "
             f"the egress-proxy decision log is not kept")
+    def log(text):                  # a failed log write (disk full) never skips the rm below
+        nonlocal f
+        if f is None:
+            return
+        try:
+            f.write(text); f.flush()
+        except OSError as e:
+            say(f"run-client-audit: WARNING: writing {path} failed ({type(e).__name__}); "
+                f"the egress-proxy decision log may be incomplete")
+            _close(f); f = None
     try:
         if f is not None:
             try:
@@ -170,18 +181,23 @@ def stop_proxy(root, logs, say):
                                          timeout=CLEANUP_TIMEOUT).returncode
             except (subprocess.TimeoutExpired, OSError) as e:
                 logs_rc = type(e).__name__
-            f.write(f"\n[run-client-audit] docker compose logs rc {logs_rc}\n")
-            f.flush()
+            log(f"\n[run-client-audit] docker compose logs rc {logs_rc}\n")
         rm_rc = _quiet(compose + ["rm", "-sf", "egress-proxy"])
-        if f is not None:
-            f.write(f"[run-client-audit] docker compose rm -sf egress-proxy rc {rm_rc}\n")
+        log(f"[run-client-audit] docker compose rm -sf egress-proxy rc {rm_rc}\n")
     finally:
         if f is not None:
-            f.close()
+            _close(f)
     if rm_rc != 0:
         say(f"run-client-audit: WARNING: stopping egress-proxy failed (rc {rm_rc}); see {path} "
             f"and run `docker compose rm -sf egress-proxy`")
     return rm_rc
+
+
+def _close(f):
+    try:
+        f.close()
+    except OSError:
+        pass
 
 
 def _quiet(argv):
@@ -431,10 +447,18 @@ def _run(steps, rec, ts, root, runner, say, state):
         say(f"run-client-audit: draft -> {vault_draft}  (data collected {ts} UTC)")
         return _summary(results, 0, say)
     finally:                        # the transient draft never outlives the run (I3); the proxy stops
+        held = (signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})   # a TERM landing now waits
+                if BLOCK_TERM_IN_CLEANUP else None)                           # until stop_proxy is done
+        # By design the cleanup children (docker logs/rm) inherit this blocked SIGTERM; each is
+        # bounded by CLEANUP_TIMEOUT, so a TERM can delay but never wedge the cleanup.
         try:
-            remove_transient(root, slug, ts)
-        finally:                    # even if the removal raises, the proxy must not outlive the run
-            stop_proxy(root, logs, say)
+            try:
+                remove_transient(root, slug, ts)
+            finally:                # even if the removal raises, the proxy must not outlive the run
+                stop_proxy(root, logs, say)
+        finally:                    # restoring delivers a pending TERM: _on_sigterm -> SystemExit(143)
+            if held is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, held)
 
 
 def _summary(results, rc, say):
@@ -445,4 +469,5 @@ def _summary(results, rc, say):
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _on_sigterm)      # the real entrypoint only; tests call main()
+    BLOCK_TERM_IN_CLEANUP = True
     sys.exit(main())

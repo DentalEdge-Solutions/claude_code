@@ -3,26 +3,11 @@
 # on loopback only, secrets in the gitignored .env. Write access + more surface
 # are added later, gated (see plan P5).
 services:
-  # Init sidecar: projects the executor's Anthropic key from .env into claude's
-  # own config (settings.json at HOME=/opt/data/home) BEFORE the gateway starts.
-  # Needed because Hermes scrubs secrets from terminal-subprocess env, so a
-  # Hermes-launched `claude -p` can only read its key from that file. Runs to
-  # completion and exits; overrides the base /init entrypoint (it must NOT boot
-  # s6/hermes — it only writes one file to the shared data volume).
-  claude-auth-init:
-    build: .
-    image: hermes-agent-claude
-    entrypoint: ["/usr/local/bin/bootstrap-claude-auth.sh"]
-    env_file: .env                      # provides ANTHROPIC_API_KEY (gitignored)
-    volumes:
-      - ./data:/opt/data                # same state volume the gateway uses
-    restart: "no"
-
   hermes-agent:
     build: .
     image: hermes-agent-claude          # derived: official base + claude CLI
     command: ["gateway", "run"]         # persistent backend (there is no `hermes serve`)
-    env_file: .env                      # ANTHROPIC_API_KEY + Hermes provider key (gitignored)
+    env_file: .env                      # OPENROUTER_API_KEY (Hermes's own reasoning); no Anthropic key — drafts run in ads-drafter
     environment:
       # S6/R21. `.env` is BOTH this service's env_file AND Compose's interpolation
       # source for ${HERMES_GOVERNANCE_DIR} in ads-mutator's volumes below (and
@@ -43,9 +28,6 @@ services:
       # the 2026-08-19 symlink finding. Nothing inside this container reads the variable
       # (measured: every reader is a host-side shell — run-ads-mutate.sh, hostenv.sh).
       HERMES_GOVERNANCE_DIR: ""
-    depends_on:
-      claude-auth-init:
-        condition: service_completed_successfully   # auth file exists before gateway boots
     volumes:
       - ./data:/opt/data                # Hermes state (gitignored)
       # The request spool (F10b). Its own bind, OUTSIDE ./data: data/ is owned by the
@@ -62,6 +44,7 @@ services:
       - ./skills/claude-code-proposer:/opt/data/skills/claude-code-proposer:ro  # proposer skill (read-only)
       - ./skills/claude-code-reviewer:/opt/data/skills/claude-code-reviewer:ro  # kanban review worker skill (read-only)
       - ./skills/claude-code-ads-analyst:/opt/data/skills/claude-code-ads-analyst:ro  # ads-analyst skill (read-only)
+      - ./skills/ads-audits:/opt/data/skills/ads-audits:ro  # Option B: how Hermes calls the audit tools
       - ./bin:/opt/cc-bin:ro            # operational helpers (run monitor, read-only)
       # --- credential masks (registry: mask_paths) ---
       # The repo mount exposes every .env.* under infra/hermes-agent/, including the
@@ -86,7 +69,7 @@ services:
   # keeps `docker compose up` from ever starting it.
   #
   # NOTE the absence of `env_file: .env`. That is load-bearing: it would put
-  # ANTHROPIC_API_KEY and the provider key into this container's environment.
+  # the OpenRouter key and the provider key into this container's environment.
   ads-mutator:
     build: .
     image: hermes-agent-claude
@@ -133,7 +116,7 @@ services:
   # WRITE credential, and must not do so into the container Hermes has a shell in.
   #
   # NOTE the absence of `env_file: .env`, exactly as on ads-mutator above. That is
-  # load-bearing for the same reason: it would put ANTHROPIC_API_KEY and the provider
+  # load-bearing for the same reason: it would put the OpenRouter key and the provider
   # key into this container's environment.
   ads-credential-audit:
     build: .
@@ -147,7 +130,7 @@ services:
   # ---- One-shot audit containers (spec 2026-09-29 ads-audits-on-the-box §2). Driven ONLY by
   # bin/run-client-audit.py, which sets HERMES_AUDIT_DATA_DIR per client and passes the READ
   # credential as `-e NAME` (value from its env, never argv, never a mounted file). No env_file:
-  # these containers never see the gateway .env (it holds ANTHROPIC_API_KEY).
+  # these containers never see the gateway .env (it holds the OpenRouter key).
   # HERMES_AUDIT_DATA_DIR defaults to /dev/null, so a run without it fails closed (a char device
   # cannot be bind-mounted onto a directory) and the gateway's `up` never needs it set.
   ads-collector:

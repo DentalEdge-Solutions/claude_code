@@ -1,0 +1,31 @@
+[Unit]
+Description=Hermes chat-trigger broker for %i (validates requests; never executes anything)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Option B spec 2026-09-30 §3.3, §6. Its own user, never root, never docker, no sudo entry: its only
+# path to root is the job file the root runner reads (hermes-app-runner@%i). Group hermes (gid
+# 10000): read the governance registry and the gateway's 0640 request files; write 0640 results.
+User=hermes-app-%i
+Group=hermes-app-%i
+SupplementaryGroups=hermes
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/hermes-app-broker.py --app %i --watch --interval 2
+Restart=on-failure
+RestartSec=5
+# Full sandbox — possible only because this unit never needs sudo (the reason the hand-off tray exists).
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateNetwork=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hermes/spool/apps/%i /var/lib/hermes/app-state/%i
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

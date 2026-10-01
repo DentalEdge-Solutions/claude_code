@@ -11,7 +11,7 @@
 #
 # NO SECRETS HERE. API keys live ONLY in .env:
 #   OPENROUTER_API_KEY  -> Hermes's own control-plane model (OpenRouter credits)
-#   ANTHROPIC_API_KEY   -> `claude -p`, the executor (billed direct to Anthropic)
+#   (no Anthropic key on the gateway: drafts run in ads-drafter with /etc/hermes/.env.anthropic)
 
 model:
   # Control-plane reasoning runs on a cheap OSS model via OpenRouter (D14/D15 economy).
@@ -27,3 +27,22 @@ terminal:
   backend: "local"
   cwd: "."
   timeout: 300
+
+# OpenRouter privacy. Hermes sends provider_routing.data_collection as provider.data_collection
+# (spec §13). Zero Data Retention is enforced by the OpenRouter ACCOUNT privacy setting (Hermes has
+# no zdr key; spec §13).
+provider_routing:
+  data_collection: "deny"
+
+# Option B (spec 2026-09-30 §3.1): the ONE app Hermes may trigger, as three MCP tools. The broker
+# on the host is the boundary; this block only gives the model typed tools instead of a shell.
+mcp_servers:
+  ads_audit:
+    command: "python3"
+    args: ["/opt/cc-bin/hermes-app-mcp.py", "--app", "ads-audit"]
+    env: {}
+    timeout: 360
+    tools:
+      include: [ads_audit_run, ads_audit_status, ads_audit_list]
+      resources: false
+      prompts: false
