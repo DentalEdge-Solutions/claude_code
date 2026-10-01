@@ -100,6 +100,18 @@ def _pump(a, b, first=b""):
         return up, down
 
 
+def _establish(client, upstream, target, log_fn):
+    """Send 200 to the client; if the client is already gone, log deny/client-gone,
+    close upstream and return False."""
+    try:
+        client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+    except OSError:
+        log_fn("deny", target, "client-gone")
+        upstream.close()
+        return False
+    return True
+
+
 class _Handler(socketserver.BaseRequestHandler):
     def handle(self):
         c, log = self.request, self.server.log
@@ -135,11 +147,7 @@ class _Handler(socketserver.BaseRequestHandler):
             except OSError:
                 pass
             return
-        try:
-            c.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        except OSError:
-            self._log("deny", f"{host}:{port}", "client-gone")
-            up.close()
+        if not _establish(c, up, f"{host}:{port}", self._log):
             return
         c.settimeout(None); up.settimeout(None)
         n_up, n_down = 0, 0

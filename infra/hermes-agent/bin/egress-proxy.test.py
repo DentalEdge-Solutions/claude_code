@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, io, os, socket, socketserver, struct, sys, threading, time, unittest
+import importlib.util, io, os, re, socket, socketserver, struct, sys, threading, time, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("egp", os.path.join(HERE, "egress-proxy.py"))
 P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P)
@@ -76,6 +76,69 @@ class AbruptClose(socketserver.BaseRequestHandler):
         except OSError:
             pass
         self.request.close()
+
+
+class FakeUpstream:
+    """Upstream whose recv yields b"hello" once, then raises ConnectionResetError."""
+    def __init__(self):
+        self._sel, self._peer = socket.socketpair()
+        self._peer.sendall(b"x")  # keep fileno() readable for select
+        self.calls = 0
+        self.sent = b""
+    def fileno(self):
+        return self._sel.fileno()
+    def recv(self, n):
+        self.calls += 1
+        if self.calls == 1:
+            return b"hello"
+        raise ConnectionResetError("reset")
+    def sendall(self, data):
+        self.sent += data
+    def close(self):
+        self._sel.close(); self._peer.close()
+
+
+class TestPump(unittest.TestCase):
+    def test_pump_returns_counts_when_upstream_resets_mid_stream(self):
+        client, far = socket.socketpair()
+        up = FakeUpstream()
+        try:
+            result = P._pump(client, up)  # must return, not raise
+            self.assertEqual(result, (0, 5))  # (up, down)
+            far.settimeout(2)
+            self.assertEqual(far.recv(16), b"hello")
+        finally:
+            client.close(); far.close(); up.close()
+
+
+class _Recorder:
+    def __init__(self, exc=None):
+        self.exc, self.sent, self.closed = exc, [], False
+    def sendall(self, data):
+        if self.exc:
+            raise self.exc
+        self.sent.append(data)
+    def close(self):
+        self.closed = True
+
+
+class TestEstablish(unittest.TestCase):
+    def test_client_gone_on_200_sendall_error(self):
+        lines = []
+        client, upstream = _Recorder(BrokenPipeError()), _Recorder()
+        ok = P._establish(client, upstream, "h:443", lambda *a: lines.append(a))
+        self.assertIs(ok, False)
+        self.assertTrue(upstream.closed)
+        self.assertEqual(lines, [("deny", "h:443", "client-gone")])
+
+    def test_established_sends_200_and_keeps_upstream_open(self):
+        lines = []
+        client, upstream = _Recorder(), _Recorder()
+        ok = P._establish(client, upstream, "h:443", lambda *a: lines.append(a))
+        self.assertIs(ok, True)
+        self.assertFalse(upstream.closed)
+        self.assertEqual(lines, [])
+        self.assertTrue(client.sent[0].startswith(b"HTTP/1.1 200"))
 
 
 class TestLoopback(unittest.TestCase):
@@ -217,7 +280,7 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
         allow_count = log.count("decision=allow")
         self.assertEqual(allow_count, 1, f"Expected 1 allow line, got {allow_count}:\n{log}")
         # Byte counts should be captured even though connection was reset
-        self.assertRegex(log, r"down=\d+", "Expected byte counts in allow line")
+        # Byte-count preservation is asserted by TestPump (RST vs. read is racy end to end).
 
     def test_log_injection_with_trailing_newline_in_target(self):
         """Finding 3: hostile target with trailing newline should not match old regex"""
@@ -229,11 +292,6 @@ name, so the ip-literal rule is exercised on the refused path and not on the all
         # Count decision lines - should be exactly 1
         lines = [l for l in log.split('\n') if 'decision=' in l]
         self.assertEqual(len(lines), 1, f"Expected 1 decision line, got {len(lines)}:\n{log}")
-
-    def test_client_gone_on_200_sendall_error(self):
-        """Finding 4: client-gone error path verified in code"""
-        pass
-
 
 if __name__ == "__main__":
     unittest.main()
