@@ -35,7 +35,7 @@
   - from the broker: `bad_request`, `duplicate`, `inactive_client`, `quota`, `disabled`, `timeout`, `interrupted`, `internal`;
   - from `run-client-audit`: `precheck`, `busy`, or a step class (`collect`, `snapshot`, `read`, `proxy`, `draft`, `isolation`, `vault-write`).
 - **Caps:** request files at most 1024 bytes; at most 64 requests per drain pass; requests older than 3600 s deleted unread; job files at most 512 bytes; done `stdout` at most 65536 bytes; results deleted after 7 days.
-- **Timeouts:** the runner uses the manifest (`run` 1800 s, `list` 60 s). The MCP `run` waits 300 s and `list` 60 s. The MCP server `timeout` in the Hermes config is 360.
+- **Timeouts:** the runner uses the manifest (`run` 7200 s — above run-client-audit's own worst case (the sum of its step timeouts, about 6000 s), `list` 60 s). The MCP `run` waits 300 s and `list` 60 s. The MCP server `timeout` in the Hermes config is 360.
 - **No free text from any step reaches Hermes.** Every result field is an enum, a number, a timestamp, a slug or a path matching a fixed regex.
 - **Never print a customer id or credential value.** The journal gets one line per request: `request=<id> op=<op> client=<slug|-> status=<s> reason=<r>`.
 - **Unchanged:** the mutation broker (`hermes-broker.service`), `spool_lib.py`, the mutation spool entries in `host_layout.LAYOUT`, and `CHECKLIST.md` (part 3).
@@ -158,7 +158,7 @@ git commit -m "docs(hermes): Option B §13 measurements — provider routing, ZD
   "user": "hermes-app-ads-audit",
   "command": "/usr/local/sbin/run-client-audit",
   "ops": {
-    "run": {"args": ["--json"], "timeout": 1800, "quota": {"per_client_day": 1, "per_box_day": 5}},
+    "run": {"args": ["--json"], "timeout": 7200, "quota": {"per_client_day": 1, "per_box_day": 5}},
     "list": {"args": ["--list", "--json"], "timeout": 60, "quota": {"per_box_day": 60}}
   },
   "tools": {"run": "ads_audit_run", "status": "ads_audit_status", "list": "ads_audit_list"},
@@ -1534,7 +1534,7 @@ class T(unittest.TestCase):
     def test_fixed_argv_per_op_and_done_written(self):
         self.job()
         R.run_all(MAN, self.state, execute=self.execute, owner=None)
-        self.assertEqual(self.calls, [(["/usr/local/sbin/run-client-audit", "acme-dental", "--json"], 1800)])
+        self.assertEqual(self.calls, [(["/usr/local/sbin/run-client-audit", "acme-dental", "--json"], 7200)])
         d = self.done()
         self.assertEqual((d["rc"], d["timed_out"], d["interrupted"]), (0, False, False))
         self.assertEqual(os.listdir(os.path.join(self.state, "jobs")), [])
@@ -1606,7 +1606,7 @@ import argparse, os, pwd, signal, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 
-KILL_GRACE = 30
+KILL_GRACE = 90   # run-client-audit needs time after SIGTERM to stop the proxy and remove containers (part 1 final fix, cleanup bounded at 20 s per call)
 SAFE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
 
 
