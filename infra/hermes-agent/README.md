@@ -33,7 +33,7 @@ execution. See the project plan for the full rationale.
 ## First run
 
 ```bash
-cp .env.example .env          # then edit: set OPENROUTER_API_KEY + ANTHROPIC_API_KEY
+cp .env.example .env          # local dev / before Option B: set OPENROUTER_API_KEY + ANTHROPIC_API_KEY (on the box the gateway .env holds OPENROUTER_API_KEY only)
 cp config.yaml.example data/config.yaml
 docker compose up -d --build
 docker compose exec hermes-agent hermes gateway status   # -> running
@@ -799,7 +799,7 @@ project directory whose spelling depends on how Compose was started, which is ho
 On a VPS the broker runs the executor, and `hermes-broker.service` sets the values. They
 equal the proxy's pins, and `proxy-policy-sync.test.py` fails if they drift.
 `run-ads-mutate.sh` passes `--env-file /dev/null`, because `hermes-broker` cannot read `.env`
-and must not (it holds `ANTHROPIC_API_KEY`). `.env` still needs the same keys for the
+and must not (on the box it holds the OpenRouter key; before Option B part 2 it also held `ANTHROPIC_API_KEY`). `.env` still needs the same keys for the
 operator's own `docker compose` commands (step 2). On a laptop, `.env` supplies them and
 `hostenv.sh` passes them on. Any paths that point at this directory and at the ads repo
 checkout work.
@@ -1444,7 +1444,7 @@ not stop collateral within an account.
 
 **The box's one non-Google secret file.** The gateway `.env`
 (`/opt/projects/claude_code/infra/hermes-agent/.env`, `root:root 0600`) holds the dashboard
-basic-auth password (real) and a **real** `ANTHROPIC_API_KEY` (workspace `hermes-box`, monthly spend limit; used only by the audit analyst). The review collector reports it as
+basic-auth password (real) and, until Option B part 1 step 5 strips it, a **real** `ANTHROPIC_API_KEY` (workspace `hermes-box`, monthly spend limit; used only by the audit analyst; afterwards the key lives in `/etc/hermes/.env.anthropic`). The review collector reports it as
 `kind: authorised-other`, `label: gateway-env` (`AUTHORISED_OTHER` in
 `bin/collect-review-evidence.py`). Adding another secret file to the box means adding it there and
 here, or the next review sees it as `unlisted`.

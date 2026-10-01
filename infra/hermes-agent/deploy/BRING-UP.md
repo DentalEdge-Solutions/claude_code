@@ -1240,7 +1240,7 @@ gets nothing until all three PRs are merged).**
 Breaks the review-#5 binding; nothing here is live for chat until part 2 and review #6.
 
 1. Record the current commit, then pull (the SHA is what a rollback checks out):
-   `git -C /opt/projects/claude_code log --oneline -1`
+   `sudo git -C /opt/projects/claude_code log --oneline -1`
    `cd /opt/projects/claude_code && sudo git pull --ff-only && sudo git log --oneline -1`
 2. Host parents (root 0711):
    `sudo install -d -o root -g root -m 0711 /var/lib/hermes/vaults /var/lib/hermes/reports /var/lib/hermes/draft-out`
@@ -1279,7 +1279,7 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
    `/var/lib/hermes/{vaults,reports,draft-out}/<client>` as well as `audit-data` and `audit-logs`.
 9. Rollback (only if part 1 must be undone before part 2):
    `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
-   Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>`
+   Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>` (detached HEAD: later pulls fail until you return; once the issue is fixed: `cd /opt/projects/claude_code && sudo git checkout main && sudo git pull --ff-only`)
    `sudo install -d -o 10000 -g 10000 -m 700 /opt/hermes-agent/data/vaults` (the migration removed it)
    For each client: `sudo mv /var/lib/hermes/vaults/<client> /opt/hermes-agent/data/vaults/<client>`
    (`mv` on the same filesystem keeps owners, modes and mtimes; across filesystems use
@@ -1296,8 +1296,8 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
 Requires part 1 on the box. Still not live until review #6.
 
 1. Record the current commit, then pull (the SHA is what a rollback checks out):
-   `git -C /opt/projects/claude_code log --oneline -1`
-   `cd /opt/projects/claude_code && git pull --ff-only`
+   `sudo git -C /opt/projects/claude_code log --oneline -1`
+   `cd /opt/projects/claude_code && sudo git pull --ff-only`
 2. The app user (no login, no home, primary group of its own, member of hermes):
    `sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin hermes-app-ads-audit`
    `sudo usermod -aG hermes hermes-app-ads-audit`
@@ -1313,10 +1313,11 @@ Requires part 1 on the box. Still not live until review #6.
    Zero Data Retention in the OpenRouter ACCOUNT privacy settings (Hermes has no zdr key; the
    config sends `provider_routing.data_collection: "deny"`; spec §13), and deny data-collecting
    providers there too. Back up the gateway env first (the rollback copy):
-   `sudo cp -a /opt/hermes-agent/.env /opt/hermes-agent/.env.pre-optb2`
+   `sudo install -o root -g root -m 0600 /opt/hermes-agent/.env /opt/hermes-agent/.env.pre-optb2`
    Then, ALONE:
    `sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name OPENROUTER_API_KEY --prefix sk-or- --mode 0600`
-6. Gateway config: back up the live file first, `sudo cp -a data/config.yaml data/config.yaml.pre-optb2`
+6. Gateway config: back up the live file first, outside the gateway-writable `data/`:
+   `sudo install -o root -g root -m 0600 data/config.yaml /root/config.yaml.pre-optb2`
    (it is your rollback copy), then `sudo diff data/config.yaml config.yaml.example` (review anything
    Hermes wrote itself), then `sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
 7. Recreate the gateway without the retired sidecar:
@@ -1331,15 +1332,21 @@ Requires part 1 on the box. Still not live until review #6.
 10. First chat audit: `sudo docker compose exec -it hermes-agent hermes chat`, then ask
     "Run the Google Ads audit for <client>." Expect `ok` within ~5 min (or `pending`; ask for its
     status later). Journal: `journalctl -u hermes-app-broker@ads-audit -n 20`.
+    Once it works, delete both rollback backups (they may hold provider keys; they MUST be gone
+    before review #6's evidence collection; keep them until then only if you still need to roll back):
+    `sudo shred -u /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2`
+    `sudo ls /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2` → both `No such file or directory`
 11. Rollback (only if part 2 must be undone):
     `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
     `sudo systemctl disable --now hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path`
+    `sudo systemctl stop hermes-app-runner@ads-audit.service` (stopping the path unit does not stop an in-flight runner)
     `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
-    Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>`
-    Restore the config: `sudo install -o 10000 -g 10000 -m 640 data/config.yaml.pre-optb2 data/config.yaml`
+    Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>` (detached HEAD: later pulls fail until you return; once the issue is fixed: `cd /opt/projects/claude_code && sudo git checkout main && sudo git pull --ff-only`)
+    Restore the config: `sudo install -o 10000 -g 10000 -m 640 /root/config.yaml.pre-optb2 data/config.yaml`
     Restore the gateway env: `sudo install -o root -g root -m 600 /opt/hermes-agent/.env.pre-optb2 /opt/hermes-agent/.env`
     `cd /opt/hermes-agent && sudo docker compose up -d --build --force-recreate hermes-agent`
-    Revoke the OpenRouter key in its console.
+    Revoke the dedicated OpenRouter key created in step 5, in its console. The app user and the
+    layout directories are left in place (harmless). Delete the backups as in step 10.
 
 ---
 
