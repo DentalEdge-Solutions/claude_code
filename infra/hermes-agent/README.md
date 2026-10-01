@@ -818,6 +818,24 @@ operator's own `docker compose` commands (step 2). On a laptop, `.env` supplies 
 `hostenv.sh` passes them on. Any paths that point at this directory and at the ads repo
 checkout work.
 
+### Chat-triggered audits — paths and secrets (Option B part 1)
+
+Client data lives outside the gateway's `data/` and is never mounted into `hermes-agent`.
+
+| Path | Owner:mode | Holds |
+|---|---|---|
+| `/var/lib/hermes/vaults/<client>/` | `10000:10000 0700` (parent `root 0711`) | the client vault; `ads-drafter` mounts one client's, read-only |
+| `/var/lib/hermes/reports/<client>/` | `10000:10000 0700` (parent `root 0711`) | the analyst's per-run reports; read-only to `ads-drafter` |
+| `/var/lib/hermes/draft-out/<client>/` | transient (parent `root 0711`) | the draft, until `vault-write` moves it into the vault |
+
+| Secret | Location | Used by |
+|---|---|---|
+| Anthropic key (`ANTHROPIC_API_KEY`) | `/etc/hermes/.env.anthropic` (`root:root 0400`) | `ads-drafter` only, passed per run as `-e`; reaches Anthropic only via `egress-proxy` (`api.anthropic.com:443`) |
+| Google Ads read credential | `/etc/hermes/.env.ga` (`root:root 0400`) | `ads-collector` and `ads-reader` |
+
+Installed with `bin/install-env-secret.py`; data moved with `bin/migrate-client-data.py`; read back
+with `show-audit`. Runbook: `deploy/BRING-UP.md`, "Chat-triggered audits — part 1".
+
 ### Client — `hermes-syscall`, in-container
 
 Identifier-only. It passes a client slug and a change-set id, never a customer id, never a
