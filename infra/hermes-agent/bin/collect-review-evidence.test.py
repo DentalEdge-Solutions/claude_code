@@ -563,6 +563,35 @@ class TestOptionBLayout(Base):
         _, secrets = CE.collect_with_secrets(self.host(), self.KEY)
         self.assertIn("sk-ant-api03-SECRETVALUE", secrets)
 
+    GATEWAY_ENV = CE.CHECKOUT + "/infra/hermes-agent/.env"
+    OPENROUTER = "sk-or-v1-NOT-A-REAL-KEY-0123456789abcdef"
+
+    def _gateway_env(self, body):
+        self._w(self.GATEWAY_ENV, body)
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n", "")
+
+    def test_d2_1_openrouter_key_value_joins_the_secrets_and_never_the_bundle(self):
+        self._gateway_env(f"HERMES_SPOOL_DIR=/var/lib/hermes/spool\nOPENROUTER_API_KEY={self.OPENROUTER}\n")
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn(self.OPENROUTER, secrets)
+        self.assertNotIn(self.OPENROUTER, json.dumps(bundle))
+        row = bundle["items"]["D2.1"]["data"]["files"][0]
+        self.assertEqual((row["kind"], row["label"]), ("authorised-other", "gateway-env"))
+        self.assertNotIn("anthropic_key_state", row)
+
+    def test_d2_1_gateway_env_without_an_openrouter_key_adds_no_secret(self):
+        for body in ("HERMES_SPOOL_DIR=/var/lib/hermes/spool\n", "OPENROUTER_API_KEY=\nHERMES_SPOOL_DIR=/x\n"):
+            self._gateway_env(body)
+            _, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+            self.assertEqual(secrets, [])
+
+    def test_the_openrouter_key_is_a_known_secret_for_the_journal_counts(self):
+        self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
+        self.outputs[("journalctl", "-o")] = (0, f"debug: Authorization: Bearer {self.OPENROUTER}\n", "")
+        items = CE.collect(self.host(), self.KEY)["items"]
+        self.assertEqual(items["D2.3"]["data"]["journal"], {"pattern_hits": 0, "known_secret_hits": 1})
+        self.assertNotIn(self.OPENROUTER, json.dumps(items))
+
     def test_d4_1_reports_anthropic_and_openrouter_env_names_only(self):
         self.outputs[("docker", "exec")] = (0, "ANTHROPIC_API_KEY=sk-ant-XYZ\nOPENROUTER_API_KEY=or-ABC\nHOME=/x\n", "")
         self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
@@ -591,7 +620,9 @@ class TestKeyedBundle(Base):
     def test_key_never_printed(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32)
+            rc = CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32)
+        self.assertEqual(rc, 0)                                  # a refusal prints nothing: it must not pass this
+        self.assertEqual(json.loads(out.getvalue())["cid_key_id"], R.key_id(self.KEY))
         self.assertNotIn("11" * 32, out.getvalue())
 
 
@@ -672,6 +703,9 @@ class TestD10(Base):
                                 ("run-client-audit", "--probe-egress"): 600})
 
     # ---- D10.3 -------------------------------------------------------------------------
+    INSTANCES = ("hermes-app-broker@ads-audit.service", "hermes-app-runner@ads-audit.service",
+                 "hermes-app-runner@ads-audit.path")
+
     def _units(self):
         for u in CE.APP_UNITS:
             self._w("/etc/systemd/system/" + u, "unit " + u)
@@ -682,6 +716,8 @@ class TestD10(Base):
                "ReadWritePaths=/var/lib/hermes/spool/apps/ads-audit /var/lib/hermes/app-state/ads-audit\n"
                "ActiveState=active\nEnvironment=\n", "")
         self.outputs[("systemctl", "show", "hermes-app-runner@ads-audit")] = (0, "Environment=\n", "")
+        for u in self.INSTANCES:
+            self.outputs[("systemctl", "show", u, "-p", "DropInPaths")] = (0, "DropInPaths=\n", "")
         self.outputs[("id", "-nG")] = (0, "hermes-app-ads-audit hermes\n", "")
         self.outputs[("sudo", "-l", "-U")] = (0, "User hermes-app-ads-audit is not allowed to run sudo on box-7.\n", "")
         self.outputs[("systemctl", "is-active", "hermes-app-runner@ads-audit.path")] = (0, "active\n", "")
@@ -695,6 +731,7 @@ class TestD10(Base):
         self.assertEqual(d["broker_unit"]["EnvironmentFiles"], [])
         self.assertEqual(d["runner_unit"], {"Environment": [], "EnvironmentFiles": []})
         self.assertEqual(d["installed_equal_repo"], {u: True for u in CE.APP_UNITS})
+        self.assertEqual(d["drop_in_paths"], {u: [] for u in self.INSTANCES})
         self.assertEqual(d["broker_user_groups"], ["hermes-app-ads-audit", "hermes"])
         self.assertEqual(d["sudo_rules"], {"rc": 0, "not_allowed": True, "command_lines": 0})
         self.assertEqual(d["runner_path_active"], "active")
@@ -723,6 +760,40 @@ class TestD10(Base):
                           "EnvironmentFiles": ["/etc/hermes/.env.anthropic (ignore_errors=no)",
                                                "/etc/extra (ignore_errors=yes)"]})
         self.assertNotIn(secret, json.dumps(it))
+
+    def test_d10_3_lists_each_units_drop_ins_with_the_unit_files_still_equal(self):
+        # A drop-in changes what a unit runs (ExecStart, User, Environment) with the unit file
+        # byte-identical: installed_equal_repo alone cannot see it.
+        self._units()
+        d1 = "/etc/systemd/system/hermes-app-runner@.service.d/override.conf"
+        d2 = "/run/systemd/system/hermes-app-runner@ads-audit.service.d/10-x.conf"
+        self.outputs[("systemctl", "show", self.INSTANCES[1], "-p", "DropInPaths")] = (
+            0, f"DropInPaths={d1} {d2}\n", "")
+        d = self._item("D10.3")["data"]
+        self.assertEqual(d["drop_in_paths"], {self.INSTANCES[0]: [], self.INSTANCES[1]: [d1, d2],
+                                              self.INSTANCES[2]: []})
+        self.assertEqual(d["installed_equal_repo"], {u: True for u in CE.APP_UNITS})    # control
+
+    def test_d10_3_drop_ins_that_cannot_be_read_are_never_an_empty_list(self):
+        self._units()
+        self.outputs[("systemctl", "show", self.INSTANCES[0], "-p", "DropInPaths")] = (0, "\n", "")
+        self.assertEqual(self._item("D10.3")["data"]["drop_in_paths"][self.INSTANCES[0]], R.COULD_NOT_CHECK)
+        self.outputs[("systemctl", "show", self.INSTANCES[2], "-p", "DropInPaths")] = (1, "", "Failed to connect to bus")
+        it = self._item("D10.3")
+        self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+        self.assertIn("systemctl exited 1", it["reason"])
+
+    def test_d10_3_environment_tokens_that_are_not_names_never_reach_the_bundle(self):
+        # A token without `=` (a broken quote, a pasted value) was returned whole.
+        self.assertEqual(CE._env_names('A=1 sk-live-secret-fragment "B=x y"'), ["?", "A", "B"])
+        self.assertEqual(CE._env_names("9BAD=1 =x GOOD_1=2 with-dash=3"), ["?", "GOOD_1"])
+        self.assertEqual(CE._env_names(""), [])
+        self._units()
+        self.outputs[("systemctl", "show", "hermes-app-runner@ads-audit")] = (
+            0, "Environment=OK=1 sk-live-secret-fragment\n", "")
+        it = self._item("D10.3")
+        self.assertEqual(it["data"]["runner_unit"]["Environment"], ["?", "OK"])
+        self.assertNotIn("sk-live-secret-fragment", json.dumps(it))
 
     def test_d10_3_a_property_systemd_did_not_print_is_could_not_check(self):
         self._units()
@@ -798,18 +869,23 @@ class TestD10(Base):
         self.assertIn("gid 5", it["reason"])
 
     # ---- D10.6 -------------------------------------------------------------------------
-    CONFIG = ("model: x\n"
-              "# the one app\n"
-              "mcp_servers:\n"
-              "  ads_audit:\n"
-              "    command: \"python3\"\n"
-              "    env: {}\n"
-              "\n"
-              "    tools:\n"
-              "      include: [ads_audit_run, ads_audit_status, ads_audit_list]\n"
-              "# a comment at column 0 stays in the block\n"
-              "terminal:\n"
-              "  backend: docker\n")
+    BLOCK = ("mcp_servers:\n"
+             "  ads_audit:\n"
+             "    command: \"python3\"\n"
+             "    args: [\"/opt/cc-bin/hermes-app-mcp.py\", \"--app\", \"ads-audit\"]\n"
+             "    env: {}\n"
+             "\n"
+             "    # three tools, nothing else\n"
+             "    tools:\n"
+             "      include: [ads_audit_run, ads_audit_status, ads_audit_list]\n")
+    BOX_CONFIG = CE.AGENT_DIR + "/data/config.yaml"
+
+    def _configs(self, box, repo=None):
+        """The box's live config and the checkout's committed template. Around the block the two
+        differ (the gateway rewrites its own keys); the block is what is compared."""
+        if box is not None:
+            self._w(self.BOX_CONFIG, "model: x\n# the one app\n" + box + "terminal:\n  backend: docker\n")
+        self._w(CE.MCP_REPO_CONFIG, "# template\nmodel:\n  default: y\n\n" + (self.BLOCK if repo is None else repo))
 
     def _gateway(self, listing):
         del self.outputs[("docker", "ps")]
@@ -817,44 +893,125 @@ class TestD10(Base):
         self.outputs[("docker", "ps", "-q", "--no-trunc")] = (0, "", "")
         self.outputs[("docker", "exec", GW_ID, "hermes", "mcp", "list")] = listing
 
-    def test_d10_6_block_and_listing(self):
-        self._w(CE.AGENT_DIR + "/data/config.yaml", self.CONFIG)
+    def test_d10_6_block_equal_to_the_committed_one_and_the_listing(self):
+        self._configs(self.BLOCK)
         self._gateway((0, "ads_audit  3 tools\n", ""))
-        d = self._item("D10.6")["data"]
-        self.assertEqual(d["mcp_block"][0], "mcp_servers:")
-        self.assertIn("      include: [ads_audit_run, ads_audit_status, ads_audit_list]", d["mcp_block"])
-        self.assertFalse(any("terminal" in l or "backend" in l or "model" in l for l in d["mcp_block"]))
+        it = self._item("D10.6")
+        d = it["data"]
+        self.assertEqual(d["mcp_block"], {"equals_repo": True, "lines": 9,
+                                          "sha256": CE.PK.sha256_bytes(self.BLOCK.rstrip("\n").encode())})
         self.assertEqual((d["gateway_mcp_list"], d["gateway_mcp_list_rc"]), (["ads_audit  3 tools"], 0))
+        self.assertEqual(set(d), {"mcp_block", "gateway_mcp_list", "gateway_mcp_list_rc"})
+        for text in ("ads_audit_run", "python3", "hermes-app-mcp"):      # the block's text is never emitted
+            self.assertNotIn(text, json.dumps(it))
 
-    def test_d10_6_failed_or_missing_listing_keeps_the_block(self):
-        self._w(CE.AGENT_DIR + "/data/config.yaml", self.CONFIG)
+    def test_d10_6_equal_means_the_same_lines_whatever_trails_them(self):
+        # Trailing whitespace, CRLF, the blank lines after the block and the comment that heads
+        # the next key are not the block.
+        box = self.BLOCK.replace("    env: {}\n", "    env: {}  \t\r\n") + "\n\n# about the terminal\n"
+        self._configs(box)
+        self.assertEqual(self._item("D10.6")["data"]["mcp_block"]["equals_repo"], True)
+        self._configs(self.BLOCK, repo=self.BLOCK + "\n# trailing note\n")
+        self.assertEqual(self._item("D10.6")["data"]["mcp_block"]["equals_repo"], True)
+
+    def test_d10_6_a_differing_block_is_not_equal_and_none_of_its_text_is_emitted(self):
+        secret = "sk-or-NOT-A-REAL-KEY-0123456789"
+        cases = {"a secret in args": self.BLOCK.replace('"--app", "ads-audit"]', '"--token", "' + secret + '"]'),
+                 "a url with a password": self.BLOCK + "  other:\n    url: https://user:" + secret + "@host.internal/x\n",
+                 "a fourth tool": self.BLOCK.replace("ads_audit_list]", "ads_audit_list, shell]"),
+                 "a non-empty env": self.BLOCK.replace("env: {}", "env: {K: " + secret + "}"),
+                 "a comment changed inside the block": self.BLOCK.replace("# three tools", "# four tools"),
+                 "an indent changed": self.BLOCK.replace("      include:", "    include:"),
+                 "the block declared a second time": self.BLOCK + "terminal:\n  x: 1\nmcp_servers:\n  evil: {command: sh}\n",
+                 "a second declaration with the key quoted": self.BLOCK + "terminal:\n  x: 1\n\"mcp_servers\":\n  evil: {command: sh}\n",
+                 "no block at all": "provider_routing:\n  data_collection: deny\n"}
+        for why, box in cases.items():
+            with self.subTest(why=why):
+                self._configs(box)
+                b = CE.collect(self.host(), self.KEY)
+                d = b["items"]["D10.6"]["data"]["mcp_block"]
+                self.assertIs(d["equals_repo"], False)
+                self.assertEqual(set(d), {"equals_repo", "lines", "sha256"})
+                self.assertRegex(d["sha256"], r"^[0-9a-f]{64}$")
+                out = json.dumps(b)
+                for text in (secret, "host.internal", "evil", "shell]", "four tools"):
+                    self.assertNotIn(text, out)
+        self.assertEqual(d["lines"], 0)                                  # the last case: a missing block
+
+    def _d10_6_could_not_check(self, expect):
+        done = []
+
+        def run():
+            done.append(self._item("D10.6"))
+        import threading
+        t = threading.Thread(target=run, daemon=True)                    # a hang must fail, not stall the suite
+        t.start(); t.join(20)
+        self.assertTrue(done, "D10.6 did not return: the config was opened without O_NONBLOCK")
+        self.assertEqual(done[0]["status"], R.COULD_NOT_CHECK)
+        self.assertIn(expect, done[0]["reason"])
+        return done[0]
+
+    def test_d10_6_missing_config_is_could_not_check(self):
+        self._configs(None)
+        self._d10_6_could_not_check("data/config.yaml: cannot open")
+
+    def test_d10_6_a_fifo_at_the_config_path_is_could_not_check_never_a_hang(self):
+        self._configs(None)
+        os.makedirs(os.path.dirname(os.path.join(self.root, self.BOX_CONFIG.lstrip("/"))))
+        os.mkfifo(os.path.join(self.root, self.BOX_CONFIG.lstrip("/")))
+        self._d10_6_could_not_check("data/config.yaml: not a regular file")
+
+    def test_d10_6_a_symlinked_config_is_could_not_check_and_never_followed(self):
+        self._configs(None)
+        target = self._w("/root/elsewhere.yaml", self.BLOCK.replace("ads_audit:", "stolen_from_the_target:"))
+        link = os.path.join(self.root, self.BOX_CONFIG.lstrip("/"))
+        os.makedirs(os.path.dirname(link))
+        os.symlink(target, link)
+        it = self._d10_6_could_not_check("data/config.yaml: cannot open")
+        self.assertNotIn("stolen_from_the_target", json.dumps(it))
+
+    def test_d10_6_an_over_size_config_is_could_not_check(self):
+        self._configs(self.BLOCK + "# " + "x" * CE.MCP_CONFIG_CAP + "\n")
+        self._d10_6_could_not_check("data/config.yaml: too large")
+
+    def test_d10_6_without_the_committed_block_nothing_can_be_compared(self):
+        self._configs(self.BLOCK, repo="terminal:\n  backend: local\n")
+        self._d10_6_could_not_check("config.yaml.example: no mcp_servers block")
+        os.remove(os.path.join(self.root, CE.MCP_REPO_CONFIG.lstrip("/")))
+        self._d10_6_could_not_check("config.yaml.example: cannot open")
+
+    def test_d10_6_failed_or_missing_listing_keeps_the_comparison(self):
+        self._configs(self.BLOCK)
         it = self._item("D10.6")                                        # no gateway container at all
         self.assertEqual(it["status"], R.OBSERVED)
         self.assertEqual((it["data"]["gateway_mcp_list"], it["data"]["gateway_mcp_list_rc"]), ([], None))
-        self.assertEqual(it["data"]["mcp_block"][0], "mcp_servers:")
+        self.assertIs(it["data"]["mcp_block"]["equals_repo"], True)
         self._gateway((127, "", "hermes: not found"))
         it = self._item("D10.6")
         self.assertEqual(it["status"], R.OBSERVED)
         self.assertEqual((it["data"]["gateway_mcp_list"], it["data"]["gateway_mcp_list_rc"]), ([], 127))
-        self.assertEqual(it["data"]["mcp_block"][0], "mcp_servers:")
+        self.assertIs(it["data"]["mcp_block"]["equals_repo"], True)
 
-    def test_d10_6_env_values_in_the_block_are_withheld(self):
-        secret = "sk-or-NOT-A-REAL-KEY-0123456789"
-        self._w(CE.AGENT_DIR + "/data/config.yaml",
-                "mcp_servers:\n  a:\n    env:\n      OPENROUTER_API_KEY: " + secret + "\n      # " + secret + "\n"
-                "    timeout: 360\n  b:\n    env: {K: " + secret + "}\n  c:\n    env: {}\n    headers:\n"
-                "      Authorization: Bearer " + secret + "\n")
+    def test_d10_6_listing_is_capped_in_lines_and_in_line_length_and_stays_redacted(self):
+        self._configs(self.BLOCK)
+        long = "ads_audit " + "x" * 5000
+        self._gateway((0, long + "\n" + f"oops GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n" + "row\n" * 100, ""))
         it = self._item("D10.6")
-        self.assertNotIn(secret, json.dumps(it))
-        block = it["data"]["mcp_block"]
-        self.assertIn("      OPENROUTER_API_KEY: <withheld>", block)        # the name stays, the value goes
-        self.assertIn("    timeout: 360", block)                             # control: outside env, untouched
-        self.assertIn("    env: <withheld>", block)
-        self.assertIn("    env: {}", block)                                  # control: empty is shown as empty
-        self.assertIn("      Authorization: <withheld>", block)
+        listing = it["data"]["gateway_mcp_list"]
+        self.assertEqual(len(listing), 40)
+        self.assertEqual(listing[0], long[:200])
+        self.assertEqual(listing[1], "<withheld>")
+        self.assertEqual(max(len(l) for l in listing), 200)
+        self.assertNotIn(TOKEN, json.dumps(it))
 
-    def test_d10_6_missing_config_is_could_not_check(self):
-        self.assertEqual(self._item("D10.6")["status"], R.COULD_NOT_CHECK)
+    def test_the_committed_template_has_the_block_the_collector_compares_with(self):
+        """The real config.yaml.example, read by the collector's own reader."""
+        real = os.path.join(os.path.dirname(HERE), "config.yaml.example")
+        block = CE._mcp_block(real, "config.yaml.example")
+        self.assertEqual(block[0], "mcp_servers:")
+        self.assertIn("      include: [ads_audit_run, ads_audit_status, ads_audit_list]", block)
+        self.assertIn("    env: {}", block)
+        self.assertTrue(CE.MCP_REPO_CONFIG.endswith("/infra/hermes-agent/config.yaml.example"))
 
     # ---- D10.7 -------------------------------------------------------------------------
     def test_d10_7_counts_without_slugs(self):
@@ -1111,9 +1268,71 @@ class TestReview5FollowUps(Base):
         self.assertEqual(d["memory_sweep"]["unreadable"], [])
         self.assertEqual(d["not_swept"], ["/run"])
 
-    def test_d4_2_compares_with_the_last_pass(self):
+    EXECSTART = ("ExecStart={ path=/opt/hermes-agent/bin/docker-create-proxy.py ; "
+                 "argv[]=/opt/hermes-agent/bin/docker-create-proxy.py --listen /run/hermes/docker.sock%s ; "
+                 "ignore_errors=no ; start_time=[%s] ; stop_time=[n/a] ; pid=%d ; code=(null) ; status=0/0 }\n")
+
+    def _proxy(self, execstart="ExecStart=x\n", drop_ins=(0, "DropInPaths=\n", "")):
+        """The more specific prefix first: FakeHost answers with the first prefix that matches."""
+        for k in [k for k in self.outputs if k[:3] == ("systemctl", "show", "hermes-docker-proxy")]:
+            del self.outputs[k]
         self.outputs[("systemctl", "is-active")] = (0, "active\n", "")
-        self.outputs[("systemctl", "show", "hermes-docker-proxy")] = (0, "ExecStart=x\n", "")
+        self.outputs[("systemctl", "show", "hermes-docker-proxy", "-p", "DropInPaths")] = drop_ins
+        self.outputs[("systemctl", "show", "hermes-docker-proxy")] = (0, execstart, "")
+
+    def test_d4_2_argv_hash_survives_a_restart_and_changes_with_the_argv(self):
+        self.addCleanup(setattr, CE, "LAST_PASS_EXECSTART", None)
+        self._proxy(self.EXECSTART % ("", "Thu 2026-09-25 10:00:00 UTC", 1234))
+        a = CE.d4_2(self.host(), {})
+        self._proxy(self.EXECSTART % ("", "Wed 2026-10-01 07:30:12 UTC", 99871))    # restarted: same argv
+        b = CE.d4_2(self.host(), {})
+        self.assertRegex(a["execstart_argv_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(a["execstart_argv_sha256"], b["execstart_argv_sha256"])
+        self.assertNotEqual(a["execstart_sha256"], b["execstart_sha256"])           # the whole line did change
+        self._proxy(self.EXECSTART % (" --allow-privileged", "Thu 2026-09-25 10:00:00 UTC", 1234))
+        c = CE.d4_2(self.host(), {})
+        self.assertNotEqual(a["execstart_argv_sha256"], c["execstart_argv_sha256"])
+        # An argument that itself holds ` ; ` must not end the hashed segment early.
+        self._proxy(self.EXECSTART % (" ; rm -rf /", "Thu 2026-09-25 10:00:00 UTC", 1234))
+        self.assertNotEqual(a["execstart_argv_sha256"], CE.d4_2(self.host(), {})["execstart_argv_sha256"])
+        for line in ("ExecStart=x\n", "", "ExecStart={ path=/x ; ignore_errors=no ; pid=1 }\n"):
+            self._proxy(line)
+            self.assertIsNone(CE.d4_2(self.host(), {})["execstart_argv_sha256"], line)
+
+    def test_d4_2_the_whole_line_hash_and_the_comparison_are_unchanged(self):
+        self.addCleanup(setattr, CE, "LAST_PASS_EXECSTART", None)
+        line = self.EXECSTART % ("", "Thu 2026-09-25 10:00:00 UTC", 1234)
+        self._proxy(line)
+        CE.LAST_PASS_EXECSTART = CE.PK.sha256_bytes(line.encode())
+        d = CE.d4_2(self.host(), {})
+        self.assertEqual(d["execstart_sha256"], CE.PK.sha256_bytes(line.encode()))
+        self.assertIs(d["matches_last_pass"], True)
+        self.assertEqual(set(d), {"active", "execstart_sha256", "execstart_argv_sha256", "last_pass_execstart_sha256",
+                                  "matches_last_pass", "drop_in_paths"})
+
+    def test_d4_2_lists_the_proxys_drop_ins_from_a_separate_call(self):
+        self._proxy()
+        host = self.host()
+        self.assertEqual(CE.d4_2(host, {})["drop_in_paths"], [])
+        shows = [c for c in host.calls if c[:2] == ["systemctl", "show"]]
+        self.assertEqual(shows, [["systemctl", "show", "hermes-docker-proxy", "-p", "ExecStart"],
+                                 ["systemctl", "show", "hermes-docker-proxy", "-p", "DropInPaths"]])
+        over = "/etc/systemd/system/hermes-docker-proxy.service.d/override.conf"
+        self._proxy(drop_ins=(0, f"DropInPaths={over}\n", ""))
+        d = CE.d4_2(self.host(), {})
+        self.assertEqual(d["drop_in_paths"], [over])
+        self.assertEqual(d["execstart_sha256"], CE.PK.sha256_bytes(b"ExecStart=x\n"))    # the hashed text is the same
+
+    def test_d4_2_drop_ins_that_cannot_be_read_are_never_an_empty_list(self):
+        self._proxy(drop_ins=(0, "\n", ""))                           # systemd printed no such property
+        self.assertEqual(CE.d4_2(self.host(), {})["drop_in_paths"], R.COULD_NOT_CHECK)
+        self._proxy(drop_ins=(1, "", "Failed to connect to bus"))
+        it = CE.collect(self.host(), self.KEY)["items"]["D4.2"]
+        self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+        self.assertIn("systemctl exited 1", it["reason"])
+
+    def test_d4_2_compares_with_the_last_pass(self):
+        self._proxy()
         self.addCleanup(setattr, CE, "LAST_PASS_EXECSTART", None)
         CE.LAST_PASS_EXECSTART = None
         d = CE.d4_2(self.host(), {})
@@ -1122,8 +1341,7 @@ class TestReview5FollowUps(Base):
         self.assertTrue(CE.d4_2(self.host(), {})["matches_last_pass"])
 
     def _run_main(self, *extra):
-        self.outputs[("systemctl", "is-active")] = (0, "active\n", "")
-        self.outputs[("systemctl", "show", "hermes-docker-proxy")] = (0, "ExecStart=x\n", "")
+        self._proxy()
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = CE.main(["--fp-key-tty", *extra], host=self.host(), read_key=lambda: "11" * 32)

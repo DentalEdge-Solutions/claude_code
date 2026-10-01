@@ -5,8 +5,13 @@
   sudo python3 bin/collect-review-evidence.py --fingerprint-only
   sudo python3 bin/collect-review-evidence.py --credentials-only
 
-READ-ONLY. It observes and reports; it never judges — CHECKLIST.md says what each item
-should show, and the independent reviewer compares. Three rules, each tested:
+It observes and reports; it never judges — CHECKLIST.md says what each item should show,
+and the independent reviewer compares. It changes nothing a review looks at, but the full
+bundle is NOT read-only: D10.1 and D10.2 run `run-client-audit --probe-env` and
+`--probe-egress`, which take the audit lock, start the audit containers (and the egress
+proxy), create and remove `/var/lib/hermes/probe`, and make one outbound CONNECT to
+`api.anthropic.com` through the proxy. `--fingerprint-only` and `--credentials-only` run no
+probe. Three rules, each tested:
   * nothing printed carries a credential value, a client slug or a customer id;
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
@@ -88,8 +93,17 @@ JOURNAL_REASONS = A.BROKER_REASONS + A.COMMAND_REASONS + ("expired", "-")
 _BROKER_LINE = "hermes-app-broker[" + APP + "]: "
 _SAY_RE = re.compile(r"request=\S+ op=\S+ client=\S+ status=(\S+) reason=(\S+)")
 _NOTE_RE = re.compile(r"(warning|error): ")
-_SECRET_MAP_RE = re.compile(r"(\s*)(env|headers):\s*(.*)")
 WITHHELD = "<withheld>"
+# D10.6: the gateway's live config (in ./data, which the gateway's uid owns: read as hostile) and
+# the template it is installed from. Only their `mcp_servers:` blocks are compared.
+MCP_BOX_CONFIG = AGENT_DIR + "/data/config.yaml"
+MCP_REPO_CONFIG = CHECKOUT + "/infra/hermes-agent/config.yaml.example"
+MCP_CONFIG_CAP = 64 * 1024
+MCP_LIST_LINES, MCP_LIST_WIDTH = 40, 200
+_MCP_KEY_RE = re.compile(r"""["']?mcp_servers["']?\s*:""")
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# systemd prints `argv[]=<the command line> ; ignore_errors=...` inside the ExecStart value.
+_ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=.*? ; "))
 
 
 def _run_real(argv, timeout=60):
@@ -395,11 +409,15 @@ def d2_1(host, ctx):
                         row["kind"] = "empty"
                     elif p in AUTHORISED_OTHER:
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
+                        name = "OPENROUTER_API_KEY"                 # the gateway .env: Hermes's own key
                         if p == "/etc/hermes/.env.anthropic":
                             row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
-                            key = CAL.load_env_value(host.path(p), "ANTHROPIC_API_KEY")
-                            if key:
-                                ctx.setdefault("secrets", []).append(key)   # so assert_no_secret covers it
+                            name = "ANTHROPIC_API_KEY"
+                        # The value is loaded only to join the known secrets (assert_no_secret,
+                        # D2.2, D2.3, D10.7 look for it); it is never reported.
+                        key = CAL.load_env_value(host.path(p), name)
+                        if key:
+                            ctx.setdefault("secrets", []).append(key)
         except OSError as e:
             row["error"] = type(e).__name__
             if not is_example:
@@ -467,12 +485,43 @@ def d4_1(host, ctx):
 LAST_PASS_EXECSTART = None      # the last passing review's proxy execstart_sha256, set by main()
 
 
+def _drop_ins(host, unit):
+    """The unit's drop-in files, from a `systemctl show` call of its own: a drop-in changes what
+    the unit runs (ExecStart, User, Environment) with the unit file byte-identical. A list of
+    paths, empty when there is none; could-not-check when systemd did not print the property."""
+    for line in _ok(host, ["systemctl", "show", unit, "-p", "DropInPaths"]).splitlines():
+        if line.startswith("DropInPaths="):
+            return line[len("DropInPaths="):].split()
+    return R.COULD_NOT_CHECK
+
+
+def _argv_sha256(execstart):
+    """sha256 of the `argv[]=...` segment of the ExecStart line(s), or None when there is none.
+    Unlike the whole line, it does not carry `start_time` or `pid`, so a restart leaves it
+    unchanged. The segment runs up to ` ; ignore_errors=`, the field systemd prints next (the
+    last one on the line, so an argument that itself holds ` ; ` cannot end it early); only
+    when that field is absent, up to the next ` ; `."""
+    segments = []
+    for line in execstart.splitlines():
+        m = _ARGV_RES[0].search(line)
+        if m:
+            segments.append(m.group(0)[:-len(" ; ignore_errors=")])
+            continue
+        m = _ARGV_RES[1].search(line)
+        if m:
+            segments.append(m.group(0)[:-len(" ; ")])
+    return PK.sha256_bytes("\n".join(segments).encode()) if segments else None
+
+
 def d4_2(host, ctx):
     active = host.run(["systemctl", "is-active", "hermes-docker-proxy"])[1].strip()
     execstart = _ok(host, ["systemctl", "show", "hermes-docker-proxy", "-p", "ExecStart"])
     sha = PK.sha256_bytes(execstart.encode())
     return {"active": active, "execstart_sha256": sha, "last_pass_execstart_sha256": LAST_PASS_EXECSTART,
-            "matches_last_pass": None if LAST_PASS_EXECSTART is None else sha == LAST_PASS_EXECSTART}
+            "matches_last_pass": None if LAST_PASS_EXECSTART is None else sha == LAST_PASS_EXECSTART,
+            # The baseline for the NEXT review, not compared in this one.
+            "execstart_argv_sha256": _argv_sha256(execstart),
+            "drop_in_paths": _drop_ins(host, "hermes-docker-proxy")}
 
 
 def d4_3(host, ctx):
@@ -703,9 +752,11 @@ def d10_2(host, ctx):
 
 
 def _env_names(value):
-    """The variable NAMES in a systemd Environment= value. A value never reaches the bundle."""
+    """The variable NAMES in a systemd Environment= value. A value never reaches the bundle: a
+    token that is not NAME=value (no `=`, or what precedes it is not a variable name) is `?`."""
     try:
-        return sorted({tok.partition("=")[0] for tok in shlex.split(value)})
+        return sorted({tok.partition("=")[0] if "=" in tok and _ENV_NAME_RE.fullmatch(tok.partition("=")[0])
+                       else "?" for tok in shlex.split(value)})
     except ValueError:
         return R.COULD_NOT_CHECK
 
@@ -752,6 +803,8 @@ def d10_3(host, ctx):
             "installed_equal_repo": {u: _same_file(host, "/etc/systemd/system/" + u,
                                                    CHECKOUT + "/infra/hermes-agent/deploy/" + u)
                                      for u in APP_UNITS},
+            # The instances of those three templates: equal unit files prove nothing with a drop-in.
+            "drop_in_paths": {u: _drop_ins(host, u) for u in (t.replace("@.", f"@{APP}.") for t in APP_UNITS)},
             "broker_user_groups": _ok(host, ["id", "-nG", APP_USER]).split(),
             "sudo_rules": _sudo_rules(host, APP_USER),
             "runner_path_active": path_state or R.COULD_NOT_CHECK}
@@ -788,41 +841,33 @@ def d10_4(host, ctx):
             "containers_mounting_app_state": mounting, "containers_not_inspected": not_inspected}
 
 
-def _mcp_block(host):
-    """config.yaml from `mcp_servers:` up to the next top-level key."""
+def _mcp_block(path, what):
+    """A config file's `mcp_servers:` block as lines: from that top-level key to the next one,
+    each line without its trailing whitespace, and without the blank lines and column-0 comments
+    that trail the block (they sit between it and whatever follows). A second `mcp_servers:`
+    key later in the file is part of the result, so it can never go unseen. [] when there is no
+    such key. The read refuses a symlink, anything but a regular file and a file over
+    MCP_CONFIG_CAP, and never blocks: a refusal is could-not-check. `what` names the file in
+    that reason, never its content."""
+    try:
+        text = A.read_capped(path, MCP_CONFIG_CAP).decode("utf-8", errors="replace")
+    except (A.Refused, OSError) as e:
+        raise CouldNotCheck(f"{what}: {e if isinstance(e, A.Refused) else type(e).__name__}")
     lines, on = [], False
-    with open(host.path(AGENT_DIR + "/data/config.yaml"), encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if line.startswith("mcp_servers:"):
-                on = True
-            elif on and line[:1].strip() and not line.startswith("#"):
-                break
-            if on:
-                lines.append(line.rstrip("\n"))
+    for line in text.splitlines():
+        if _MCP_KEY_RE.match(line):
+            on = True
+        elif line[:1].strip() and not line.startswith("#"):
+            on = False                                      # another top-level key: the block is over
+        if on:
+            lines.append(line.rstrip())
+    while lines and (not lines[-1] or lines[-1].startswith("#")):
+        lines.pop()
     return lines
 
 
-def _withhold_secret_maps(lines):
-    """Every value under an `env:` or `headers:` map withheld, its key kept. The block is meant
-    to hold no secret (`env: {}`); one put there by mistake must show as a key, never a value."""
-    out, depth = [], None
-    for line in lines:
-        indent = len(line) - len(line.lstrip())
-        if depth is not None and line.strip() and indent <= depth:
-            depth = None                                    # dedented: the map is over
-        if depth is not None:
-            if line.strip():
-                key, sep, _ = line.partition(":")
-                line = (key + ": " if sep else line[:indent]) + WITHHELD
-        else:
-            m = _SECRET_MAP_RE.fullmatch(line)
-            rest = m.group(3).strip() if m else "{}"
-            if not rest or rest.startswith("#"):
-                depth = indent                              # a block map: its entries follow
-            elif rest != "{}":
-                line = f"{m.group(1)}{m.group(2)}: {WITHHELD}"
-        out.append(line)
-    return out
+def _block_sha256(lines):
+    return PK.sha256_bytes("\n".join(lines).encode())
 
 
 def _no_credential_lines(lines):
@@ -830,16 +875,24 @@ def _no_credential_lines(lines):
 
 
 def d10_6(host, ctx):
-    block = _no_credential_lines(_withhold_secret_maps(_mcp_block(host)))
+    """The box's block is free text from the reviewed party, so none of it is emitted: only
+    whether it equals the committed block (the same lines, as _mcp_block gives them: comments
+    and blank lines inside the block count), how many lines it has and their sha256."""
+    box = _mcp_block(host.path(MCP_BOX_CONFIG), "data/config.yaml")
+    repo = _mcp_block(host.path(MCP_REPO_CONFIG), "config.yaml.example")
+    if not repo:
+        raise CouldNotCheck("config.yaml.example: no mcp_servers block")
     # The tool list is information, not a boundary: when it cannot be had, it is empty with its
-    # exit code (None: no gateway container to ask), and the config block is still reported.
+    # exit code (None: no gateway container to ask), and the comparison is still reported. It is
+    # the gateway's own text: capped in lines and in line length.
     rc, gw, _ = host.run(["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER])
     gw, listing, list_rc = gw.strip(), [], None
     if rc == 0 and len(gw) == 64:
         list_rc, out, _ = host.run(["docker", "exec", gw, "hermes", "mcp", "list"])
         if list_rc == 0:
-            listing = _no_credential_lines(out.splitlines()[:40])
-    return {"mcp_block": block, "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
+            listing = [l[:MCP_LIST_WIDTH] for l in _no_credential_lines(out.splitlines()[:MCP_LIST_LINES])]
+    return {"mcp_block": {"equals_repo": box == repo, "lines": len(box), "sha256": _block_sha256(box)},
+            "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
 
 
 def _label(value, allowed):
