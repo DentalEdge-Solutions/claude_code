@@ -3,19 +3,25 @@
 **Start here in the next session.** Read this file, then `.project-brain/BRAIN.md`. Client names are written as
 `<client>`; no customer ids or fingerprints appear here.
 
+**Updated later on 2026-10-01, after PR #90:** the runner restart-spin fix is merged and the checklist is now
+**v1.12**. Nothing has to land before the box rollout any more.
+
 ## Where things stand
 
-- **Merged to `main`:** all three Option B parts.
+- **Merged to `main`:** all three Option B parts, and the restart-spin fix.
   - **#85, part 1:** isolation and egress.
   - **#86, part 2:** the chat trigger.
   - **#88, part 3:** review tooling and checklist v1.11. CI was green on all five checks. The "Bind agreement"
     job ran both probes on real Docker for the first time, and both passed.
+  - **#90, restart-spin fix:** the broker sweeps stray entries out of `jobs/` on every pass. It also raised the
+    checklist to v1.12 (one D10.7 sentence; no pass rule changed).
 - **Not on the box:** nothing from Option B has been applied. The box still runs review #5's code:
   `sudo run-client-audit <client>` over SSH, draft run in the gateway.
 - **Spec:** `docs/superpowers/specs/2026-09-30-hermes-chat-triggered-audits-design.md`.
 - **Brain:**
-  - **Active decision:** `decisions/active/2026-10-01-option-b-part-3-merged-pr-88-…` records what merged and
-    the key rulings.
+  - **Active decisions:** `decisions/active/2026-10-01-option-b-part-3-merged-pr-88-…` records what part 3
+    merged and the key rulings; `decisions/active/2026-10-01-runner-restart-spin-fix-merged-pr-90-…` records
+    the fix and checklist v1.12.
   - **Today's session note:** `sessions/daily/2026-10-01.md` holds the follow-up list. It's gitignored and
     local only; the same list is below.
 
@@ -94,19 +100,25 @@ In order. Every step is in BRING-UP.
 3. **Operator evidence file:** the manual items (D3.2, D8.1, D8.2, D9.1, D10.5) and the D4.2 statement if
    `matches_last_pass` is `false`. For D10.5, state the OpenRouter key limit ($10, monthly reset) and that ZDR is
    set on the account: Hermes has no `zdr` key.
-4. **Run a fresh reviewer** against checklist v1.11. The packet now includes `config.yaml.example`.
+4. **Run a fresh reviewer** against checklist v1.12. The packet now includes `config.yaml.example`.
 5. **Sign-off:** operator sign-off, then a brain decision. Promote "live on the box, review #6 PASS" to canon.
 
 ## Open follow-ups
 
-**Must land before review #6's evidence, or be listed under D9.1.** `bin/` and `deploy/` are in the box
-fingerprint, so a later change re-binds the review.
+**Done.**
 
-1. **Runner restart spin** (parked since part 2, still not built): a non-job entry left in
-   `app-state/<app>/jobs/` makes the runner restart in a tight loop. Fix: a broker-side sweep of names that
-   don't match.
+1. **Runner restart spin:** fixed in PR #90. The broker removes any entry in `app-state/<app>/jobs/` whose name
+   doesn't fully match the job-file pattern, on every pass and before `recover()`. A matching name is a job and
+   is never touched. Two cases are left, by decision:
+   - an entry the broker can't remove (a non-empty directory, which only the app user or root can create
+     there) gets one journal line and still re-triggers the runner;
+   - the sweep only runs while the broker runs.
+   
+   D10.7's `note_counts.warning` now also counts the two stray-entry lines. A non-zero count is worth a look.
 
-**Deferred code items.** Each fails closed today.
+**Deferred code items.** Each fails closed today. List them under D9.1 for review #6 unless they are built
+first: `bin/` and `deploy/` are in the box fingerprint, so building one after the rollout means updating the
+box again before the evidence is collected.
 
 2. The env probe can't detect a mounted real credential file, because the real file holds no sentinel. A
    `test -e /etc/hermes` line would.
@@ -129,7 +141,7 @@ fingerprint, so a later change re-binds the review.
 14. The README's "one non-Google secret file" paragraph is stale.
 
 **Rules that now apply:**
-- Any change to `CHECKLIST.md` needs a version bump above 1.11.
+- Any change to `CHECKLIST.md` needs a version bump above 1.12.
 - Any change under `bin/` or `deploy/` changes the box fingerprint.
 
 ## How the build ran (worth repeating)
