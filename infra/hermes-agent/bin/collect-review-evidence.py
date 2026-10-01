@@ -275,7 +275,8 @@ def _memory_sweep(host, mounts):
     if mounts is None:
         return R.COULD_NOT_CHECK
     targets = sorted(t for t, fs in mounts if fs in MEMORY_FSTYPES)
-    names, contents, unreadable = set(), set(), set()
+    ns = {t for t, fs in mounts if fs == "nsfs"}      # Docker namespace handles: classified, not read
+    names, contents, unreadable, handles = set(), set(), set(), set()
     for m in targets:
         top = host.path(m)
         try:
@@ -300,6 +301,9 @@ def _memory_sweep(host, mounts):
             for n in files:
                 full = os.path.join(root, n)
                 shown = shown_of(full)
+                if shown in ns:
+                    handles.add(shown)
+                    continue
                 try:
                     st = os.lstat(full)
                     if not stat.S_ISREG(st.st_mode):
@@ -312,7 +316,7 @@ def _memory_sweep(host, mounts):
                 except OSError:
                     unreadable.add(shown)
     return {"mounts": targets, "name_hits": sorted(names), "content_hits": sorted(contents),
-            "unreadable": sorted(unreadable)}
+            "unreadable": sorted(unreadable), "namespace_handles": sorted(handles)}
 
 
 def _shared_sweep(host, ctx):
@@ -453,10 +457,15 @@ def d4_1(host, ctx):
             "openrouter_env_names": sorted(n for n in names if n.startswith("OPENROUTER_"))}
 
 
+LAST_PASS_EXECSTART = None      # the last passing review's proxy execstart_sha256, set by main()
+
+
 def d4_2(host, ctx):
     active = host.run(["systemctl", "is-active", "hermes-docker-proxy"])[1].strip()
     execstart = _ok(host, ["systemctl", "show", "hermes-docker-proxy", "-p", "ExecStart"])
-    return {"active": active, "execstart_sha256": PK.sha256_bytes(execstart.encode())}
+    sha = PK.sha256_bytes(execstart.encode())
+    return {"active": active, "execstart_sha256": sha, "last_pass_execstart_sha256": LAST_PASS_EXECSTART,
+            "matches_last_pass": None if LAST_PASS_EXECSTART is None else sha == LAST_PASS_EXECSTART}
 
 
 def d4_3(host, ctx):
@@ -579,6 +588,27 @@ def _dir_row(host, p):
     return {"owner": _owner(st.st_uid), "group": _group(st.st_gid), "mode": oct(stat.S_IMODE(st.st_mode))}
 
 
+def _file_modes(cdir, st):
+    """Counts of the entries inside one client directory by "owner group mode", never names.
+    A symlink or non-directory is not listed; an entry that vanishes is skipped and a
+    directory that cannot be listed gives no counts, never an exception out of D7.1."""
+    files = {}
+    if not stat.S_ISDIR(st.st_mode):               # lstat: a symlink is not S_ISDIR
+        return files
+    try:
+        names = os.listdir(cdir)
+    except OSError:
+        return files
+    for fn in names:
+        try:
+            fst = os.lstat(os.path.join(cdir, fn))
+        except OSError:
+            continue
+        k = f"{_owner(fst.st_uid)} {_group(fst.st_gid)} {oct(stat.S_IMODE(fst.st_mode))}"
+        files[k] = files.get(k, 0) + 1
+    return files
+
+
 def _audit_logs(host, reg):
     """The audit-logs root plus one row per child: registry status, owner, mode, never the name.
     A symlinked root is reported as such and never listed."""
@@ -589,7 +619,8 @@ def _audit_logs(host, reg):
         for name in sorted(os.listdir(host.path(root))):
             st = os.lstat(os.path.join(host.path(root), name))
             rows.append({"status": _reg_status(reg, name),
-                         "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode))})
+                         "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode)),
+                         "files": _file_modes(os.path.join(host.path(root), name), st)})
     return {"root": row, "rows": rows}
 
 
@@ -994,7 +1025,23 @@ def main(argv=None, host=None, read_key=_tty_key):
     g.add_argument("--fingerprint-only", action="store_true")
     g.add_argument("--credentials-only", action="store_true")
     ap.add_argument("--fp-key-tty", action="store_true")
+    ap.add_argument("--last-pass-execstart")
     a = ap.parse_args(argv)
+    if a.last_pass_execstart is None:
+        return _main(a, host, read_key)
+    if not re.fullmatch(r"[0-9a-f]{64}", a.last_pass_execstart):
+        print("collect-review-evidence: --last-pass-execstart must be 64 lowercase hex characters",
+              file=sys.stderr)
+        return 2
+    global LAST_PASS_EXECSTART
+    prior, LAST_PASS_EXECSTART = LAST_PASS_EXECSTART, a.last_pass_execstart
+    try:
+        return _main(a, host, read_key)
+    finally:
+        LAST_PASS_EXECSTART = prior            # never leaks into a later call without the flag
+
+
+def _main(a, host, read_key):
     fp_key = None
     if a.fp_key_tty:
         try:

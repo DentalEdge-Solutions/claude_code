@@ -456,7 +456,7 @@ class TestAuditsOnTheBox(Base):
         self.assertEqual(set(al["root"]) & {"owner", "group", "mode"}, {"owner", "group", "mode"})
         self.assertEqual([r["status"] for r in al["rows"]], ["active", "retired", "unregistered"])
         for r in al["rows"]:
-            self.assertEqual(set(r), {"status", "owner", "mode"})
+            self.assertEqual(set(r), {"status", "owner", "mode", "files"})
         dump = json.dumps(out)
         for slug in ("gone-dental", "stray-dental"):
             self.assertNotIn(slug, dump)
@@ -1064,6 +1064,78 @@ class TestD10(Base):
     def test_d10_items_survive_the_redactor_and_the_secret_check(self):
         out = json.dumps(CE.collect(self.host(), self.KEY))
         self.assertNotIn("acme-dental", out); self.assertNotIn("1234567890", out)
+
+
+class TestReview5FollowUps(Base):
+    def test_audit_logs_file_modes_counted_without_names(self):
+        d = os.path.join(self.root, "var/lib/hermes/audit-logs/acme-dental"); os.makedirs(d)
+        for n, mode in (("collect-a.stdout", 0o600), ("collect-a.stderr", 0o644)):
+            p = os.path.join(d, n); open(p, "w").close(); os.chmod(p, mode)
+        row = CE.collect(self.host(), self.KEY)["items"]["D7.1"]["data"]["audit_logs"]["rows"][0]
+        self.assertEqual(sum(row["files"].values()), 2)
+        self.assertTrue(any(k.endswith("0o644") for k in row["files"]))
+        self.assertNotIn("collect-a", json.dumps(row))
+
+    def test_audit_logs_file_listing_survives_a_vanished_or_unlistable_entry(self):
+        d = os.path.join(self.root, "var/lib/hermes/audit-logs/acme-dental"); os.makedirs(d)
+        with open(os.path.join(d, "a"), "w"):
+            pass
+        st = os.lstat(d)
+        real_lstat = os.lstat
+        def flaky(path, *a, **k):
+            if os.path.basename(path) == "a":
+                raise FileNotFoundError(path)
+            return real_lstat(path, *a, **k)
+        with mock.patch.object(CE.os, "lstat", flaky):
+            self.assertEqual(CE._file_modes(d, st), {})
+        with mock.patch.object(CE.os, "listdir", side_effect=PermissionError):
+            self.assertEqual(CE._file_modes(d, st), {})
+
+    def test_nsfs_handles_are_classified_not_unreadable(self):
+        run = os.path.join(self.root, "run/docker/netns"); os.makedirs(run)
+        h = os.path.join(run, "abc123"); open(h, "w").close(); os.chmod(h, 0)
+        mounts = [("/run", "tmpfs"), ("/run/docker/netns/abc123", "nsfs")]
+        out = CE._memory_sweep(self.host(), mounts)
+        self.assertIn("/run/docker/netns/abc123", out["namespace_handles"])
+        self.assertNotIn("/run/docker/netns/abc123", out["unreadable"])
+
+    def test_d4_2_compares_with_the_last_pass(self):
+        self.outputs[("systemctl", "is-active")] = (0, "active\n", "")
+        self.outputs[("systemctl", "show", "hermes-docker-proxy")] = (0, "ExecStart=x\n", "")
+        self.addCleanup(setattr, CE, "LAST_PASS_EXECSTART", None)
+        CE.LAST_PASS_EXECSTART = None
+        d = CE.d4_2(self.host(), {})
+        self.assertIsNone(d["matches_last_pass"])
+        CE.LAST_PASS_EXECSTART = d["execstart_sha256"]
+        self.assertTrue(CE.d4_2(self.host(), {})["matches_last_pass"])
+
+    def _run_main(self, *extra):
+        self.outputs[("systemctl", "is-active")] = (0, "active\n", "")
+        self.outputs[("systemctl", "show", "hermes-docker-proxy")] = (0, "ExecStart=x\n", "")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = CE.main(["--fp-key-tty", *extra], host=self.host(), read_key=lambda: "11" * 32)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_main_passes_a_valid_last_pass_execstart_and_does_not_leak_it(self):
+        self.addCleanup(setattr, CE, "LAST_PASS_EXECSTART", None)
+        sha = "ab" * 32
+        rc, out, _ = self._run_main("--last-pass-execstart", sha)
+        d = json.loads(out)["items"]["D4.2"]["data"]
+        self.assertEqual(d["last_pass_execstart_sha256"], sha)
+        self.assertFalse(d["matches_last_pass"])
+        self.assertIsNone(CE.LAST_PASS_EXECSTART)
+        _, out, _ = self._run_main()
+        self.assertIsNone(json.loads(out)["items"]["D4.2"]["data"]["matches_last_pass"])
+
+    def test_main_refuses_an_invalid_last_pass_execstart(self):
+        self.addCleanup(setattr, CE, "LAST_PASS_EXECSTART", None)
+        for bad in ("ab" * 31, "AB" * 32, "ab" * 32 + "\n", ""):
+            rc, out, err = self._run_main("--last-pass-execstart", bad)
+            self.assertEqual(rc, 2, repr(bad))
+            self.assertEqual(out, "")
+            self.assertIn("--last-pass-execstart", err)
+            self.assertIsNone(CE.LAST_PASS_EXECSTART)
 
 
 if __name__ == "__main__":
