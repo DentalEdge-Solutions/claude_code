@@ -16,6 +16,7 @@ You do not receive the build conversation. Do not ask for it.
 - Anything alarming the checklist does not cover goes in **Not on the checklist**, with your recommendation.
 - For D3.2 you may recommend a dedicated STANDARD-access account; the operator decides.
 - The overall verdict is PASS only if every item is PASS (manual items: the operator's statement is the evidence).
+- Customer-id fingerprints (`cid:`) are keyed (HMAC-SHA256, 12 hex): the key lives only on the operator's laptop. Both bundles carry a `cid_key_id`, and the two must show the same one. If they differ (or either is missing), every comparison of a `cid:` fingerprint across the bundles is `CANNOT-VERIFY`, never a mismatch. The box bundle also carries the last PASS's proxy `execstart_sha256` (D4.2 `last_pass_execstart_sha256`) as the baseline for D4.2.
 - Never paste a client slug, a customer id or a credential value into the report — the bundles already hide them; keep it that way.
 
 ## Output

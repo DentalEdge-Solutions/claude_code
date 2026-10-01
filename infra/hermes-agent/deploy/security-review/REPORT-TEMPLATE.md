@@ -12,6 +12,14 @@
 | Item | Verdict | Evidence (short quote) | Note |
 |---|---|---|---|
 | D1.1 | | | |
+| D10.1 | | | |
+| D10.2 | | | |
+| D10.3 | | | |
+| D10.4 | | | |
+| D10.5 | | | |
+| D10.6 | | | |
+| D10.7 | | | |
+| D10.8 | | | |
 
 ## Not on the checklist
 

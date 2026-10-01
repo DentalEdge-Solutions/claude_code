@@ -37,9 +37,9 @@ class TestChecklistSync(unittest.TestCase):
         lap = {k for k, v in items()[1].items() if v == "laptop"}
         self.assertEqual(lap, set(_load("cl", "collect-review-evidence-laptop.py").ITEMS))
 
-    def test_every_area_d1_to_d9_is_present(self):
+    def test_every_area_d1_to_d10_is_present(self):
         areas = {k.split(".")[0] for k in items()[1]}
-        self.assertEqual(areas, {f"D{i}" for i in range(1, 10)})
+        self.assertEqual(areas, {f"D{i}" for i in range(1, 11)})
 
 
 if __name__ == "__main__":

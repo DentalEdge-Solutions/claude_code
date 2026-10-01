@@ -1358,6 +1358,23 @@ Requires part 1 on the box. Still not live until review #6.
 
 ---
 
+## A security review (checklist v1.11)
+
+Run it after parts 1 and 2 are applied and the rollback backups are shredded (part 2 step 10;
+the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). Raw bundles live in the
+gitignored `security-reviews/`; only the report is committed.
+
+1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
+2. Box: `git pull`, then `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no output means an audit holds the lock: wait for it and run the probe again.
+3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):
+   `sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <review #5 execstart_sha256> > ~/bundle-box.json`
+   (the collector re-runs both probes as D10.1 and D10.2, so this step takes as long as step 2 again; `--last-pass-execstart` is the last PASS report's D4.2 `execstart_sha256`, 64 hex characters.)
+4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file; the ads repo checked out at the pin, with `.claude/settings.json` stashed).
+5. Copy the box bundle to the laptop's `security-reviews/`, and delete it from the box. Check that both bundles show the same `cid_key_id`.
+6. Launch a fresh reviewer with only REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc and the operator evidence file (it states D2.1's key, D10.5's limit and privacy routing, D10.8's chat run).
+
+---
+
 ## Phase 7: Reach the Dashboard From the Laptop
 
 Independent of phase 5 — needs only the phase 4 stack. Verified end to end on 2026-09-21.
