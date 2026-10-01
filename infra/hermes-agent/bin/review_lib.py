@@ -4,7 +4,7 @@
 Nothing here judges. It makes evidence safe to hand to a reviewer: slugs and customer ids
 redacted, credentials reduced to fingerprints, and one canonical fingerprint hash.
 """
-import datetime, hashlib, json, os, re
+import datetime, hashlib, hmac, json, os, re
 
 CLIENT = "<client>"
 OBSERVED = "observed"
@@ -171,12 +171,30 @@ def sha12(value):
     return hashlib.sha1(str(value).encode()).hexdigest()[:12]
 
 
+def hmac12(key, value):
+    """Keyed customer-id fingerprint (Option B §8): a 10-digit id cannot be brute-forced
+    from it without the review key, which lives only on the operator's laptop."""
+    return hmac.new(key, str(value).encode(), hashlib.sha256).hexdigest()[:12]
+
+
+def load_fp_key(text):
+    t = (text or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", t):
+        raise ValueError("the review fingerprint key must be 64 lowercase hex characters")
+    return bytes.fromhex(t)
+
+
+def key_id(key):
+    return hashlib.sha256(key).hexdigest()[:8]
+
+
 def canon(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 class Redactor:
-    def __init__(self, slugs, customer_ids):
+    def __init__(self, slugs, customer_ids, fp_key=None):
+        self._fp = (lambda d: hmac12(fp_key, d)) if fp_key else sha12
         self._slugs = sorted({s for s in slugs if s}, key=len, reverse=True)
         # Normalise to digits FIRST: a customer_id already stored dashed in
         # clients.json (e.g. "123-456-7890") must still redact both the dashed and
@@ -196,7 +214,7 @@ class Redactor:
                 self._cids.append((f"{d[:3]}-{d[3:6]}-{d[6:]}", d))
 
     @classmethod
-    def from_clients_json(cls, path):
+    def from_clients_json(cls, path, fp_key=None):
         """Raises ValueError if the registry cannot be read — the caller must then refuse to
         print anything, because it no longer knows what to hide."""
         try:
@@ -207,11 +225,11 @@ class Redactor:
         if not isinstance(clients, dict):
             raise ValueError("cannot load the redaction list: 'clients' is not an object")
         return cls(list(clients), [(v or {}).get("customer_id", "") for v in clients.values()
-                                   if isinstance(v, dict)])
+                                   if isinstance(v, dict)], fp_key=fp_key)
 
     def text(self, s):
         for raw, digits in self._cids:
-            s = s.replace(raw, "cid:" + sha12(digits))
+            s = s.replace(raw, "cid:" + self._fp(digits))
         for slug in self._slugs:
             s = re.sub(rf"(?<![A-Za-z0-9]){re.escape(slug)}(?![A-Za-z0-9])", CLIENT, s)
         return s
