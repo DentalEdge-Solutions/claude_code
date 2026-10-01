@@ -874,6 +874,15 @@ def _no_credential_lines(lines):
     return [WITHHELD if R.looks_like_credential_text(l) else l for l in lines]
 
 
+def _cut_listing(lines, secrets):
+    """Each line cut to MCP_LIST_WIDTH, except one that holds a known secret value: that line is
+    kept whole, so the whole-bundle refusal (assert_no_secret in main) still fires on it and no
+    part of a secret that straddles the cut is ever printed. A secret never spans lines, so the
+    line cap needs no such care."""
+    known = [s for s in secrets if len(s) >= 8]
+    return [l if any(s in l for s in known) else l[:MCP_LIST_WIDTH] for l in lines]
+
+
 def d10_6(host, ctx):
     """The box's block is free text from the reviewed party, so none of it is emitted: only
     whether it equals the committed block (the same lines, as _mcp_block gives them: comments
@@ -890,7 +899,8 @@ def d10_6(host, ctx):
     if rc == 0 and len(gw) == 64:
         list_rc, out, _ = host.run(["docker", "exec", gw, "hermes", "mcp", "list"])
         if list_rc == 0:
-            listing = [l[:MCP_LIST_WIDTH] for l in _no_credential_lines(out.splitlines()[:MCP_LIST_LINES])]
+            listing = _cut_listing(_no_credential_lines(out.splitlines()[:MCP_LIST_LINES]),
+                                   ctx.get("secrets", []))
     return {"mcp_block": {"equals_repo": box == repo, "lines": len(box), "sha256": _block_sha256(box)},
             "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
 

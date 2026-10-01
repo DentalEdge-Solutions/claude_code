@@ -887,6 +887,14 @@ class TestD10(Base):
             self._w(self.BOX_CONFIG, "model: x\n# the one app\n" + box + "terminal:\n  backend: docker\n")
         self._w(CE.MCP_REPO_CONFIG, "# template\nmodel:\n  default: y\n\n" + (self.BLOCK if repo is None else repo))
 
+    OPENROUTER = "sk-or-v1-NOT-A-REAL-KEY-0123456789abcdef"
+
+    def _load_openrouter_key(self):
+        """D2.1 reads the gateway's .env and puts the key among the known secrets."""
+        env = CE.CHECKOUT + "/infra/hermes-agent/.env"
+        self._w(env, f"HERMES_SPOOL_DIR=/var/lib/hermes/spool\nOPENROUTER_API_KEY={self.OPENROUTER}\n")
+        self.outputs[("find",)] = (0, env + "\n", "")
+
     def _gateway(self, listing):
         del self.outputs[("docker", "ps")]
         self.outputs[("docker", "ps", "-q", "--no-trunc", "--filter")] = (0, GW_ID + "\n", "")
@@ -1003,6 +1011,31 @@ class TestD10(Base):
         self.assertEqual(listing[1], "<withheld>")
         self.assertEqual(max(len(l) for l in listing), 200)
         self.assertNotIn(TOKEN, json.dumps(it))
+
+    def test_d10_6_a_known_secret_straddling_the_cut_refuses_the_bundle_and_prints_nothing(self):
+        """The 200-character cut must not hide a known secret from assert_no_secret: a line that
+        holds one is not cut, so the whole-bundle refusal still fires and no prefix is printed."""
+        self._load_openrouter_key()
+        self._configs(self.BLOCK)
+        straddle = "ads_audit " + "y" * (CE.MCP_LIST_WIDTH - 10 - 20) + self.OPENROUTER
+        self.assertLess(straddle.index(self.OPENROUTER), CE.MCP_LIST_WIDTH)
+        self.assertGreater(straddle.index(self.OPENROUTER) + len(self.OPENROUTER), CE.MCP_LIST_WIDTH)
+        self._gateway((0, straddle + "\nrow\n", ""))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(RuntimeError):
+                CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32)
+        printed = out.getvalue() + err.getvalue()
+        for n in range(8, len(self.OPENROUTER) + 1):
+            self.assertNotIn(self.OPENROUTER[:n], printed)
+        self.assertEqual(printed, "")
+
+    def test_d10_6_a_long_line_without_a_secret_is_still_cut_with_secrets_loaded(self):
+        self._load_openrouter_key()
+        self._configs(self.BLOCK)
+        self._gateway((0, "ads_audit " + "x" * 5000 + "\n", ""))
+        listing = self._item("D10.6")["data"]["gateway_mcp_list"]
+        self.assertEqual(listing, [("ads_audit " + "x" * 5000)[:200]])
 
     def test_the_committed_template_has_the_block_the_collector_compares_with(self):
         """The real config.yaml.example, read by the collector's own reader."""
