@@ -6,7 +6,7 @@ You are reviewing a production box you did not build. You receive ONLY:
 2. The box bundle and the laptop bundle (JSON, redacted by design).
 3. `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`.
 4. This brief (`REVIEWER-BRIEF.md`) and `REPORT-TEMPLATE.md` (this directory).
-5. The operator evidence file: the statements and attachments the checklist asks the operator for. It holds the manual items' statements (D3.2, D8.1, D8.2, D9.1 and D10.5, with D10.5's console screens of the limit and the privacy settings), D2.1's statement about the Anthropic key and the `ls` output showing the rollback backups gone, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement that the `ok` run was triggered from chat, and every other explanation an item asks for.
+5. The operator evidence file: the statements and attachments the checklist asks the operator for. It holds the manual items' statements (D3.2, D8.1, D8.2, D9.1 and D10.5, with D10.5's console screens of the limit and the privacy settings), D2.1's statement about the Anthropic key, D2.1's statement about the dashboard (when the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output showing the rollback backups gone, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement that the `ok` run was triggered from chat, and every other explanation an item asks for.
 6. `infra/hermes-agent/config.yaml.example` at the reviewed commit, for D10.6: its `mcp_servers:` block is the committed block the box's is compared with.
 
 You do not receive the build conversation. Do not ask for it.

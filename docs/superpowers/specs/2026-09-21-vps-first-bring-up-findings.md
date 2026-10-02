@@ -641,7 +641,7 @@ box is not at that code until it is pulled and review #7 passes.
 | F28 | `probe_egress` ignores its two exit codes. | accepted: a failed step shows as missing lines | **fixed**: `proxy_rc` and `drafter_rc` are reported and must be 0 |
 | F29 | `_sudo_rules` reads `command_lines: 0` when `sudo` did not run. | accepted: the pass rule needs `not_allowed: true` | **fixed**: neither answer is `could-not-check` |
 | F30 | `d10_3` loses the whole item when the app user is missing. | accepted: it becomes `could-not-check` | **fixed**: only `broker_user_groups` is `could-not-check` |
-| F31 | `load_env_value` does not strip an inline `# comment`. | accepted: the installed files have none | **fixed** |
+| F31 | `load_env_value` does not strip an inline `# comment`. | accepted: the installed files have none | **fixed**; surrounding whitespace is dropped too, and the review collector reads every value a secret name is given |
 | F32 | The review's "authorised credential set" and `--credentials-only` cover Google values only. | accepted: the other values are covered by D2.1, D4.1, D10.1 and D10.7 | **fixed**: the set lists the Anthropic key, the OpenRouter key and the dashboard password |
 | F33 | The audit lock file in `/run/lock` can be pre-created by a local user. | accepted: the worst case is a refused audit, never a run | accepted (standing) |
 | F34 | D10.4 inspects running containers only. | accepted: the compose file is in the fingerprint | accepted (standing) |

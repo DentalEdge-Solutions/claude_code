@@ -1415,7 +1415,7 @@ gitignored `security-reviews/`; only the report is committed.
    `L=$(systemctl show hermes-docker-proxy -p ExecStart --no-pager); P=$(systemctl show hermes-docker-proxy -p MainPID --value); T=$(systemctl show hermes-docker-proxy -p ExecMainStartTimestamp --value); echo "pid=$P start=$T"; printf '%s\n' "$L" | sha256sum; printf '%s\n' "$L" | sed "s/start_time=\[n\/a\] ; stop_time=\[n\/a\] ; pid=0/start_time=[$T] ; stop_time=[n\/a] ; pid=$P/" | sha256sum`
 4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file, and refuses one with any group or other access: it is `0600`; the ads repo checked out at the pin, with `.claude/settings.json` stashed).
 5. Copy the box bundle to the laptop's `security-reviews/`, and delete it from the box. Check that both bundles show the same `cid_key_id`.
-6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`) and D10.8's statement that the `ok` run came from chat.
+6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`) and D10.8's statement that the `ok` run came from chat.
 
 ---
 
@@ -1448,7 +1448,7 @@ if [ ${#P} -ge 16 ] && case "$P" in *'$'*|*'#'*|*'"'*|*"'"*|*' '*|*'\'*) false;;
   { sudo grep -v '^HERMES_DASHBOARD' .env
     printf 'HERMES_DASHBOARD=1\nHERMES_DASHBOARD_BASIC_AUTH_USERNAME=hermesadmin\nHERMES_DASHBOARD_BASIC_AUTH_PASSWORD=%s\n' "$P"
   } | sudo tee .env.new >/dev/null
-  sudo install -m 600 .env.new .env && sudo shred -u .env.new && echo "WRITTEN len=${#P}"
+  sudo install -m 600 .env.new .env && echo "WRITTEN len=${#P}"; sudo shred -u .env.new
 else
   echo "REFUSED: length ${#P} (need >=16) or a forbidden character -- nothing written"
 fi
