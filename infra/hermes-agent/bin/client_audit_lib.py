@@ -168,18 +168,32 @@ TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}$")
 _AUDIT_NAME_RE = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})-audit\.md$")
 
 
+_COMMENT_RE = re.compile(r"\s+#.*")
+
+
+def _env_value(v):
+    """The value part of NAME=value. A quoted value ends at its closing quote when only a comment
+    follows; otherwise one layer of matching outer quotes is stripped, as before. An unquoted value
+    ends at the first whitespace that is followed by `#` (a `#` with nothing before it is data)."""
+    if v[:1] in ("\"", "'"):
+        end = v.find(v[0], 1)
+        if end > 0 and _COMMENT_RE.fullmatch(v[end + 1:]):
+            return v[1:end]
+        return v[1:-1] if len(v) >= 2 and v[0] == v[-1] else v
+    return _COMMENT_RE.sub("", v, count=1)
+
+
 def load_env_value(path, name):
-    """One NAME=value from an env file, parsed as DATA with load_cred_env's rules."""
+    """One NAME=value from an env file, parsed as DATA with load_cred_env's rules, plus an inline
+    comment (see _env_value): the installed files have none today, but a hand edit must not turn a
+    comment into part of a key."""
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\r\n")
             if line.startswith("export "):
                 line = line[len("export "):].lstrip()
             if line.startswith(name + "="):
-                v = line.split("=", 1)[1]
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                    v = v[1:-1]
-                return v
+                return _env_value(line.split("=", 1)[1])
     return None
 
 

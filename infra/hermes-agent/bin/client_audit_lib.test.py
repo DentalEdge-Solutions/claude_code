@@ -209,6 +209,25 @@ class TestOptionBHelpers(unittest.TestCase):
         self.assertEqual(L.load_env_value(p, "ANTHROPIC_API_KEY"), "sk-ant-x")
         self.assertIsNone(L.load_env_value(p, "MISSING"))
 
+    def test_load_env_value_strips_an_inline_comment(self):
+        cases = {"K=abc # note": "abc",                    # whitespace then # starts a comment
+                 "K=abc\t# note": "abc",
+                 "K=abc#def": "abc#def",                   # no whitespace before #: part of the value
+                 "K= # only a comment": "",
+                 'K="abc" # note': "abc",                  # a quoted value ends at its closing quote
+                 "K='abc'   # note": "abc",
+                 'K="a # b"': "a # b",                     # a # inside the quotes is kept
+                 'K="a"b"': 'a"b',                         # unchanged from before: outer quotes stripped
+                 'K="abc': '"abc',                         # unchanged from before: no closing quote
+                 "export K=abc # note": "abc",
+                 "K=abc": "abc"}
+        for line, want in cases.items():
+            with self.subTest(line=line):
+                p = os.path.join(self.d, "e")
+                with open(p, "w") as f:
+                    f.write("OTHER=1\n" + line + "\r\n")
+                self.assertEqual(L.load_env_value(p, "K"), want)
+
     def test_check_host_parent(self):
         p = os.path.join(self.d, "vaults"); os.mkdir(p); os.chmod(p, 0o711)
         L.check_host_parent(p, uid=os.geteuid())                       # ok
