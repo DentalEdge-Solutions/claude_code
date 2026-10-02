@@ -12,7 +12,8 @@ bundle is NOT read-only: D10.1 and D10.2 run `run-client-audit --probe-env` and
 proxy), create and remove `/var/lib/hermes/probe`, and make one outbound CONNECT to
 `api.anthropic.com` through the proxy. `--fingerprint-only` and `--credentials-only` run no
 probe. Three rules, each tested:
-  * nothing printed carries a credential value, a client slug or a customer id;
+  * nothing printed carries a credential value (Google, Anthropic, OpenRouter or the dashboard password),
+    a client slug or a customer id;
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
@@ -55,6 +56,15 @@ HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history",
 # `unlisted`, which the reviewer must see explained (review #3, not-on-checklist #3).
 AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env",
                     "/etc/hermes/.env.anthropic": "anthropic-key"}
+# The secret values each authorised non-Google file may hold, as (env name, label). D2.1 names the
+# labels a file holds (`secrets_held`), the values join the known secrets the leak checks look
+# for, and each is a row of the authorised credential set (`credentials`, --credentials-only).
+OTHER_SECRET_NAMES = {
+    "/etc/hermes/.env.anthropic": (("ANTHROPIC_API_KEY", "anthropic-key"),),
+    CHECKOUT + "/infra/hermes-agent/.env": (("OPENROUTER_API_KEY", "openrouter-key"),
+                                            ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password"))}
+# Listed, never fingerprinted: a short hash of a value a person may have chosen can be guessed offline.
+UNFINGERPRINTED = ("dashboard-password",)
 # Writable in-memory filesystems `find / -xdev` never crosses: the collector sweeps them
 # itself, by name and by content (review #3 §5 — the manual sweep went stale).
 MEMORY_FSTYPES = {"tmpfs", "ramfs"}
@@ -400,6 +410,30 @@ def installed_credentials(host, sweep=None):
     return infos, secrets, unparsed, unreadable
 
 
+def _other_secrets(host, p):
+    """[(label, value)] for each non-empty secret the authorised file `p` holds."""
+    return [(label, v) for name, label in OTHER_SECRET_NAMES[p]
+            for v in [CAL.load_env_value(host.path(p), name)] if v]
+
+
+def other_credentials(host):
+    """(rows, secrets) for the non-Google secrets installed: one {label, sha12} row each, sha12
+    null for an UNFINGERPRINTED one. A file that is absent adds nothing (D2.1's pass rule names
+    the missing row); one that is there and cannot be read is could-not-check, never "none"."""
+    rows, secrets = [], []
+    for p in sorted(OTHER_SECRET_NAMES):
+        try:
+            held = _other_secrets(host, p)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as e:
+            raise CouldNotCheck(f"{AUTHORISED_OTHER[p]}: {type(e).__name__}")
+        for label, v in held:
+            rows.append({"label": label, "sha12": None if label in UNFINGERPRINTED else R.sha12(v)})
+            secrets.append(v)
+    return sorted(rows, key=R.canon), secrets
+
+
 def d2_1(host, ctx):
     """Every sweep hit gets a kind: example, credential (a Google Ads credential), unparsed
     (credential-shaped but not parseable), empty, authorised-other (AUTHORISED_OTHER, with
@@ -425,15 +459,13 @@ def d2_1(host, ctx):
                         row["kind"] = "empty"
                     elif p in AUTHORISED_OTHER:
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
-                        name = "OPENROUTER_API_KEY"                 # the gateway .env: Hermes's own key
                         if p == "/etc/hermes/.env.anthropic":
                             row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
-                            name = "ANTHROPIC_API_KEY"
-                        # The value is loaded only to join the known secrets (assert_no_secret,
-                        # D2.2, D2.3, D10.7 look for it); it is never reported.
-                        key = CAL.load_env_value(host.path(p), name)
-                        if key:
-                            ctx.setdefault("secrets", []).append(key)
+                        # The values are loaded only to join the known secrets (assert_no_secret,
+                        # D2.2, D2.3, D10.7 look for them); the row names which, never a value.
+                        held = _other_secrets(host, p)
+                        row["secrets_held"] = [label for label, _ in held]
+                        ctx.setdefault("secrets", []).extend(v for _, v in held)
         except OSError as e:
             row["error"] = type(e).__name__
             if not is_example:
@@ -1084,7 +1116,8 @@ def collect_with_secrets(host, fp_key):
     try:
         sweep = _shared_sweep(host, ctx)                   # A3: reuse D2.1's sweep, don't re-run find
         infos, secrets, _unparsed, _unreadable = installed_credentials(host, sweep=sweep)
-        creds = R.credential_set(infos)
+        other, other_secrets = other_credentials(host)
+        creds, secrets = R.credential_set(infos) + other, secrets + other_secrets
     except CouldNotCheck as e:
         secrets, creds = [], {R.COULD_NOT_CHECK: str(e)}
     bundle = {"schema": 1, "kind": "box", "collected_at": R.utc_now(), "items": items,
@@ -1145,6 +1178,7 @@ def _main(a, host, read_key):
     elif a.credentials_only:
         try:
             infos, secrets, unparsed, unreadable = installed_credentials(host)
+            other, other_secrets = other_credentials(host)
         except CouldNotCheck as e:
             print(f"collect-review-evidence: {e} — refusing to certify the installed set",
                   file=sys.stderr)
@@ -1154,7 +1188,7 @@ def _main(a, host, read_key):
                   "unreadable credential-shaped file(s) found — refusing to certify the "
                   "installed set", file=sys.stderr)
             return 2
-        out = R.credential_set(infos)
+        out, secrets = R.credential_set(infos) + other, secrets + other_secrets
     else:
         out, secrets = collect_with_secrets(host, fp_key)
     text = json.dumps(ctx["redactor"].obj(out), indent=2, sort_keys=True)
