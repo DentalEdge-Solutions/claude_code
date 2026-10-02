@@ -587,7 +587,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `infra/hermes-agent/bin/security-review-checklist.test.py` (existing; run, do not edit)
 
 **Interfaces:**
-- Consumes: the field names from Tasks 2 to 4, exactly: `host_credential_files_visible`, `proxy_rc`, `drafter_rc`, `secrets_held`, the `{label, sha12}` rows of `credentials`, `could-not-check` inside `sudo_rules` and as `broker_user_groups`, and the 90 s grace.
+- Consumes: the field names from Tasks 2 to 4, exactly: `host_credential_files_visible`, `proxy_rc`, `drafter_rc`, `secrets_held`, `secrets_not_searchable`, the `{label, sha12}` rows of `credentials` (or `could-not-check` when a non-Google secret file cannot be read), `could-not-check` inside `sudo_rules` and as `broker_user_groups`, and the 90 s grace.
 - Produces: nothing code relies on.
 
 Every checklist item is one very long line. Make each edit with an exact, unique substring; do not re-wrap or reflow any line. Change nothing that is not listed here.
@@ -595,25 +595,25 @@ Every checklist item is one very long line. Make each edit with an exact, unique
 - [ ] **Step 1: The version and its note.** Change `version: 1.14` to `version: 1.15`. In the header paragraph, append this after the last existing `(v1.14: ...)` note, on the same line, separated by one space:
 
 ```
-(v1.15: review #6's follow-ups. D2.1: each `authorised-other` row names the secrets it holds (`secrets_held`), the gateway `.env` may hold the dashboard password, and the bundle's `credentials` lists the non-Google secrets too. D10.1: `host_credential_files_visible`, and a probe that times out is sent SIGTERM and given 90 s to clean up. D10.2: `proxy_rc` and `drafter_rc`. D10.3: `sudo_rules` and `broker_user_groups` can each be `could-not-check` without losing the item. D10.7: the dashboard password is a known secret.)
+(v1.15: review #6's follow-ups. D2.1: each `authorised-other` row names the secrets it holds (`secrets_held`) and any too short to search for (`secrets_not_searchable`), the gateway `.env` may hold the dashboard password, and the bundle's `credentials` lists the non-Google secrets too. D10.1: `host_credential_files_visible`, and a probe that times out is sent SIGTERM and given 90 s to clean up. D10.2: `proxy_rc` and `drafter_rc`. D10.3: `sudo_rules` and `broker_user_groups` can each be `could-not-check` without losing the item. D10.7: the dashboard password is a known secret.)
 ```
 
 - [ ] **Step 2: D2.1.** Four edits in the D2.1 item.
 
-  1. In **expected**, replace `` `anthropic_key_state: real` (`dummy` and `missing` mean the audit cannot draft and are a FAIL); `` with `` `anthropic_key_state: real` (`dummy` and `missing` mean the audit cannot draft and are a FAIL), `secrets_held: ["anthropic-key"]`; ``.
+  1. In **expected**, replace `` `anthropic_key_state: real` (`dummy` and `missing` mean the audit cannot draft and are a FAIL); `` with `` `anthropic_key_state: real` (`dummy` and `missing` mean the audit cannot draft and are a FAIL), `secrets_held: ["anthropic-key"]`, `secrets_not_searchable: []`; ``.
   2. In **expected**, replace `` `mode 0o600`, holding the OpenRouter key (the collector reads the file's content to classify it and to load the key's value for the leak checks of D2.2, D2.3 and D10.7; the content is never reported. `` with:
 
 ```
-`mode 0o600`, `secrets_held` exactly `["openrouter-key"]`, or `["openrouter-key", "dashboard-password"]` when the dashboard is switched on (BRING-UP Phase 7 writes `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` into this file; the dashboard is off by default, and the operator states in the report whether it is on) (the collector reads the file's content to classify it and to load the values `secrets_held` names for the leak checks of D2.2, D2.3 and D10.7; the content is never reported.
+`mode 0o600`, `secrets_held` exactly `["openrouter-key"]`, or `["openrouter-key", "dashboard-password"]` when the dashboard is switched on (BRING-UP Phase 7 writes `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` into this file; the dashboard is off by default, and the operator states in the report whether it is on), `secrets_not_searchable: []` (the labels in `secrets_held` whose value is shorter than 8 characters: the leak checks and the collector's own output check skip a value that short, so it is held and never looked for) (the collector reads the file's content to classify it and to load the values `secrets_held` names for the leak checks of D2.2, D2.3 and D10.7; the content is never reported. The collector loads those values from the two files directly, before any item runs, so the leak checks look for them whether or not the sweep reached the file.
 ```
 
   3. In **expected**, immediately before `` `example` rows are templates. `` insert:
 
 ```
-The bundle's top-level `credentials` is the authorised credential set, and `--credentials-only` prints the same list: the Google rows (`role`, `refresh_token_sha12`, `client_id_sha12`), then one row per non-Google secret installed (`label`, `sha12`): `anthropic-key` and `openrouter-key` each with a `sha12`, and `dashboard-password` with `sha12: null` when a password is set (a password is listed and never fingerprinted). A `credentials` row whose label is not one of those three, or a missing `anthropic-key` or `openrouter-key` row, is a FAIL. 
+The bundle's top-level `credentials` is the authorised credential set, and `--credentials-only` prints the same list: the Google rows (`role`, `refresh_token_sha12`, `client_id_sha12`), then one row per non-Google secret installed (`label`, `sha12`): `anthropic-key` and `openrouter-key` each with a `sha12`, and `dashboard-password` with `sha12: null` when a password is set (a password is listed and never fingerprinted). A `credentials` row whose label is not one of those three, or a missing `anthropic-key` or `openrouter-key` row, is a FAIL. When one of the two non-Google secret files is there and cannot be read, `credentials` is `could-not-check` (the reason names the file's label): the leak counts of D2.2, D2.3 and D10.7 were then taken without the non-Google values, so D2.1 and those three items are CANNOT-VERIFY. 
 ```
 
-  4. In **pass rule**, replace `` A missing `anthropic-key` or `gateway-env` row is a FAIL. `` with `` A missing `anthropic-key` or `gateway-env` row is a FAIL, and so is a `secrets_held` other than stated above (a missing `anthropic-key` or `openrouter-key`, or a label not listed). A `dashboard-password` entry with no operator statement that the dashboard is on is CANNOT-VERIFY. ``
+  4. In **pass rule**, replace `` A missing `anthropic-key` or `gateway-env` row is a FAIL. `` with `` A missing `anthropic-key` or `gateway-env` row is a FAIL, and so is a `secrets_held` other than stated above (a missing `anthropic-key` or `openrouter-key`, or a label not listed), and so is a non-empty `secrets_not_searchable` (BRING-UP Phase 7 requires 16 characters or more for the dashboard password: the operator sets a proper value and re-collects before a report is written). A `dashboard-password` entry with no operator statement that the dashboard is on is CANNOT-VERIFY. ``
 
 - [ ] **Step 3: D10.1.** Three edits.
 
