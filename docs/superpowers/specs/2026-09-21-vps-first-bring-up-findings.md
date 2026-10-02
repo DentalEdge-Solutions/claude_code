@@ -626,11 +626,11 @@ and the target account.
 and none of Hermes's checks run then. Only the access audit sees it. **Fix:** the access audit runs
 on every security review (D3.1) and after any console change to either account.
 
-### F26 to F42: opened at security review #6 (2026-10-02)
+### F26 to F43: opened at or after security review #6 (2026-10-02)
 
 Review #6 (PASS 34/34, checklist v1.14) accepted sixteen findings opened since review #5, each
 with a reason, under D9.1. They were recorded only in the operator's evidence for that review;
-this section is their record. F42 is the reviewer's "Not on the checklist" entry 7. "Fixed"
+this section is their record. F42 is the reviewer's "Not on the checklist" entry 7. F43 was found while the follow-up change was built and reviewed. "Fixed"
 means fixed in the review #6 follow-up change (checklist v1.15), which re-opens the review: the
 box is not at that code until it is pulled and review #7 passes.
 
@@ -653,6 +653,7 @@ box is not at that code until it is pulled and review #7 passes.
 | F40 | BRING-UP part 2 step 7 removed a leftover key file with `rm -f` where part 1 step 5 uses `shred -u`. | accepted: the file was shredded in part 1 on this box | **fixed**; the dashboard step's `.env.new` is shredded too |
 | F41 | The README's "one non-Google secret file" paragraph was stale. | accepted: documentation | **fixed** |
 | F42 | The dashboard basic-auth password was outside the D2.1 inventory and the leak checks. | accepted for review #6: the dashboard is off by default and bound to localhost | **fixed**: D2.1 names it (`secrets_held`) and its value is a known secret; it is listed and never fingerprinted |
+| F43 | The review collector parsed the gateway `.env` itself, while the gateway reads it through Docker Compose: a line the two read differently (a quoted value followed by text, an escape, `$`, `NAME: value`) left the live key out of the leak checks and the output guard, silently. The output guard also could not match a value that JSON escapes. | not known at review #6 (found 2026-10-02) | **fixed**: the collector also reads the two values from the running gateway (D4.1 `secret_env`), and the guard checks the escaped forms |
 
 Still open from review #6, not findings against the code: the retired ADMIN write token is valid at
 Google (accepted under D3.2; revoke it when the shared grant can be separated), and two reviewer
@@ -711,6 +712,6 @@ name; capture the whole Data Training section of the OpenRouter privacy screen).
     other project's grant (canon rule 1). Instead every copy is destroyed; this is an accepted risk. The
     mutation tier and the live gate are parked.
 18. **2026-10-02: security review #6 PASS (34/34, checklist v1.14); Option B (chat-triggered
-    audits) is live on the box.** Its findings are F26 to F42 above. The follow-up change that
-    fixes ten of them moves the checklist to v1.15 and changes the box fingerprint, so it needs a
+    audits) is live on the box.** Its findings are F26 to F43 above. The follow-up change that
+    fixes eleven of them moves the checklist to v1.15 and changes the box fingerprint, so it needs a
     pull on the box and review #7 before the box is at that code.
