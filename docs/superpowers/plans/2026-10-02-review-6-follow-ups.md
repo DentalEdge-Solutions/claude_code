@@ -8,6 +8,13 @@
 
 **Tech Stack:** Python 3 standard library only, `unittest`. Tests run with `infra/hermes-agent/bin/run-bin-tests.sh`.
 
+**Superseded during review (read the code, not these listings).** Three parts of this plan were found wrong by the task reviews and the whole-branch review, and were replaced on the branch:
+- Task 3's `_run_real` listing ends its kill path with `p.communicate()`, which can wait forever on a pipe a grandchild holds. The code waits for the child only and closes the pipes (`with p:`).
+- Task 4's wiring (an all-or-nothing `other_credentials` called inside the existing `try`, values seeded only through D2.1's row, one `load_env_value` call per name) could drop a secret value from the leak checks and from `assert_no_secret`. The code reads each secret file once and tolerantly, treats every value a name is given as a known secret, seeds them before any item runs, and reports a damaged or duplicated file as `could-not-check`. `other_credentials` returns `(rows, secrets, failed)`, and D2.1 rows also carry `secrets_not_searchable`.
+- Task 1's `_env_value` listing keeps surrounding whitespace. The code drops it.
+
+Task 5's text below was amended for the first two; the checklist on the branch is the authority.
+
 **Spec:** There is no separate design spec. The requirements are `docs/superpowers/handoffs/2026-10-02-option-b-live-review-6-pass.md` ("Open follow-ups", items 1, 2 and 4 to 9) and `docs/security-reviews/2026-10-02-review-6.md` ("Not on the checklist", entries 2 and 7). Item 3 (revoking the retired token) is an operator action at Google and is out of scope. Item 7 (widening D10.6's top-level rule) is deliberately **not** done: the rule fails closed, no real config needs it widened, and it is recorded as accepted in Task 6.
 
 ## Global Constraints
