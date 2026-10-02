@@ -461,12 +461,13 @@ def d2_1(host, ctx):
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
                         if p == "/etc/hermes/.env.anthropic":
                             row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
-                        # The values are loaded only to join the known secrets (assert_no_secret,
-                        # D2.2, D2.3, D10.7 look for them); the row names which, never a value.
+                        # The values already joined the known secrets (collect_with_secrets seeds
+                        # them); the row names which are held, never a value.
                         held = _other_secrets(host, p)
                         row["secrets_held"] = [label for label, _ in held]
-                        ctx.setdefault("secrets", []).extend(v for _, v in held)
-        except OSError as e:
+                        # Held but too short for the leak counters to search for (R._MIN_SECRET_LEN).
+                        row["secrets_not_searchable"] = [l for l, v in held if len(v) < R._MIN_SECRET_LEN]
+        except (OSError, ValueError) as e:                  # e.g. invalid UTF-8: this row only
             row["error"] = type(e).__name__
             if not is_example:
                 row["kind"] = "unreadable"
@@ -1108,6 +1109,14 @@ def collect_with_secrets(host, fp_key):
     """The bundle (redacted) and every credential value seen, for assert_no_secret."""
     ctx = context(host, fp_key)
     items = {}
+    # The non-Google secrets are loaded first and on their own, so the leak checks (D2.2, D2.3,
+    # D10.7) search for them whether or not the sweep reaches the files.
+    other, other_secrets, other_err = [], [], None
+    try:
+        other, other_secrets = other_credentials(host)
+        ctx.setdefault("secrets", []).extend(other_secrets)
+    except CouldNotCheck as e:
+        other_err = e
     for iid, fn in PROBES.items():
         try:
             items[iid] = {"status": R.OBSERVED, "data": fn(host, ctx)}
@@ -1116,8 +1125,7 @@ def collect_with_secrets(host, fp_key):
     try:
         sweep = _shared_sweep(host, ctx)                   # A3: reuse D2.1's sweep, don't re-run find
         infos, secrets, _unparsed, _unreadable = installed_credentials(host, sweep=sweep)
-        other, other_secrets = other_credentials(host)
-        creds, secrets = R.credential_set(infos) + other, secrets + other_secrets
+        creds = {R.COULD_NOT_CHECK: str(other_err)} if other_err else R.credential_set(infos) + other
     except CouldNotCheck as e:
         secrets, creds = [], {R.COULD_NOT_CHECK: str(e)}
     bundle = {"schema": 1, "kind": "box", "collected_at": R.utc_now(), "items": items,

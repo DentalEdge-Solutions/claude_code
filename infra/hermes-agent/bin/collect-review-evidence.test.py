@@ -631,6 +631,51 @@ class TestOptionBLayout(Base):
         self.assertNotIn(self.root, str(cm.exception))                 # the reason names the label, not a path
         self.assertEqual(CE.other_credentials(self.host())[1], [self.OPENROUTER])   # control: readable again
 
+    def test_an_unreadable_gateway_env_keeps_the_google_secrets_and_costs_only_its_row(self):
+        with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
+            f.write(b"OPENROUTER_API_KEY=\xff\xfe\n")
+        self.outputs[("find",)] = (0, f"{CE.AGENT_DIR}/.env.gaw\n{self.GATEWAY_ENV}\n", "")
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn(TOKEN, secrets)
+        (reason,) = bundle["credentials"].values()
+        self.assertEqual(list(bundle["credentials"]), [R.COULD_NOT_CHECK])
+        self.assertIn("gateway-env", reason)
+        self.assertNotIn(self.root, reason)
+        d2_1 = bundle["items"]["D2.1"]
+        self.assertEqual(d2_1["status"], R.OBSERVED)
+        row = [r for r in d2_1["data"]["files"] if r["path"] == self.GATEWAY_ENV][0]
+        self.assertEqual(row["kind"], "unreadable")
+
+    def test_the_dashboard_password_is_searched_for_even_when_the_sweep_misses_the_file(self):
+        self._w(self.GATEWAY_ENV, f"HERMES_DASHBOARD_BASIC_AUTH_PASSWORD={self.DASH}\n")
+        self.outputs[("journalctl", "-o")] = (0, f"basic auth failed for {self.DASH}\n", "")
+        it = CE.collect(self.host(), self.KEY)["items"]["D2.3"]
+        self.assertEqual(it["data"]["journal"]["known_secret_hits"], 1)
+
+    def test_d2_1_names_the_held_secrets_too_short_to_be_searched_for(self):
+        self._w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-SECRETVALUE\n")
+        for pw, expect in (("short77", ["dashboard-password"]), (self.DASH, [])):
+            self._w(self.GATEWAY_ENV, f"OPENROUTER_API_KEY={self.OPENROUTER}\n"
+                                      f"HERMES_DASHBOARD_BASIC_AUTH_PASSWORD={pw}\n")
+            self.outputs[("find",)] = (0, f"{self.GATEWAY_ENV}\n/etc/hermes/.env.anthropic\n", "")
+            rows = {r["path"]: r for r in CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["files"]}
+            row = rows[self.GATEWAY_ENV]
+            self.assertEqual(row["secrets_held"], ["openrouter-key", "dashboard-password"])
+            self.assertEqual(row["secrets_not_searchable"], expect)
+            self.assertEqual(rows["/etc/hermes/.env.anthropic"]["secrets_not_searchable"], [])
+
+    def test_credentials_only_refuses_when_an_authorised_file_cannot_be_read(self):
+        self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
+
+        def denied(path, name):
+            raise PermissionError(path)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(CE.CAL, "load_env_value", denied), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = CE.main(["--credentials-only"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertTrue("anthropic-key" in err.getvalue() or "gateway-env" in err.getvalue())
+
     def test_d2_1_gateway_env_without_an_openrouter_key_adds_no_secret(self):
         for body in ("HERMES_SPOOL_DIR=/var/lib/hermes/spool\n", "OPENROUTER_API_KEY=\nHERMES_SPOOL_DIR=/x\n"):
             self._gateway_env(body)
