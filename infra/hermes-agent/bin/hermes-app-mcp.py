@@ -8,7 +8,7 @@ a result back. It holds no credential, does no network I/O and makes no policy d
 everything is decided by the host-side broker, which treats every byte written here as hostile.
 A refusal is returned as a normal (non-error) tool result stating it is final, never as a
 retryable error: a model that retries a refusal is a model applying pressure to a guard."""
-import argparse, json, os, sys, time
+import argparse, json, os, sys, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 
@@ -118,6 +118,77 @@ def serve_line(server, line):
         return _err(mid, -32603, "internal error") if mid is not None else None
 
 
+MAX_WAITING = 8     # run/list calls waiting on the broker at once; one more is refused, never queued
+
+
+def _waits(server, msg):
+    """True for a tools/call that waits on the broker's result (run, list): minutes, not milliseconds."""
+    if not isinstance(msg, dict) or msg.get("method") != "tools/call" or msg.get("id") is None:
+        return False
+    p = msg.get("params")
+    name = p.get("name") if isinstance(p, dict) else None
+    return isinstance(name, str) and server.by_tool.get(name) in ("run", "list")
+
+
+def serve(server, lines, write, max_waiting=MAX_WAITING):
+    """Answer every input line. A run or list call waits for the broker's result, so it gets its
+    own thread and this loop keeps reading: the client's liveness ping must be answered WHILE a
+    call waits. Hermes pings each MCP server on a cadence (default 180 s), allows 30 s, and
+    reconnects on silence, which discarded the reply of every audit that outlasted a ping
+    (first box run, 2026-10-02: the audit finished `ok` in 233 s, Hermes saw a 360 s timeout).
+    One lock keeps replies whole; a reply nobody can read any more is dropped, never raised."""
+    lock = threading.Lock()
+    slots = threading.BoundedSemaphore(max_waiting)
+    closed = []                                   # non-empty once the input has ended
+
+    def emit(out):
+        if out is None:
+            return
+        try:
+            with lock:
+                if not closed:
+                    write(json.dumps(out) + "\n")
+        except (OSError, ValueError):             # the client hung up (closed pipe / closed file)
+            pass
+
+    def waited(line):
+        try:
+            emit(serve_line(server, line))
+        finally:
+            slots.release()
+
+    def started(line):
+        """True once the call has its own thread; False, holding nothing, at the cap or when the
+        OS has no thread to give (RuntimeError from start() must not end this loop)."""
+        if not slots.acquire(blocking=False):
+            return False
+        try:
+            threading.Thread(target=waited, args=(line,), daemon=True).start()
+        except RuntimeError:
+            slots.release()
+            return False
+        return True
+
+    for line in lines:
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            msg = None
+        if _waits(server, msg):
+            if not started(line):
+                emit({"jsonrpc": "2.0", "id": msg["id"],
+                      "result": server._text({"error": "too many requests are waiting; try again later"},
+                                             error=True)})
+            continue
+        emit(serve_line(server, line))
+    # EOF: the client is gone and the process is about to exit with calls still waiting on daemon
+    # threads. Wait out a reply being written and let none start: a daemon thread inside
+    # sys.stdout.write when the interpreter shuts down aborts it ("could not acquire lock for
+    # <_io.BufferedWriter name='<stdout>'> at interpreter shutdown", SIGABRT) or leaves half a line.
+    with lock:
+        closed.append(True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--app", required=True)
@@ -126,10 +197,16 @@ def main(argv=None):
     a = ap.parse_args(argv)
     m = A.load_manifest(os.path.join(a.manifest_dir, a.app + ".json"), a.app)
     s = Server(m, A.spool_dir(a.app, a.spool_root))
-    for line in sys.stdin:
-        out = serve_line(s, line)
-        if out is not None:
-            sys.stdout.write(json.dumps(out) + "\n"); sys.stdout.flush()
+
+    def write(text):
+        try:
+            sys.stdout.write(text); sys.stdout.flush()
+        except BrokenPipeError:                       # the client closed its end: serve drops the reply.
+            fd = os.open(os.devnull, os.O_WRONLY)     # What is left in the buffer goes to /dev/null, or the
+            os.dup2(fd, sys.stdout.fileno())          # flush at exit complains on stderr and exits 120.
+            os.close(fd)
+            raise
+    serve(s, sys.stdin, write)
 
 
 if __name__ == "__main__":
