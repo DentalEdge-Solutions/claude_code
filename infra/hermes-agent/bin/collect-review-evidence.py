@@ -82,6 +82,9 @@ APP_UNITS = ("hermes-app-broker@.service", "hermes-app-runner@.service", "hermes
 APP_RESULTS = "/var/lib/hermes/spool/apps/" + APP + "/results"
 # The probes start real containers: --probe-env's worst case is about 480 s, --probe-egress's 240 s.
 PROBE_TIMEOUT = 600
+# On a timeout the child gets SIGTERM and this long to clean up before SIGKILL: run-client-audit
+# removes its probe containers and throwaway dirs on TERM (each cleanup command is bounded there).
+TERM_GRACE = 90
 # Spec §6's hardening list, plus what the unit's environment holds (the declared map gives the
 # broker and the runner no credential; a drop-in could add one without changing the unit file).
 ENV_PROPS = ("Environment", "EnvironmentFiles")
@@ -109,12 +112,24 @@ _ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=
 
 def _run_real(argv, timeout=60):
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout, p.stderr
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: not found"
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out, err
     except subprocess.TimeoutExpired:
+        p.terminate()                           # not kill(): the child's `finally` must get to run
+        try:
+            p.communicate(timeout=TERM_GRACE)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
         return 124, "", f"{argv[0]}: timed out"
+    except BaseException:                       # as subprocess.run: never leave the child behind
+        p.kill()
+        p.wait()
+        raise
 
 
 class Host:
@@ -788,17 +803,24 @@ def _same_file(host, a, b):
 
 
 def _sudo_rules(host, user):
-    """`sudo -l -U <user>` as shape only: its text names the host, and its rules are not ours to print."""
+    """`sudo -l -U <user>` as shape only: its text names the host, and its rules are not ours to
+    print. It has two answers, "is not allowed to run sudo" and "may run the following commands";
+    with neither (sudo did not run, an unknown user, another locale) nothing was learned."""
     rc, out, _ = host.run(["sudo", "-l", "-U", user])
     lines = out.splitlines()
     grant = next((i for i, l in enumerate(lines) if "may run the following commands" in l), None)
-    return {"rc": rc, "not_allowed": any("is not allowed to run sudo" in l for l in lines),
+    not_allowed = any("is not allowed to run sudo" in l for l in lines)
+    if grant is None and not not_allowed:
+        return {"rc": rc, "not_allowed": R.COULD_NOT_CHECK, "command_lines": R.COULD_NOT_CHECK}
+    return {"rc": rc, "not_allowed": not_allowed,
             "command_lines": 0 if grant is None else sum(1 for l in lines[grant + 1:] if l.strip())}
 
 
 def d10_3(host, ctx):
     # is-active exits non-zero for every state but `active`: the state is the answer, not a failure.
     path_state = host.run(["systemctl", "is-active", f"hermes-app-runner@{APP}.path"])[1].strip()
+    # A missing app user is `id`'s non-zero exit: it costs this value, not the unit properties.
+    rc, groups, _ = host.run(["id", "-nG", APP_USER])
     return {"broker_unit": _unit_props(host, f"hermes-app-broker@{APP}", BROKER_PROPS),
             "runner_unit": _unit_props(host, f"hermes-app-runner@{APP}", ENV_PROPS),
             "installed_equal_repo": {u: _same_file(host, "/etc/systemd/system/" + u,
@@ -806,7 +828,7 @@ def d10_3(host, ctx):
                                      for u in APP_UNITS},
             # The instances of those three templates: equal unit files prove nothing with a drop-in.
             "drop_in_paths": {u: _drop_ins(host, u) for u in (t.replace("@.", f"@{APP}.") for t in APP_UNITS)},
-            "broker_user_groups": _ok(host, ["id", "-nG", APP_USER]).split(),
+            "broker_user_groups": groups.split() if rc == 0 else R.COULD_NOT_CHECK,
             "sudo_rules": _sudo_rules(host, APP_USER),
             "runner_path_active": path_state or R.COULD_NOT_CHECK}
 

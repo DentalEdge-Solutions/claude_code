@@ -819,6 +819,27 @@ class TestD10(Base):
         self.assertEqual(it["status"], R.OBSERVED)
         self.assertEqual(it["data"]["runner_path_active"], "inactive")
 
+    def test_d10_3_sudo_that_gave_neither_answer_is_could_not_check(self):
+        self._units()
+        for rc, out in ((127, ""), (1, "sudo: unknown user hermes-app-ads-audit\n"), (0, ""),
+                        (0, "L'utilisateur hermes-app-ads-audit n'est pas autorisé\n")):
+            with self.subTest(rc=rc, out=out):
+                self.outputs[("sudo", "-l", "-U")] = (rc, out, "")
+                it = self._item("D10.3")
+                self.assertEqual(it["status"], R.OBSERVED)
+                self.assertEqual(it["data"]["sudo_rules"],
+                                 {"rc": rc, "not_allowed": R.COULD_NOT_CHECK, "command_lines": R.COULD_NOT_CHECK})
+
+    def test_d10_3_a_missing_app_user_costs_only_the_groups(self):
+        self._units()
+        self.outputs[("id", "-nG")] = (1, "", "id: 'hermes-app-ads-audit': no such user\n")
+        it = self._item("D10.3")
+        self.assertEqual(it["status"], R.OBSERVED)
+        self.assertEqual(it["data"]["broker_user_groups"], R.COULD_NOT_CHECK)
+        self.assertEqual(it["data"]["broker_unit"]["User"], "hermes-app-ads-audit")
+        self.assertEqual(it["data"]["runner_path_active"], "active")
+        self.assertNotIn("no such user", json.dumps(it))
+
     # ---- D10.4 -------------------------------------------------------------------------
     def _resolver(self):
         names = {"root": 0, "hermes": 10000, "hermes-app-ads-audit": 990}
@@ -1339,6 +1360,39 @@ class TestD10(Base):
     def test_d10_items_survive_the_redactor_and_the_secret_check(self):
         out = json.dumps(CE.collect(self.host(), self.KEY))
         self.assertNotIn("acme-dental", out); self.assertNotIn("1234567890", out)
+
+
+class TestRunReal(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.marker = os.path.join(self.d, "cleaned")
+
+    def _child(self, on_term):
+        # The 2 s timeout the tests use is what gives the interpreter time to install the handler.
+        return [sys.executable, "-c",
+                "import signal, sys, time\n"
+                f"def h(s, f):\n    {on_term}\n"
+                "signal.signal(signal.SIGTERM, h)\n"
+                "time.sleep(60)\n"]
+
+    def test_a_timeout_sends_sigterm_and_waits_for_the_cleanup(self):
+        argv = self._child(f"open({self.marker!r}, 'w').close(); sys.exit(143)")
+        rc, out, err = CE._run_real(argv, timeout=2)
+        self.assertEqual((rc, out), (124, ""))
+        self.assertIn("timed out", err)
+        self.assertTrue(os.path.exists(self.marker))            # the child's own cleanup ran
+
+    def test_a_child_that_ignores_sigterm_is_killed_after_the_grace(self):
+        argv = self._child("pass")
+        with mock.patch.object(CE, "TERM_GRACE", 1):
+            rc, _, _ = CE._run_real(argv, timeout=2)
+        self.assertEqual(rc, 124)
+
+    def test_ordinary_results_are_unchanged(self):
+        self.assertEqual(CE._run_real([sys.executable, "-c",
+                                       "import sys; print('o'); print('e', file=sys.stderr); sys.exit(3)"]),
+                         (3, "o\n", "e\n"))
+        self.assertEqual(CE._run_real(["/nonexistent/binary-for-this-test"])[0], 127)
 
 
 class TestReview5FollowUps(Base):
