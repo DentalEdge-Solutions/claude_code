@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, hashlib, importlib.util, io, json, os, sys, tempfile, time, unittest
+import contextlib, hashlib, importlib.util, io, json, os, shutil, sys, tempfile, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1734,10 +1734,13 @@ class TestD10(Base):
 class TestRunReal(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
         self.marker = os.path.join(self.d, "cleaned")
 
+    # What gives the child's interpreter time to install its handler before SIGTERM arrives.
+    TIMEOUT = 5
+
     def _child(self, on_term):
-        # The 2 s timeout the tests use is what gives the interpreter time to install the handler.
         return [sys.executable, "-c",
                 "import signal, sys, time\n"
                 f"def h(s, f):\n    {on_term}\n"
@@ -1746,16 +1749,20 @@ class TestRunReal(unittest.TestCase):
 
     def test_a_timeout_sends_sigterm_and_waits_for_the_cleanup(self):
         argv = self._child(f"open({self.marker!r}, 'w').close(); sys.exit(143)")
-        rc, out, err = CE._run_real(argv, timeout=2)
+        rc, out, err = CE._run_real(argv, timeout=self.TIMEOUT)
         self.assertEqual((rc, out), (124, ""))
         self.assertIn("timed out", err)
         self.assertTrue(os.path.exists(self.marker))            # the child's own cleanup ran
 
     def test_a_child_that_ignores_sigterm_is_killed_after_the_grace(self):
         argv = self._child("pass")
+        t0 = time.monotonic()
         with mock.patch.object(CE, "TERM_GRACE", 1):
-            rc, _, _ = CE._run_real(argv, timeout=2)
+            rc, _, _ = CE._run_real(argv, timeout=self.TIMEOUT)
+        elapsed = time.monotonic() - t0
         self.assertEqual(rc, 124)
+        self.assertGreaterEqual(elapsed, self.TIMEOUT + 1)      # the grace was waited out before the kill
+        self.assertLess(elapsed, 15)                            # and the kill ended it: not the child's 60 s
 
     def test_a_grandchild_holding_the_pipe_cannot_hang_the_runner(self):
         pidfile = os.path.join(self.d, "grandchild.pid")
@@ -1774,9 +1781,9 @@ class TestRunReal(unittest.TestCase):
                 "time.sleep(60)\n"]
         t0 = time.monotonic()
         with mock.patch.object(CE, "TERM_GRACE", 1):
-            rc, _, _ = CE._run_real(argv, timeout=2)
+            rc, _, _ = CE._run_real(argv, timeout=self.TIMEOUT)
         self.assertEqual(rc, 124)
-        self.assertLess(time.monotonic() - t0, 10)      # not the grandchild's 20 s
+        self.assertLess(time.monotonic() - t0, 12)      # timeout + grace is 6 s; not the grandchild's 20 s
 
     def test_ordinary_results_are_unchanged(self):
         self.assertEqual(CE._run_real([sys.executable, "-c",
