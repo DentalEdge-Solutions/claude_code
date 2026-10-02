@@ -290,6 +290,14 @@ class TestTopLevel(unittest.TestCase):
                     self.assertEqual(M.block_value(text), (None, "top_level_not_plain"))
                     self.assertEqual(M.compare(text, template()),
                                      {"equals_repo": False, "reason": "top_level_not_plain", "canonical_sha256": None})
+        # Known causes on a file that is otherwise fine (a FAIL with this reason until the rule is
+        # deliberately widened): a top-level key that holds an indentless block list, the PyYAML
+        # and ruamel default, and a top-level key named outside [A-Za-z_][A-Za-z0-9_-]*.
+        for healthy in ("platforms:\n- name: x\n  token: t\n", "api.base: http/x\n", "2fa: true\n", '"on": true\n'):
+            for text in (box() + healthy, healthy + box()):
+                with self.subTest(healthy=healthy):
+                    self.assertEqual(M.block_value(text), (None, "top_level_not_plain"))
+        self.assertEqual(M.block_value(box() + "platforms:\n  - name: x\n    token: t\n"), (EXPECTED, None))
         # Indented content before any top-level key is not under a plain key.
         self.assertEqual(M.block_value("  stray: 1\n" + box()), (None, "top_level_not_plain"))
         self.assertEqual(M.block_value(" mcp_servers:\n   a:\n     b: c\n"), (None, "top_level_not_plain"))
@@ -333,7 +341,6 @@ class TestHostileBlocks(unittest.TestCase):
     def test_hostile_blocks_are_unparseable_not_a_crash(self):
         R = REWRITTEN_BLOCK
         cases = {
-            "a tab as indentation": R.replace("    env: {}", "\tenv: {}"),
             "a tab inside the indentation": R.replace("    env: {}", "  \t  env: {}"),
             "a tab after the colon": R.replace("env: {}", "env:\t{}"),
             "a tab after the dash": R.replace("- --app", "-\t--app"),
@@ -433,7 +440,8 @@ class TestHostileBlocks(unittest.TestCase):
         for why, block in cases.items():
             with self.subTest(why=why):
                 self.assertEqual(self._reason(block), "unparseable")
-        self.assertEqual(M.block_value(os.urandom(65536).decode("utf-8", errors="replace"))[0], None)
+        noise = random.Random(20261002).randbytes(65536)                # seeded: a failure reproduces
+        self.assertEqual(M.block_value(noise.decode("utf-8", errors="replace"))[0], None)
         self.assertEqual(M.block_value(box("mcp_servers:\n" + "  a:\n    b: |\n" * 30000)), (None, "unparseable"))
 
     def test_a_repeated_key_in_one_mapping_is_a_duplicate(self):
@@ -468,9 +476,30 @@ class TestHostileBlocks(unittest.TestCase):
         self.assertEqual(len(fill(2000)), 2001)                          # 2,000 characters and the newline
         self.assertEqual(M.block_value("mcp_servers:\n  s:\n" + fill(2000))[0], {"s": {"command": "a" * 1985}})
         self.assertEqual(M.block_value("mcp_servers:\n  s:\n" + fill(2001)), (None, "unparseable"))
-        self.assertEqual(M.block_value(box() + "# " + "x" * 1998 + "\n")[1], None)
-        self.assertEqual(M.block_value(box() + "# " + "x" * 1999 + "\n"), (None, "unparseable"))
-        self.assertEqual(M.block_value(box() + "notes:\n  text: " + "x" * 2000 + "\n"), (None, "unparseable"))
+        # The line limit and the tab rule are the block's: under ANOTHER top-level key a long line
+        # (an unbreakable value) and a tab-indented line are that key's content, and not read.
+        for other in ("notes:\n  text: " + "x" * 3000 + "\n", "notes:\n  \ttext: x\n  text:\ty\n \t\n",
+                      "# " + "x" * 3000 + "\n", "notes: " + "x" * 65000 + "\n", "notes:\n  # a\tcomment\n"):
+            with self.subTest(other=other[:16]):
+                self.assertEqual(M.block_value(BOX_HEAD + other + REWRITTEN_BLOCK + BOX_TAIL), (EXPECTED, None))
+                self.assertEqual(M.block_value(box() + other), (EXPECTED, None))
+                self.assertIs(M.compare(box() + other, template() + other)["equals_repo"], True)
+        # Inside the block they are still refused: on a comment, a blank line and the key's own line too.
+        R = REWRITTEN_BLOCK
+        for block in (R.replace("    env: {}\n", "    # " + "x" * 1995 + "\n    env: {}\n"),
+                      R.replace("    env: {}\n", " " * 2001 + "\n    env: {}\n"),
+                      R.replace("mcp_servers:\n", "mcp_servers:" + " " * 1989 + "\n"),
+                      R + "# " + "x" * 1999 + "\n",
+                      R.replace("    env: {}", "  \t  env: {}"), R.replace("    env: {}\n", "  \t# c\n    env: {}\n"),
+                      R.replace("    env: {}\n", "  \t\n    env: {}\n")):
+            with self.subTest(block=block[:16]):
+                self.assertEqual(M.block_value(box(block)), (None, "unparseable"))
+        self.assertEqual(M.block_value(box(R.replace("    env: {}\n", "    # " + "x" * 1994 + "\n    env: {}\n"))), (EXPECTED, None))
+        self.assertEqual(M.block_value(box(R.replace("    env: {}\n", "    # a\tcomment\n    env: {}\n"))), (EXPECTED, None))
+        # A line that STARTS with a tab is at column 0 and is no plain key, wherever it is.
+        for text in (box(R.replace("    env: {}", "\tenv: {}")), box() + "\tnotes: x\n", box() + "\t\n", "\tmcp_servers:\n" + box()):
+            with self.subTest(text=text[-12:]):
+                self.assertEqual(M.block_value(text), (None, "top_level_not_plain"))
         # An integer is at most 18 digits.
         self.assertEqual(M.block_value("mcp_servers:\n  s:\n    k: " + "9" * 18 + "\n")[0], {"s": {"k": 10 ** 18 - 1}})
 

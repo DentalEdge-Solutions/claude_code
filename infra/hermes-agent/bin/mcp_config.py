@@ -9,7 +9,8 @@ on any text, never recurses on the input's depth, and makes one pass over each l
 
 THE SUBSET (everything else is `unparseable`):
 - Lines are split on `\\n`; a trailing `\\r` is unparseable. Blank lines and lines whose first
-  non-space character is `#` are skipped. A tab anywhere in a line's indentation is unparseable.
+  non-space character is `#` are skipped. A tab anywhere in the indentation of a line of the
+  block is unparseable.
 - The block is the top-level line `mcp_servers:` (nothing after the colon but spaces) and the
   indented lines that follow it, up to the next top-level line.
 - Top level of the WHOLE file: every line starting at column 0 that is not blank or a comment
@@ -42,10 +43,15 @@ WHERE THAT IS SILENT, THE STRICTER READING (each one is a refusal, and each is t
   U+2028, U+2029, a byte order mark, U+FFFD (what a byte that is not UTF-8 decodes to) and a
   surrogate are unparseable. A YAML loader breaks lines at `\\r`, U+0085, U+2028 and U+2029
   too, so one of them could hide a key from a parser that splits on `\\n`.
-- The tab rule and the 2,000-character rule apply to every line of the file, not only the
-  block's, and a line of the block holds no tab at all, a quoted string's included. The
-  block's 200 lines count its key line and every line up to the next top-level line, blank
-  lines and comments included.
+- The block's lines are its key line and every line up to the next top-level line, blank
+  lines and comments included: the 200 lines count them all and none of them is over 2,000
+  characters. A line of the block that is not blank or a comment holds no tab at all, a quoted
+  string's included (a line of spaces and tabs is not blank; a tab inside a comment's text is
+  the one tab the block allows).
+- Outside the block neither rule applies: a long line or a tab-indented line under another
+  key is that key's content. Such a line cannot be a top-level key: it does not start at
+  column 0, or it starts with a tab and is then `top_level_not_plain` like any column-0 line
+  that is not a plain key (a line of tabs only included).
 - An indented line that is not blank or a comment before the first top-level key is
   `top_level_not_plain`: it is under no plain key.
 - `mcp_servers:` with no entry under it, and `mcp_servers: {}`, are `no_block`. Anything else
@@ -57,8 +63,17 @@ WHERE THAT IS SILENT, THE STRICTER READING (each one is a refusal, and each is t
 - An integer has at most 18 digits. A key that is, in any case, one of the reserved words
   above is unparseable (a loader reads `on:` as a boolean key).
 - Nesting is counted in open mappings and lists, the block's own mapping being the first.
-- Reasons, in order: characters, tabs and line length (`unparseable`), then the top level
-  (`top_level_not_plain`), then the number of `mcp_servers` keys, then the block.
+- Reasons, in order: characters (`unparseable`), then the top level (`top_level_not_plain`),
+  then the number of `mcp_servers` keys, then the block.
+
+KNOWN CAUSES OF `top_level_not_plain` ON A FILE THAT IS OTHERWISE FINE (a refusal until the
+rule is deliberately widened; do not widen it in passing, every accepted spelling is one a
+hostile file can use):
+- a top-level key that holds an indentless block list (`platforms:` then `- name: x` at column
+  0, the PyYAML and ruamel default for a list under a top-level key);
+- a top-level key named outside `[A-Za-z_][A-Za-z0-9_-]*` (`api.base:`, `2fa:`, a quoted `"on":`).
+And of `unparseable`: a raw U+0085 or U+2028 inside a quoted value under any key (some dumpers
+write them raw).
 
 What is NOT parsed: the content under the other top-level keys. Whatever its shape, it cannot
 give a loader a top-level `mcp_servers` key this parser does not see (such a key starts a line
@@ -194,9 +209,6 @@ def block_value(text):
     lines = text.split("\n")
     if lines[-1] == "":
         lines.pop()                                          # the file's final newline ends its last line
-    for line in lines:
-        if len(line) > MAX_LINE_CHARS or "\t" in line[:len(line) - len(line.lstrip(" \t"))]:
-            return None, "unparseable"
     tops, found = [], []
     for n, line in enumerate(lines):
         body = line.lstrip(" ")
@@ -217,10 +229,10 @@ def block_value(text):
     start, nth, after = found[0]
     if after is not None and after.strip(" "):
         return None, "no_block" if after == "{}" else "unparseable"
-    block = lines[start + 1:tops[nth] if nth < len(tops) else len(lines)]
-    if 1 + len(block) > MAX_BLOCK_LINES:
+    block = lines[start:tops[nth] if nth < len(tops) else len(lines)]
+    if len(block) > MAX_BLOCK_LINES or any(len(l) > MAX_LINE_CHARS for l in block):
         return None, "unparseable"
-    content = [l for l in block if l.strip(" ") and not l.lstrip(" ").startswith("#")]
+    content = [l for l in block[1:] if l.strip(" ") and not l.lstrip(" ").startswith("#")]
     if not content:
         return None, "no_block"
     return _build(content)
