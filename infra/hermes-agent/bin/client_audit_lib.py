@@ -171,30 +171,47 @@ _AUDIT_NAME_RE = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-
 _COMMENT_RE = re.compile(r"\s+#.*")
 
 
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")      # the line ends a text-mode read of a file gives
+
+
 def _env_value(v):
-    """The value part of NAME=value. A quoted value ends at its closing quote when only a comment
-    follows; otherwise one layer of matching outer quotes is stripped, as before. An unquoted value
+    """The value part of NAME=value, without the whitespace around it. A quoted value ends at its
+    closing quote when nothing or only a comment follows; otherwise one layer of matching outer
+    quotes is stripped, as before; otherwise the text is the value as it stands. An unquoted value
     ends at the first whitespace that is followed by `#` (a `#` with nothing before it is data)."""
-    if v[:1] in ("\"", "'"):
-        end = v.find(v[0], 1)
-        if end > 0 and _COMMENT_RE.fullmatch(v[end + 1:]):
-            return v[1:end]
-        return v[1:-1] if len(v) >= 2 and v[0] == v[-1] else v
-    return _COMMENT_RE.sub("", v, count=1)
+    s = v.strip()
+    if s[:1] in ("\"", "'"):
+        end = s.find(s[0], 1)
+        if end > 0 and (not s[end + 1:] or _COMMENT_RE.fullmatch(s[end + 1:])):
+            return s[1:end]
+        return s[1:-1] if len(s) >= 2 and s[0] == s[-1] else s
+    return _COMMENT_RE.sub("", v, count=1).strip()
+
+
+def _env_values(lines, name):
+    """The value of each NAME= line among `lines`, in order, empty ones included."""
+    for line in lines:
+        line = line.rstrip("\r\n")
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if line.startswith(name + "="):
+            yield _env_value(line.split("=", 1)[1])
 
 
 def load_env_value(path, name):
-    """One NAME=value from an env file, parsed as DATA with load_cred_env's rules, plus an inline
-    comment (see _env_value): the installed files have none today, but a hand edit must not turn a
-    comment into part of a key."""
+    """One NAME=value from an env file (the FIRST such line; None when there is none), parsed as
+    DATA with load_cred_env's rules, plus an inline comment and surrounding whitespace (see
+    _env_value): the installed files have neither today, but a hand edit must not turn a comment
+    or a trailing blank into part of a key."""
     with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\r\n")
-            if line.startswith("export "):
-                line = line[len("export "):].lstrip()
-            if line.startswith(name + "="):
-                return _env_value(line.split("=", 1)[1])
-    return None
+        return next(_env_values(f, name), None)
+
+
+def env_values(text, name):
+    """Every non-empty value NAME is given in env-file TEXT, in file order, parsed with
+    load_env_value's rules. For a caller that must know every value a reader of this file
+    might use, whichever line that reader prefers."""
+    return [v for v in _env_values(_LINE_END_RE.split(text), name) if v]
 
 
 def check_host_parent(path, uid=0, mode=0o711):

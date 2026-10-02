@@ -205,7 +205,8 @@ class TestOptionBHelpers(unittest.TestCase):
 
     def test_load_env_value_parses_as_data(self):
         p = os.path.join(self.d, "e")
-        open(p, "w").write('export ANTHROPIC_API_KEY="sk-ant-x"\r\nOTHER=1\n')
+        with open(p, "w") as f:
+            f.write('export ANTHROPIC_API_KEY="sk-ant-x"\r\nOTHER=1\n')
         self.assertEqual(L.load_env_value(p, "ANTHROPIC_API_KEY"), "sk-ant-x")
         self.assertIsNone(L.load_env_value(p, "MISSING"))
 
@@ -227,6 +228,49 @@ class TestOptionBHelpers(unittest.TestCase):
                 with open(p, "w") as f:
                     f.write("OTHER=1\n" + line + "\r\n")
                 self.assertEqual(L.load_env_value(p, "K"), want)
+
+    def test_load_env_value_drops_the_whitespace_around_a_value(self):
+        cases = {"K=abc ": "abc",                          # a trailing blank is not part of a key
+                 "K=abc \t": "abc",
+                 'K="abc" ': "abc",                        # nor are the quotes it follows
+                 "K= abc": "abc",
+                 'K= "abc"': "abc",
+                 "K= abc # note": "abc",
+                 'K=" abc "': " abc ",                     # inside the quotes it is the value
+                 "K=  ": "",
+                 # No whitespace before the #, so no comment, and the closing quote is not the end:
+                 # the text is returned as it stands (pinned; the installed files have no such line).
+                 'K="abc"#x': '"abc"#x'}
+        for line, want in cases.items():
+            with self.subTest(line=line):
+                p = os.path.join(self.d, "e")
+                with open(p, "w") as f:
+                    f.write("OTHER=1\n" + line + "\r\n")
+                self.assertEqual(L.load_env_value(p, "K"), want)
+
+    def test_load_env_value_is_the_first_line_and_an_empty_value_is_not_none(self):
+        p = os.path.join(self.d, "e")
+        with open(p, "w") as f:
+            f.write("K=\nK=later\n")
+        self.assertEqual(L.load_env_value(p, "K"), "")
+        with open(p, "w") as f:
+            f.write("K=first\nK=later\n")
+        self.assertEqual(L.load_env_value(p, "K"), "first")
+
+    def test_env_values_is_every_non_empty_value_of_a_name_in_file_order(self):
+        text = "export K=old\n# K=commented\nK=\nK=new # c\nOTHER=x\nK=old\n"
+        self.assertEqual(L.env_values(text, "K"), ["old", "new", "old"])
+        self.assertEqual(L.env_values(text, "MISSING"), [])
+        self.assertEqual(L.env_values(text, "OTHE"), [])                  # a prefix of a name is not the name
+        self.assertEqual(L.env_values("", "K"), [])
+
+    def test_env_values_reads_lines_as_load_env_value_does(self):
+        text = 'K="a" \r\nK=b\rK=c'                                       # CRLF, a bare CR, no final newline
+        self.assertEqual(L.env_values(text, "K"), ["a", "b", "c"])
+        p = os.path.join(self.d, "e")
+        with open(p, "w", newline="") as f:
+            f.write(text)
+        self.assertEqual(L.load_env_value(p, "K"), "a")
 
     def test_check_host_parent(self):
         p = os.path.join(self.d, "vaults"); os.mkdir(p); os.chmod(p, 0o711)

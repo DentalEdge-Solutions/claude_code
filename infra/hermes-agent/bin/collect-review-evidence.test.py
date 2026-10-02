@@ -620,16 +620,23 @@ class TestOptionBLayout(Base):
         for value in ("SECRETVALUE", self.OPENROUTER, self.DASH):
             self.assertNotIn(value, buf.getvalue())
 
+    def _a_directory_instead(self, rel):
+        """Make an installed file unreadable for real, as root too: a directory of its name
+        (open() raises IsADirectoryError whoever asks). Returns the directory's path."""
+        p = os.path.join(self.root, rel.lstrip("/"))
+        os.remove(p)
+        os.mkdir(p)
+        return p
+
     def test_an_authorised_file_that_cannot_be_read_is_never_an_empty_set(self):
         self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
-
-        def denied(path, name):
-            raise PermissionError(path)
-        with mock.patch.object(CE.CAL, "load_env_value", denied):
-            rows, secrets, failed = CE.other_credentials(self.host())
+        p = self._a_directory_instead(self.GATEWAY_ENV)
+        rows, secrets, failed = CE.other_credentials(self.host())
         self.assertEqual((rows, secrets), ([], []))
-        self.assertIn("gateway-env: PermissionError", failed)          # the label, not a path
+        self.assertIn("gateway-env: IsADirectoryError", failed)        # the label, not a path
         self.assertNotIn(self.root, "".join(failed))
+        os.rmdir(p)
+        self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
         rows, secrets, failed = CE.other_credentials(self.host())      # control: readable again
         self.assertEqual((secrets, failed), ([self.OPENROUTER], []))
 
@@ -638,8 +645,130 @@ class TestOptionBLayout(Base):
         with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
             f.write(b"OPENROUTER_API_KEY=\xff\xfe\n")
         rows, secrets, failed = CE.other_credentials(self.host())
+        self.assertIn("sk-ant-api03-SECRETVALUE", secrets)
+        self.assertEqual(rows[0], {"label": "anthropic-key", "sha12": R.sha12("sk-ant-api03-SECRETVALUE")})
+        self.assertEqual(failed, ["gateway-env: undecodable bytes"])
+        self._a_directory_instead(self.GATEWAY_ENV)                    # and one that cannot be opened at all
+        rows, secrets, failed = CE.other_credentials(self.host())
         self.assertEqual(secrets, ["sk-ant-api03-SECRETVALUE"])
-        self.assertEqual(failed, ["gateway-env: UnicodeDecodeError"])
+        self.assertEqual(failed, ["gateway-env: IsADirectoryError"])
+
+    # ---- final review C1: one tolerant read; every value a name is given is a known secret ----
+    def test_the_two_tables_of_authorised_files_name_the_same_files(self):
+        self.assertEqual(set(CE.OTHER_SECRET_NAMES), set(CE.AUTHORISED_OTHER))
+
+    def _openrouter_row(self):
+        return {"label": "openrouter-key", "sha12": R.sha12(self.OPENROUTER)}
+
+    def test_a_name_given_the_same_value_twice_is_not_a_problem(self):
+        for body in (f"OPENROUTER_API_KEY={self.OPENROUTER}\nOPENROUTER_API_KEY={self.OPENROUTER}\n",
+                     f"OPENROUTER_API_KEY={self.OPENROUTER}\nexport OPENROUTER_API_KEY='{self.OPENROUTER}' # again\n"):
+            with self.subTest(body=body):
+                self._gateway_env(body)
+                rows, secrets, failed = CE.other_credentials(self.host())
+                self.assertEqual((rows, secrets, failed), ([self._openrouter_row()], [self.OPENROUTER], []))
+
+    def test_a_healthy_gateway_env_in_every_ordinary_shape_is_healthy_and_loses_no_value(self):
+        key = self.OPENROUTER
+        shapes = {"plain": f"OPENROUTER_API_KEY={key}\n",
+                  "no final newline": f"OPENROUTER_API_KEY={key}",
+                  "blank lines and comments": f"\n# the gateway's own key\n\nHERMES_SPOOL_DIR=/x\n\nOPENROUTER_API_KEY={key}\n\n# end\n",
+                  "a commented-out assignment": f"# OPENROUTER_API_KEY=sk-or-v1-NOT-A-REAL-KEY-commented\n"
+                                                f"#OPENROUTER_API_KEY=sk-or-v1-NOT-A-REAL-KEY-commented\nOPENROUTER_API_KEY={key}\n",
+                  "another name with this one as its prefix": f"OPENROUTER_API_KEY_NOTE=not-the-key-at-all\nOPENROUTER_API_KEY={key}\n",
+                  "export": f"export OPENROUTER_API_KEY={key}\n",
+                  "export and a tab": f"export\tOPENROUTER_API_KEY={key}\n",
+                  "CRLF line ends": f"HERMES_SPOOL_DIR=/x\r\nOPENROUTER_API_KEY={key}\r\nHERMES_DASHBOARD=0\r\n",
+                  "a byte-order mark": f"\ufeffOPENROUTER_API_KEY={key}\n",
+                  "a byte-order mark and CRLF": f"\ufeffOPENROUTER_API_KEY={key}\r\n",
+                  "an indented line": f"  \tOPENROUTER_API_KEY={key}\n",
+                  "blanks around the equals sign": f"OPENROUTER_API_KEY = {key}\n",
+                  "single quotes": f"OPENROUTER_API_KEY='{key}'\n",
+                  "double quotes and a comment": f'OPENROUTER_API_KEY="{key}"  # rotated in the autumn\n',
+                  "an inline comment": f"OPENROUTER_API_KEY={key} # rotated in the autumn\n",
+                  "a tab after the value": f"OPENROUTER_API_KEY={key}\t\n"}
+        for shape, body in shapes.items():
+            with self.subTest(shape=shape):
+                with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
+                    f.write(body.encode("utf-8"))
+                self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n", "")
+                self.assertEqual(CE.other_credentials(self.host()), ([self._openrouter_row()], [key], []))
+                bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+                self.assertEqual(bundle["credentials"], [self._openrouter_row()])
+                self.assertEqual(secrets, [key])
+                row = bundle["items"]["D2.1"]["data"]["files"][0]
+                self.assertEqual((row["kind"], row["label"], row["secrets_held"], row["secrets_not_searchable"]),
+                                 ("authorised-other", "gateway-env", ["openrouter-key"], []))
+                self.assertNotIn("error", row)
+
+    def test_a_hash_sign_inside_a_value_is_part_of_the_value(self):
+        password = "NOT#A#REAL-DASHBOARD-PASSWORD#"
+        self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\nHERMES_DASHBOARD_BASIC_AUTH_PASSWORD={password}\n")
+        rows, secrets, failed = CE.other_credentials(self.host())
+        self.assertEqual((secrets, failed), ([self.OPENROUTER, password], []))
+        self.assertEqual(rows, [{"label": "dashboard-password", "sha12": None}, self._openrouter_row()])
+
+    def test_two_different_values_for_one_name_are_both_secrets_and_the_set_is_not_certified(self):
+        old = "NOT-A-REAL-DASHBOARD-PASSWORD-BEFORE"
+        self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\nHERMES_DASHBOARD_BASIC_AUTH_PASSWORD={old}\n"
+                          f"HERMES_DASHBOARD_BASIC_AUTH_PASSWORD={self.DASH}\n")
+        rows, secrets, failed = CE.other_credentials(self.host())
+        self.assertEqual(secrets, [self.OPENROUTER, old, self.DASH])
+        self.assertEqual(failed, ["gateway-env: duplicate dashboard-password"])   # fixed text: no value, path or length
+        self.assertEqual(rows, [self._openrouter_row()])                          # a label with two values has no row
+
+    def test_the_anthropic_file_is_read_by_the_same_rules(self):
+        key, old = "sk-ant-api03-SECRETVALUE", "sk-ant-api03-ROTATED-OUT-VALUE"
+        self.outputs[("find",)] = (0, "/etc/hermes/.env.anthropic\n", "")
+        for body, want in ((f'ANTHROPIC_API_KEY="{key}" \n'.encode(), ([key], [])),
+                           (f"ANTHROPIC_API_KEY={old}\nANTHROPIC_API_KEY={key}\n".encode(),
+                            ([old, key], ["anthropic-key: duplicate anthropic-key"])),
+                           (f"ANTHROPIC_API_KEY={key}\n# \xff\n".encode("latin-1"),
+                            ([key], ["anthropic-key: undecodable bytes"]))):
+            with self.subTest(body=body):
+                with open(self._w("/etc/hermes/.env.anthropic", ""), "wb") as f:
+                    f.write(body)
+                _rows, secrets, failed = CE.other_credentials(self.host())
+                self.assertEqual((secrets, failed), want)
+
+    def test_d2_1_on_its_own_seeds_every_value_of_a_damaged_anthropic_file(self):
+        key = "sk-ant-api03-SECRETVALUE"
+        for raw in (b"# caf\xe9\n" + f"ANTHROPIC_API_KEY={key}\n".encode(),
+                    f"ANTHROPIC_API_KEY={key}\n".encode() + b"# padding line\n" * 800 + b"\xff\n"):
+            with self.subTest(size=len(raw)):
+                with open(self._w("/etc/hermes/.env.anthropic", ""), "wb") as f:
+                    f.write(raw)
+                self.outputs[("find",)] = (0, "/etc/hermes/.env.anthropic\n", "")
+                h = self.host()
+                ctx = CE.context(h)
+                (row,) = CE.d2_1(h, ctx)["files"]
+                self.assertEqual(ctx["secrets"], [key])
+                self.assertEqual((row["kind"], row["error"], row["label"], row["secrets_held"], row["secrets_not_searchable"]),
+                                 ("unreadable", "undecodable", "anthropic-key", ["anthropic-key"], []))
+                self.assertNotIn("anthropic_key_state", row)        # nothing more is stated about a damaged file
+
+    def test_d2_1_on_its_own_seeds_both_values_of_a_duplicated_name(self):
+        old = "sk-or-v1-NOT-A-REAL-KEY-ROTATED-OUT-zyxwvu"
+        self._gateway_env(f"OPENROUTER_API_KEY={old}\nOPENROUTER_API_KEY={self.OPENROUTER}\n"
+                          "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=short77\nHERMES_DASHBOARD_BASIC_AUTH_PASSWORD=short78\n")
+        h = self.host()
+        ctx = CE.context(h)
+        (row,) = CE.d2_1(h, ctx)["files"]
+        self.assertEqual(ctx["secrets"], [old, self.OPENROUTER, "short77", "short78"])
+        self.assertEqual((row["kind"], row["secrets_held"], row["secrets_not_searchable"]),
+                         ("authorised-other", ["openrouter-key", "dashboard-password"], ["dashboard-password"]))
+        self.assertNotIn("error", row)
+
+    def test_credentials_only_refuses_a_name_given_two_different_values(self):
+        old = "sk-or-v1-NOT-A-REAL-KEY-ROTATED-OUT-zyxwvu"
+        self._gateway_env(f"OPENROUTER_API_KEY={old}\nOPENROUTER_API_KEY={self.OPENROUTER}\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = CE.main(["--credentials-only"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertIn("gateway-env: duplicate openrouter-key", err.getvalue())
+        for text in (old, self.OPENROUTER, self.root, str(len(self.OPENROUTER))):
+            self.assertNotIn(text, err.getvalue())
 
     def test_the_anthropic_key_is_searched_for_when_the_gateway_env_cannot_be_read(self):
         self._w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-SECRETVALUE\n")
@@ -715,12 +844,10 @@ class TestOptionBLayout(Base):
 
     def test_credentials_only_refuses_when_an_authorised_file_cannot_be_read(self):
         self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
-
-        def denied(path, name):
-            raise PermissionError(path)
+        self._a_directory_instead(self.GATEWAY_ENV)
+        self.outputs[("find",)] = (0, CE.AGENT_DIR + "/.env.gaw\n", "")     # a directory is not a sweep hit
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(CE.CAL, "load_env_value", denied), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = CE.main(["--credentials-only"], host=self.host())
         self.assertEqual((rc, out.getvalue()), (2, ""))
         self.assertTrue("anthropic-key" in err.getvalue() or "gateway-env" in err.getvalue())
@@ -1299,6 +1426,83 @@ class TestD10(Base):
             with self.assertRaises(RuntimeError):
                 CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32)
         self.assertEqual(out.getvalue() + err.getvalue(), "")
+
+    # ---- final review C1: the value parsed from the gateway .env must be the live one -------
+    GATEWAY_ENV = CE.CHECKOUT + "/infra/hermes-agent/.env"
+    OLD_OPENROUTER = "sk-or-v1-NOT-A-REAL-KEY-ROTATED-OUT-zyxwvu"
+
+    def _leaking_box(self, env_bytes):
+        """A gateway .env of exactly these bytes, on a box whose journal and whose gateway's
+        `hermes mcp list` text both hold the live OpenRouter key."""
+        with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
+            f.write(env_bytes)
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n", "")
+        self.outputs[("journalctl", "-o")] = (0, f"debug: Authorization: Bearer {self.OPENROUTER}\n", "")
+        self._configs(self.BLOCK)
+        self._gateway((0, f"ads_audit {self.OPENROUTER}\nrow\n", ""))
+
+    def _assert_the_live_key_is_guarded(self):
+        """The three things a live key must never slip past: the known-secrets list, the leak
+        count, and the whole-bundle refusal. Returns the bundle and the list."""
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn(self.OPENROUTER, secrets)
+        self.assertGreaterEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(RuntimeError):
+                CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32)
+        self.assertEqual(out.getvalue() + err.getvalue(), "")
+        return bundle, secrets
+
+    def _gateway_row(self, bundle):
+        return [r for r in bundle["items"]["D2.1"]["data"]["files"] if r["path"] == self.GATEWAY_ENV][0]
+
+    def _assert_undecodable(self, bundle):
+        row = self._gateway_row(bundle)
+        self.assertEqual((row["kind"], row["error"], row["label"]), ("unreadable", "undecodable", "gateway-env"))
+        self.assertEqual(row["secrets_held"], ["openrouter-key"])
+        self.assertEqual(list(bundle["credentials"]), [R.COULD_NOT_CHECK])
+        self.assertIn("gateway-env: undecodable bytes", bundle["credentials"][R.COULD_NOT_CHECK])
+
+    def test_case_a_a_bad_byte_far_below_the_key_line_does_not_drop_the_key(self):
+        padding = b"# padding line\n" * 800
+        self.assertGreater(len(padding), 8192)                      # past the text layer's first chunk
+        self._leaking_box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n".encode() + padding + b"\xff\n")
+        bundle, _ = self._assert_the_live_key_is_guarded()
+        self._assert_undecodable(bundle)
+
+    def test_case_b_a_bad_byte_in_a_comment_above_the_key_line_does_not_drop_the_key(self):
+        self._leaking_box(b"# caf\xe9 notes\n" + f"OPENROUTER_API_KEY={self.OPENROUTER}\n".encode())
+        bundle, _ = self._assert_the_live_key_is_guarded()
+        self._assert_undecodable(bundle)
+
+    def _assert_healthy_apart_from_the_refusal(self, bundle):
+        self.assertEqual(bundle["credentials"], [{"label": "openrouter-key", "sha12": R.sha12(self.OPENROUTER)}])
+        row = self._gateway_row(bundle)
+        self.assertEqual((row["kind"], row["secrets_held"], row["secrets_not_searchable"]),
+                         ("authorised-other", ["openrouter-key"], []))
+        self.assertNotIn("error", row)
+
+    def test_case_d_a_trailing_space_after_the_key_is_not_part_of_the_key(self):
+        self._leaking_box(f"OPENROUTER_API_KEY={self.OPENROUTER} \n".encode())
+        bundle, _ = self._assert_the_live_key_is_guarded()
+        self._assert_healthy_apart_from_the_refusal(bundle)
+
+    def test_case_d2_a_trailing_space_after_a_quoted_key_leaves_the_bare_key(self):
+        self._leaking_box(f'OPENROUTER_API_KEY="{self.OPENROUTER}" \n'.encode())
+        bundle, _ = self._assert_the_live_key_is_guarded()
+        self._assert_healthy_apart_from_the_refusal(bundle)
+
+    def test_case_g_a_name_given_twice_makes_both_values_known_secrets(self):
+        self._leaking_box(f"OPENROUTER_API_KEY={self.OLD_OPENROUTER}\n"
+                          f"OPENROUTER_API_KEY={self.OPENROUTER}\n".encode())
+        bundle, secrets = self._assert_the_live_key_is_guarded()
+        self.assertIn(self.OLD_OPENROUTER, secrets)
+        self.assertEqual(list(bundle["credentials"]), [R.COULD_NOT_CHECK])
+        self.assertIn("gateway-env: duplicate openrouter-key", bundle["credentials"][R.COULD_NOT_CHECK])
+        row = self._gateway_row(bundle)
+        self.assertEqual((row["kind"], row["secrets_held"]), ("authorised-other", ["openrouter-key"]))
+        self.assertNotIn("error", row)
 
     def test_d10_6_a_long_line_without_a_secret_is_still_cut_with_secrets_loaded(self):
         self._load_openrouter_key()

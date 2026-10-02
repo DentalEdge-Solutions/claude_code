@@ -57,14 +57,22 @@ HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history",
 AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env",
                     "/etc/hermes/.env.anthropic": "anthropic-key"}
 # The secret values each authorised non-Google file may hold, as (env name, label). D2.1 names the
-# labels a file holds (`secrets_held`), the values join the known secrets the leak checks look
-# for, and each is a row of the authorised credential set (`credentials`, --credentials-only).
+# labels a file holds (`secrets_held`), EVERY value a name is given joins the known secrets the
+# leak checks look for, and a label with one value is a row of the authorised credential set
+# (`credentials`, --credentials-only). Same files as AUTHORISED_OTHER (tested).
 OTHER_SECRET_NAMES = {
     "/etc/hermes/.env.anthropic": (("ANTHROPIC_API_KEY", "anthropic-key"),),
     CHECKOUT + "/infra/hermes-agent/.env": (("OPENROUTER_API_KEY", "openrouter-key"),
                                             ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password"))}
 # Listed, never fingerprinted: a short hash of a value a person may have chosen can be guessed offline.
 UNFINGERPRINTED = ("dashboard-password",)
+# What _other_secrets reports about a file it could still read. Fixed text: never a value or a path.
+UNDECODABLE = "undecodable bytes"
+# An assignment as an env-file reader such as Docker Compose also takes it: indented, `export`
+# and any blanks, blanks before the `=`. Rewritten to the bare `NAME=` that CAL.env_values reads,
+# so a line the gateway would use is never one this collector skips.
+_ENV_ASSIGN_RE = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")
 # Writable in-memory filesystems `find / -xdev` never crosses: the collector sweeps them
 # itself, by name and by content (review #3 §5 — the manual sweep went stale).
 MEMORY_FSTYPES = {"tmpfs", "ramfs"}
@@ -411,35 +419,60 @@ def installed_credentials(host, sweep=None):
 
 
 def _other_secrets(host, p):
-    """[(label, value)] for each non-empty secret the authorised file `p` holds."""
-    return [(label, v) for name, label in OTHER_SECRET_NAMES[p]
-            for v in [CAL.load_env_value(host.path(p), name)] if v]
+    """(held, problems) for the authorised file `p`, read once, as bytes, and decoded tolerantly
+    (as R.parse_credential_file reads the Google files): a damaged file never costs a value.
+    `held` is [(label, value)] for every DISTINCT non-empty value of every name in
+    OTHER_SECRET_NAMES[p], names in table order and values in file order: whichever line the
+    file's real reader prefers, its value is here, in its bare form (no quotes, comment or
+    surrounding whitespace). `problems` is fixed text only, empty for a healthy file: UNDECODABLE
+    when a byte was not UTF-8, "duplicate <label>" when one name is given two different values.
+    Raises only what opening or reading the file raises."""
+    with open(host.path(p), "rb") as f:
+        text = f.read().decode("utf-8", errors="replace")
+    problems = [UNDECODABLE] if "\ufffd" in text else []
+    if text.startswith("\ufeff"):                           # a byte-order mark is not part of a name
+        text = text[1:]
+    text = "\n".join(_ENV_ASSIGN_RE.sub(r"\1=", line, count=1) for line in _LINE_END_RE.split(text))
+    held = []
+    for name, label in OTHER_SECRET_NAMES[p]:
+        values = list(dict.fromkeys(CAL.env_values(text, name)))
+        held += [(label, v) for v in values]
+        if len(values) > 1:
+            problems.append(f"duplicate {label}")
+    return held, problems
 
 
 def other_credentials(host):
-    """(rows, secrets, failed) for the non-Google secrets installed: one {label, sha12} row each,
-    sha12 null for an UNFINGERPRINTED one. Each file is read on its own. One that is absent adds
-    nothing (D2.1's pass rule names the missing row); one that is there and cannot be read adds
-    "<label>: <ExceptionClass>" to `failed` (could-not-check, never "none") and the rest still count."""
+    """(rows, secrets, failed) for the non-Google secrets installed. Each file is read on its own.
+    One that is absent adds nothing (D2.1's pass rule names the missing row). One that cannot be
+    opened or read adds "<file label>: <ExceptionClass>" to `failed`; one that was read but holds
+    undecodable bytes, or two different values for one name, adds "<file label>: <problem>".
+    Anything in `failed` makes the set could-not-check, never "none", and the rest still count.
+    `secrets` gets EVERY value read, problem or not. `rows` gets one {label, sha12} row per label
+    with exactly one value (sha12 null for an UNFINGERPRINTED one); a label with two has no row."""
     rows, secrets, failed = [], [], []
     for p in sorted(OTHER_SECRET_NAMES):
         try:
-            held = _other_secrets(host, p)
+            held, problems = _other_secrets(host, p)
         except FileNotFoundError:
             continue
-        except (OSError, ValueError) as e:
+        except OSError as e:
             failed.append(f"{AUTHORISED_OTHER[p]}: {type(e).__name__}")
             continue
-        for label, v in held:
-            rows.append({"label": label, "sha12": None if label in UNFINGERPRINTED else R.sha12(v)})
-            secrets.append(v)
+        failed += [f"{AUTHORISED_OTHER[p]}: {problem}" for problem in problems]
+        secrets += [v for _, v in held]
+        labels = [label for label, _ in held]
+        rows += [{"label": label, "sha12": None if label in UNFINGERPRINTED else R.sha12(v)}
+                 for label, v in held if labels.count(label) == 1]
     return sorted(rows, key=R.canon), secrets, failed
 
 
 def d2_1(host, ctx):
     """Every sweep hit gets a kind: example, credential (a Google Ads credential), unparsed
     (credential-shaped but not parseable), empty, authorised-other (AUTHORISED_OTHER, with
-    its label), unlisted (anything else non-empty), or unreadable."""
+    its label), unlisted (anything else non-empty), or unreadable (it could not be read, or it
+    is an authorised file with undecodable bytes: `error` is then `undecodable`, and the row
+    still names what the file holds)."""
     rows = []
     for p in _shared_sweep(host, ctx):
         is_example = p.endswith(".example")
@@ -461,17 +494,25 @@ def d2_1(host, ctx):
                         row["kind"] = "empty"
                     elif p in AUTHORISED_OTHER:
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
-                        if p == "/etc/hermes/.env.anthropic":
-                            row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
-                        # The values join the known secrets (unless collect_with_secrets already
-                        # seeded them); the row names which are held, never a value.
-                        held = _other_secrets(host, p)
+                        # Every value joins the known secrets (unless collect_with_secrets already
+                        # seeded it) before anything below can fail, whatever state the file is
+                        # in; the row names which are held, never a value.
+                        held, problems = _other_secrets(host, p)
                         known = ctx.setdefault("secrets", [])
-                        known.extend(v for _, v in held if v not in known)
-                        row["secrets_held"] = [label for label, _ in held]
+                        for _, v in held:
+                            if v not in known:
+                                known.append(v)
+                        row["secrets_held"] = list(dict.fromkeys(label for label, _ in held))
                         # Held but too short for the leak counters to search for (R._MIN_SECRET_LEN).
-                        row["secrets_not_searchable"] = [l for l, v in held if len(v) < R._MIN_SECRET_LEN]
-        except (OSError, ValueError) as e:                  # e.g. invalid UTF-8: this row only
+                        row["secrets_not_searchable"] = list(dict.fromkeys(
+                            label for label, v in held if len(v) < R._MIN_SECRET_LEN))
+                        if UNDECODABLE in problems:
+                            # Not a file to state anything more about (a duplicated name alone
+                            # leaves the row authorised-other: `credentials` reports it).
+                            row["kind"], row["error"] = "unreadable", "undecodable"
+                        elif p == "/etc/hermes/.env.anthropic":
+                            row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
+        except (OSError, ValueError) as e:                  # e.g. it cannot be opened: this row only
             row["error"] = type(e).__name__
             if not is_example:
                 row["kind"] = "unreadable"
@@ -1115,7 +1156,8 @@ def collect_with_secrets(host, fp_key):
     ctx = context(host, fp_key)
     items = {}
     # The non-Google secrets are loaded first and on their own, so the leak checks (D2.2, D2.3,
-    # D10.7) search for them whether or not the sweep reaches the files.
+    # D10.7) search for them whether or not the sweep reaches the files. Every value read is
+    # seeded, also from a file reported in other_failed.
     other, other_secrets, other_failed = other_credentials(host)
     ctx.setdefault("secrets", []).extend(other_secrets)
     for iid, fn in PROBES.items():
