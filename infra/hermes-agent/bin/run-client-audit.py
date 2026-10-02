@@ -312,13 +312,17 @@ SENTINEL = "".join(("HERMESPROBE", "SENTINEL0123456789"))
 DECLARED = {"ads-collector": ["GOOGLE_ADS_"], "ads-reader": ["GOOGLE_ADS_"],
             "ads-drafter": ["ANTHROPIC_"], "egress-proxy": []}
 _CRED_SHAPED = r"(GOOGLE_ADS_|ANTHROPIC_|OPENROUTER_)"
-# Three measurements: the credential-shaped env NAMES; the names of every variable whose VALUE
+# Four measurements: the credential-shaped env NAMES; the names of every variable whose VALUE
 # holds the sentinel, whatever it is called (spec §8: "in any environment or mounted file"); the
-# count of mounted files that hold it.
+# count of mounted files that hold it; how many of the host's two real credential files exist.
 _ENV_PROBE = ("env | cut -d= -f1 | grep -E '^" + _CRED_SHAPED + "' | sort; "
               "env | grep -F " + SENTINEL + " | cut -d= -f1 | sed 's/^/SENTINEL_ENV=/'; "
               "n=$(grep -rlF " + SENTINEL + " /projects /work /opt/cc-bin /opt/skills /opt/registry 2>/dev/null | wc -l); "
-              "echo SENTINEL_FILES=$n")
+              "echo SENTINEL_FILES=$n; "
+              # A real credential file holds no sentinel: look for the host's two files by path. The
+              # files, not /etc/hermes: an image may ship a directory of that name.
+              "c=0; for p in " + CRED + " " + ANTHROPIC_CRED + "; do [ -e \"$p\" ] && c=$((c+1)); done; "
+              "echo HOST_CRED_FILES=$c")
 _EGRESS_PROBE = r'''python3 - <<'EOF'
 import os, socket
 def direct():
@@ -443,12 +447,14 @@ def probe_env(root, runner=None):
             # Fail closed: "no sentinel in the mounted files" only when the container says exactly
             # that. A missing or malformed count (the script died early) reads as found.
             clean = any(re.fullmatch(r"SENTINEL_FILES=\s*0+", l) for l in lines)
+            # Fail closed: absent only when the container says exactly that.
+            no_host_file = any(re.fullmatch(r"HOST_CRED_FILES=0", l) for l in lines)
             # Names only, never a value: anything after SENTINEL_ENV= that is not an env name (a
             # multi-line value's continuation line) is shown as a placeholder, and matches nothing.
             held = sorted(n if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n) else "<not a name>"
                           for n in (l[len("SENTINEL_ENV="):] for l in lines if l.startswith("SENTINEL_ENV=")))
             services[svc] = {"rc": rc, "env_names": names, "sentinel_env_names": held,
-                             "sentinel_in_files": not clean}
+                             "sentinel_in_files": not clean, "host_credential_files_visible": not no_host_file}
         ok = set(services) == set(DECLARED) and all(_matches(svc, s) for svc, s in services.items())
         return {"services": services, "matches_declared": ok}
     finally:
@@ -459,8 +465,9 @@ def _matches(svc, s):
     """A service matches the declared map when it ran, holds no sentinel in any mounted file,
     and every credential-shaped env name it holds, and every env name whose value holds the
     sentinel, has a declared prefix. With a declared prefix it must hold at least one of each
-    (the sentinel reaching it also proves the value scan ran); with none, none of either."""
-    if s["rc"] != 0 or s["sentinel_in_files"]:
+    (the sentinel reaching it also proves the value scan ran); with none, none of either. A host
+    credential file visible in the container is never a match."""
+    if s["rc"] != 0 or s["sentinel_in_files"] or s["host_credential_files_visible"]:
         return False
     prefixes = DECLARED[svc]
     names, held = s["env_names"], s["sentinel_env_names"]
@@ -484,8 +491,9 @@ def probe_egress(root, runner=None):
                 skip = True
             else:
                 clean.append(x)
-        runner(_compose(root) + ["up", "-d", "--no-deps", "egress-proxy"], env, 60)
-        _, out = runner(_override(clean, "ads-drafter", _EGRESS_PROBE), env, 120)
+        # A failed step used to show only as missing lines; its code is now evidence of its own.
+        proxy_rc, _ = runner(_compose(root) + ["up", "-d", "--no-deps", "egress-proxy"], env, 60)
+        drafter_rc, out = runner(_override(clean, "ads-drafter", _EGRESS_PROBE), env, 120)
         # Positional, as the script prints them; a line that is missing (the proxy never came up,
         # the script died) is "", which matches nothing below.
         lines = out.splitlines()
@@ -498,10 +506,12 @@ def probe_egress(root, runner=None):
         j = {"direct": "blocked" if get(0) == "DIRECT_BLOCKED" else "open",
              "non_allowed": get(1), "anthropic": get(2),
              "dns": "blocked" if get(3) == "DNS_BLOCKED" else "resolves",
-             "work_entries": work, "host_visible": host_visible}
+             "work_entries": work, "host_visible": host_visible,
+             "proxy_rc": proxy_rc, "drafter_rc": drafter_rc}
         j["matches_expected"] = (j["direct"] == "blocked" and " 403" in j["non_allowed"]
                                  and " 200" in j["anthropic"] and j["dns"] == "blocked"
-                                 and sorted(work) == ["out", "reports", "vault"] and not host_visible)
+                                 and sorted(work) == ["out", "reports", "vault"] and not host_visible
+                                 and proxy_rc == 0 and drafter_rc == 0)
         return j
     finally:
         _probe_cleanup(root, base, proxy=True)
