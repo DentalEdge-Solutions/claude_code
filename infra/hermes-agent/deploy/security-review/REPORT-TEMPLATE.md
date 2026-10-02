@@ -4,7 +4,7 @@
 - **Reviewer:** (session / model) — did not build the box: yes
 - **Box fingerprint:** `<sha256>` (complete: true|false)
 - **`cid_key_id`:** box `<8 hex>`, laptop `<8 hex>` — equal: yes|no (if not, no `cid:` fingerprint can be compared across the bundles)
-- **Authorised credential set:** (role, refresh-token sha12, client-id sha12 — one line each)
+- **Authorised credential set:** (the box bundle's `credentials`, one line each: a Google row is role, refresh-token sha12, client-id sha12; a non-Google row is label and sha12, or label alone for the dashboard password)
 - **Measured-access digest:** `<sha256>`
 - **Components changed since the last PASS:** (first review: n/a)
 

@@ -1116,7 +1116,7 @@ to the deploy user's home and install it:
 sudo install -d -m 0755 /etc/hermes && sudo install -o root -g root -m 0400 ~/env.ga.incoming /etc/hermes/.env.ga && shred -u ~/env.ga.incoming
 sudo stat -c '%U:%G %a' /etc/hermes/.env.ga                                       # root:root 400
 sudo grep -c '^GOOGLE_ADS_CREDENTIAL_ROLE=read$' /etc/hermes/.env.ga              # 1
-sudo python3 /opt/hermes-agent/bin/collect-review-evidence.py --credentials-only  # one row for /etc/hermes/.env.ga, role read, sha12 fd18a3b7d0f4
+sudo python3 /opt/hermes-agent/bin/collect-review-evidence.py --credentials-only  # the read row for /etc/hermes/.env.ga (role read; its sha12 equals the laptop's .env.ga row), then one row per non-Google secret already installed
 ls ~/env.ga.incoming 2>&1                                                         # No such file or directory (F24: no stray copy)
 ```
 
@@ -1332,7 +1332,7 @@ Requires part 1 on the box. Still not live until review #6.
    `sudo docker compose up -d --build --remove-orphans hermes-agent`
    `sudo docker compose ps -a` → no `claude-auth-init`
    `sudo test ! -e /opt/hermes-agent/data/home/.claude/settings.json && echo NO_CLAUDE_KEY_FILE`
-   (if present: `sudo rm -f /opt/hermes-agent/data/home/.claude/settings.json`)
+   (if present, it holds the Anthropic key: `sudo shred -u /opt/hermes-agent/data/home/.claude/settings.json`, as part 1 step 5)
    After any later pull that changes `bin/hermes-app-mcp.py` or a `bin/*_lib.py` it imports: `cd /opt/hermes-agent && sudo docker compose restart hermes-agent` (the gateway keeps the old tool server running until then).
 8. Tools visible: `sudo docker compose exec hermes-agent hermes mcp list` → `ads_audit` with 3 tools
 9. Kill switch (for the review and for emergencies):
@@ -1448,7 +1448,7 @@ if [ ${#P} -ge 16 ] && case "$P" in *'$'*|*'#'*|*'"'*|*"'"*|*' '*|*'\'*) false;;
   { sudo grep -v '^HERMES_DASHBOARD' .env
     printf 'HERMES_DASHBOARD=1\nHERMES_DASHBOARD_BASIC_AUTH_USERNAME=hermesadmin\nHERMES_DASHBOARD_BASIC_AUTH_PASSWORD=%s\n' "$P"
   } | sudo tee .env.new >/dev/null
-  sudo install -m 600 .env.new .env && sudo rm -f .env.new && echo "WRITTEN len=${#P}"
+  sudo install -m 600 .env.new .env && sudo shred -u .env.new && echo "WRITTEN len=${#P}"
 else
   echo "REFUSED: length ${#P} (need >=16) or a forbidden character -- nothing written"
 fi
