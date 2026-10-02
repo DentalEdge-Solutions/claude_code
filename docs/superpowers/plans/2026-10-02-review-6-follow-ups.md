@@ -771,6 +771,83 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
+### Task 7: The collector also takes the gateway's secrets from the running gateway (added after the whole-branch review)
+
+**Files:**
+- Modify: `infra/hermes-agent/bin/collect-review-evidence.py` (a new function next to `other_credentials`; `collect_with_secrets`; `d4_1`)
+- Modify: `infra/hermes-agent/bin/review_lib.py` (`assert_no_secret` only)
+- Test: `infra/hermes-agent/bin/collect-review-evidence.test.py`, `infra/hermes-agent/bin/review_lib.test.py`
+- Modify: `infra/hermes-agent/deploy/security-review/CHECKLIST.md` (D4.1, one sentence in D2.1, one in D10.7, the header note; the version stays `1.15`)
+- Modify: `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md` (one table row and three small wording changes)
+
+**Interfaces:**
+- Consumes: `OTHER_SECRET_NAMES`, `AUTHORISED_OTHER`, `_other_secrets(host, p) -> (held, problems)`, `GATEWAY_FILTER`, `R._MIN_SECRET_LEN`, as they are on the branch.
+- Produces: `gateway_secret_env(host) -> (states, secrets)`; `D4.1` data gains `secret_env`; `R.assert_no_secret` also refuses on a secret's JSON-escaped forms.
+
+**Background (finding R1 of the fix-wave re-review).** The collector parses the gateway `.env` itself. The gateway gets the same file through Docker Compose's `env_file`, and the two read some lines differently: a quoted value followed by text (`NAME="<key>"#note`), backslash escapes, `$WORD` or `${VAR}` in a value, `NAME: value`, a form feed before the name. For those lines the known-secret list holds a string that is not the key the gateway uses, so D2.2, D2.3 and D10.7 count 0 for a real leak and the output guard lets the key through, while the bundle looks healthy. Chasing Compose's parser rule by rule cannot close this. Asking the consumer can: the running gateway container holds the values it really uses.
+
+A second, related gap: `R.assert_no_secret` compares each secret with the JSON text about to be printed. A secret that contains `"`, `\` or a non-ASCII character appears in that text only in its escaped form, so the guard can never fire for it.
+
+**Required behaviour.**
+
+1. `gateway_secret_env(host)` in the collector:
+   - finds the gateway container exactly as `d4_1` does (`docker ps -q --no-trunc --filter GATEWAY_FILTER`, one 64-character id); when there is none, or `docker ps` fails, it raises `CouldNotCheck` with a fixed message that carries no command output;
+   - for each `(env name, label)` of the gateway `.env`'s entry in `OTHER_SECRET_NAMES`, runs `docker exec <id> printenv <env name>` with `host.run` directly (never `_ok`: no stdout or stderr text of this command may ever reach a message, a reason or the bundle);
+   - exit 0: the value is the output with ONE trailing newline removed. Empty is `unset`. Otherwise the state is `matches-file` when the value is one of the values `_other_secrets` read from the gateway `.env` for that label, and `differs-from-file` when it is not (including when the file could not be read or holds nothing for that label); the value joins the returned `secrets`;
+   - exit 1 (the name is not in the container's environment): `unset`;
+   - any other exit code (a timeout's 124, 127, a Docker error): `R.COULD_NOT_CHECK` for that label;
+   - returns `(states, secrets)`: `states` is `{label: state}` for every label of the gateway file, in table order; `secrets` is every non-empty value read.
+   - The Anthropic file is not asked about: its only reader is `load_env_value`, whose rules the collector already applies.
+2. `collect_with_secrets` calls it once, before the probe loop and after the `other_credentials` seeding. The values are added to `ctx["secrets"]` (skipping any already there), so the leak checks and `assert_no_secret` look for the value the gateway really holds. The states are kept in `ctx["secret_env"]`. When it raises `CouldNotCheck`, `ctx["secret_env"]` is `R.COULD_NOT_CHECK` and nothing is seeded. Every value read is in the list `collect_with_secrets` returns.
+3. `d4_1` adds `"secret_env"` to its data: the states from `ctx` when `collect_with_secrets` put them there, otherwise its own call to `gateway_secret_env(host)` (so `d4_1` on its own still reports them, and seeds `ctx["secrets"]` the same way). `--fingerprint-only` and `--credentials-only` do not call it.
+4. `R.assert_no_secret(text, secrets)` refuses when `text` contains a secret of at least `_MIN_SECRET_LEN` characters in any of three forms: the value itself, `json.dumps(value)[1:-1]`, or `json.dumps(value, ensure_ascii=False)[1:-1]`. The message is unchanged and still never says which.
+
+**Tests.** `FakeHost` matches a command by argv prefix, first match wins in dict order: a fixture keyed `("docker", "exec")` will also answer `printenv`. Make the new fixtures specific (`("docker", "exec", <id>, "printenv", <NAME>)`) and placed so they win, and check that no EXISTING test now feeds some other command's output in as a "secret"; if one does, give that test a specific `printenv` fixture (exit 1) rather than loosening anything, and list it in the report.
+
+- The five shapes the re-review showed leaking, each with the gateway `.env` spelled that way, the container's `printenv` returning the bare live key, and the key in the journal and in the `hermes mcp list` text: `NAME="<key>"#note`; `NAME="<key>" note`; a backslash-escaped value (the file holds `ab\"cd...`, the container holds `ab"cd...`); `NAME: <key>`; `NAME=${OTHER}` with the container holding the real key. For each: the returned list holds the live key, D2.3 counts at least 1, the full-bundle `main` refuses and prints nothing, and D4.1's `secret_env` for `openrouter-key` is `differs-from-file`.
+- Healthy: file `OPENROUTER_API_KEY=<key>`, container the same: `secret_env == {"openrouter-key": "matches-file", "dashboard-password": "unset"}` (`printenv` exit 1 for the password); nothing leaked: the bundle prints and holds no value.
+- Dashboard on: both `matches-file`.
+- File edited after the gateway started (the file holds a new key, the container the old one): `differs-from-file`, and BOTH keys are in the returned list.
+- No gateway container: `D4.1` is `could-not-check` as before, nothing extra is seeded, and the file's values are still in the returned list.
+- `printenv` exits 125 for one name: that label is `could-not-check`, the other label is still reported.
+- A `printenv` whose stderr holds text: that text is in no reason and nowhere in the bundle.
+- `assert_no_secret`: a secret holding `"`, one holding `\`, and one holding a non-ASCII character each raise when the text is `json.dumps({"k": secret})`, with `ensure_ascii` true and false; a text without the secret does not raise; a 7-character secret still does not raise.
+- One end-to-end case for the JSON gap: the container's value holds a `"`, it appears in the `hermes mcp list` text, and the full-bundle `main` refuses.
+
+Run RED for the five shapes and the `assert_no_secret` cases before implementing.
+
+**Documentation (exact replacements; each checklist item is one long line; no re-wrapping; stop if an old string does not occur exactly once).**
+
+In `CHECKLIST.md`:
+- D4.1 expected: replace `` `openrouter_env_names` is exactly `["OPENROUTER_API_KEY"]`. (The gateway's side `` with:
+
+```
+`openrouter_env_names` is exactly `["OPENROUTER_API_KEY"]`. `secret_env` holds one state for each secret the gateway `.env` may hold (`openrouter-key`, `dashboard-password`), read from the running container with `printenv`; a value is never reported. The states are `matches-file` (the container's value is one the collector read from the file), `differs-from-file` (the container holds a value the collector did not read from the file: the file was edited after the gateway started, or it holds a line the gateway's loader reads differently from the collector), `unset` and `could-not-check`. Expected: `openrouter-key` is `matches-file`; `dashboard-password` is `matches-file` when the gateway row's `secrets_held` (D2.1) names it, and `unset` when it does not. The container's values join the known secrets before any item runs, so the leak checks of D2.2, D2.3 and D10.7 and the collector's own output check look for the value the gateway really holds, however the file spells it. (The gateway's side 
+```
+
+  (keep one space before `of D10.1's`, as in the original).
+- D4.1 pass rule: replace `` or a failed control, is a FAIL; `` with `` a `secret_env` state other than expected above (the operator corrects the line or recreates the gateway, then re-collects), or a failed control, is a FAIL; ``
+- D2.1 expected: replace `` so the leak checks look for them whether or not the sweep reached the file. `` with `` so the leak checks look for them whether or not the sweep reached the file. It also reads the gateway's own values of the same names from the running container (D4.1 `secret_env`). ``
+- D10.7 pass rule: replace `` from their two files before any item runs, `` with `` from their two files and from the running gateway's environment before any item runs, ``
+- Header note: replace `` lists the non-Google secrets too. D10.1: `` with `` lists the non-Google secrets too. D4.1: `secret_env`, the gateway's own values of those names, compared with the file and looked for. D10.1: ``
+
+In the findings doc:
+- the heading `### F26 to F42: opened at security review #6 (2026-10-02)` becomes `### F26 to F43: opened at or after security review #6 (2026-10-02)`;
+- after the sentence `F42 is the reviewer's "Not on the checklist" entry 7.` add ` F43 was found while the follow-up change was built and reviewed.` (same line; do not re-wrap the paragraph);
+- add this row directly after the F42 row:
+
+```
+| F43 | The review collector parsed the gateway `.env` itself, while the gateway reads it through Docker Compose: a line the two read differently (a quoted value followed by text, an escape, `$`, `NAME: value`) left the live key out of the leak checks and the output guard, silently. The output guard also could not match a value that JSON escapes. | not known at review #6 (found 2026-10-02) | **fixed**: the collector also reads the two values from the running gateway (D4.1 `secret_env`), and the guard checks the escaped forms |
+```
+
+- in open item 18, change `F26 to F42` to `F26 to F43` and `ten` to `eleven`, without re-wrapping.
+
+**Verification.** The four test files named above, `python3 infra/hermes-agent/bin/collect-review-evidence-laptop.test.py` (it uses `review_lib`), then `infra/hermes-agent/bin/run-bin-tests.sh`: every suite `OK`. `python3 infra/hermes-agent/bin/check-checklist-version.py --base main`: exit 0. `git diff HEAD~N | grep -E '^\+' | grep -E '[0-9a-f]{12}'` over this task's commits prints nothing.
+
+**Commits.** Two: code and tests (`fix(hermes): the collector takes the gateway's secrets from the running gateway; the guard checks escaped forms`), then the two documents (`docs(hermes): checklist D4.1 secret_env; finding F43`). Stage only the files each names. Each message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. No push.
+
+---
+
 ## After the last task
 
 The branch is not pushed. The operator decides when to push and open the pull request. Merging it changes `bin/` and `deploy/`, so it changes the box fingerprint and re-opens review #6: plan a pull on the box and review #7. Run a trial evidence collection on the box before the real one.
