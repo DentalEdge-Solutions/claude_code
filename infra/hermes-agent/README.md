@@ -1444,12 +1444,18 @@ not stop collateral within an account.
 | read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga`, on the laptop, and on the box at `/etc/hermes/.env.ga` (`root:root 0400`, same token; passed per run to the audit containers, never mounted) | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
 | write | **none — read-only posture** (2026-09-29) | — | no `.env.gaw` anywhere | Operator decision, security review D3.2: Hermes holds no write credential. Changes to client accounts are made by the apps that join the AI OS, not by Hermes core. The mutation tier is parked. |
 
-**The box's one non-Google secret file.** The gateway `.env`
-(`/opt/projects/claude_code/infra/hermes-agent/.env`, `root:root 0600`) holds the dashboard
-basic-auth password (real) and, until Option B part 1 step 5 strips it, a **real** `ANTHROPIC_API_KEY` (workspace `hermes-box`, monthly spend limit; used only by the audit analyst; afterwards the key lives in `/etc/hermes/.env.anthropic`). The review collector reports it as
-`kind: authorised-other`, `label: gateway-env` (`AUTHORISED_OTHER` in
-`bin/collect-review-evidence.py`). Adding another secret file to the box means adding it there and
-here, or the next review sees it as `unlisted`.
+**The box's non-Google secrets.** Two files hold them. The gateway `.env`
+(`/opt/projects/claude_code/infra/hermes-agent/.env`, `root:root 0600`) holds the OpenRouter key
+(Hermes's own reasoning; dedicated to the box, with a credit limit) and, when the dashboard is
+switched on, the dashboard basic-auth password. `/etc/hermes/.env.anthropic` (`root:root 0400`)
+holds the **real** `ANTHROPIC_API_KEY` (workspace `hermes-box`, monthly spend limit; used only by
+the audit drafter, passed per run and never mounted). The gateway `.env` holds no Anthropic key.
+The review collector reports the two files as `kind: authorised-other` (`label: gateway-env` and
+`label: anthropic-key`; `AUTHORISED_OTHER` in `bin/collect-review-evidence.py`), names the secrets
+each holds (`secrets_held`; `OTHER_SECRET_NAMES` in the same file) and looks for their values in
+the shell histories and the journals. Adding another secret file to the box, or another secret to
+one of these two files, means adding it there and here, or the next review sees the file as
+`unlisted` or never looks for the value.
 
 **Why there is no write credential (security review D3.2, 2026-09-29).** From 2026-08-18
 the write role reused the operator's own Google account at **ADMIN**. That carried user

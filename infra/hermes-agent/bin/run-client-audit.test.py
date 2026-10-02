@@ -911,10 +911,10 @@ class TestStopProxyKeepsTheDecisionLog(Base):
 
 
 ENV_OK = {"ads-collector": "GOOGLE_ADS_REFRESH_TOKEN\nGOOGLE_ADS_CUSTOMER_ID\n"
-                           "SENTINEL_ENV=GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n",
-          "ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_ENV=GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\n",
-          "ads-drafter": "ANTHROPIC_API_KEY\nSENTINEL_ENV=ANTHROPIC_API_KEY\nSENTINEL_FILES=0\n",
-          "egress-proxy": "SENTINEL_FILES=0\n"}
+                           "SENTINEL_ENV=GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\nHOST_CRED_FILES=0\n",
+          "ads-reader": "GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_ENV=GOOGLE_ADS_REFRESH_TOKEN\nSENTINEL_FILES=0\nHOST_CRED_FILES=0\n",
+          "ads-drafter": "ANTHROPIC_API_KEY\nSENTINEL_ENV=ANTHROPIC_API_KEY\nSENTINEL_FILES=0\nHOST_CRED_FILES=0\n",
+          "egress-proxy": "SENTINEL_FILES=0\nHOST_CRED_FILES=0\n"}
 EGRESS_OK = ("DIRECT_BLOCKED\nHTTP/1.1 403 Forbidden\nHTTP/1.1 200 Connection Established\n"
              "DNS_BLOCKED\nWORK=out,reports,vault\nHOST_VISIBLE=0\n")
 
@@ -943,6 +943,26 @@ class TestProbes(Base):
         for argv, env in calls:
             for v in env.values():
                 self.assertNotIn("sk-ant-api03-x", v); self.assertNotIn(TOKEN, v)
+
+    def test_probe_env_reports_a_host_credential_file_in_a_container(self):
+        run, _ = self.fake_probe_runner(ENV_OK)
+        j = RCA.probe_env(self.root, run)
+        self.assertTrue(j["matches_declared"], j)
+        self.assertEqual({s["host_credential_files_visible"] for s in j["services"].values()}, {False})
+        R = ENV_OK["ads-reader"]
+        cases = {"one file is there": R.replace("HOST_CRED_FILES=0", "HOST_CRED_FILES=1"),
+                 "no HOST_CRED_FILES line": R.replace("HOST_CRED_FILES=0\n", ""),
+                 "a line that is not a count": R.replace("HOST_CRED_FILES=0", "HOST_CRED_FILES=")}
+        for why, out in cases.items():
+            with self.subTest(why=why):
+                run, _ = self.fake_probe_runner(dict(ENV_OK, **{"ads-reader": out}))
+                j = RCA.probe_env(self.root, run)
+                self.assertIs(j["services"]["ads-reader"]["host_credential_files_visible"], True)
+                self.assertFalse(j["matches_declared"], j)
+
+    def test_the_env_probe_script_tests_both_credential_files_and_no_directory(self):
+        self.assertIn('for p in ' + RCA.CRED + ' ' + RCA.ANTHROPIC_CRED + ';', RCA._ENV_PROBE)
+        self.assertIn('echo HOST_CRED_FILES=$c', RCA._ENV_PROBE)
 
     def test_probe_env_flags_a_leak(self):
         outs = dict(ENV_OK, **{"ads-drafter": "ANTHROPIC_API_KEY\nGOOGLE_ADS_REFRESH_TOKEN\n"
@@ -1159,7 +1179,7 @@ class TestProbes(Base):
                 j = RCA.probe_egress(self.root, run)
                 self.assertFalse(j["matches_expected"], j)
                 self.assertEqual(set(j), {"direct", "non_allowed", "anthropic", "dns", "work_entries",
-                                          "host_visible", "matches_expected"})
+                                          "host_visible", "matches_expected", "proxy_rc", "drafter_rc"})
         for why in ("an outside name resolves (the DNS exit)", "no DNS line", "a DNS line that is neither token"):
             run, _ = self.fake_probe_runner({"ads-drafter": "\n".join(cases[why]) + "\n"})
             j = RCA.probe_egress(self.root, run)
@@ -1167,10 +1187,24 @@ class TestProbes(Base):
             self.assertEqual({k: v for k, v in j.items() if k not in ("dns", "matches_expected")},
                              {"direct": "blocked", "non_allowed": "HTTP/1.1 403 Forbidden",
                               "anthropic": "HTTP/1.1 200 Connection Established",
-                              "work_entries": ["out", "reports", "vault"], "host_visible": False}, why)
+                              "work_entries": ["out", "reports", "vault"], "host_visible": False,
+                              "proxy_rc": 0, "drafter_rc": 0}, why)
         run, _ = self.fake_probe_runner({"ads-drafter": ""})
         j = RCA.probe_egress(self.root, run)
         self.assertEqual((j["direct"], j["dns"], j["host_visible"]), ("open", "resolves", True))   # unproven is not "blocked"
+
+    def test_probe_egress_a_failed_step_is_not_expected(self):
+        # "ads-drafter" first: the drafter's argv must match it before "egress-proxy".
+        outs = {"ads-drafter": EGRESS_OK, "egress-proxy": ""}
+        run, _ = self.fake_probe_runner(outs)
+        j = RCA.probe_egress(self.root, run)
+        self.assertEqual((j["proxy_rc"], j["drafter_rc"], j["matches_expected"]), (0, 0, True))
+        for svc, key in (("egress-proxy", "proxy_rc"), ("ads-drafter", "drafter_rc")):
+            with self.subTest(failed=svc):
+                run, _ = self.fake_probe_runner(outs, {svc: 125})
+                j = RCA.probe_egress(self.root, run)
+                self.assertEqual(j[key], 125)
+                self.assertFalse(j["matches_expected"], j)      # every line was as expected; the code was not
 
     def test_the_egress_probe_script_measures_dns_as_the_ci_drafter_test_does(self):
         """deploy/audit-mounts-integration.test.py's drafter-egress test is the one that has run
@@ -1306,7 +1340,7 @@ class TestProbeCli(Base):
         self.assertEqual(set(j), {"services", "matches_declared"}); self.assertTrue(j["matches_declared"])
         self.assertEqual(j["services"]["ads-drafter"],
                          {"rc": 0, "env_names": ["ANTHROPIC_API_KEY"], "sentinel_env_names": ["ANTHROPIC_API_KEY"],
-                          "sentinel_in_files": False})
+                          "sentinel_in_files": False, "host_credential_files_visible": False})
         self.assertNotIn(RCA.SENTINEL, out)
         self.assertEqual(len(runs), 4)
 
@@ -1317,7 +1351,7 @@ class TestProbeCli(Base):
         self.assertEqual(json.loads(out), {"direct": "blocked", "non_allowed": "HTTP/1.1 403 Forbidden",
                                            "anthropic": "HTTP/1.1 200 Connection Established", "dns": "blocked",
                                            "work_entries": ["out", "reports", "vault"], "host_visible": False,
-                                           "matches_expected": True})
+                                           "matches_expected": True, "proxy_rc": 0, "drafter_rc": 0})
         self.assertEqual(len(self.proxy_stops), 1)
 
     def test_a_mismatch_is_exit_1_with_the_json_still_printed(self):
