@@ -162,12 +162,19 @@ class Concurrency(unittest.TestCase):
         self.assertEqual(self.err.getvalue(), "")
         self.assertEqual(self.raised, [])
 
+    def feed(self):
+        """serve's input: blocks on the queue, ends on None, raises a queued exception."""
+        for item in iter(self.q.get, None):
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
     def start(self, write=None, **kw):
         serve = M.serve
 
         def run():
             try:
-                serve(self.s, iter(self.q.get, None), write or self.write, **kw)
+                serve(self.s, self.feed(), write or self.write, **kw)
             except BaseException as e:                 # serve must never raise: finish() checks
                 self.raised.append(e)
         self.th = threading.Thread(target=run)
@@ -336,6 +343,20 @@ class Concurrency(unittest.TestCase):
         self.join_waiters()
         self.assertEqual(self.lines, [])               # a write here would race interpreter shutdown
 
+    def test_no_reply_is_written_after_the_input_raises(self):
+        boom = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")   # what bad stdin bytes raise
+        self.start()
+        self.tool(1, "ads_audit_run", client="acme-dental")
+        self.until(lambda: len(self.requests()) == 1)
+        self.q.put(boom)
+        self.th.join(2)
+        self.assertFalse(self.th.is_alive())
+        self.assertEqual(self.raised, [boom])          # it still comes out of serve, as before
+        self.raised.clear()
+        self.answer(self.requests()[0])
+        self.join_waiters()
+        self.assertEqual(self.lines, [])               # the same shutdown race as after EOF
+
     def test_eof_waits_for_a_reply_being_written(self):
         entered, go = threading.Event(), threading.Event()
 
@@ -366,6 +387,8 @@ class Concurrency(unittest.TestCase):
             def start(self):
                 raise RuntimeError("can't start new thread")
         self.start(max_waiting=1)
+        # M.threading IS the threading module, so this replaces Thread for the whole process until
+        # it is put back below (and again in cleanup). Start no thread from the test in that window.
         M.threading.Thread = NoThread
         self.addCleanup(setattr, M.threading, "Thread", real)
         self.tool(1, "ads_audit_run", client="acme-dental")
@@ -379,7 +402,8 @@ class Concurrency(unittest.TestCase):
         self.until(lambda: len(self.requests()) == 1)  # and its place was given back
 
     def spawn(self, pump=True):
-        """The real server process over a temp spool root; returns (process, spool, reply queue)."""
+        """The real server process over a temp spool root; returns (process, spool, reply queue).
+        Every deadline on the real process is 15 s: it only matters on a starved runner."""
         root = os.path.join(self.spool, "root")
         spool = os.path.join(root, "ads-audit")
         for d in ("requests", "results"):
@@ -401,7 +425,7 @@ class Concurrency(unittest.TestCase):
             if p.poll() is None:
                 p.kill()
             p.wait()
-            reader.join(5)
+            reader.join(15)
             for f in (p.stdin, p.stdout, p.stderr):
                 f.close()
         self.addCleanup(reap)
@@ -417,24 +441,24 @@ class Concurrency(unittest.TestCase):
         p, spool, out = self.spawn()
         p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "ads_audit_run", "arguments": {"client": "acme-dental"}}}) + "\n")
-        self.until(lambda: len(self.requests(spool)) == 1)
+        self.until(lambda: len(self.requests(spool)) == 1, timeout=15)
         p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n")
-        self.assertEqual(self.line(out, 5), {"jsonrpc": "2.0", "id": 2, "result": {}})
+        self.assertEqual(self.line(out, 15), {"jsonrpc": "2.0", "id": 2, "result": {}})
         res = self.answer(self.requests(spool)[0], spool)
-        got = self.line(out, 5)                        # the real server polls every 2 s
+        got = self.line(out, 15)                       # the real server polls every 2 s
         self.assertEqual(got["id"], 1)
         self.assertEqual(json.loads(got["result"]["content"][0]["text"]), res)
         p.stdin.close()
-        self.assertEqual(p.wait(5), 0)
+        self.assertEqual(p.wait(15), 0)
         self.assertEqual(p.stderr.read(), "")
 
     def test_real_process_exits_cleanly_with_a_call_waiting(self):
         p, spool, out = self.spawn()
         p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "ads_audit_run", "arguments": {"client": "acme-dental"}}}) + "\n")
-        self.until(lambda: len(self.requests(spool)) == 1)
+        self.until(lambda: len(self.requests(spool)) == 1, timeout=15)
         p.stdin.close()                                # the client hangs up; the waiting thread is a daemon
-        self.assertEqual(p.wait(5), 0)
+        self.assertEqual(p.wait(15), 0)
         self.assertEqual(p.stderr.read(), "")
         self.assertEqual(len(self.requests(spool)), 1)
 
@@ -442,12 +466,12 @@ class Concurrency(unittest.TestCase):
         p, spool, _ = self.spawn(pump=False)
         p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "ads_audit_run", "arguments": {"client": "acme-dental"}}}) + "\n")
-        self.until(lambda: len(self.requests(spool)) == 1)
+        self.until(lambda: len(self.requests(spool)) == 1, timeout=15)
         p.stdout.close()
         for i in (2, 3):                               # each reply is written into a closed pipe
             p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": "ping"}) + "\n")
         p.stdin.close()
-        self.assertEqual(p.wait(5), 0)
+        self.assertEqual(p.wait(15), 0)
         self.assertEqual(p.stderr.read(), "")          # not even "Exception ignored while flushing sys.stdout"
         self.assertEqual(len(self.requests(spool)), 1)
 

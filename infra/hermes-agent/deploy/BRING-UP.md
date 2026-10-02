@@ -1258,9 +1258,10 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
    `sudo python3 bin/install-env-secret.py strip --file /opt/hermes-agent/.env --name ANTHROPIC_API_KEY`
    `sudo docker compose up -d --force-recreate hermes-agent`
    `sudo test -e /opt/hermes-agent/data/home/.claude/settings.json && echo STILL-PRESENT || echo absent`
-   → `absent` (spec §6: no Anthropic key in a file the gateway can read; `STILL-PRESENT` stops here)
+   → `absent` (spec §6: no Anthropic key in a file the gateway can read; `STILL-PRESENT`: see below)
    `STILL-PRESENT` after pulling all three parts at once is expected (the retired sidecar that cleared the
-   file no longer exists). The file holds the Anthropic key: check it is the old one
+   file no longer exists), and this step is not passed until the test prints `absent`.
+   The file holds the Anthropic key: check it is the old one
    (`sudo stat -c '%y' /opt/hermes-agent/data/home/.claude/settings.json` → a date before today), then
    `sudo shred -u /opt/hermes-agent/data/home/.claude/settings.json` and re-run the test → `absent`.
    A file dated today means something still writes it: stop.
@@ -1330,7 +1331,7 @@ Requires part 1 on the box. Still not live until review #6.
    `sudo docker compose ps -a` → no `claude-auth-init`
    `sudo test ! -e /opt/hermes-agent/data/home/.claude/settings.json && echo NO_CLAUDE_KEY_FILE`
    (if present: `sudo rm -f /opt/hermes-agent/data/home/.claude/settings.json`)
-   After any later pull that changes `bin/hermes-app-mcp.py`: `cd /opt/hermes-agent && sudo docker compose restart hermes-agent` (the gateway keeps the old tool server running until then).
+   After any later pull that changes `bin/hermes-app-mcp.py` or a `bin/*_lib.py` it imports: `cd /opt/hermes-agent && sudo docker compose restart hermes-agent` (the gateway keeps the old tool server running until then).
 8. Tools visible: `sudo docker compose exec hermes-agent hermes mcp list` → `ads_audit` with 3 tools
 9. Kill switch (for the review and for emergencies):
    on:  `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`

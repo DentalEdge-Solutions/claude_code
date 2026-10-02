@@ -3,6 +3,9 @@
 
   python3 /opt/cc-bin/hermes-app-mcp.py --app ads-audit
 
+It serves until stdin ends, and EOF abandons a call that is still waiting: piping one `run`
+line in (`printf ... | hermes-app-mcp.py`) exits at once, usually before the request is filed.
+
 DELIBERATELY DUMB, like hermes-syscall.py: it writes a request into the app's spool and reads
 a result back. It holds no credential, does no network I/O and makes no policy decision —
 everything is decided by the host-side broker, which treats every byte written here as hostile.
@@ -136,7 +139,9 @@ def serve(server, lines, write, max_waiting=MAX_WAITING):
     call waits. Hermes pings each MCP server on a cadence (default 180 s), allows 30 s, and
     reconnects on silence, which discarded the reply of every audit that outlasted a ping
     (first box run, 2026-10-02: the audit finished `ok` in 233 s, Hermes saw a 360 s timeout).
-    One lock keeps replies whole; a reply nobody can read any more is dropped, never raised."""
+    One lock keeps replies whole; a reply nobody can read any more is dropped, never raised.
+    EOF abandons the calls still waiting: their replies are not written, and a call read just
+    before EOF may not have filed its request yet (a request already filed stays with the broker)."""
     lock = threading.Lock()
     slots = threading.BoundedSemaphore(max_waiting)
     closed = []                                   # non-empty once the input has ended
@@ -169,24 +174,27 @@ def serve(server, lines, write, max_waiting=MAX_WAITING):
             return False
         return True
 
-    for line in lines:
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            msg = None
-        if _waits(server, msg):
-            if not started(line):
-                emit({"jsonrpc": "2.0", "id": msg["id"],
-                      "result": server._text({"error": "too many requests are waiting; try again later"},
-                                             error=True)})
-            continue
-        emit(serve_line(server, line))
-    # EOF: the client is gone and the process is about to exit with calls still waiting on daemon
-    # threads. Wait out a reply being written and let none start: a daemon thread inside
-    # sys.stdout.write when the interpreter shuts down aborts it ("could not acquire lock for
-    # <_io.BufferedWriter name='<stdout>'> at interpreter shutdown", SIGABRT) or leaves half a line.
-    with lock:
-        closed.append(True)
+    try:
+        for line in lines:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                msg = None
+            if _waits(server, msg):
+                if not started(line):
+                    emit({"jsonrpc": "2.0", "id": msg["id"],
+                          "result": server._text({"error": "too many requests are waiting; try again later"},
+                                                 error=True)})
+                continue
+            emit(serve_line(server, line))
+    finally:
+        # EOF, or the input itself raised (bytes that are not UTF-8): either way the process is
+        # about to exit with calls still waiting on daemon threads. Wait out a reply being written
+        # and let none start: a daemon thread inside sys.stdout.write when the interpreter shuts
+        # down aborts it ("could not acquire lock for <_io.BufferedWriter name='<stdout>'> at
+        # interpreter shutdown", SIGABRT) or leaves half a line.
+        with lock:
+            closed.append(True)
 
 
 def main(argv=None):
