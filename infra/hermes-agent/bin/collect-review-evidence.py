@@ -115,21 +115,21 @@ def _run_real(argv, timeout=60):
         p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: not found"
-    try:
-        out, err = p.communicate(timeout=timeout)
-        return p.returncode, out, err
-    except subprocess.TimeoutExpired:
-        p.terminate()                           # not kill(): the child's `finally` must get to run
+    with p:                                     # on every path: pipes closed (unread), child reaped
         try:
-            p.communicate(timeout=TERM_GRACE)
+            out, err = p.communicate(timeout=timeout)
+            return p.returncode, out, err
         except subprocess.TimeoutExpired:
+            p.terminate()                       # not kill(): the child's `finally` must get to run
+            try:
+                p.communicate(timeout=TERM_GRACE)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()                        # the child only: a grandchild holding a pipe must not hang us
+            return 124, "", f"{argv[0]}: timed out"
+        except BaseException:                   # as subprocess.run: never leave the child behind
             p.kill()
-            p.communicate()
-        return 124, "", f"{argv[0]}: timed out"
-    except BaseException:                       # as subprocess.run: never leave the child behind
-        p.kill()
-        p.wait()
-        raise
+            raise
 
 
 class Host:

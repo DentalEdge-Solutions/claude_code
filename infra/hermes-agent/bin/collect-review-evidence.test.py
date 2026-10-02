@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, hashlib, importlib.util, io, json, os, sys, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, sys, tempfile, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1387,6 +1387,27 @@ class TestRunReal(unittest.TestCase):
         with mock.patch.object(CE, "TERM_GRACE", 1):
             rc, _, _ = CE._run_real(argv, timeout=2)
         self.assertEqual(rc, 124)
+
+    def test_a_grandchild_holding_the_pipe_cannot_hang_the_runner(self):
+        pidfile = os.path.join(self.d, "grandchild.pid")
+        def reap():
+            try:
+                with open(pidfile) as f:
+                    os.kill(int(f.read()), 9)
+            except (OSError, ValueError):       # never started, or already gone
+                pass
+        self.addCleanup(reap)
+        argv = [sys.executable, "-c",
+                "import signal, subprocess, sys, time\n"
+                "signal.signal(signal.SIGTERM, lambda s, f: None)\n"
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])\n"   # inherits stdout
+                f"open({pidfile!r}, 'w').write(str(g.pid))\n"
+                "time.sleep(60)\n"]
+        t0 = time.monotonic()
+        with mock.patch.object(CE, "TERM_GRACE", 1):
+            rc, _, _ = CE._run_real(argv, timeout=2)
+        self.assertEqual(rc, 124)
+        self.assertLess(time.monotonic() - t0, 10)      # not the grandchild's 20 s
 
     def test_ordinary_results_are_unchanged(self):
         self.assertEqual(CE._run_real([sys.executable, "-c",
