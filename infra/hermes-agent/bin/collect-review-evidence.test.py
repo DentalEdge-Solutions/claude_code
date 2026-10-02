@@ -1225,10 +1225,15 @@ class TestD10(Base):
         self.outputs[("find",)] = (0, env + "\n", "")
 
     def _gateway(self, listing):
+        """A running gateway with this `hermes mcp list` answer. It holds the OpenRouter key and
+        no dashboard password, and says so to `printenv`: D10.6 emits the listing only when every
+        D4.1 secret_env state was measured."""
         del self.outputs[("docker", "ps")]
         self.outputs[("docker", "ps", "-q", "--no-trunc", "--filter")] = (0, GW_ID + "\n", "")
         self.outputs[("docker", "ps", "-q", "--no-trunc")] = (0, "", "")
         self.outputs[("docker", "exec", GW_ID, "hermes", "mcp", "list")] = listing
+        self.outputs[("docker", "exec", GW_ID, "printenv", "OPENROUTER_API_KEY")] = (0, self.OPENROUTER + "\n", "")
+        self.outputs[("docker", "exec", GW_ID, "printenv", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD")] = (1, "", "")
 
     def test_d10_6_block_equal_to_the_committed_one_and_the_listing(self):
         self._configs(self.BLOCK)
@@ -1377,7 +1382,8 @@ class TestD10(Base):
         self._configs(self.BLOCK)
         it = self._item("D10.6")                                        # no gateway container at all
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual((it["data"]["gateway_mcp_list"], it["data"]["gateway_mcp_list_rc"]), ([], None))
+        # Nobody to ask for the listing, nor for the values to look for in one: not measured.
+        self.assertEqual((it["data"]["gateway_mcp_list"], it["data"]["gateway_mcp_list_rc"]), (R.COULD_NOT_CHECK, None))
         self.assertIs(it["data"]["mcp_block"]["equals_repo"], True)
         self._gateway((127, "", "hermes: not found"))
         it = self._item("D10.6")
@@ -1451,6 +1457,8 @@ class TestD10(Base):
     def _assert_the_live_key_is_guarded(self):
         """The three things a live key must never slip past: the known-secrets list, the leak
         count, and the whole-bundle refusal. Returns the bundle and the list."""
+        # The file alone gives the key: the running gateway (see _gateway) holds it as well.
+        self.assertIn(self.OPENROUTER, CE.other_credentials(self.host())[1])
         bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
         self.assertIn(self.OPENROUTER, secrets)
         self.assertGreaterEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
@@ -1744,7 +1752,7 @@ class TestD10(Base):
                  "the file's value and a blank": ((0, self.OPENROUTER + " \n", ""), "differs-from-file", [self.OPENROUTER + " "]),
                  "a short value": ((0, "short77\n", ""), "differs-from-file", ["short77"]),
                  "set but empty": ((0, "\n", ""), "unset", []),
-                 "no output at all": ((0, "", ""), "unset", []),
+                 "exit 0 and no output at all": ((0, "", ""), R.COULD_NOT_CHECK, []),   # printenv always ends a value
                  "not set": ((1, "", ""), "unset", []),
                  "exit 1 with a message": ((1, "", "Error response from daemon: not running\n"), R.COULD_NOT_CHECK, []),
                  "exit 1 with output": ((1, "sk-or-v1-NOT-A-REAL-KEY-from-a-failed-call\n", ""), R.COULD_NOT_CHECK, []),
@@ -1820,6 +1828,109 @@ class TestD10(Base):
                 self.assertTrue(out)                                     # control: it ran and printed
                 self.assertEqual(self._printenv_calls(h), [])
                 self.assertNotIn("secret_env", out)
+
+    # ---- fix round 1: trimmed forms are known secrets; the gateway's text needs known secrets ----
+    def _assert_the_bare_key_is_guarded(self, env_text, held, state):
+        """The gateway holds `held`, a value with the key inside it (a blank, a line break), and
+        the BARE key has leaked, mid-line in the journal and into the `hermes mcp list` text."""
+        key = self.OPENROUTER
+        self.assertNotEqual(held, key)
+        self.assertIn(key, held)
+        self._box(env_text, (0, held + "\n", ""), leaked=key)
+        self.outputs[("journalctl", "-o")] = (0, f"debug: Authorization: Bearer {key} was sent\n", "")
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn(key, secrets)
+        self.assertIn(held, secrets)                                     # the value itself stays known
+        self.assertGreaterEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        self.assertEqual(self._secret_env(bundle)["openrouter-key"], state)
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertIsInstance(rc, RuntimeError)
+        self.assertEqual(out + err, "")
+
+    def test_a_gateway_value_that_ends_in_a_line_break_makes_the_bare_key_known(self):
+        self._assert_the_bare_key_is_guarded(f'OPENROUTER_API_KEY="{self.OPENROUTER}\\n"\n',
+                                             self.OPENROUTER + "\n", "differs-from-file")
+
+    def test_a_gateway_value_with_a_blank_after_the_key_makes_the_bare_key_known(self):
+        self._assert_the_bare_key_is_guarded(f'OPENROUTER_API_KEY="{self.OPENROUTER} "\n',
+                                             self.OPENROUTER + " ", "matches-file")
+
+    def test_a_gateway_value_with_a_blank_before_the_key_makes_the_bare_key_known(self):
+        self._assert_the_bare_key_is_guarded(f'OPENROUTER_API_KEY=" {self.OPENROUTER}"\n',
+                                             " " + self.OPENROUTER, "matches-file")
+
+    def test_a_gateway_value_with_the_key_on_its_second_line_makes_the_bare_key_known(self):
+        self._assert_the_bare_key_is_guarded(f'OPENROUTER_API_KEY="prefix-not-a-secret\\n{self.OPENROUTER}"\n',
+                                             "prefix-not-a-secret\n" + self.OPENROUTER, "differs-from-file")
+
+    def test_a_file_value_with_a_blank_inside_its_quotes_makes_the_bare_key_known_without_a_gateway(self):
+        key = self.OPENROUTER
+        self._w(self.GATEWAY_ENV, f'OPENROUTER_API_KEY="{key} "\n')
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n", "")
+        self.outputs[("journalctl", "-o")] = (0, f"debug: Authorization: Bearer {key} was sent\n", "")
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(secrets, [key + " ", key])
+        self.assertGreaterEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        h = self.host()
+        ctx = CE.context(h)                                              # and D2.1 on its own seeds the same
+        CE.d2_1(h, ctx)
+        self.assertEqual(ctx["secrets"], [key + " ", key])
+
+    def test_the_forms_of_a_secret_value(self):
+        for value, want in (("NOT-A-REAL-KEY", ["NOT-A-REAL-KEY"]),
+                            ("NOT-A-REAL-KEY ", ["NOT-A-REAL-KEY ", "NOT-A-REAL-KEY"]),
+                            ("\tNOT-A-REAL-KEY", ["\tNOT-A-REAL-KEY", "NOT-A-REAL-KEY"]),
+                            ("NOT-A-REAL-KEY\n", ["NOT-A-REAL-KEY\n", "NOT-A-REAL-KEY"]),
+                            ("one \n two\r\n\nthree", ["one \n two\r\n\nthree", "one", "two", "three"]),
+                            (" \n ", [" \n "]), ("", [])):
+            with self.subTest(value=value):
+                self.assertEqual(CE._secret_forms(value), want)
+
+    def test_the_gateways_text_is_withheld_when_its_key_could_not_be_read(self):
+        key = self.OPENROUTER
+        self._box(f'OPENROUTER_API_KEY="{key}"#note\n', (125, "", "boom"), leaked=key)
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertNotIn(key, secrets)                                   # control: nothing here knows the key
+        self.assertEqual(self._secret_env(bundle)["openrouter-key"], R.COULD_NOT_CHECK)
+        d = bundle["items"]["D10.6"]["data"]
+        self.assertEqual((d["gateway_mcp_list"], d["gateway_mcp_list_rc"]), (R.COULD_NOT_CHECK, 0))
+        self.assertIs(d["mcp_block"]["equals_repo"], True)               # the comparison is still reported
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertNotIn(key, out)
+        self.assertEqual(json.loads(out)["items"]["D10.6"]["data"]["gateway_mcp_list"], R.COULD_NOT_CHECK)
+
+    def test_d10_6_prints_the_gateways_text_only_with_every_secret_env_state_measured(self):
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OPENROUTER)
+        h = self.host()
+        both = {"openrouter-key": "differs-from-file", "dashboard-password": "unset"}
+        for why, ctx in {"measured": {"secret_env": dict(self.HEALTHY)}, "measured, one differs": {"secret_env": both}}.items():
+            with self.subTest(why=why):
+                d = CE.d10_6(h, ctx)
+                self.assertEqual((d["gateway_mcp_list"], d["gateway_mcp_list_rc"]), (["ads_audit  3 tools"], 0))
+        for why, ctx in {"never asked": {}, "no gateway when asked": {"secret_env": R.COULD_NOT_CHECK},
+                         "one label not measured": {"secret_env": dict(self.HEALTHY, **{"dashboard-password": R.COULD_NOT_CHECK})},
+                         "not a dict": {"secret_env": ["matches-file"]}}.items():
+            with self.subTest(why=why):
+                before = len(self._printenv_calls(h))
+                d = CE.d10_6(h, ctx)
+                self.assertEqual((d["gateway_mcp_list"], d["gateway_mcp_list_rc"]), (R.COULD_NOT_CHECK, 0))
+                self.assertIs(d["mcp_block"]["equals_repo"], True)
+                self.assertEqual(len(self._printenv_calls(h)), before)   # D10.6 never asks itself
+
+    def test_a_secret_that_holds_a_client_slug_is_caught_before_redaction(self):
+        """The redactor rewrites the slug inside the password, so the redacted text no longer
+        holds the value: the guard has to read the text as it was before redaction too."""
+        password = "NOT-A-REAL-acme-dental-PASSWORD-0123"
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\nHERMES_DASHBOARD_BASIC_AUTH_PASSWORD={password}\n",
+                  self.OPENROUTER, dash=password, leaked=password)
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn(password, secrets)
+        self.assertNotIn(password, json.dumps(bundle))                   # control: the redacted text hides it
+        self.assertIn("NOT-A-REAL-<client>-PASSWORD-0123", json.dumps(bundle))
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertIsInstance(rc, RuntimeError)
+        self.assertEqual(out + err, "")
 
     def test_d10_6_a_long_line_without_a_secret_is_still_cut_with_secrets_loaded(self):
         self._load_openrouter_key()

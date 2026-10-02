@@ -447,6 +447,25 @@ def _other_secrets(host, p):
     return held, problems
 
 
+def _secret_forms(value):
+    """The forms of a non-Google secret value to look for, the value itself first: also the value
+    without surrounding whitespace and, when it holds a line break, each of its lines without
+    theirs. A key that reached its reader with a blank or a line break around it (`NAME="<key> "`)
+    is in a journal or in the gateway's own text as the bare key; the listing is split into lines
+    before it is printed. Empty forms are dropped; a plain value is its only form."""
+    forms = [value, value.strip()] + [line.strip() for line in value.splitlines()]
+    return [f for f in dict.fromkeys(forms) if f]
+
+
+def _seed(ctx, values):
+    """Every form of every value joins ctx["secrets"], unless it is already there."""
+    known = ctx.setdefault("secrets", [])
+    for value in values:
+        for form in _secret_forms(value):
+            if form not in known:
+                known.append(form)
+
+
 def other_credentials(host):
     """(rows, secrets, failed) for the non-Google secrets installed. Each file is read on its own.
     One that is absent adds nothing (D2.1's pass rule names the missing row). One that cannot be
@@ -481,7 +500,7 @@ def gateway_secret_env(host):
     (the value is one _other_secrets read from the file for that label), DIFFERS_FROM_FILE (it is
     not, which includes a file that could not be read), UNSET (the name is not in the environment,
     or is empty) or R.COULD_NOT_CHECK (the answer could not be had). `secrets` is every non-empty
-    value read, for the known-secret list: never for printing.
+    value read, exactly as read, for the known-secret list (_seed adds its forms): never for printing.
     Nothing a `printenv` call writes, to stdout or to stderr, reaches a message: this never
     calls _ok, and it raises only CouldNotCheck(NO_GATEWAY), when there is no one container."""
     try:
@@ -503,6 +522,9 @@ def gateway_secret_env(host):
             states[label] = R.COULD_NOT_CHECK               # UTF-8 (the runner decodes strictly)
             continue
         if rc == 0:
+            if not out:                                     # printenv ends even an empty value with a
+                states[label] = R.COULD_NOT_CHECK           # newline: no output at all is not its answer
+                continue
             value = out[:-1] if out.endswith("\n") else out  # ONE newline is printenv's; the rest is the value
             if not value:
                 states[label] = UNSET
@@ -520,18 +542,15 @@ def gateway_secret_env(host):
 
 def _gateway_secret_states(host, ctx):
     """gateway_secret_env, asked ONCE per run and kept on ctx: the states, or R.COULD_NOT_CHECK
-    when there was no gateway to ask. Every value read joins ctx["secrets"] (unless it is already
-    there), so the leak checks and the output check look for what the gateway really holds."""
+    when there was no gateway to ask. Every value read joins ctx["secrets"], in each of its forms
+    (_seed), so the leak checks and the output check look for what the gateway really holds."""
     if "secret_env" not in ctx:
         try:
             states, values = gateway_secret_env(host)
         except CouldNotCheck:
             ctx["secret_env"] = R.COULD_NOT_CHECK
         else:
-            known = ctx.setdefault("secrets", [])
-            for v in values:
-                if v not in known:
-                    known.append(v)
+            _seed(ctx, values)
             ctx["secret_env"] = states
     return ctx["secret_env"]
 
@@ -563,14 +582,11 @@ def d2_1(host, ctx):
                         row["kind"] = "empty"
                     elif p in AUTHORISED_OTHER:
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
-                        # Every value joins the known secrets (unless collect_with_secrets already
-                        # seeded it) before anything below can fail, whatever state the file is
-                        # in; the row names which are held, never a value.
+                        # Every value joins the known secrets, in each of its forms (unless
+                        # collect_with_secrets already seeded it) before anything below can fail,
+                        # whatever state the file is in; the row names which are held, never a value.
                         held, problems = _other_secrets(host, p)
-                        known = ctx.setdefault("secrets", [])
-                        for _, v in held:
-                            if v not in known:
-                                known.append(v)
+                        _seed(ctx, [v for _, v in held])
                         row["secrets_held"] = list(dict.fromkeys(label for label, _ in held))
                         # Held but too short for the leak counters to search for (R._MIN_SECRET_LEN).
                         row["secrets_not_searchable"] = list(dict.fromkeys(
@@ -1053,15 +1069,21 @@ def d10_6(host, ctx):
         raise CouldNotCheck("config.yaml.example: no usable mcp_servers block")
     # The tool list is information, not a boundary: when it cannot be had, it is empty with its
     # exit code (None: no gateway container to ask), and the comparison is still reported. It is
-    # the gateway's own text: capped in lines and in line length.
+    # the gateway's own text: capped in lines and in line length, and emitted only when the values
+    # to look for in it are known, which is when every D4.1 secret_env state was measured. Not
+    # asked here (collect_with_secrets or D4.1 did): without that, or with one label that could
+    # not be checked, the listing is could-not-check and only its exit code is reported.
+    states = ctx.get("secret_env")
+    measured = isinstance(states, dict) and R.COULD_NOT_CHECK not in states.values()
     rc, gw, _ = host.run(["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER])
     gw, listing, list_rc = gw.strip(), [], None
     if rc == 0 and len(gw) == 64:
         list_rc, out, _ = host.run(["docker", "exec", gw, "hermes", "mcp", "list"])
-        if list_rc == 0:
+        if list_rc == 0 and measured:
             listing = _cut_listing(_no_credential_lines(out.splitlines()[:MCP_LIST_LINES]),
                                    ctx.get("secrets", []))
-    return {"mcp_block": block, "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
+    return {"mcp_block": block, "gateway_mcp_list": listing if measured else R.COULD_NOT_CHECK,
+            "gateway_mcp_list_rc": list_rc}
 
 
 def _label(value, allowed):
@@ -1224,15 +1246,17 @@ def box_fingerprint(host, ctx):
 
 
 # ---------------------------------------------------------------- assembly
-def collect_with_secrets(host, fp_key):
-    """The bundle (redacted) and every credential value seen, for assert_no_secret."""
+def _collect(host, fp_key):
+    """(bundle, secrets, ctx): the bundle BEFORE redaction, every credential value seen (for
+    assert_no_secret) and the run's ctx. Only main and collect_with_secrets call this: nothing
+    else may hold the unredacted bundle."""
     ctx = context(host, fp_key)
     items = {}
     # The non-Google secrets are loaded first and on their own, so the leak checks (D2.2, D2.3,
     # D10.7) search for them whether or not the sweep reaches the files. Every value read is
     # seeded, also from a file reported in other_failed.
     other, other_secrets, other_failed = other_credentials(host)
-    ctx.setdefault("secrets", []).extend(other_secrets)
+    _seed(ctx, other_secrets)
     # Then the values the running gateway really holds, however the file spells them (F43).
     _gateway_secret_states(host, ctx)
     for iid, fn in PROBES.items():
@@ -1250,7 +1274,13 @@ def collect_with_secrets(host, fp_key):
     bundle = {"schema": 1, "kind": "box", "collected_at": R.utc_now(), "items": items,
               "fingerprint": box_fingerprint(host, ctx), "credentials": creds,
               "cid_fingerprint": "hmac-sha256/12", "cid_key_id": R.key_id(fp_key)}
-    return ctx["redactor"].obj(bundle), ctx.get("secrets", []) + secrets
+    return bundle, ctx.get("secrets", []) + secrets, ctx
+
+
+def collect_with_secrets(host, fp_key):
+    """The bundle (redacted) and every credential value seen, for assert_no_secret."""
+    bundle, secrets, ctx = _collect(host, fp_key)
+    return ctx["redactor"].obj(bundle), secrets
 
 
 def collect(host, fp_key):
@@ -1319,9 +1349,14 @@ def _main(a, host, read_key):
             return 2
         out, secrets = R.credential_set(infos) + other, secrets + other_secrets
     else:
-        out, secrets = collect_with_secrets(host, fp_key)
+        out, secrets, _ = _collect(host, fp_key)
+    secrets = secrets + ([fp_key.hex()] if fp_key else [])
+    # Twice: on the text as collected, then on the text to print. The redactor rewrites a client
+    # slug or a customer id INSIDE a secret value, so the redacted text alone would let the rest
+    # of that value through.
+    R.assert_no_secret(json.dumps(out, indent=2, sort_keys=True), secrets)
     text = json.dumps(ctx["redactor"].obj(out), indent=2, sort_keys=True)
-    R.assert_no_secret(text, secrets + ([fp_key.hex()] if fp_key else []))
+    R.assert_no_secret(text, secrets)
     print(text)
     return rc
 
