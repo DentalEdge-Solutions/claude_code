@@ -626,6 +626,39 @@ and the target account.
 and none of Hermes's checks run then. Only the access audit sees it. **Fix:** the access audit runs
 on every security review (D3.1) and after any console change to either account.
 
+### F26 to F42: opened at security review #6 (2026-10-02)
+
+Review #6 (PASS 34/34, checklist v1.14) accepted sixteen findings opened since review #5, each
+with a reason, under D9.1. They were recorded only in the operator's evidence for that review;
+this section is their record. F42 is the reviewer's "Not on the checklist" entry 7. "Fixed"
+means fixed in the review #6 follow-up change (checklist v1.15), which re-opens the review: the
+box is not at that code until it is pulled and review #7 passes.
+
+| # | Finding | Decision at review #6 | Now |
+|---|---|---|---|
+| F26 | The env probe cannot see a real credential file mounted into an audit container (a real file holds no sentinel). | accepted: D4.1 and the fingerprinted compose file show no such mount | **fixed**: the probe reports `host_credential_files_visible` for each container |
+| F27 | When the collector's 600 s timeout kills a probe, the probe's own cleanup does not run. | accepted: the next probe or audit removes the leftovers | **fixed**: the collector sends SIGTERM and waits 90 s before it kills |
+| F28 | `probe_egress` ignores its two exit codes. | accepted: a failed step shows as missing lines | **fixed**: `proxy_rc` and `drafter_rc` are reported and must be 0 |
+| F29 | `_sudo_rules` reads `command_lines: 0` when `sudo` did not run. | accepted: the pass rule needs `not_allowed: true` | **fixed**: neither answer is `could-not-check` |
+| F30 | `d10_3` loses the whole item when the app user is missing. | accepted: it becomes `could-not-check` | **fixed**: only `broker_user_groups` is `could-not-check` |
+| F31 | `load_env_value` does not strip an inline `# comment`. | accepted: the installed files have none | **fixed** |
+| F32 | The review's "authorised credential set" and `--credentials-only` cover Google values only. | accepted: the other values are covered by D2.1, D4.1, D10.1 and D10.7 | **fixed**: the set lists the Anthropic key, the OpenRouter key and the dashboard password |
+| F33 | The audit lock file in `/run/lock` can be pre-created by a local user. | accepted: the worst case is a refused audit, never a run | accepted (standing) |
+| F34 | D10.4 inspects running containers only. | accepted: the compose file is in the fingerprint | accepted (standing) |
+| F35 | D4.1's evidence comes from `docker exec` inside the gateway container. | accepted: a known limit of that item since review #1 | accepted (standing) |
+| F36 | The box bundle is written to the operator's home with the shell's umask before it is shredded. | accepted: it is redacted by design and exists for minutes | accepted (standing) |
+| F37 | The broker's sweep of `jobs/` leaves an entry it cannot remove, and only runs while the broker runs. | accepted: only the app user or root can create one there | accepted (standing) |
+| F38 | The app MCP server abandons a waiting call when its input ends, and an exception from the logger would leave the broker's sweep. | accepted: neither is reachable by a client | accepted (standing) |
+| F39 | D10.6's stated limit (a crafted file can leave the loader with no top-level `mcp_servers` key while the collector reports equal) and its top-level-plain rule, which refuses an indentless list or a key name outside the plain pattern. | accepted: it cannot yield a different or extra server; the broker is the boundary | accepted (standing). The rule is not widened: it fails closed, and no config on the box needs it. Widen it deliberately if a future Hermes config trips `top_level_not_plain`. |
+| F40 | BRING-UP part 2 step 7 removed a leftover key file with `rm -f` where part 1 step 5 uses `shred -u`. | accepted: the file was shredded in part 1 on this box | **fixed**; the dashboard step's `.env.new` is shredded too |
+| F41 | The README's "one non-Google secret file" paragraph was stale. | accepted: documentation | **fixed** |
+| F42 | The dashboard basic-auth password was outside the D2.1 inventory and the leak checks. | accepted for review #6: the dashboard is off by default and bound to localhost | **fixed**: D2.1 names it (`secrets_held`) and its value is a known secret; it is listed and never fingerprinted |
+
+Still open from review #6, not findings against the code: the retired ADMIN write token is valid at
+Google (accepted under D3.2; revoke it when the shared grant can be separated), and two reviewer
+suggestions for the next review (the collector could name the accounts that `sudoers.d` rules
+name; capture the whole Data Training section of the OpenRouter privacy screen).
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -677,3 +710,7 @@ on every security review (D3.1) and after any console change to either account.
     (sha12 `b5aa4baf3310`) is **not revoked**: revoking a token on the ADMIN account could kill the
     other project's grant (canon rule 1). Instead every copy is destroyed; this is an accepted risk. The
     mutation tier and the live gate are parked.
+18. **2026-10-02: security review #6 PASS (34/34, checklist v1.14); Option B (chat-triggered
+    audits) is live on the box.** Its findings are F26 to F42 above. The follow-up change that
+    fixes ten of them moves the checklist to v1.15 and changes the box fingerprint, so it needs a
+    pull on the box and review #7 before the box is at that code.
