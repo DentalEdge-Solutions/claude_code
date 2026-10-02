@@ -1116,7 +1116,7 @@ to the deploy user's home and install it:
 sudo install -d -m 0755 /etc/hermes && sudo install -o root -g root -m 0400 ~/env.ga.incoming /etc/hermes/.env.ga && shred -u ~/env.ga.incoming
 sudo stat -c '%U:%G %a' /etc/hermes/.env.ga                                       # root:root 400
 sudo grep -c '^GOOGLE_ADS_CREDENTIAL_ROLE=read$' /etc/hermes/.env.ga              # 1
-sudo python3 /opt/hermes-agent/bin/collect-review-evidence.py --credentials-only  # the read row for /etc/hermes/.env.ga (role read; its sha12 equals the laptop's .env.ga row), then one row per non-Google secret already installed
+sudo python3 /opt/hermes-agent/bin/collect-review-evidence.py --credentials-only  # the read row for /etc/hermes/.env.ga (role read; its refresh-token sha12 equals the laptop's .env.ga row's), then one row per non-Google secret already installed
 ls ~/env.ga.incoming 2>&1                                                         # No such file or directory (F24: no stray copy)
 ```
 
