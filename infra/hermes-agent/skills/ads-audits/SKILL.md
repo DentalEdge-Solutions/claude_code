@@ -24,6 +24,7 @@ audit's content, and you must not try to: drafts are read by the operator on the
 | `failed` | it failed at step `reason` (e.g. `collect`, `draft`, `timeout`, `interrupted`) | suggest the manual command `sudo run-client-audit <client>`; do not retry |
 | `busy` | another audit is running on the server | offer to try later; do not loop |
 | `pending` | it is still running, and the `request_id` | check with `ads_audit_status` once, only when the operator asks |
+| the tool call itself errors or times out (no `status` came back) | you got no answer; the audit may still be running or may have finished | do NOT call `ads_audit_run` again and do NOT suggest the manual command (it would start a second audit). Call `ads_audit_list` once and report the latest timestamp; the operator can read it with `sudo show-audit <client>` |
 
 ## Never
 
@@ -31,3 +32,4 @@ audit's content, and you must not try to: drafts are read by the operator on the
 - Retry a `refused` or `failed` result.
 - Write into or read from `/opt/data/spool` yourself, or use the terminal to reach the audit system.
 - Guess a client's short name. If unsure, ask the operator.
+- Treat a tool error or timeout as a failed audit.

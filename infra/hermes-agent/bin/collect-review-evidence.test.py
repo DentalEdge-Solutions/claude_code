@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, sys, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, sys, tempfile, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -878,6 +878,30 @@ class TestD10(Base):
              "    # three tools, nothing else\n"
              "    tools:\n"
              "      include: [ads_audit_run, ads_audit_status, ads_audit_list]\n")
+    BLOCK_SHA256 = hashlib.sha256(
+        b'{"ads_audit":{"args":["/opt/cc-bin/hermes-app-mcp.py","--app","ads-audit"],"command":"python3",'
+        b'"env":{},"tools":{"include":["ads_audit_run","ads_audit_status","ads_audit_list"]}}}').hexdigest()
+    # The whole file as the gateway rewrote it on the box: the template's values, another layout.
+    REWRITTEN = ("model:\n  default: deepseek/deepseek-v3.2\n  provider: openrouter\n"
+                 "terminal:\n  backend: local\n  cwd: .\n  timeout: 300\n"
+                 "provider_routing:\n  data_collection: deny\n"
+                 "mcp_servers:\n"
+                 "  ads_audit:\n"
+                 "    command: python3\n"
+                 "    args:\n"
+                 "      - /opt/cc-bin/hermes-app-mcp.py\n"
+                 "      - --app\n"
+                 "      - ads-audit\n"
+                 "    env: {}\n"
+                 "    timeout: 360\n"
+                 "    tools:\n"
+                 "      include:\n"
+                 "        - ads_audit_run\n"
+                 "        - ads_audit_status\n"
+                 "        - ads_audit_list\n"
+                 "      resources: false\n"
+                 "      prompts: false\n"
+                 "onboarding:\n  seen:\n  - welcome\n  note: |\n    any shape: {not, parsed}\n")
     BOX_CONFIG = CE.AGENT_DIR + "/data/config.yaml"
 
     def _configs(self, box, repo=None):
@@ -886,6 +910,10 @@ class TestD10(Base):
         if box is not None:
             self._w(self.BOX_CONFIG, "model: x\n# the one app\n" + box + "terminal:\n  backend: docker\n")
         self._w(CE.MCP_REPO_CONFIG, "# template\nmodel:\n  default: y\n\n" + (self.BLOCK if repo is None else repo))
+
+    def _real_template(self):
+        with open(os.path.join(os.path.dirname(HERE), "config.yaml.example"), encoding="utf-8") as f:
+            return f.read()
 
     OPENROUTER = "sk-or-v1-NOT-A-REAL-KEY-0123456789abcdef"
 
@@ -906,45 +934,91 @@ class TestD10(Base):
         self._gateway((0, "ads_audit  3 tools\n", ""))
         it = self._item("D10.6")
         d = it["data"]
-        self.assertEqual(d["mcp_block"], {"equals_repo": True, "lines": 9,
-                                          "sha256": CE.PK.sha256_bytes(self.BLOCK.rstrip("\n").encode())})
+        self.assertEqual(d["mcp_block"], {"equals_repo": True, "reason": "-", "canonical_sha256": self.BLOCK_SHA256})
         self.assertEqual((d["gateway_mcp_list"], d["gateway_mcp_list_rc"]), (["ads_audit  3 tools"], 0))
         self.assertEqual(set(d), {"mcp_block", "gateway_mcp_list", "gateway_mcp_list_rc"})
         for text in ("ads_audit_run", "python3", "hermes-app-mcp"):      # the block's text is never emitted
             self.assertNotIn(text, json.dumps(it))
 
-    def test_d10_6_equal_means_the_same_lines_whatever_trails_them(self):
-        # Trailing whitespace, CRLF, the blank lines after the block and the comment that heads
-        # the next key are not the block.
-        box = self.BLOCK.replace("    env: {}\n", "    env: {}  \t\r\n") + "\n\n# about the terminal\n"
+    def test_d10_6_the_rewritten_layout_equals_the_template(self):
+        """The first box rollout: the gateway re-serialised data/config.yaml (quotes dropped, the
+        flow lists one item per line, a key added after the block). Same values: equal."""
+        template = self._real_template()
+        self._w(CE.MCP_REPO_CONFIG, template)
+        self._w(self.BOX_CONFIG, self.REWRITTEN)
+        it = self._item("D10.6")
+        self.assertEqual(it["status"], R.OBSERVED)
+        mine = it["data"]["mcp_block"]
+        self.assertEqual((mine["equals_repo"], mine["reason"]), (True, "-"))
+        self._w(self.BOX_CONFIG, template)                               # the template itself, as installed
+        self.assertEqual(self._item("D10.6")["data"]["mcp_block"], mine)
+        self.assertEqual(mine["canonical_sha256"], CE.mcp_config.compare(template, template)["canonical_sha256"])
+        self.assertNotEqual(mine["canonical_sha256"], self.BLOCK_SHA256)
+
+    def test_d10_6_equal_means_the_same_values_whatever_the_layout(self):
+        # Quoting, flow or block lists, key order, comments and blank lines are layout, and so is
+        # what trails the block: the blank lines after it and the comment that heads the next key.
+        box = ("mcp_servers:\n  ads_audit:\n    tools:\n      include:\n      - 'ads_audit_run'\n      - ads_audit_status\n"
+               "      - ads_audit_list\n    # four tools? no: three\n    env: {}\n    args:\n      - /opt/cc-bin/hermes-app-mcp.py\n"
+               "      - \"--app\"\n      - ads-audit\n    command: python3\n\n\n# about the terminal\n")
         self._configs(box)
-        self.assertEqual(self._item("D10.6")["data"]["mcp_block"]["equals_repo"], True)
+        self.assertEqual(self._item("D10.6")["data"]["mcp_block"],
+                         {"equals_repo": True, "reason": "-", "canonical_sha256": self.BLOCK_SHA256})
         self._configs(self.BLOCK, repo=self.BLOCK + "\n# trailing note\n")
         self.assertEqual(self._item("D10.6")["data"]["mcp_block"]["equals_repo"], True)
 
     def test_d10_6_a_differing_block_is_not_equal_and_none_of_its_text_is_emitted(self):
         secret = "sk-or-NOT-A-REAL-KEY-0123456789"
-        cases = {"a secret in args": self.BLOCK.replace('"--app", "ads-audit"]', '"--token", "' + secret + '"]'),
-                 "a url with a password": self.BLOCK + "  other:\n    url: https://user:" + secret + "@host.internal/x\n",
-                 "a fourth tool": self.BLOCK.replace("ads_audit_list]", "ads_audit_list, shell]"),
-                 "a non-empty env": self.BLOCK.replace("env: {}", "env: {K: " + secret + "}"),
-                 "a comment changed inside the block": self.BLOCK.replace("# three tools", "# four tools"),
-                 "an indent changed": self.BLOCK.replace("      include:", "    include:"),
-                 "the block declared a second time": self.BLOCK + "terminal:\n  x: 1\nmcp_servers:\n  evil: {command: sh}\n",
-                 "a second declaration with the key quoted": self.BLOCK + "terminal:\n  x: 1\n\"mcp_servers\":\n  evil: {command: sh}\n",
-                 "no block at all": "provider_routing:\n  data_collection: deny\n"}
-        for why, box in cases.items():
+        second = "terminal:\n  x: 1\n%s:\n  evil:\n    command: sh\n"
+        cases = {"a secret in args": ("differs", self.BLOCK.replace('"--app", "ads-audit"]', '"--token", "' + secret + '"]')),
+                 "a fourth tool": ("differs", self.BLOCK.replace("ads_audit_list]", "ads_audit_list, shell]")),
+                 "a second server": ("differs", self.BLOCK + "  evil:\n    command: sh\n    args: [-c, " + secret + "]\n"),
+                 "list order changed": ("differs", self.BLOCK.replace("ads_audit_run, ads_audit_status", "ads_audit_status, ads_audit_run")),
+                 "a string where the template has none": ("differs", self.BLOCK.replace("env: {}", 'env: "{}"')),
+                 "a url with a password": ("unparseable", self.BLOCK + "  other:\n    url: https://user:" + secret + "@host.internal/x\n"),
+                 "a non-empty env": ("unparseable", self.BLOCK.replace("env: {}", "env: {K: " + secret + "}")),
+                 "an indent changed": ("unparseable", self.BLOCK.replace("      include:", "    include:")),
+                 "an anchor": ("unparseable", self.BLOCK.replace("env: {}", "env: &evil {}")),
+                 "CRLF line ends": ("unparseable", self.BLOCK.replace("\n", "\r\n")),
+                 "a repeated key in the block": ("duplicate_key", self.BLOCK + "    env: {}\n"),
+                 "the block declared a second time": ("duplicate_key", self.BLOCK + second % "mcp_servers"),
+                 "a second declaration with the key quoted": ("top_level_not_plain", self.BLOCK + second % '"mcp_servers"'),
+                 "a second declaration with an escape in the key": ("top_level_not_plain", self.BLOCK + second % '"mcp\\x5fservers"'),
+                 "a second declaration under a merge key": ("top_level_not_plain", self.BLOCK + "<<:\n  mcp_servers:\n    evil:\n      command: sh\n"),
+                 "a second document": ("top_level_not_plain", self.BLOCK + "---\nmcp_servers:\n  evil:\n    command: sh\n"),
+                 "an empty block": ("no_block", "mcp_servers: {}\n"),
+                 "no block at all": ("no_block", "provider_routing:\n  data_collection: deny\n")}
+        self.assertIn('"mcp\\x5fservers":', cases["a second declaration with an escape in the key"][1])
+        for why, (reason, box) in cases.items():
             with self.subTest(why=why):
                 self._configs(box)
                 b = CE.collect(self.host(), self.KEY)
+                self.assertEqual(b["items"]["D10.6"]["status"], R.OBSERVED)
                 d = b["items"]["D10.6"]["data"]["mcp_block"]
                 self.assertIs(d["equals_repo"], False)
-                self.assertEqual(set(d), {"equals_repo", "lines", "sha256"})
-                self.assertRegex(d["sha256"], r"^[0-9a-f]{64}$")
+                self.assertEqual(set(d), {"equals_repo", "reason", "canonical_sha256"})
+                self.assertEqual(d["reason"], reason)
+                self.assertIn(d["reason"], CE.mcp_config.REASONS)
+                if reason == "differs":                                   # it parsed: the sha256 of what it holds
+                    self.assertRegex(d["canonical_sha256"], r"^[0-9a-f]{64}$")
+                    self.assertNotEqual(d["canonical_sha256"], self.BLOCK_SHA256)
+                else:
+                    self.assertIsNone(d["canonical_sha256"])
                 out = json.dumps(b)
-                for text in (secret, "host.internal", "evil", "shell]", "four tools"):
+                for text in (secret, "host.internal", "evil", "shell", "--token"):
                     self.assertNotIn(text, out)
-        self.assertEqual(d["lines"], 0)                                  # the last case: a missing block
+
+    def test_d10_6_binary_content_is_unparseable_never_an_exception(self):
+        self._configs(self.BLOCK)
+        path = os.path.join(self.root, self.BOX_CONFIG.lstrip("/"))
+        for body in (bytes(range(256)) * 16, b"\xff\xfe" + self.BLOCK.encode("utf-16-le"), self.BLOCK.encode() + b"\x00",
+                     b"model: \xff\n" + self.BLOCK.encode(), b"\xef\xbb\xbf" + self.BLOCK.encode()):
+            with self.subTest(body=body[:12]):
+                with open(path, "wb") as f:
+                    f.write(body)
+                it = self._item("D10.6")
+                self.assertEqual(it["status"], R.OBSERVED)
+                self.assertEqual(it["data"]["mcp_block"], {"equals_repo": False, "reason": "unparseable", "canonical_sha256": None})
 
     def _d10_6_could_not_check(self, expect):
         done = []
@@ -983,8 +1057,18 @@ class TestD10(Base):
         self._d10_6_could_not_check("data/config.yaml: too large")
 
     def test_d10_6_without_the_committed_block_nothing_can_be_compared(self):
-        self._configs(self.BLOCK, repo="terminal:\n  backend: local\n")
-        self._d10_6_could_not_check("config.yaml.example: no mcp_servers block")
+        marker = "only-in-the-template"
+        for why, repo in {"no block": "terminal:\n  backend: local\n",
+                          "a block outside the subset": self.BLOCK.replace("env: {}", "env: {K: " + marker + "}"),
+                          "two blocks": self.BLOCK + "mcp_servers:\n  " + marker + ":\n    command: sh\n",
+                          "a top level that is not plain": self.BLOCK + "--- " + marker + "\n"}.items():
+            with self.subTest(why=why):
+                self._configs(self.BLOCK, repo=repo)
+                it = self._d10_6_could_not_check("config.yaml.example: no usable mcp_servers block")
+                self.assertNotIn(marker, json.dumps(it))
+        # The box's own state does not turn that into a verdict.
+        self._configs("provider_routing:\n  data_collection: deny\n", repo="terminal:\n  backend: local\n")
+        self._d10_6_could_not_check("config.yaml.example: no usable mcp_servers block")
         os.remove(os.path.join(self.root, CE.MCP_REPO_CONFIG.lstrip("/")))
         self._d10_6_could_not_check("config.yaml.example: cannot open")
 
@@ -1038,13 +1122,14 @@ class TestD10(Base):
         self.assertEqual(listing, [("ads_audit " + "x" * 5000)[:200]])
 
     def test_the_committed_template_has_the_block_the_collector_compares_with(self):
-        """The real config.yaml.example, read by the collector's own reader."""
-        real = os.path.join(os.path.dirname(HERE), "config.yaml.example")
-        block = CE._mcp_block(real, "config.yaml.example")
-        self.assertEqual(block[0], "mcp_servers:")
-        self.assertIn("      include: [ads_audit_run, ads_audit_status, ads_audit_list]", block)
-        self.assertIn("    env: {}", block)
+        """The real config.yaml.example, parsed by the parser the collector compares with."""
+        value, reason = CE.mcp_config.block_value(self._real_template())
+        self.assertIsNone(reason)
+        self.assertEqual(value["ads_audit"]["tools"]["include"], ["ads_audit_run", "ads_audit_status", "ads_audit_list"])
+        self.assertEqual(value["ads_audit"]["env"], {})
         self.assertTrue(CE.MCP_REPO_CONFIG.endswith("/infra/hermes-agent/config.yaml.example"))
+        for gone in ("_mcp_block", "_block_sha256", "_MCP_KEY_RE"):
+            self.assertFalse(hasattr(CE, gone))
 
     # ---- D10.7 -------------------------------------------------------------------------
     def test_d10_7_counts_without_slugs(self):

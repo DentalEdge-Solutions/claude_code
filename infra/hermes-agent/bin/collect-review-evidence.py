@@ -23,6 +23,7 @@ import app_lib as A
 import changeset_lib as C
 import client_audit_lib as CAL
 import host_layout as HL
+import mcp_config
 import package_lib as PK
 import review_lib as R
 
@@ -95,12 +96,12 @@ _SAY_RE = re.compile(r"request=\S+ op=\S+ client=\S+ status=(\S+) reason=(\S+)")
 _NOTE_RE = re.compile(r"(warning|error): ")
 WITHHELD = "<withheld>"
 # D10.6: the gateway's live config (in ./data, which the gateway's uid owns: read as hostile) and
-# the template it is installed from. Only their `mcp_servers:` blocks are compared.
+# the template it is installed from. Only their `mcp_servers:` blocks are compared, as parsed
+# values (mcp_config): the gateway rewrites its file, so the layout is not the template's.
 MCP_BOX_CONFIG = AGENT_DIR + "/data/config.yaml"
 MCP_REPO_CONFIG = CHECKOUT + "/infra/hermes-agent/config.yaml.example"
 MCP_CONFIG_CAP = 64 * 1024
 MCP_LIST_LINES, MCP_LIST_WIDTH = 40, 200
-_MCP_KEY_RE = re.compile(r"""["']?mcp_servers["']?\s*:""")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # systemd prints `argv[]=<the command line> ; ignore_errors=...` inside the ExecStart value.
 _ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=.*? ; "))
@@ -841,33 +842,15 @@ def d10_4(host, ctx):
             "containers_mounting_app_state": mounting, "containers_not_inspected": not_inspected}
 
 
-def _mcp_block(path, what):
-    """A config file's `mcp_servers:` block as lines: from that top-level key to the next one,
-    each line without its trailing whitespace, and without the blank lines and column-0 comments
-    that trail the block (they sit between it and whatever follows). A second `mcp_servers:`
-    key later in the file is part of the result, so it can never go unseen. [] when there is no
-    such key. The read refuses a symlink, anything but a regular file and a file over
-    MCP_CONFIG_CAP, and never blocks: a refusal is could-not-check. `what` names the file in
-    that reason, never its content."""
+def _config_text(path, what):
+    """A config file's text. The read refuses a symlink, anything but a regular file and a file
+    over MCP_CONFIG_CAP, and never blocks: a refusal is could-not-check. `what` names the file in
+    that reason, never its content. Bytes that are not UTF-8 become U+FFFD, which mcp_config
+    refuses."""
     try:
-        text = A.read_capped(path, MCP_CONFIG_CAP).decode("utf-8", errors="replace")
+        return A.read_capped(path, MCP_CONFIG_CAP).decode("utf-8", errors="replace")
     except (A.Refused, OSError) as e:
         raise CouldNotCheck(f"{what}: {e if isinstance(e, A.Refused) else type(e).__name__}")
-    lines, on = [], False
-    for line in text.splitlines():
-        if _MCP_KEY_RE.match(line):
-            on = True
-        elif line[:1].strip() and not line.startswith("#"):
-            on = False                                      # another top-level key: the block is over
-        if on:
-            lines.append(line.rstrip())
-    while lines and (not lines[-1] or lines[-1].startswith("#")):
-        lines.pop()
-    return lines
-
-
-def _block_sha256(lines):
-    return PK.sha256_bytes("\n".join(lines).encode())
 
 
 def _no_credential_lines(lines):
@@ -884,13 +867,17 @@ def _cut_listing(lines, secrets):
 
 
 def d10_6(host, ctx):
-    """The box's block is free text from the reviewed party, so none of it is emitted: only
-    whether it equals the committed block (the same lines, as _mcp_block gives them: comments
-    and blank lines inside the block count), how many lines it has and their sha256."""
-    box = _mcp_block(host.path(MCP_BOX_CONFIG), "data/config.yaml")
-    repo = _mcp_block(host.path(MCP_REPO_CONFIG), "config.yaml.example")
-    if not repo:
-        raise CouldNotCheck("config.yaml.example: no mcp_servers block")
+    """The box's file is free text from the reviewed party, so none of it is emitted: only
+    whether its `mcp_servers:` block holds the committed block's values (mcp_config parses both
+    with one strict parser; layout, quoting, comments and mapping key order do not count), a
+    reason from mcp_config.REASONS when it does not, and the sha256 of its canonical form when it
+    parsed. The template is ours: when IT has no block the parser reads, nothing can be compared."""
+    box = _config_text(host.path(MCP_BOX_CONFIG), "data/config.yaml")
+    repo = _config_text(host.path(MCP_REPO_CONFIG), "config.yaml.example")
+    try:
+        block = mcp_config.compare(box, repo)
+    except ValueError:
+        raise CouldNotCheck("config.yaml.example: no usable mcp_servers block")
     # The tool list is information, not a boundary: when it cannot be had, it is empty with its
     # exit code (None: no gateway container to ask), and the comparison is still reported. It is
     # the gateway's own text: capped in lines and in line length.
@@ -901,8 +888,7 @@ def d10_6(host, ctx):
         if list_rc == 0:
             listing = _cut_listing(_no_credential_lines(out.splitlines()[:MCP_LIST_LINES]),
                                    ctx.get("secrets", []))
-    return {"mcp_block": {"equals_repo": box == repo, "lines": len(box), "sha256": _block_sha256(box)},
-            "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
+    return {"mcp_block": block, "gateway_mcp_list": listing, "gateway_mcp_list_rc": list_rc}
 
 
 def _label(value, allowed):
