@@ -626,10 +626,59 @@ class TestOptionBLayout(Base):
         def denied(path, name):
             raise PermissionError(path)
         with mock.patch.object(CE.CAL, "load_env_value", denied):
-            with self.assertRaises(CE.CouldNotCheck) as cm:
-                CE.other_credentials(self.host())
-        self.assertNotIn(self.root, str(cm.exception))                 # the reason names the label, not a path
-        self.assertEqual(CE.other_credentials(self.host())[1], [self.OPENROUTER])   # control: readable again
+            rows, secrets, failed = CE.other_credentials(self.host())
+        self.assertEqual((rows, secrets), ([], []))
+        self.assertIn("gateway-env: PermissionError", failed)          # the label, not a path
+        self.assertNotIn(self.root, "".join(failed))
+        rows, secrets, failed = CE.other_credentials(self.host())      # control: readable again
+        self.assertEqual((secrets, failed), ([self.OPENROUTER], []))
+
+    def test_one_unreadable_authorised_file_keeps_the_other_files_values(self):
+        self._w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-SECRETVALUE\n")
+        with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
+            f.write(b"OPENROUTER_API_KEY=\xff\xfe\n")
+        rows, secrets, failed = CE.other_credentials(self.host())
+        self.assertEqual(secrets, ["sk-ant-api03-SECRETVALUE"])
+        self.assertEqual(failed, ["gateway-env: UnicodeDecodeError"])
+
+    def test_the_anthropic_key_is_searched_for_when_the_gateway_env_cannot_be_read(self):
+        self._w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-SECRETVALUE\n")
+        with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
+            f.write(b"OPENROUTER_API_KEY=\xff\xfe\n")
+        self.outputs[("find",)] = (0, f"{self.GATEWAY_ENV}\n/etc/hermes/.env.anthropic\n", "")
+        self.outputs[("journalctl", "-o")] = (0, "leak sk-ant-api03-SECRETVALUE\n", "")
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(secrets.count("sk-ant-api03-SECRETVALUE"), 1)
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        self.assertIn("gateway-env", bundle["credentials"][R.COULD_NOT_CHECK])
+
+    def test_the_openrouter_key_is_searched_for_when_the_anthropic_file_cannot_be_read(self):
+        with open(self._w("/etc/hermes/.env.anthropic", ""), "wb") as f:
+            f.write(b"ANTHROPIC_API_KEY=\xff\xfe\n")
+        self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
+        self.outputs[("find",)] = (0, f"{self.GATEWAY_ENV}\n/etc/hermes/.env.anthropic\n", "")
+        self.outputs[("journalctl", "-o")] = (0, f"leak {self.OPENROUTER}\n", "")
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(secrets.count(self.OPENROUTER), 1)
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        self.assertIn("anthropic-key", bundle["credentials"][R.COULD_NOT_CHECK])
+
+    def test_a_secret_listed_twice_is_counted_once(self):
+        self.assertEqual(CE._count_cred_text("x SECRETVALUE12 y", ["SECRETVALUE12", "SECRETVALUE12"])
+                         ["known_secret_hits"], 1)
+
+    def test_the_google_secrets_survive_a_failed_d2_1_and_an_unreadable_authorised_file(self):
+        with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
+            f.write(b"OPENROUTER_API_KEY=\xff\xfe\n")
+        self.outputs[("find",)] = (0, f"{CE.AGENT_DIR}/.env.gaw\n{self.GATEWAY_ENV}\n", "")
+
+        def boom(host, ctx):
+            raise CE.CouldNotCheck("x")
+        with mock.patch.dict(CE.PROBES, {"D2.1": boom}):
+            bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(bundle["items"]["D2.1"]["status"], R.COULD_NOT_CHECK)
+        self.assertIn("gateway-env", bundle["credentials"][R.COULD_NOT_CHECK])
+        self.assertIn(TOKEN, secrets)
 
     def test_an_unreadable_gateway_env_keeps_the_google_secrets_and_costs_only_its_row(self):
         with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
@@ -1231,6 +1280,25 @@ class TestD10(Base):
         for n in range(8, len(self.OPENROUTER) + 1):
             self.assertNotIn(self.OPENROUTER[:n], printed)
         self.assertEqual(printed, "")
+
+    def test_an_unreadable_gateway_env_does_not_hide_the_anthropic_key_from_the_whole_bundle_refusal(self):
+        self._configs(self.BLOCK)
+        self._w("/etc/hermes/.env.anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-SECRETVALUE\n")
+        env = CE.CHECKOUT + "/infra/hermes-agent/.env"
+        with open(self._w(env, ""), "wb") as f:
+            f.write(b"OPENROUTER_API_KEY=\xff\xfe\n")
+        self.outputs[("find",)] = (0, env + "\n/etc/hermes/.env.anthropic\n", "")
+        self.outputs[("journalctl", "-o")] = (0, "leak sk-ant-api03-SECRETVALUE\n", "")
+        self._gateway((0, "ads_audit sk-ant-api03-SECRETVALUE\nrow\n", ""))
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn("sk-ant-api03-SECRETVALUE", secrets)
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        self.assertIn("gateway-env", bundle["credentials"][R.COULD_NOT_CHECK])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(RuntimeError):
+                CE.main(["--fp-key-tty"], host=self.host(), read_key=lambda: "11" * 32)
+        self.assertEqual(out.getvalue() + err.getvalue(), "")
 
     def test_d10_6_a_long_line_without_a_secret_is_still_cut_with_secrets_loaded(self):
         self._load_openrouter_key()

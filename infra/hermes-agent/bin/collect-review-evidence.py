@@ -417,21 +417,23 @@ def _other_secrets(host, p):
 
 
 def other_credentials(host):
-    """(rows, secrets) for the non-Google secrets installed: one {label, sha12} row each, sha12
-    null for an UNFINGERPRINTED one. A file that is absent adds nothing (D2.1's pass rule names
-    the missing row); one that is there and cannot be read is could-not-check, never "none"."""
-    rows, secrets = [], []
+    """(rows, secrets, failed) for the non-Google secrets installed: one {label, sha12} row each,
+    sha12 null for an UNFINGERPRINTED one. Each file is read on its own. One that is absent adds
+    nothing (D2.1's pass rule names the missing row); one that is there and cannot be read adds
+    "<label>: <ExceptionClass>" to `failed` (could-not-check, never "none") and the rest still count."""
+    rows, secrets, failed = [], [], []
     for p in sorted(OTHER_SECRET_NAMES):
         try:
             held = _other_secrets(host, p)
         except FileNotFoundError:
             continue
         except (OSError, ValueError) as e:
-            raise CouldNotCheck(f"{AUTHORISED_OTHER[p]}: {type(e).__name__}")
+            failed.append(f"{AUTHORISED_OTHER[p]}: {type(e).__name__}")
+            continue
         for label, v in held:
             rows.append({"label": label, "sha12": None if label in UNFINGERPRINTED else R.sha12(v)})
             secrets.append(v)
-    return sorted(rows, key=R.canon), secrets
+    return sorted(rows, key=R.canon), secrets, failed
 
 
 def d2_1(host, ctx):
@@ -461,9 +463,11 @@ def d2_1(host, ctx):
                         row["kind"], row["label"] = "authorised-other", AUTHORISED_OTHER[p]
                         if p == "/etc/hermes/.env.anthropic":
                             row["anthropic_key_state"] = CAL.anthropic_key_state(host.path(p))
-                        # The values already joined the known secrets (collect_with_secrets seeds
-                        # them); the row names which are held, never a value.
+                        # The values join the known secrets (unless collect_with_secrets already
+                        # seeded them); the row names which are held, never a value.
                         held = _other_secrets(host, p)
+                        known = ctx.setdefault("secrets", [])
+                        known.extend(v for _, v in held if v not in known)
                         row["secrets_held"] = [label for label, _ in held]
                         # Held but too short for the leak counters to search for (R._MIN_SECRET_LEN).
                         row["secrets_not_searchable"] = [l for l, v in held if len(v) < R._MIN_SECRET_LEN]
@@ -480,7 +484,7 @@ def d2_1(host, ctx):
 
 def _count_cred_text(text, secrets):
     return {"pattern_hits": len(CRED_TEXT_RE.findall(text)),
-            "known_secret_hits": sum(text.count(s) for s in secrets if len(s) >= 8)}
+            "known_secret_hits": sum(text.count(s) for s in set(secrets) if len(s) >= 8)}
 
 
 def _homes(host):
@@ -987,7 +991,8 @@ def d10_7(host, ctx):
             notes[note.group(1)] = notes.get(note.group(1), 0) + 1
         else:
             other += 1                                      # systemd's own lines, a traceback, anything else
-    # The values D2.1 read from the installed credential files (it runs first). With none
+    # The non-Google values are loaded before the probes; D2.1 (it runs first) adds the Google
+    # ones and any other it finds. With none
     # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
     secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
     return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
@@ -1111,12 +1116,8 @@ def collect_with_secrets(host, fp_key):
     items = {}
     # The non-Google secrets are loaded first and on their own, so the leak checks (D2.2, D2.3,
     # D10.7) search for them whether or not the sweep reaches the files.
-    other, other_secrets, other_err = [], [], None
-    try:
-        other, other_secrets = other_credentials(host)
-        ctx.setdefault("secrets", []).extend(other_secrets)
-    except CouldNotCheck as e:
-        other_err = e
+    other, other_secrets, other_failed = other_credentials(host)
+    ctx.setdefault("secrets", []).extend(other_secrets)
     for iid, fn in PROBES.items():
         try:
             items[iid] = {"status": R.OBSERVED, "data": fn(host, ctx)}
@@ -1125,7 +1126,8 @@ def collect_with_secrets(host, fp_key):
     try:
         sweep = _shared_sweep(host, ctx)                   # A3: reuse D2.1's sweep, don't re-run find
         infos, secrets, _unparsed, _unreadable = installed_credentials(host, sweep=sweep)
-        creds = {R.COULD_NOT_CHECK: str(other_err)} if other_err else R.credential_set(infos) + other
+        creds = ({R.COULD_NOT_CHECK: "; ".join(other_failed)} if other_failed
+                 else R.credential_set(infos) + other)
     except CouldNotCheck as e:
         secrets, creds = [], {R.COULD_NOT_CHECK: str(e)}
     bundle = {"schema": 1, "kind": "box", "collected_at": R.utc_now(), "items": items,
@@ -1186,7 +1188,9 @@ def _main(a, host, read_key):
     elif a.credentials_only:
         try:
             infos, secrets, unparsed, unreadable = installed_credentials(host)
-            other, other_secrets = other_credentials(host)
+            other, other_secrets, other_failed = other_credentials(host)
+            if other_failed:
+                raise CouldNotCheck("; ".join(other_failed))
         except CouldNotCheck as e:
             print(f"collect-review-evidence: {e} — refusing to certify the installed set",
                   file=sys.stderr)
