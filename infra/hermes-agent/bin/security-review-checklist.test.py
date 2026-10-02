@@ -38,16 +38,27 @@ class TestChecklistSync(unittest.TestCase):
         self.assertEqual(lap, set(_load("cl", "collect-review-evidence-laptop.py").ITEMS))
 
     def test_d10_6_states_the_committed_mcp_block(self):
-        """D10.6 judges the box's `mcp_servers:` block by `equals_repo` and by its sha256 and line
-        count, which the checklist states: they must be config.yaml.example's, as the collector
-        computes them, so changing the committed block means changing (and re-versioning) this file."""
-        ce = _load("ce", "collect-review-evidence.py")
-        block = ce._mcp_block(os.path.join(os.path.dirname(HERE), "config.yaml.example"), "config.yaml.example")
+        """D10.6 judges the box's `mcp_servers:` block by `equals_repo`, `reason` and the sha256 of
+        its canonical form, which the checklist states: it must be config.yaml.example's, as the
+        collector's parser computes it, so changing the committed block's values means changing
+        (and re-versioning) this file. The line count and the sha256 of the lines are gone: they
+        described layout, which the gateway rewrites."""
+        import mcp_config
+        with open(os.path.join(os.path.dirname(HERE), "config.yaml.example"), encoding="utf-8") as f:
+            template = f.read()
+        pinned = mcp_config.compare(template, template)
+        self.assertEqual((pinned["equals_repo"], pinned["reason"]), (True, "-"))
+        self.assertRegex(pinned["canonical_sha256"], r"^[0-9a-f]{64}$")
         d10_6 = re.split(r"(?m)^### ", items()[0])
         d10_6 = next(b for b in d10_6 if b.startswith("D10.6 — "))
-        self.assertIn(f"`mcp_block.sha256` is `{ce._block_sha256(block)}`", d10_6)
-        self.assertIn(f"`mcp_block.lines` is `{len(block)}`", d10_6)
+        self.assertIn(f"`mcp_block.canonical_sha256` is `{pinned['canonical_sha256']}`", d10_6)
+        self.assertEqual(re.findall(r"\b[0-9a-f]{64}\b", d10_6), [pinned["canonical_sha256"]])
         self.assertIn("`mcp_block.equals_repo` is `true`", d10_6)
+        self.assertIn("`mcp_block.reason` is `-`", d10_6)
+        for gone in ("mcp_block.lines", "mcp_block.sha256", "`lines`", "`sha256`"):
+            self.assertNotIn(gone, d10_6)
+        for reason in mcp_config.REASONS:                            # every reason the collector can emit is named
+            self.assertIn(f"`{reason}`", d10_6)
 
     def test_every_area_d1_to_d10_is_present(self):
         areas = {k.split(".")[0] for k in items()[1]}

@@ -1326,6 +1326,8 @@ Requires part 1 on the box. Still not live until review #6.
    `sudo install -o root -g root -m 0600 data/config.yaml /root/config.yaml.pre-optb2`
    (it is your rollback copy), then `sudo diff data/config.yaml config.yaml.example` (review anything
    Hermes wrote itself), then `sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
+   The gateway rewrites `data/config.yaml` once it runs (layout only); review item D10.6 compares the
+   parsed `mcp_servers` block with the template, so do not re-install the template to "fix" a layout difference.
 7. Recreate the gateway without the retired sidecar:
    `sudo docker compose up -d --build --remove-orphans hermes-agent`
    `sudo docker compose ps -a` → no `claude-auth-init`
