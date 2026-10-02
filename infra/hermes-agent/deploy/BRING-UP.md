@@ -1259,6 +1259,11 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
    `sudo docker compose up -d --force-recreate hermes-agent`
    `sudo test -e /opt/hermes-agent/data/home/.claude/settings.json && echo STILL-PRESENT || echo absent`
    → `absent` (spec §6: no Anthropic key in a file the gateway can read; `STILL-PRESENT` stops here)
+   `STILL-PRESENT` after pulling all three parts at once is expected (the retired sidecar that cleared the
+   file no longer exists). The file holds the Anthropic key: check it is the old one
+   (`sudo stat -c '%y' /opt/hermes-agent/data/home/.claude/settings.json` → a date before today), then
+   `sudo shred -u /opt/hermes-agent/data/home/.claude/settings.json` and re-run the test → `absent`.
+   A file dated today means something still writes it: stop.
 6. Install show-audit: `sudo ln -sf /opt/hermes-agent/deploy/show-audit /usr/local/sbin/show-audit`
 7. Docker engine and DNS (CVE-2024-29018: older engines forward an `internal: true` network's
    external DNS lookups, a covert exit for the drafter):
@@ -1325,6 +1330,7 @@ Requires part 1 on the box. Still not live until review #6.
    `sudo docker compose ps -a` → no `claude-auth-init`
    `sudo test ! -e /opt/hermes-agent/data/home/.claude/settings.json && echo NO_CLAUDE_KEY_FILE`
    (if present: `sudo rm -f /opt/hermes-agent/data/home/.claude/settings.json`)
+   After any later pull that changes `bin/hermes-app-mcp.py`: `cd /opt/hermes-agent && sudo docker compose restart hermes-agent` (the gateway keeps the old tool server running until then).
 8. Tools visible: `sudo docker compose exec hermes-agent hermes mcp list` → `ads_audit` with 3 tools
 9. Kill switch (for the review and for emergencies):
    on:  `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
@@ -1337,9 +1343,11 @@ Requires part 1 on the box. Still not live until review #6.
    To discard the queued jobs instead, with both units stopped:
    `sudo find /var/lib/hermes/app-state/ads-audit/jobs -mindepth 1 -delete` — the broker then
    reports each one `interrupted` (its periodic recover, within about a minute).
-10. First chat audit: `sudo docker compose exec -it hermes-agent hermes chat`, then ask
+10. First chat audit: `cd /opt/hermes-agent && sudo docker compose exec -it hermes-agent hermes chat`, then ask
     "Run the Google Ads audit for <client>." Expect `ok` within ~5 min (or `pending`; ask for its
-    status later). Journal: `journalctl -u hermes-app-broker@ads-audit -n 20`.
+    status later). Journal: `sudo journalctl -u hermes-app-broker@ads-audit -n 20 --no-pager`.
+    A reply of "MCP call timed out" while the journal shows `status=ok` for that request means the gateway is
+    running a tool server from before the ping fix: pull, then `sudo docker compose restart hermes-agent`.
     Once it works, delete both rollback backups (they may hold provider keys; they MUST be gone
     before review #6's evidence collection; keep them until then only if you still need to roll back):
     `sudo shred -u /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2`
