@@ -288,7 +288,12 @@ def fingerprint(components):
 
 def assert_no_secret(text, secrets):
     """The last line of defence: refuse to print if any credential value is present. Never
-    says which one."""
-    for s in secrets:
-        if len(s) >= _MIN_SECRET_LEN and s in text:
+    says which one. `text` is usually JSON, where a value holding `"`, `\\` or a non-ASCII
+    character appears only escaped: each value is looked for as itself and as JSON writes it,
+    with ensure_ascii on and off. For a plain value the three are one string."""
+    for secret in secrets:
+        if len(secret) < _MIN_SECRET_LEN:
+            continue
+        forms = {secret, json.dumps(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1]}
+        if any(form in text for form in forms):
             raise RuntimeError("output would contain a credential value — refusing to print")

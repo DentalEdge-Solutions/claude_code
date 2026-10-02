@@ -361,6 +361,32 @@ class TestNoSecret(unittest.TestCase):
     def test_control_clean_text_passes(self):
         R.assert_no_secret("bundle " + R.sha12(TOKEN), [TOKEN])
 
+    # ---- F43: a value that JSON escapes is in the printed text only in its escaped form ----
+    ESCAPED = {"a double quote": 'NOT-A"REAL-KEY-0123', "a backslash": "NOT-A\\REAL-KEY-0123",
+               "a non-ASCII character": "NOT-A-RÉAL-KEY-0123"}
+    MESSAGE = "output would contain a credential value — refusing to print"
+
+    def test_a_secret_that_json_escapes_is_found_in_the_json_text(self):
+        for what, secret in self.ESCAPED.items():
+            for ensure_ascii in (True, False):
+                with self.subTest(what=what, ensure_ascii=ensure_ascii):
+                    text = json.dumps({"k": secret}, ensure_ascii=ensure_ascii)
+                    with self.assertRaises(RuntimeError) as cm:
+                        R.assert_no_secret(text, [secret])
+                    self.assertEqual(str(cm.exception), self.MESSAGE)   # unchanged, and never says which
+
+    def test_a_text_without_the_escaping_secret_passes(self):
+        for what, secret in self.ESCAPED.items():
+            with self.subTest(what=what):
+                R.assert_no_secret(json.dumps({"k": "NOT-A-REAL-KEY-0123", "sha12": R.sha12(secret)}), [secret])
+
+    def test_a_secret_under_the_minimum_length_is_still_not_searched_for(self):
+        for secret in ("short77", 'sh"rt77', "sh\\rt77", "shÉrt77"):
+            with self.subTest(secret=secret):
+                self.assertEqual(len(secret), R._MIN_SECRET_LEN - 1)
+                R.assert_no_secret(json.dumps({"k": secret}), [secret])
+                R.assert_no_secret(json.dumps({"k": secret}, ensure_ascii=False), [secret])
+
 
 class TestKeyedFingerprints(unittest.TestCase):
     KEY = bytes.fromhex("11" * 32)

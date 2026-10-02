@@ -54,7 +54,8 @@ HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history",
 # Non-Google secret files the box is meant to hold (README credential table). A sweep hit
 # at one of these paths is `authorised-other`; any other non-empty, non-Google hit is
 # `unlisted`, which the reviewer must see explained (review #3, not-on-checklist #3).
-AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env",
+GATEWAY_ENV_FILE = CHECKOUT + "/infra/hermes-agent/.env"
+AUTHORISED_OTHER = {GATEWAY_ENV_FILE: "gateway-env",
                     "/etc/hermes/.env.anthropic": "anthropic-key"}
 # The secret values each authorised non-Google file may hold, as (env name, label). D2.1 names the
 # labels a file holds (`secrets_held`), EVERY value a name is given joins the known secrets the
@@ -62,10 +63,14 @@ AUTHORISED_OTHER = {CHECKOUT + "/infra/hermes-agent/.env": "gateway-env",
 # (`credentials`, --credentials-only). Same files as AUTHORISED_OTHER (tested).
 OTHER_SECRET_NAMES = {
     "/etc/hermes/.env.anthropic": (("ANTHROPIC_API_KEY", "anthropic-key"),),
-    CHECKOUT + "/infra/hermes-agent/.env": (("OPENROUTER_API_KEY", "openrouter-key"),
-                                            ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password"))}
+    GATEWAY_ENV_FILE: (("OPENROUTER_API_KEY", "openrouter-key"),
+                       ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password"))}
 # Listed, never fingerprinted: a short hash of a value a person may have chosen can be guessed offline.
 UNFINGERPRINTED = ("dashboard-password",)
+# What D4.1 says when there is no one gateway container to look into. Fixed text.
+NO_GATEWAY = "gateway container not running — isolation cannot be observed"
+# D4.1 `secret_env`: the only four things said about a secret in the running gateway's environment.
+MATCHES_FILE, DIFFERS_FROM_FILE, UNSET = "matches-file", "differs-from-file", "unset"
 # What _other_secrets reports about a file it could still read. Fixed text: never a value or a path.
 UNDECODABLE = "undecodable bytes"
 # An assignment as an env-file reader such as Docker Compose also takes it: indented, `export`
@@ -467,6 +472,70 @@ def other_credentials(host):
     return sorted(rows, key=R.canon), secrets, failed
 
 
+def gateway_secret_env(host):
+    """(states, secrets): what the RUNNING gateway holds for each secret its `.env` may give it.
+    The collector's own parse of that file and Docker Compose's can differ (a quoted value
+    followed by text, an escape, `$`, `NAME: value`); the container's environment is what the
+    gateway really uses, so it is asked, one `printenv <NAME>` per name and never through a shell.
+    `states` is {label: state} for every label of the gateway file, in table order: MATCHES_FILE
+    (the value is one _other_secrets read from the file for that label), DIFFERS_FROM_FILE (it is
+    not, which includes a file that could not be read), UNSET (the name is not in the environment,
+    or is empty) or R.COULD_NOT_CHECK (the answer could not be had). `secrets` is every non-empty
+    value read, for the known-secret list: never for printing.
+    Nothing a `printenv` call writes, to stdout or to stderr, reaches a message: this never
+    calls _ok, and it raises only CouldNotCheck(NO_GATEWAY), when there is no one container."""
+    try:
+        rc, out, _ = host.run(["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER])
+    except (OSError, ValueError):
+        raise CouldNotCheck(NO_GATEWAY) from None
+    gw = out.strip()
+    if rc != 0 or len(gw) != 64:
+        raise CouldNotCheck(NO_GATEWAY)
+    try:
+        held = _other_secrets(host, GATEWAY_ENV_FILE)[0]
+    except OSError:
+        held = []                                           # nothing read: no value can match
+    states, secrets = {}, []
+    for name, label in OTHER_SECRET_NAMES[GATEWAY_ENV_FILE]:
+        try:
+            rc, out, err = host.run(["docker", "exec", gw, "printenv", name])
+        except (OSError, ValueError):                       # it could not be run, or its output is not
+            states[label] = R.COULD_NOT_CHECK               # UTF-8 (the runner decodes strictly)
+            continue
+        if rc == 0:
+            value = out[:-1] if out.endswith("\n") else out  # ONE newline is printenv's; the rest is the value
+            if not value:
+                states[label] = UNSET
+                continue
+            states[label] = MATCHES_FILE if (label, value) in held else DIFFERS_FROM_FILE
+            secrets.append(value)
+        elif rc == 1 and not out and not err:
+            states[label] = UNSET                           # printenv: not in the environment (it prints nothing)
+        else:
+            # Not measured, so never `unset`: a timeout, no printenv, a Docker error. `docker exec`
+            # itself exits 1, with a message, for a container that has just stopped.
+            states[label] = R.COULD_NOT_CHECK
+    return states, secrets
+
+
+def _gateway_secret_states(host, ctx):
+    """gateway_secret_env, asked ONCE per run and kept on ctx: the states, or R.COULD_NOT_CHECK
+    when there was no gateway to ask. Every value read joins ctx["secrets"] (unless it is already
+    there), so the leak checks and the output check look for what the gateway really holds."""
+    if "secret_env" not in ctx:
+        try:
+            states, values = gateway_secret_env(host)
+        except CouldNotCheck:
+            ctx["secret_env"] = R.COULD_NOT_CHECK
+        else:
+            known = ctx.setdefault("secrets", [])
+            for v in values:
+                if v not in known:
+                    known.append(v)
+            ctx["secret_env"] = states
+    return ctx["secret_env"]
+
+
 def d2_1(host, ctx):
     """Every sweep hit gets a kind: example, credential (a Google Ads credential), unparsed
     (credential-shaped but not parseable), empty, authorised-other (AUTHORISED_OTHER, with
@@ -563,14 +632,18 @@ def d2_3(host, ctx):
 def d4_1(host, ctx):
     gw = _ok(host, ["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER]).strip()
     if len(gw) != 64:
-        raise CouldNotCheck("gateway container not running — isolation cannot be observed")
+        raise CouldNotCheck(NO_GATEWAY)
     script = ('for p in "$@"; do if [ -e "$p" ]; then if [ -r "$p" ]; then '
               'echo "$p readable $(wc -c < "$p" 2>/dev/null || echo dir)"; else echo "$p unreadable"; fi; '
               'else echo "$p absent"; fi; done')
     out = _ok(host, ["docker", "exec", gw, "sh", "-c", script, "sh", *GATEWAY_PROBE_PATHS, GATEWAY_CONTROL_PATH])
     env = _ok(host, ["docker", "exec", gw, "env"])
     names = [l.split("=", 1)[0] for l in env.splitlines() if "=" in l]
-    return {"paths": out.splitlines(),
+    # Asked before the items ran (collect_with_secrets); asked here when D4.1 runs on its own.
+    states = _gateway_secret_states(host, ctx)
+    if states == R.COULD_NOT_CHECK:                         # no gateway then: a state for each label all the same
+        states = {label: R.COULD_NOT_CHECK for _, label in OTHER_SECRET_NAMES[GATEWAY_ENV_FILE]}
+    return {"paths": out.splitlines(), "secret_env": states,
             "google_ads_env_names": sorted(n for n in names if n.startswith("GOOGLE_ADS_")),
             "anthropic_env_names": sorted(n for n in names if n.startswith("ANTHROPIC_")),
             "openrouter_env_names": sorted(n for n in names if n.startswith("OPENROUTER_"))}
@@ -1160,6 +1233,8 @@ def collect_with_secrets(host, fp_key):
     # seeded, also from a file reported in other_failed.
     other, other_secrets, other_failed = other_credentials(host)
     ctx.setdefault("secrets", []).extend(other_secrets)
+    # Then the values the running gateway really holds, however the file spells them (F43).
+    _gateway_secret_states(host, ctx)
     for iid, fn in PROBES.items():
         try:
             items[iid] = {"status": R.OBSERVED, "data": fn(host, ctx)}

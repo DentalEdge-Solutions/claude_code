@@ -866,11 +866,18 @@ class TestOptionBLayout(Base):
         self.assertNotIn(self.OPENROUTER, json.dumps(items))
 
     def test_d4_1_reports_anthropic_and_openrouter_env_names_only(self):
+        # Specific, and first: the catch-all `docker exec` answer below must not also answer the
+        # two `printenv` calls, or the `env` text would be taken for the gateway's secret values.
+        for name in ("OPENROUTER_API_KEY", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"):
+            self.outputs[("docker", "exec", "a" * 64, "printenv", name)] = (1, "", "")
         self.outputs[("docker", "exec")] = (0, "ANTHROPIC_API_KEY=sk-ant-XYZ\nOPENROUTER_API_KEY=or-ABC\nHOME=/x\n", "")
         self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
-        d = CE.collect(self.host(), self.KEY)["items"]["D4.1"]["data"]
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        d = bundle["items"]["D4.1"]["data"]
         self.assertEqual(d["anthropic_env_names"], ["ANTHROPIC_API_KEY"])
         self.assertEqual(d["openrouter_env_names"], ["OPENROUTER_API_KEY"])
+        self.assertEqual(d["secret_env"], {"openrouter-key": "unset", "dashboard-password": "unset"})
+        self.assertEqual(set(secrets), {TOKEN})                         # no command's output became a "secret"
 
 
 class TestKeyedBundle(Base):
@@ -1503,6 +1510,316 @@ class TestD10(Base):
         row = self._gateway_row(bundle)
         self.assertEqual((row["kind"], row["secrets_held"]), ("authorised-other", ["openrouter-key"]))
         self.assertNotIn("error", row)
+
+    # ---- F43: the gateway's own values come from the running gateway (D4.1 secret_env) ------
+    OR_NAME, DASH_NAME = "OPENROUTER_API_KEY", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"
+    DASH = "NOT-A-REAL-DASHBOARD-PASSWORD-0123"
+    QUOTED_KEY = 'sk-or-v1-NOT"A"REAL-KEY-with-two-quotes-zyxwvu'
+    NOT_SET = (1, "", "")                                   # printenv: the name is not in the environment
+    HEALTHY = {"openrouter-key": "matches-file", "dashboard-password": "unset"}
+
+    def _printenv(self, openrouter, dash=NOT_SET):
+        """What the running gateway answers `printenv` for its two names (a string is the value
+        it holds, a tuple is the (rc, out, err) itself), and enough for D4.1 to be observed.
+        Every key is one whole command: none of these can answer for another."""
+        for name, answer in ((self.OR_NAME, openrouter), (self.DASH_NAME, dash)):
+            self.outputs[("docker", "exec", GW_ID, "printenv", name)] = \
+                answer if isinstance(answer, tuple) else (0, answer + "\n", "")
+        self.outputs[("docker", "exec", GW_ID, "sh", "-c")] = (0, "/opt/governance absent\n", "")
+        self.outputs[("docker", "exec", GW_ID, "env")] = (0, "OPENROUTER_API_KEY=x\nHOME=/x\n", "")
+
+    def _box(self, env_text, openrouter, dash=NOT_SET, leaked=None):
+        """A gateway .env of exactly this text on a box whose running gateway answers `printenv`
+        with `openrouter` and `dash`. `leaked` is in the journal and in the gateway's `hermes mcp
+        list` text; with none, both are clean."""
+        with open(self._w(self.GATEWAY_ENV, ""), "wb") as f:
+            f.write(env_text.encode("utf-8"))
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n", "")
+        self._configs(self.BLOCK)
+        self.outputs[("journalctl", "-o")] = (0, f"debug: Authorization: Bearer {leaked}\n" if leaked else "Started.\n", "")
+        self._gateway((0, f"ads_audit {leaked}\nrow\n" if leaked else "ads_audit  3 tools\n", ""))
+        self._printenv(openrouter, dash)
+
+    def _printenv_calls(self, host):
+        return [c for c in host.calls if c[:2] == ["docker", "exec"] and "printenv" in c]
+
+    def _secret_env(self, bundle):
+        return bundle["items"]["D4.1"]["data"]["secret_env"]
+
+    def _main(self, host, *argv):
+        """(rc or the exception main raised, stdout, stderr) of one run."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = CE.main(list(argv), host=host, read_key=lambda: "11" * 32)
+            except RuntimeError as e:
+                rc = e
+        return rc, out.getvalue(), err.getvalue()
+
+    def _assert_a_line_the_gateway_reads_differently_is_guarded(self, env_text, live):
+        """The gateway holds `live`, the file spells it so that the collector's own parse does
+        not give it, and it has leaked: the known-secrets list, the leak count and the
+        whole-bundle refusal must all see it, and D4.1 must say the two differ."""
+        self._box(env_text, live, leaked=live)
+        self.assertNotIn(live, [v for _, v in CE._other_secrets(self.host(), self.GATEWAY_ENV)[0]])  # control
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn(live, secrets)
+        self.assertGreaterEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        self.assertEqual(self._secret_env(bundle), {"openrouter-key": "differs-from-file", "dashboard-password": "unset"})
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertIsInstance(rc, RuntimeError)
+        self.assertEqual(out + err, "")
+
+    def test_shape_1_a_quoted_key_followed_by_a_comment_without_a_blank(self):
+        self._assert_a_line_the_gateway_reads_differently_is_guarded(
+            f'OPENROUTER_API_KEY="{self.OPENROUTER}"#note\n', self.OPENROUTER)
+
+    def test_shape_2_a_quoted_key_followed_by_text(self):
+        self._assert_a_line_the_gateway_reads_differently_is_guarded(
+            f'OPENROUTER_API_KEY="{self.OPENROUTER}" note\n', self.OPENROUTER)
+
+    def test_shape_3_a_backslash_escaped_key(self):
+        escaped = self.QUOTED_KEY.replace('"', '\\"')
+        self.assertIn('NOT\\"A\\"REAL', escaped)                   # the file holds the backslashes, the gateway does not
+        self._assert_a_line_the_gateway_reads_differently_is_guarded(
+            f'OPENROUTER_API_KEY="{escaped}"\n', self.QUOTED_KEY)
+
+    def test_shape_4_a_colon_for_the_equals_sign(self):
+        self._assert_a_line_the_gateway_reads_differently_is_guarded(
+            f"OPENROUTER_API_KEY: {self.OPENROUTER}\n", self.OPENROUTER)
+
+    def test_shape_5_a_variable_reference(self):
+        self._assert_a_line_the_gateway_reads_differently_is_guarded(
+            "OPENROUTER_API_KEY=${THE_REAL_NAME}\n", self.OPENROUTER)
+
+    def test_a_gateway_key_that_json_escapes_refuses_the_bundle(self):
+        """The file and the gateway agree, so the value was always known: but it holds a `"`, so
+        the printed JSON holds it only escaped, which the guard has to look for too."""
+        self._box(f"OPENROUTER_API_KEY={self.QUOTED_KEY}\n", self.QUOTED_KEY, leaked=self.QUOTED_KEY)
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertIn(self.QUOTED_KEY, secrets)
+        self.assertNotIn(self.QUOTED_KEY, json.dumps(bundle))            # control: only its escaped form is there
+        self.assertIn(json.dumps(self.QUOTED_KEY)[1:-1], json.dumps(bundle))
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertIsInstance(rc, RuntimeError)
+        self.assertEqual(out + err, "")
+        self.assertEqual(self._secret_env(bundle), self.HEALTHY)
+
+    def test_a_healthy_box_says_matches_file_and_prints_a_bundle_holding_no_value(self):
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OPENROUTER)
+        h = self.host()
+        bundle, secrets = CE.collect_with_secrets(h, self.KEY)
+        self.assertEqual(secrets, [self.OPENROUTER])                     # known once, however often it was read
+        d = bundle["items"]["D4.1"]["data"]
+        self.assertEqual(d["secret_env"], self.HEALTHY)
+        self.assertEqual(list(d["secret_env"]), ["openrouter-key", "dashboard-password"])
+        self.assertEqual(set(d), {"paths", "google_ads_env_names", "anthropic_env_names", "openrouter_env_names",
+                                  "secret_env"})
+        self.assertEqual(d["openrouter_env_names"], ["OPENROUTER_API_KEY"])
+        self.assertEqual(bundle["credentials"], [{"label": "openrouter-key", "sha12": R.sha12(self.OPENROUTER)}])
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"], {"pattern_hits": 0, "known_secret_hits": 0})
+        self.assertEqual(bundle["items"]["D10.6"]["data"]["gateway_mcp_list"], ["ads_audit  3 tools"])
+        # The gateway is asked once for each name in the whole run, and never through a shell.
+        self.assertEqual(self._printenv_calls(h), [["docker", "exec", GW_ID, "printenv", self.OR_NAME],
+                                                   ["docker", "exec", GW_ID, "printenv", self.DASH_NAME]])
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(json.loads(out)["items"]["D4.1"]["data"]["secret_env"], self.HEALTHY)
+        self.assertNotIn(self.OPENROUTER, out)
+
+    def test_with_the_dashboard_on_both_values_match_the_file(self):
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\nHERMES_DASHBOARD=1\n"
+                  f"HERMES_DASHBOARD_BASIC_AUTH_PASSWORD={self.DASH}\n", self.OPENROUTER, dash=self.DASH)
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(self._secret_env(bundle), {"openrouter-key": "matches-file", "dashboard-password": "matches-file"})
+        self.assertEqual(secrets, [self.OPENROUTER, self.DASH])
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertEqual((rc, err), (0, ""))
+        for value in (self.OPENROUTER, self.DASH):
+            self.assertNotIn(value, out)
+
+    def test_a_file_edited_after_the_gateway_started_makes_both_keys_known(self):
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OLD_OPENROUTER, leaked=self.OLD_OPENROUTER)
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(self._secret_env(bundle), {"openrouter-key": "differs-from-file", "dashboard-password": "unset"})
+        self.assertEqual(secrets, [self.OPENROUTER, self.OLD_OPENROUTER])
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        self.assertEqual(bundle["credentials"], [{"label": "openrouter-key", "sha12": R.sha12(self.OPENROUTER)}])
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertIsInstance(rc, RuntimeError)
+        self.assertEqual(out + err, "")
+
+    def test_a_password_the_gateway_holds_and_the_file_does_not_is_a_known_secret(self):
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OPENROUTER, dash=self.DASH, leaked=self.DASH)
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(self._secret_env(bundle), {"openrouter-key": "matches-file", "dashboard-password": "differs-from-file"})
+        self.assertEqual(secrets, [self.OPENROUTER, self.DASH])
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+
+    def test_a_gateway_env_that_cannot_be_read_never_matches(self):
+        self._box("", self.OPENROUTER, leaked=self.OPENROUTER)
+        os.remove(os.path.join(self.root, self.GATEWAY_ENV.lstrip("/")))
+        os.mkdir(os.path.join(self.root, self.GATEWAY_ENV.lstrip("/")))    # open() raises whoever asks
+        self.outputs[("find",)] = (0, "", "")
+        states, values = CE.gateway_secret_env(self.host())
+        self.assertEqual((states, values), ({"openrouter-key": "differs-from-file", "dashboard-password": "unset"},
+                                            [self.OPENROUTER]))
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(secrets, [self.OPENROUTER])
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+
+    def test_without_a_gateway_container_nothing_is_asked_and_the_files_values_stay_known(self):
+        self._w(self.GATEWAY_ENV, f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n", "")
+        self._printenv("sk-or-v1-NOT-A-REAL-KEY-never-asked-for")         # no container: nobody may ask
+        h = self.host()
+        bundle, secrets = CE.collect_with_secrets(h, self.KEY)
+        self.assertEqual(bundle["items"]["D4.1"], {"status": R.COULD_NOT_CHECK, "reason":
+                                                   "CouldNotCheck: gateway container not running — isolation cannot be observed"})
+        self.assertEqual(secrets, [self.OPENROUTER])
+        self.assertEqual(self._printenv_calls(h), [])
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            CE.gateway_secret_env(h)
+        self.assertEqual(str(cm.exception), CE.NO_GATEWAY)
+
+    def test_a_failing_docker_ps_is_could_not_check_with_a_fixed_message(self):
+        marker = "Cannot-connect-to-the-daemon-MARKER"
+        self.outputs[("docker", "ps")] = (1, marker + "\n", marker + "\n")
+        for answer in ((1, marker + "\n", marker + "\n"), (0, marker + "\n", ""), (0, GW_ID + "\n" + GW_ID + "\n", ""),
+                       (0, "", ""), (124, "", "docker: timed out")):
+            with self.subTest(answer=answer):
+                self.outputs[("docker", "ps")] = answer
+                h = self.host()
+                with self.assertRaises(CE.CouldNotCheck) as cm:
+                    CE.gateway_secret_env(h)
+                self.assertEqual(str(cm.exception), CE.NO_GATEWAY)
+                self.assertEqual(self._printenv_calls(h), [])
+        ctx = {}
+        self.assertEqual(CE._gateway_secret_states(self.host(), ctx), R.COULD_NOT_CHECK)
+        self.assertEqual(ctx, {"secret_env": R.COULD_NOT_CHECK})        # nothing seeded
+
+    def test_printenv_failing_for_one_name_costs_that_label_only(self):
+        marker = "docker-daemon-said-MARKER"
+        failed = (125, marker + "\n", marker + "\n")
+        for openrouter, dash, want, known in (
+                (self.OPENROUTER, failed, {"openrouter-key": "matches-file", "dashboard-password": R.COULD_NOT_CHECK},
+                 [self.OPENROUTER]),
+                (failed, self.DASH, {"openrouter-key": R.COULD_NOT_CHECK, "dashboard-password": "differs-from-file"},
+                 [self.DASH])):
+            with self.subTest(want=want):
+                self.outputs[("docker", "ps")] = (0, "", "")            # _gateway() replaces it, each time
+                self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", openrouter, dash=dash)
+                self.assertEqual(CE.gateway_secret_env(self.host()), (want, known))
+                bundle = CE.collect(self.host(), self.KEY)
+                self.assertEqual(self._secret_env(bundle), want)
+                self.assertNotIn(marker, json.dumps(bundle))
+
+    def test_no_text_a_printenv_call_prints_reaches_a_reason_or_the_bundle(self):
+        out_marker, err_marker = "PRINTENV-STDOUT-MARKER", "PRINTENV-STDERR-MARKER"
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", (125, out_marker + "\n", err_marker + "\n"),
+                  dash=(1, "", "Error response from daemon: " + err_marker + "\n"))
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        self.assertEqual(self._secret_env(bundle), {"openrouter-key": R.COULD_NOT_CHECK, "dashboard-password": R.COULD_NOT_CHECK})
+        self.assertEqual(secrets, [self.OPENROUTER])                     # the file's value only: no output was seeded
+        rc, out, err = self._main(self.host(), "--fp-key-tty")
+        self.assertEqual(rc, 0)
+        for marker in (out_marker, err_marker, "daemon"):
+            self.assertNotIn(marker, json.dumps(bundle))
+            self.assertNotIn(marker, out + err)
+        # A value read with exit 0 is still read when the command also wrote to stderr.
+        self.outputs[("docker", "exec", GW_ID, "printenv", self.OR_NAME)] = (0, self.OPENROUTER + "\n", err_marker + "\n")
+        bundle = CE.collect(self.host(), self.KEY)
+        self.assertEqual(self._secret_env(bundle)["openrouter-key"], "matches-file")
+        self.assertNotIn(err_marker, json.dumps(bundle))
+
+    def test_what_each_printenv_answer_means(self):
+        """Exit 0 gives the value (one trailing newline removed, nothing else); exit 1 with no
+        output is a name that is not set; anything else was not measured. Fail closed: `docker
+        exec` itself exits 1, with a message, when the container stopped a moment ago."""
+        two_lines = "NOT-A-REAL-KEY line one\nNOT-A-REAL-KEY line two\n"
+        cases = {"the file's value": ((0, self.OPENROUTER + "\n", ""), "matches-file", [self.OPENROUTER]),
+                 "the file's value with no newline": ((0, self.OPENROUTER, ""), "matches-file", [self.OPENROUTER]),
+                 "another value": ((0, self.OLD_OPENROUTER + "\n", ""), "differs-from-file", [self.OLD_OPENROUTER]),
+                 "a value of several lines stays whole": ((0, two_lines + "\n", ""), "differs-from-file", [two_lines]),
+                 "the file's value and a blank": ((0, self.OPENROUTER + " \n", ""), "differs-from-file", [self.OPENROUTER + " "]),
+                 "a short value": ((0, "short77\n", ""), "differs-from-file", ["short77"]),
+                 "set but empty": ((0, "\n", ""), "unset", []),
+                 "no output at all": ((0, "", ""), "unset", []),
+                 "not set": ((1, "", ""), "unset", []),
+                 "exit 1 with a message": ((1, "", "Error response from daemon: not running\n"), R.COULD_NOT_CHECK, []),
+                 "exit 1 with output": ((1, "sk-or-v1-NOT-A-REAL-KEY-from-a-failed-call\n", ""), R.COULD_NOT_CHECK, []),
+                 "exit 2": ((2, "", ""), R.COULD_NOT_CHECK, []),
+                 "a timeout": ((124, "", "docker: timed out"), R.COULD_NOT_CHECK, []),
+                 "a docker error": ((125, "", "boom"), R.COULD_NOT_CHECK, []),
+                 "not executable": ((126, "", "boom"), R.COULD_NOT_CHECK, []),
+                 "no printenv": ((127, "", "boom"), R.COULD_NOT_CHECK, []),
+                 "killed": ((-9, "", ""), R.COULD_NOT_CHECK, [])}
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OPENROUTER)
+        for what, (answer, state, values) in cases.items():
+            with self.subTest(what=what):
+                self.outputs[("docker", "exec", GW_ID, "printenv", self.OR_NAME)] = answer
+                self.assertEqual(CE.gateway_secret_env(self.host()),
+                                 ({"openrouter-key": state, "dashboard-password": "unset"}, values))
+
+    def test_a_printenv_that_cannot_be_run_or_decoded_is_could_not_check_never_an_exception(self):
+        """The real runner decodes strictly: a value that is not UTF-8 raises there. That must
+        cost its own label only, and none of the bytes may reach anything."""
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OPENROUTER, dash=self.DASH)
+        child = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'NOT-A-REAL-\\xff\\xfe-KEY\\n')"]
+        with self.assertRaises(UnicodeDecodeError):                      # control: what the real runner does
+            CE._run_real(child)
+        fake = self.host()
+
+        def undecodable(argv, timeout=60):
+            if argv[3:] == ["printenv", self.OR_NAME]:
+                return CE._run_real(child, timeout)
+            return fake.run(argv, timeout)
+
+        def unrunnable(argv, timeout=60):
+            if argv[3:] == ["printenv", self.OR_NAME]:
+                raise PermissionError(13, "Permission denied: NOT-A-REAL-PATH-MARKER")
+            return fake.run(argv, timeout)
+        for run in (undecodable, unrunnable):
+            with self.subTest(run=run.__name__):
+                host = CE.Host(self.root, run)
+                want = {"openrouter-key": R.COULD_NOT_CHECK, "dashboard-password": "differs-from-file"}
+                self.assertEqual(CE.gateway_secret_env(host), (want, [self.DASH]))
+                bundle, secrets = CE.collect_with_secrets(host, self.KEY)
+                self.assertEqual(self._secret_env(bundle), want)
+                self.assertEqual(bundle["items"]["D4.1"]["status"], R.OBSERVED)
+                self.assertEqual(secrets, [self.OPENROUTER, self.DASH])
+                for text in ("NOT-A-REAL-", "codec", "MARKER", "Permission"):
+                    self.assertNotIn(text, json.dumps(bundle["items"]["D4.1"]))
+
+    def test_d4_1_on_its_own_asks_the_gateway_and_seeds_what_it_holds(self):
+        self._box("OPENROUTER_API_KEY=${THE_REAL_NAME}\n", self.OPENROUTER, dash=self.DASH)
+        h, ctx = self.host(), {}
+        d = CE.d4_1(h, ctx)
+        self.assertEqual(d["secret_env"], {"openrouter-key": "differs-from-file", "dashboard-password": "differs-from-file"})
+        self.assertEqual(ctx["secrets"], [self.OPENROUTER, self.DASH])
+        self.assertEqual(len(self._printenv_calls(h)), 2)
+        CE.d4_1(h, ctx)                                                  # a second item in the same run does not ask again
+        self.assertEqual(len(self._printenv_calls(h)), 2)
+        self.assertEqual(ctx["secrets"], [self.OPENROUTER, self.DASH])
+
+    def test_d4_1_reports_a_state_for_each_label_when_the_gateway_could_not_be_asked(self):
+        """The run found no gateway when it asked for the values, and D4.1 finds one a moment
+        later: every label is could-not-check, and the gateway is not asked a second time."""
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OPENROUTER)
+        h, ctx = self.host(), {"secret_env": R.COULD_NOT_CHECK}
+        self.assertEqual(CE.d4_1(h, ctx)["secret_env"],
+                         {"openrouter-key": R.COULD_NOT_CHECK, "dashboard-password": R.COULD_NOT_CHECK})
+        self.assertEqual(self._printenv_calls(h), [])
+
+    def test_fingerprint_only_and_credentials_only_never_ask_the_gateway(self):
+        self._box(f"OPENROUTER_API_KEY={self.OPENROUTER}\n", self.OPENROUTER)
+        for flag in ("--fingerprint-only", "--credentials-only"):
+            with self.subTest(flag=flag):
+                h = self.host()
+                _rc, out, _err = self._main(h, flag)
+                self.assertTrue(out)                                     # control: it ran and printed
+                self.assertEqual(self._printenv_calls(h), [])
+                self.assertNotIn("secret_env", out)
 
     def test_d10_6_a_long_line_without_a_secret_is_still_cut_with_secrets_loaded(self):
         self._load_openrouter_key()
