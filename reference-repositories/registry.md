@@ -22,3 +22,6 @@ _Generated from registry.json — do not hand-edit._
 | kj-os-template | reference | human-workflow-source | do-not-install-directly | 2026-07-08 |
 | eve | reference | methodology-source, agent-pattern-source, skill-pattern-source | do-not-install-directly | 2026-07-16 |
 | eve-analyst | reference | agent-pattern-source, eval-scenario-source, skill-pattern-source | do-not-install-directly | 2026-07-16 |
+| nous-hermes-agent | reference | research-source, governance-source | do-not-install-directly | 2026-10-03 |
+| nous-hermes-agent-self-evolution | reference | methodology-source, research-source | do-not-install-directly | 2026-10-03 |
+| hermes-optimization-guide | reference | methodology-source, human-workflow-source | do-not-install-directly | 2026-10-03 |

@@ -301,6 +301,65 @@
       "risk_notes": [
         "third-party (coleam00) reference agent built on BETA Eve; docs/pattern reference only — never install; verify against upstream before borrowing code"
       ]
+    },
+    {
+      "name": "nous-hermes-agent",
+      "url": "https://github.com/NousResearch/hermes-agent",
+      "status": "reference",
+      "types": [
+        "research-source",
+        "governance-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-03",
+      "preferred_use": [
+        "Primary source for the Hermes runtime we deploy: releases",
+        "docs",
+        "security policy",
+        "code at the pinned tag"
+      ],
+      "risk_notes": [
+        "Upstream ships about weekly; pin by image digest and re-run the audit on every upgrade"
+      ]
+    },
+    {
+      "name": "nous-hermes-agent-self-evolution",
+      "url": "https://github.com/NousResearch/hermes-agent-self-evolution",
+      "status": "reference",
+      "types": [
+        "methodology-source",
+        "research-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-03",
+      "preferred_use": [
+        "Evolutionary optimisation of skills (DSPy + GEPA); phase 1 only as of 2026-10-03"
+      ],
+      "risk_notes": [
+        "Not adopted; any skill or agent from it goes through scout",
+        "audit",
+        "adapt",
+        "eval"
+      ]
+    },
+    {
+      "name": "hermes-optimization-guide",
+      "url": "https://github.com/OnlyTerp/hermes-optimization-guide",
+      "status": "reference",
+      "types": [
+        "methodology-source",
+        "human-workflow-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-03",
+      "preferred_use": [
+        "Community operations guide",
+        "verified against Hermes v0.21.4; corroboration only"
+      ],
+      "risk_notes": [
+        "Independent community project",
+        "not affiliated with Nous Research; never the sole basis for a decision"
+      ]
     }
   ]
 }
