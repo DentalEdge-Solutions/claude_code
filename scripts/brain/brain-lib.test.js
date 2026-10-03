@@ -55,4 +55,34 @@ const lib = require('./brain-lib');
   assert.strictEqual(lib.resolveCapsuleRelative(target, '../../etc/passwd'), null);
   assert.strictEqual(lib.resolveCapsuleRelative(target, '/etc/passwd'), null);
 }
+// block lists: parse from text, quoting, empty key stays '', and round trips
+{
+  const text = '---\nsources:\n  - .project-brain/canon/a.md\n  - "Session 2026-07-17 (Opus): local-first, VPS"\n  - \'single q\'\nstatus: x\nempty:\nnext: y\n---\n\nB\n';
+  const { fields, body } = lib.parseFrontmatter(text);
+  assert.deepStrictEqual(fields.sources, ['.project-brain/canon/a.md', 'Session 2026-07-17 (Opus): local-first, VPS', 'single q']);
+  assert.strictEqual(fields.status, 'x');
+  assert.strictEqual(fields.empty, '', 'key with no value and no list stays empty string');
+  assert.strictEqual(fields.next, 'y');
+  assert.strictEqual(body, 'B\n');
+
+  const cases = [
+    ['comma', ['a, b', 'c']],
+    ['colon-space', ['note: thing', 'plain']],
+    ['quoted', ['"already quoted"', 'x']],
+    ['hash', ['a # b']],
+    ['brackets', ['[x]']],
+    ['edge-space', [' lead', 'trail ']],
+    ['backslash-quote', ['say "hi" \\ there, ok']],
+  ];
+  for (const [name, items] of cases) {
+    const fm = { type: 'decision', sources: items, status: 'candidate' };
+    const out = lib.serializeFrontmatter(fm, 'Body\n');
+    assert.ok(out.includes('sources:\n  - '), `${name}: written as block list`);
+    const back = lib.parseFrontmatter(out);
+    assert.deepStrictEqual(back.fields, fm, `${name}: round trip fields`);
+    assert.strictEqual(back.body, 'Body\n', `${name}: round trip body`);
+  }
+  // plain items keep the byte-identical inline form; empty array stays []
+  assert.strictEqual(lib.serializeFrontmatter({ tags: ['a', 'b'], s: [] }, 'x\n'), '---\ntags: [a, b]\ns: []\n---\n\nx\n');
+}
 console.log('brain-lib.test.js: all assertions passed');
