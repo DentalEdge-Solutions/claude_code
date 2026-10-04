@@ -114,6 +114,26 @@ try {
     fs.rmSync(absOutside, { force: true });
   }
 
+  // 9. Block-list sources (incl. an item with a comma) survive promotion
+  seed();
+  const srcs = ['.project-brain/canon/2026-07-17-ai-os-charter.md', 'Session discussion 2026-07-17 (Opus): local-first, vs VPS-first'];
+  fs.writeFileSync(path.join(TMP, CAND), LIB.serializeFrontmatter({
+    type: 'decision', title: 'Use pipeline', description: 'd', tags: [],
+    timestamp: '2026-07-08T10:05:00', sources: srcs, status: 'candidate',
+  }, 'We default to pipeline().\n'));
+  r = run([CAND, '--approve', '--to', 'canon']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(
+    LIB.parseFrontmatter(fs.readFileSync(path.join(TMP, 'canon', '2026-07-08-use-pipeline.md'), 'utf8')).fields.sources, srcs);
+  // and a hand-written block-list candidate (the real-world shape)
+  seed();
+  fs.writeFileSync(path.join(TMP, CAND), '---\ntype: decision\ntitle: T\nsources:\n  - .project-brain/canon/x.md\n  - "Session: y"\nstatus: candidate\n---\n\nBody\n');
+  r = run([CAND, '--approve']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(
+    LIB.parseFrontmatter(fs.readFileSync(path.join(TMP, 'decisions', 'active', '2026-07-08-use-pipeline.md'), 'utf8')).fields.sources,
+    ['.project-brain/canon/x.md', 'Session: y']);
+
   console.log('brain-promote.test.js: all assertions passed');
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });

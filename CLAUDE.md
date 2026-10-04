@@ -72,6 +72,7 @@ project-setup → project-audit → skill-scout → skill-audit → skill-adapt 
 - Discover skills and agents dynamically (`find skills/ -mindepth 1 -maxdepth 1 -type d`) — never hardcode skill names in scripts
 - Keep `install.sh` and `uninstall.sh` in sync — every step in install must have a mirror in uninstall
 - Deploy to `~/.claude/skills/` after editing any skill so changes take effect immediately in Claude Code
+- Verify against primary sources before an important project decision (an upgrade, the security posture, an architecture or vendor choice): the official repository, release notes, docs and advisory databases, plus a measurement where one is possible. Community sources corroborate; they never decide alone. Record each source, its access date and what it verified in `docs/evaluations/`, and keep recurring sources in the reference library (`reference-repositories/`). Hermes sources and the last verified data: `docs/evaluations/2026-10-03-hermes-v0-21-5-upgrade-evaluation.md`
 
 ### Never
 

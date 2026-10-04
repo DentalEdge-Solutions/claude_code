@@ -2,6 +2,9 @@
 // scripts/brain/brain-compile.js — extract [decision] and [lesson] entries from
 // session logs into candidate files. Notes stay in the log. NEVER writes to
 // decisions/active/ or canon/ — that is brain-promote's job, behind --approve.
+// An entry whose file name already exists in decisions/active/ or canon/ was
+// promoted (promote moves the file, same basename): it is skipped, even with
+// --force, so a promoted entry is never resurrected as a candidate.
 // Usage: node brain-compile.js [--date YYYY-MM-DD | --all] [--force] [--target <dir>]
 // Exit 0 ok (including nothing to do) · 1 structure error.
 'use strict';
@@ -34,7 +37,8 @@ const DEST = {
   lesson: path.join(target, 'lessons', 'memories'),
 };
 const ENTRY_RE = /^## (\d{2}:\d{2}) \[(decision|lesson)\] ?(.*)$/gm;
-let written = 0, skipped = 0;
+let written = 0, skipped = 0, alreadyPromoted = 0;
+const PROMOTED_DIRS = [path.join(target, 'decisions', 'active'), path.join(target, 'canon')];
 const outputs = [];
 
 for (const file of files) {
@@ -48,7 +52,9 @@ for (const file of files) {
     const nextHeading = text.indexOf('\n## ', bodyStart);
     const body = text.slice(bodyStart, nextHeading === -1 ? undefined : nextHeading).trim();
     const title = titleRaw.trim() || body.split('\n')[0].slice(0, 60);
-    const dest = path.join(DEST[type], `${date}-${slugify(title)}.md`);
+    const name = `${date}-${slugify(title)}.md`;
+    const dest = path.join(DEST[type], name);
+    if (PROMOTED_DIRS.some(d => fs.existsSync(path.join(d, name)))) { alreadyPromoted++; continue; }
     if (fs.existsSync(dest) && !hasFlag(process.argv, '--force')) { skipped++; continue; }
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, serializeFrontmatter({
@@ -70,7 +76,7 @@ try {
   const rdir = path.join(target, 'reports', 'compile');
   fs.mkdirSync(rdir, { recursive: true });
   fs.writeFileSync(path.join(rdir, `${todayStamp()}.json`),
-    JSON.stringify({ written, skipped, outputs }, null, 2));
+    JSON.stringify({ written, skipped, already_promoted: alreadyPromoted, outputs }, null, 2));
 } catch { /* fail open */ }
 
-console.log(`brain-compile: ${written} candidate(s) written, ${skipped} skipped`);
+console.log(`brain-compile: ${written} candidate(s) written, ${skipped} skipped, ${alreadyPromoted} already promoted`);

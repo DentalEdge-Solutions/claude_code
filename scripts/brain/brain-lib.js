@@ -34,27 +34,58 @@ function timeStamp(d = new Date()) { return d.toISOString().slice(11, 16); }
 function scanSensitive(text) {
   return SENSITIVE_CONTENT_PATTERNS.filter(p => p.re.test(text)).map(p => p.name);
 }
-// Frontmatter: leading '---' block of `key: value` lines. Values are scalars or
-// inline lists like [a, b]. Enough for brain files; deliberately not full YAML.
+// Frontmatter: leading '---' block of `key: value` lines. Values are scalars,
+// inline lists like [a, b], or block lists (`key:` then `  - item` lines). Enough
+// for brain files; deliberately not full YAML.
+function unquoteItem(s) {
+  const q = s[0];
+  if (s.length >= 2 && (q === '"' || q === "'") && s[s.length - 1] === q) {
+    const inner = s.slice(1, -1);
+    // Only double quotes carry escapes (the serializer writes \\ and \").
+    return q === '"' ? inner.replace(/\\(["\\])/g, '$1') : inner;
+  }
+  return s;
+}
 function parseFrontmatter(text) {
   if (!text.startsWith('---\n')) return { fields: null, body: text };
   const end = text.indexOf('\n---', 4);
   if (end === -1) return { fields: null, body: text };
   const fields = {};
-  for (const line of text.slice(4, end).split('\n')) {
-    const m = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+  const lines = text.slice(4, end).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
     if (!m) continue;
     let v = m[2].trim();
-    if (v.startsWith('[') && v.endsWith(']')) {
+    if (v === '') {
+      // `key:` with nothing after it: collect following `- item` lines, if any.
+      const items = [];
+      while (i + 1 < lines.length) {
+        const im = lines[i + 1].match(/^\s*-\s+(.*)$/);
+        if (!im) break;
+        items.push(unquoteItem(im[1].trim()));
+        i++;
+      }
+      if (items.length) v = items;
+    } else if (v.startsWith('[') && v.endsWith(']')) {
       v = v.slice(1, -1).split(',').map(s => s.trim()).filter(Boolean);
     }
     fields[m[1]] = v;
   }
   return { fields, body: text.slice(end + 4).replace(/^\n+/, '') };
 }
+// An item the inline `[a, b]` form cannot carry safely.
+const NEEDS_QUOTING = /,|: |#|^ | $|[\[\]]|^["']/;
 function serializeFrontmatter(fields, body) {
-  const lines = Object.entries(fields).map(([k, v]) =>
-    Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`);
+  const lines = Object.entries(fields).map(([k, v]) => {
+    if (!Array.isArray(v)) return `${k}: ${v}`;
+    if (!v.some(item => NEEDS_QUOTING.test(String(item)))) return `${k}: [${v.join(', ')}]`;
+    // Block list; quote only the items that need it so plain ones stay readable.
+    const items = v.map(item => {
+      const t = String(item);
+      return NEEDS_QUOTING.test(t) ? `  - "${t.replace(/[\\"]/g, '\\$&')}"` : `  - ${t}`;
+    });
+    return `${k}:\n${items.join('\n')}`;
+  });
   return `---\n${lines.join('\n')}\n---\n\n${body}`;
 }
 function walkMarkdown(dir) {
