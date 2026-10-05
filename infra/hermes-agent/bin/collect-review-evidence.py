@@ -12,7 +12,7 @@ bundle is NOT read-only: D10.1 and D10.2 run `run-client-audit --probe-env` and
 proxy), create and remove `/var/lib/hermes/probe`, and make one outbound CONNECT to
 `api.anthropic.com` through the proxy. `--fingerprint-only` and `--credentials-only` run no
 probe. Three rules, each tested:
-  * nothing printed carries a credential value (Google, Anthropic, OpenRouter or the dashboard password),
+  * nothing printed carries a credential value (Google, Anthropic, OpenRouter, the API server key or the dashboard password),
     a client slug or a customer id;
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
@@ -55,8 +55,13 @@ HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history",
 # at one of these paths is `authorised-other`; any other non-empty, non-Google hit is
 # `unlisted`, which the reviewer must see explained (review #3, not-on-checklist #3).
 GATEWAY_ENV_FILE = CHECKOUT + "/infra/hermes-agent/.env"
+# Hermes's own secrets file in HERMES_HOME (/opt/data/.env in the container): from v0.21.5 its
+# start-up seeds it from the bundled template and appends a generated API_SERVER_KEY. Hermes loads
+# it with override=True, so a credential placed here overrides the gateway's own .env.
+HERMES_HOME_ENV_FILE = CHECKOUT + "/infra/hermes-agent/data/.env"
 AUTHORISED_OTHER = {GATEWAY_ENV_FILE: "gateway-env",
-                    "/etc/hermes/.env.anthropic": "anthropic-key"}
+                    "/etc/hermes/.env.anthropic": "anthropic-key",
+                    HERMES_HOME_ENV_FILE: "hermes-home-env"}
 # The secret values each authorised non-Google file may hold, as (env name, label). D2.1 names the
 # labels a file holds (`secrets_held`), EVERY value a name is given joins the known secrets the
 # leak checks look for, and a label with one value is a row of the authorised credential set
@@ -64,7 +69,12 @@ AUTHORISED_OTHER = {GATEWAY_ENV_FILE: "gateway-env",
 OTHER_SECRET_NAMES = {
     "/etc/hermes/.env.anthropic": (("ANTHROPIC_API_KEY", "anthropic-key"),),
     GATEWAY_ENV_FILE: (("OPENROUTER_API_KEY", "openrouter-key"),
-                       ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password"))}
+                       ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password")),
+    HERMES_HOME_ENV_FILE: (("API_SERVER_KEY", "api-server-key"),)}
+# D2.1 `credential_shaped_names` (the Hermes home file only): an assignment NAME holding one of
+# these is credential-shaped. Names only, never a value; the file's own key is expected there.
+CREDENTIAL_NAME_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH")
+HERMES_HOME_OWN_NAMES = ("API_SERVER_KEY",)
 # Listed, never fingerprinted: a short hash of a value a person may have chosen can be guessed offline.
 UNFINGERPRINTED = ("dashboard-password",)
 # What D4.1 says when there is no one gateway container to look into. Fixed text.
@@ -423,7 +433,35 @@ def installed_credentials(host, sweep=None):
     return infos, secrets, unparsed, unreadable
 
 
-def _other_secrets(host, p):
+def _read_env(host, p):
+    """(text, problems): the file `p` read once, as bytes, decoded tolerantly, without a byte-order
+    mark, every assignment rewritten to the bare `NAME=` (_ENV_ASSIGN_RE). `problems` is
+    [UNDECODABLE] when a byte was not UTF-8, else []. Raises only what opening or reading raises."""
+    with open(host.path(p), "rb") as f:
+        text = f.read().decode("utf-8", errors="replace")
+    problems = [UNDECODABLE] if "�" in text else []
+    if text.startswith("﻿"):                           # a byte-order mark is not part of a name
+        text = text[1:]
+    text = "\n".join(_ENV_ASSIGN_RE.sub(r"\1=", line, count=1) for line in _LINE_END_RE.split(text))
+    return text, problems
+
+
+_BARE_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=")
+
+
+def _credential_shaped_names(text):
+    """The sorted, distinct assignment NAMES in _read_env's `text` that hold one of
+    CREDENTIAL_NAME_PARTS, other than HERMES_HOME_OWN_NAMES. Names only: no value is looked at."""
+    names = set()
+    for line in text.split("\n"):
+        m = _BARE_ASSIGN_RE.match(line)
+        if m and m.group(1) not in HERMES_HOME_OWN_NAMES and \
+                any(part in m.group(1).upper() for part in CREDENTIAL_NAME_PARTS):
+            names.add(m.group(1))
+    return sorted(names)
+
+
+def _other_secrets(host, p, read=None):
     """(held, problems) for the authorised file `p`, read once, as bytes, and decoded tolerantly
     (as R.parse_credential_file reads the Google files): a damaged file never costs a value.
     `held` is [(label, value)] for every DISTINCT non-empty value of every name in
@@ -431,13 +469,10 @@ def _other_secrets(host, p):
     file's real reader prefers, its value is here, in its bare form (no quotes, comment or
     surrounding whitespace). `problems` is fixed text only, empty for a healthy file: UNDECODABLE
     when a byte was not UTF-8, "duplicate <label>" when one name is given two different values.
-    Raises only what opening or reading the file raises."""
-    with open(host.path(p), "rb") as f:
-        text = f.read().decode("utf-8", errors="replace")
-    problems = [UNDECODABLE] if "\ufffd" in text else []
-    if text.startswith("\ufeff"):                           # a byte-order mark is not part of a name
-        text = text[1:]
-    text = "\n".join(_ENV_ASSIGN_RE.sub(r"\1=", line, count=1) for line in _LINE_END_RE.split(text))
+    Raises only what opening or reading the file raises. `read`, when given, is _read_env's
+    result for `p`, so a caller that also needs the file's names reads it once."""
+    text, problems = read if read is not None else _read_env(host, p)
+    problems = list(problems)
     held = []
     for name, label in OTHER_SECRET_NAMES[p]:
         values = list(dict.fromkeys(CAL.env_values(text, name)))
@@ -585,8 +620,12 @@ def d2_1(host, ctx):
                         # Every value joins the known secrets, in each of its forms (unless
                         # collect_with_secrets already seeded it) before anything below can fail,
                         # whatever state the file is in; the row names which are held, never a value.
-                        held, problems = _other_secrets(host, p)
+                        read = _read_env(host, p)
+                        held, problems = _other_secrets(host, p, read)
                         _seed(ctx, [v for _, v in held])
+                        if p == HERMES_HOME_ENV_FILE:
+                            # A credential here would override the gateway's own environment.
+                            row["credential_shaped_names"] = _credential_shaped_names(read[0])
                         row["secrets_held"] = list(dict.fromkeys(label for label, _ in held))
                         # Held but too short for the leak counters to search for (R._MIN_SECRET_LEN).
                         row["secrets_not_searchable"] = list(dict.fromkeys(
@@ -645,6 +684,35 @@ def d2_3(host, ctx):
 
 
 # ---------------------------------------------------------------- D4 isolation boundaries
+_PROC_NET_ROW_RE = re.compile(r"\d+:\s+([0-9A-Fa-f]+):([0-9A-Fa-f]{4})\s+[0-9A-Fa-f]+:[0-9A-Fa-f]{4}\s+([0-9A-Fa-f]{2})\s")
+
+
+def _listeners(host, gw):
+    """D4.1 `listeners`: the sorted, distinct local ports (decimal) of every socket in state 0A
+    (LISTEN) in the gateway container's /proc/net/tcp and /proc/net/tcp6, read in one `docker exec
+    cat`. Only the port is kept: no address or other field. R.COULD_NOT_CHECK when the call fails,
+    when the output is not exactly two tables (two headers), or when any row does not parse."""
+    try:
+        rc, out, _ = host.run(["docker", "exec", gw, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
+    except (OSError, ValueError):
+        return R.COULD_NOT_CHECK
+    if rc != 0:
+        return R.COULD_NOT_CHECK
+    headers, ports = 0, set()
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if line.split()[0] == "sl":
+            headers += 1
+            continue
+        m = _PROC_NET_ROW_RE.match(line.strip())
+        if not m or not headers:
+            return R.COULD_NOT_CHECK
+        if m.group(3).upper() == "0A":
+            ports.add(int(m.group(2), 16))
+    return sorted(ports) if headers == 2 else R.COULD_NOT_CHECK
+
+
 def d4_1(host, ctx):
     gw = _ok(host, ["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER]).strip()
     if len(gw) != 64:
@@ -659,7 +727,7 @@ def d4_1(host, ctx):
     states = _gateway_secret_states(host, ctx)
     if states == R.COULD_NOT_CHECK:                         # no gateway then: a state for each label all the same
         states = {label: R.COULD_NOT_CHECK for _, label in OTHER_SECRET_NAMES[GATEWAY_ENV_FILE]}
-    return {"paths": out.splitlines(), "secret_env": states,
+    return {"paths": out.splitlines(), "secret_env": states, "listeners": _listeners(host, gw),
             "google_ads_env_names": sorted(n for n in names if n.startswith("GOOGLE_ADS_")),
             "anthropic_env_names": sorted(n for n in names if n.startswith("ANTHROPIC_")),
             "openrouter_env_names": sorted(n for n in names if n.startswith("OPENROUTER_"))}

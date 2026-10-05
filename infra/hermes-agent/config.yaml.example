@@ -46,3 +46,9 @@ mcp_servers:
       include: [ads_audit_run, ads_audit_status, ads_audit_list]
       resources: false
       prompts: false
+
+# Hermes v0.21.5+ generates an API_SERVER_KEY and would start its OpenAI-compatible API server on
+# container loopback (8642); our posture keeps it off, measured by review item D4.1 `listeners`.
+platforms:
+  api_server:
+    enabled: false
