@@ -34,7 +34,7 @@ FROM nousresearch/hermes-agent@sha256:fca358f12efd65bfaaca05884166f15c0e2788375c
 
 ## Re-audit 2026-10-05 — v0.19.0 → v0.21.5
 
-Method: both images were measured on the laptop, and the upstream release notes, docs and advisory databases were read; the full record is in `docs/evaluations/2026-10-03-hermes-v0-21-5-upgrade-evaluation.md`.
+Method: both images were measured on the laptop (the linux/arm64 variant; the box runs the linux/amd64 manifest `sha256:2fd023efbb8d3d2b0ce1a73d028b07370cff34f567cfe0e999553e8c327ea283` of the same index, first measured by the post-pull box steps), and the upstream release notes, docs and advisory databases were read; the full record is in `docs/evaluations/2026-10-03-hermes-v0-21-5-upgrade-evaluation.md`.
 
 | Fact | v0.19.0 (old pin) | v0.21.5 (new pin) |
 |---|---|---|
@@ -64,7 +64,7 @@ Findings, row by row against the original table:
 - LOW, plaintext secrets under `/opt/data`: unchanged.
 - INFO, upstream image posture (digest-pinned base, immutable root-owned `/opt/hermes`, non-root uid 10000): still holds.
 
-Verdict unchanged: GO, with the same conditions. No published GitHub security advisory; no recorded CVE affects v0.19.0 or v0.21.5 (see the evaluation record).
+Verdict unchanged: GO, with the same conditions. No published GitHub security advisory; no recorded CVE affects v0.19.0, and every recorded CVE predates both pins (see the evaluation record).
 
 ## VPS hardening checklist (P4 — before any real key / public exposure)
 
