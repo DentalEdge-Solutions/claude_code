@@ -31,3 +31,8 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-10-01 promoted decisions/candidates/2026-10-01-option-b-part-3-merged-pr-88-review-tooling-and-checklist-v1.md → decisions/active/2026-10-01-option-b-part-3-merged-pr-88-review-tooling-and-checklist-v1.md
 - 2026-10-01 promoted decisions/candidates/2026-10-01-runner-restart-spin-fix-merged-pr-90-broker-sweeps-stray-ent.md → decisions/active/2026-10-01-runner-restart-spin-fix-merged-pr-90-broker-sweeps-stray-ent.md
 - 2026-10-02 promoted decisions/candidates/2026-10-02-option-b-live-on-the-box-security-review-6-pass-34-34-checkl.md → canon/2026-10-02-option-b-live-on-the-box-security-review-6-pass-34-34-checkl.md
+- 2026-10-05 promoted decisions/candidates/2026-07-17-hermes-local-first-deploy.md → canon/2026-07-17-hermes-local-first-deploy.md
+- 2026-10-05 promoted decisions/candidates/2026-07-21-adopt-nous-hermes-agent-runtime.md → canon/2026-07-21-adopt-nous-hermes-agent-runtime.md
+- 2026-10-05 promoted decisions/candidates/vercel-eve-fs-architecture-adoption.md → decisions/active/vercel-eve-fs-architecture-adoption.md
+- 2026-10-05 promoted lessons/memories/2026-10-03-verify-sources-before-important-decisions.md → canon/2026-10-03-verify-sources-before-important-decisions.md
+- 2026-10-05 promoted decisions/candidates/2026-10-03-hermes-v0-21-5-upgrade-evaluated-batch-it-with-the-pr-96-pul.md → canon/2026-10-03-hermes-v0-21-5-upgrade-evaluated-batch-it-with-the-pr-96-pul.md

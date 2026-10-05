@@ -5,8 +5,13 @@ title: "Hermes is built local-first (Docker), deployed to Hostinger — the VPS 
 description: "Develop the Hermes runtime locally, containerized from day one for dev/prod parity; provision the Hostinger VPS early in parallel for staging deploys with dummy credentials; introduce real client credentials only after hardening + security review. The git repo is the source of truth; the VPS runs deployments and spawned projects."
 tags: [hermes, deployment, docker, hostinger, vps, runtime, workflow, security]
 timestamp: 2026-07-17
-sources: 
-promoted_at: 2026-08-05
+sources:
+  - .project-brain/canon/2026-07-17-ai-os-charter.md
+  - .project-brain/decisions/active/vercel-eve-fs-architecture-adoption.md
+  - docs/superpowers/specs/2026-07-17-domain-packs-design.md
+  - "Session discussion 2026-07-17 (Claude Opus 4.8): local-first vs VPS-first for Hermes"
+promoted_at: 2026-10-05
+originally_promoted_at: 2026-08-05
 ---
 
 # Decision — Hermes local-first, deploy to Hostinger
