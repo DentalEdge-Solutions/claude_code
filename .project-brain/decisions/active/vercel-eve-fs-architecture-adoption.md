@@ -6,8 +6,9 @@ description: "Whether to adopt Vercel Eve's filesystem-as-registry pattern into 
 tags: [architecture, agents, orchestrator, hermes, eve, filesystem-registry, adoption, deferred]
 timestamp: 2026-07-16
 authority: synthesis
-sources: 
-promoted_at: 2026-07-16
+sources: [https://github.com/vercel/eve, https://eve.dev/docs/introduction, https://github.com/coleam00/eve-analyst, Session analysis 2026-07-16 (Claude Opus 4.8); web sources fetched + summarized — verify beta API details before building]
+promoted_at: 2026-10-05
+originally_promoted_at: 2026-07-16
 ---
 
 # Vercel Eve filesystem-centric architecture — adoption analysis

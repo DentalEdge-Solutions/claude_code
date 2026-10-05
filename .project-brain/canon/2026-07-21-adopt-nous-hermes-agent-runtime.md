@@ -5,8 +5,16 @@ title: "Adopt Nous Research's Hermes Agent as the AIOS runtime / control plane o
 description: "Adopt the real Nous Research Hermes Agent (official Docker image) as the persistent, model-agnostic control plane that connects to and operates Claude Code projects (via the bundled claude-code skill running `claude -p`), forming a 'Claude Code AIOS' for managing AI agents/workflows and, ultimately, monetization. Governed as a runtime dependency (adoption decision + security-audit gate), NOT via the reference-repo pattern-source model."
 tags: [hermes, nous-hermes-agent, runtime, control-plane, aios, adoption, governance, docker, claude-code, correction]
 timestamp: 2026-07-21
-sources: 
-promoted_at: 2026-08-05
+sources:
+  - .project-brain/canon/2026-07-17-ai-os-charter.md
+  - .project-brain/decisions/active/vercel-eve-fs-architecture-adoption.md
+  - .project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md
+  - ~/.claude/plans/iterative-squishing-church.md (session plan of record)
+  - "Session 2026-07-21 (Claude Opus 4.8): user clarification that 'Hermes' = Nous Research Hermes Agent; recon of NousResearch/hermes-agent"
+  - https://hermes-agent.nousresearch.com/docs/
+  - https://github.com/nousresearch/hermes-agent
+promoted_at: 2026-10-05
+originally_promoted_at: 2026-08-05
 ---
 
 # Adopt Nous Hermes Agent as the AIOS runtime (decision candidate)
