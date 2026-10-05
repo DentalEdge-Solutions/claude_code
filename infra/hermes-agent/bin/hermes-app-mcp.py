@@ -136,9 +136,10 @@ def _waits(server, msg):
 def serve(server, lines, write, max_waiting=MAX_WAITING):
     """Answer every input line. A run or list call waits for the broker's result, so it gets its
     own thread and this loop keeps reading: the client's liveness ping must be answered WHILE a
-    call waits. Hermes pings each MCP server on a cadence (default 180 s), allows 30 s, and
-    reconnects on silence, which discarded the reply of every audit that outlasted a ping
+    call waits. Hermes v0.19.0 pinged each MCP server on a cadence (default 180 s), allowed 30 s, and
+    reconnected on silence, which discarded the reply of every audit that outlasted a ping
     (first box run, 2026-10-02: the audit finished `ok` in 233 s, Hermes saw a 360 s timeout).
+    From v0.21.5 a stdio server is pinged only when its config sets `keepalive_interval`; answering pings while a call waits stays correct either way.
     One lock keeps replies whole; a reply nobody can read any more is dropped, never raised.
     EOF abandons the calls still waiting: their replies are not written, and a call read just
     before EOF may not have filed its request yet (a request already filed stays with the broker)."""

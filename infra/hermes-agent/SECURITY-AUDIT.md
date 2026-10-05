@@ -28,10 +28,43 @@ Conditions (all already met by our config): project mount **read-only**, API ser
 ## Pinned image
 
 ```
-FROM nousresearch/hermes-agent@sha256:f7b35053268f532f98955195c909f15a230470fbcbdacaa9fdecb95707dad04a
+FROM nousresearch/hermes-agent@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7
 ```
-= `v2026.7.20` (Hermes Agent v0.19.0 "Quicksilver", published 2026-07-20). More soak-tested alt:
-`v2026.7.7.2` (v0.18.2). **Re-pin + re-run this audit on every upgrade.**
+= v2026.9.24 (Hermes Agent v0.21.5, published 2026-09-24). Previous pin: v2026.7.20 (v0.19.0), sha256:f7b35053268f532f98955195c909f15a230470fbcbdacaa9fdecb95707dad04a. **Re-pin + re-run this audit on every upgrade.**
+
+## Re-audit 2026-10-05 — v0.19.0 → v0.21.5
+
+Method: both images were measured on the laptop, and the upstream release notes, docs and advisory databases were read; the full record is in `docs/evaluations/2026-10-03-hermes-v0-21-5-upgrade-evaluation.md`.
+
+| Fact | v0.19.0 (old pin) | v0.21.5 (new pin) |
+|---|---|---|
+| `hermes --version` | v0.19.0 (2026.7.20) · upstream 3ef6bbd2 | v0.21.5 (2026.9.24) · upstream f97608f1 |
+| Runtime user | `hermes` uid 10000 | same |
+| `HERMES_HOME` / `HERMES_WRITE_SAFE_ROOT` | `/opt/data` / `/opt/data` | same |
+| Entrypoint | `/init` + `main-wrapper.sh` | `entrypoint-dispatch.sh` (execs `/init` + `main-wrapper.sh` when PID 1, as under Compose) |
+| `/opt/hermes` | root, 755 | root, 755 |
+| `docker` CLI baked in | yes | yes |
+| `stage2-hook.sh` docker-socket group logic | present | present |
+| Bundled `claude-code` skill uses `--dangerously-skip-permissions` | yes | yes |
+| Dashboard auth providers | basic, drain, nous, self_hosted | same; basic auth also accepts `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH` |
+| Node | 22 | 26 (our Dockerfile's `npm install -g @anthropic-ai/claude-code` builds: Claude CLI 2.1.288) |
+| MCP keepalive for stdio servers | pinged every 180 s | 180 s default, but stdio servers are pinged only when `keepalive_interval` is set ("stdio only opts in explicitly") |
+| Our derived image | builds | builds; uid 10000; `ads-venv OK` |
+| Committed `mcp_servers` block after the gateway rewrites `config.yaml` | `equals_repo: true` | `equals_repo: true` (the rewrite adds only `_config_version`) |
+| Our app MCP server | connects, 3 tools | connects, 3 tools |
+
+Findings, row by row against the original table:
+
+- HIGH, `--dangerously-skip-permissions` in the bundled `claude-code` skill: still present at v0.21.5; still neutralised by the read-only mounts.
+- HIGH, `:latest` is a moving target: still true; still pinned by digest.
+- MED, docker CLI + stage2 docker group logic: still present; still no Docker socket mounted.
+- MED, `network_mode: host`: our compose still avoids it.
+- MED, `install.sh` third-party installers: still N/A.
+- LOW, API server one edit from public exposure: still off.
+- LOW, plaintext secrets under `/opt/data`: unchanged.
+- INFO, upstream image posture (digest-pinned base, immutable root-owned `/opt/hermes`, non-root uid 10000): still holds.
+
+Verdict unchanged: GO, with the same conditions. No published GitHub security advisory; no recorded CVE affects v0.19.0 or v0.21.5 (see the evaluation record).
 
 ## VPS hardening checklist (P4 — before any real key / public exposure)
 
