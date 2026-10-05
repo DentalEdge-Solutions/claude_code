@@ -917,9 +917,12 @@ class TestOptionBLayout(Base):
 
     def test_credential_shaped_names_is_on_the_hermes_home_row_only(self):
         self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
-        row = CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["files"][0]
-        self.assertEqual(row["label"], "gateway-env")
-        self.assertNotIn("credential_shaped_names", row)
+        self._w(self.HERMES_HOME_ENV, self.TEMPLATE + f"API_SERVER_KEY={self.API_KEY}\n")
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n" + self.HERMES_HOME_ENV + "\n", "")
+        rows = {r["label"]: r for r in CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["files"]}
+        self.assertEqual(set(rows), {"gateway-env", "hermes-home-env"})
+        self.assertNotIn("credential_shaped_names", rows["gateway-env"])
+        self.assertEqual(rows["hermes-home-env"]["credential_shaped_names"], [])
 
     # ---- v1.16: D4.1 `listeners`, the gateway container's listening ports
     TCP_HEADER = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt"
@@ -955,6 +958,26 @@ class TestOptionBLayout(Base):
         tcp6 = self.TCP6_HEADER + self.TCP6.splitlines(True)[1].replace("239F", "21C2")
         self.assertEqual(self._d4_1((0, self.TCP + tcp6, ""))[0]["listeners"], [8642])
 
+    DNS4 = "   0: 0B00007F:8693 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 5 1 0 100 0 0 10 0\n"
+    DASH4 = "   1: 00000000:239F 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10000 0 6 1 0 100 0 0 10 0\n"
+
+    def test_d4_1_docker_dns_listener_is_counted_not_listed(self):
+        """The box: the dashboard on 0.0.0.0:9119 and Docker's embedded DNS on 127.0.0.11:34451."""
+        d, _ = self._d4_1((0, self.TCP_HEADER + self.DNS4 + self.DASH4 + self.TCP6_HEADER, ""))
+        self.assertEqual((d["listeners"], d["docker_dns_listeners"]), ([9119], 1))
+        self.assertNotIn("34451", json.dumps(d))
+
+    def test_d4_1_docker_dns_listener_in_tcp6_mapped_form_is_excluded(self):
+        mapped = "0" * 16 + "FFFF0000" + "0B00007F"
+        tcp6 = self.TCP6_HEADER + (f"   0: {mapped}:8693 {self.ANY6}:0000 0A "
+                                   "00000000:00000000 00:00000000 00000000 0 0 7 1 0 100 0 0 10 0\n")
+        d, _ = self._d4_1((0, self.TCP_HEADER + self.DASH4 + tcp6, ""))
+        self.assertEqual((d["listeners"], d["docker_dns_listeners"]), ([9119], 1))
+
+    def test_d4_1_a_loopback_listener_is_still_reported(self):
+        d, _ = self._d4_1((0, self.TCP + self.TCP6_HEADER, ""))         # 127.0.0.1:8642 LISTEN
+        self.assertEqual((d["listeners"], d["docker_dns_listeners"]), ([8642], 0))
+
     def test_d4_1_listeners_empty_tables(self):
         self.assertEqual(self._d4_1((0, self.TCP_HEADER + self.TCP6_HEADER, ""))[0]["listeners"], [])
 
@@ -965,7 +988,7 @@ class TestOptionBLayout(Base):
                     (0, self.TCP_HEADER + "   0: garbage\n" + self.TCP6_HEADER, "")):
             with self.subTest(cat=cat):
                 d, _ = self._d4_1(cat)
-                self.assertEqual(d["listeners"], R.COULD_NOT_CHECK)
+                self.assertEqual((d["listeners"], d["docker_dns_listeners"]), (R.COULD_NOT_CHECK,) * 2)
                 self.assertEqual(d["paths"], ["/opt/governance absent"])
                 self.assertEqual(d["secret_env"], {"openrouter-key": "unset", "dashboard-password": "unset"})
                 self.assertNotIn("No such file", json.dumps(d))
@@ -1713,7 +1736,7 @@ class TestD10(Base):
         self.assertEqual(d["secret_env"], self.HEALTHY)
         self.assertEqual(list(d["secret_env"]), ["openrouter-key", "dashboard-password"])
         self.assertEqual(set(d), {"paths", "google_ads_env_names", "anthropic_env_names", "openrouter_env_names",
-                                  "secret_env", "listeners"})
+                                  "secret_env", "listeners", "docker_dns_listeners"})
         self.assertEqual(d["openrouter_env_names"], ["OPENROUTER_API_KEY"])
         self.assertEqual(bundle["credentials"], [{"label": "openrouter-key", "sha12": R.sha12(self.OPENROUTER)}])
         self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"], {"pattern_hits": 0, "known_secret_hits": 0})

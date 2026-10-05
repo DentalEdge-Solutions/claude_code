@@ -687,18 +687,26 @@ def d2_3(host, ctx):
 _PROC_NET_ROW_RE = re.compile(r"\d+:\s+([0-9A-Fa-f]+):([0-9A-Fa-f]{4})\s+[0-9A-Fa-f]+:[0-9A-Fa-f]{4}\s+([0-9A-Fa-f]{2})\s")
 
 
+# Docker's embedded DNS resolver, on 127.0.0.11 with an ephemeral TCP port in every user-defined
+# (Compose) network, as /proc/net/tcp spells the address and as tcp6 spells it IPv4-mapped.
+DOCKER_DNS_ADDRS = ("0B00007F", "0" * 16 + "FFFF0000" + "0B00007F")
+
+
 def _listeners(host, gw):
-    """D4.1 `listeners`: the sorted, distinct local ports (decimal) of every socket in state 0A
-    (LISTEN) in the gateway container's /proc/net/tcp and /proc/net/tcp6, read in one `docker exec
-    cat`. Only the port is kept: no address or other field. R.COULD_NOT_CHECK when the call fails,
+    """(listeners, docker_dns_listeners) for D4.1. `listeners`: the sorted, distinct local ports
+    (decimal) of every socket in state 0A (LISTEN) in the gateway container's /proc/net/tcp and
+    /proc/net/tcp6, read in one `docker exec cat`, except those bound to Docker's embedded DNS
+    address (DOCKER_DNS_ADDRS), which are only counted: `docker_dns_listeners`. Only ports and the
+    count are kept: no address or other field. Both are R.COULD_NOT_CHECK when the call fails,
     when the output is not exactly two tables (two headers), or when any row does not parse."""
+    failed = (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK)
     try:
         rc, out, _ = host.run(["docker", "exec", gw, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
     except (OSError, ValueError):
-        return R.COULD_NOT_CHECK
+        return failed
     if rc != 0:
-        return R.COULD_NOT_CHECK
-    headers, ports = 0, set()
+        return failed
+    headers, ports, dns = 0, set(), 0
     for line in out.splitlines():
         if not line.strip():
             continue
@@ -707,10 +715,13 @@ def _listeners(host, gw):
             continue
         m = _PROC_NET_ROW_RE.match(line.strip())
         if not m or not headers:
-            return R.COULD_NOT_CHECK
+            return failed
         if m.group(3).upper() == "0A":
-            ports.add(int(m.group(2), 16))
-    return sorted(ports) if headers == 2 else R.COULD_NOT_CHECK
+            if m.group(1).upper() in DOCKER_DNS_ADDRS:
+                dns += 1
+            else:
+                ports.add(int(m.group(2), 16))
+    return (sorted(ports), dns) if headers == 2 else failed
 
 
 def d4_1(host, ctx):
@@ -727,7 +738,9 @@ def d4_1(host, ctx):
     states = _gateway_secret_states(host, ctx)
     if states == R.COULD_NOT_CHECK:                         # no gateway then: a state for each label all the same
         states = {label: R.COULD_NOT_CHECK for _, label in OTHER_SECRET_NAMES[GATEWAY_ENV_FILE]}
-    return {"paths": out.splitlines(), "secret_env": states, "listeners": _listeners(host, gw),
+    listeners, dns = _listeners(host, gw)
+    return {"paths": out.splitlines(), "secret_env": states,
+            "listeners": listeners, "docker_dns_listeners": dns,
             "google_ads_env_names": sorted(n for n in names if n.startswith("GOOGLE_ADS_")),
             "anthropic_env_names": sorted(n for n in names if n.startswith("ANTHROPIC_")),
             "openrouter_env_names": sorted(n for n in names if n.startswith("OPENROUTER_"))}
