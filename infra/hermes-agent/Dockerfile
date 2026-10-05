@@ -5,15 +5,15 @@
 # The official base image's install tree (/opt/hermes) is immutable at runtime,
 # so tools like `claude` must be added in a derived image (documented pattern).
 #
-# Pinned to v2026.7.20 (Hermes Agent v0.19.0 "Quicksilver") — digest verified by the
-# P0 security audit on 2026-07-21 (see infra/hermes-agent/SECURITY-AUDIT.md).
+# Pinned to v2026.9.24 (Hermes Agent v0.21.5), digest verified and the image audit re-run
+# on 2026-10-05 (see infra/hermes-agent/SECURITY-AUDIT.md); previous pin v2026.7.20 (v0.19.0).
 # Re-pin AND re-run the audit on every upgrade (Hermes ships ~weekly; :latest is a
 # moving target retagged on every push to main — never build against :latest).
-FROM nousresearch/hermes-agent@sha256:f7b35053268f532f98955195c909f15a230470fbcbdacaa9fdecb95707dad04a
+FROM nousresearch/hermes-agent@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7
 
 USER root
 
-# Claude Code CLI — Node 22 is present in the base image.
+# Claude Code CLI — Node 26 is present in the base image (v0.21.5).
 RUN npm install -g @anthropic-ai/claude-code && claude --version
 
 # Read-execute (Increment 3): a pinned, isolated venv carrying the target's Google
