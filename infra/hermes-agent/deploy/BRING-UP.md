@@ -1328,6 +1328,7 @@ Requires part 1 on the box. Still not live until review #6.
    Hermes wrote itself), then `sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
    The gateway rewrites `data/config.yaml` once it runs (its layout, and it may add keys of its own); review item D10.6 compares the
    parsed `mcp_servers` block with the template, so do not re-install the template to "fix" a layout difference.
+   From Hermes v0.21.5 the template carries `platforms.api_server.enabled: false` (the API server stays off); a box whose `data/config.yaml` predates it gets that block appended once, as a top-level key, or `api_server: {enabled: false}` added under an existing top-level `platforms:` key (never a second `platforms:` key) (the gateway keeps it through its rewrites), then `sudo docker compose restart hermes-agent`; review item D4.1 `listeners` then shows no `8642`.
 7. Recreate the gateway without the retired sidecar:
    `sudo docker compose up -d --build --remove-orphans hermes-agent`
    `sudo docker compose ps -a` → no `claude-auth-init`

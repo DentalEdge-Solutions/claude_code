@@ -53,3 +53,19 @@ Logged by v0.21.5 at start and expected on the box: warnings that the Nous Porta
 ## 4 · Decision
 
 Upgrade the pin to `sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7` (v0.21.5) and re-run the image security audit (`SECURITY-AUDIT.md`), batched with the PR #96 pull. Then one trial collection and review #7 against checklist v1.15. If the trial finds a regression, stay on v0.19.0 and run review #7 on the current pin. Revisit the pin at the next minor release, re-reading these sources first.
+
+## 5 · Missed at first, found on the box (2026-10-05)
+
+§3's last open point came back the other way: `/opt/data/.env` does exist on the box, and v0.21.5 writes it. Measured on the v0.21.5 image (`sha256:fca358f1…52b7`):
+
+- `docker/stage2-hook.sh` seeds `$HERMES_HOME/.env` (`/opt/data/.env`; on the box `/opt/projects/claude_code/infra/hermes-agent/data/.env`, owner uid 10000, mode 0600) from the bundled 26 KB `.env.example` (11 non-secret default assignments) and, when no `API_SERVER_KEY` is in the container environment or in that file, appends a generated `API_SERVER_KEY` (64 hex). Hermes loads that file with `override=True`. The API server key is the only assignment the start-up adds to the template.
+- The gateway starts its API server on `127.0.0.1:8642` inside the container whenever `API_SERVER_KEY` has 16 or more characters (`gateway/config_env.py:_api_server`), unless `config.yaml` sets `enabled` for the platform: `_enable_from_env` enables a platform from env credentials "unless config.yaml explicitly disabled it" (`gateway/config_loader.py:merge_platform_sections` sets the explicit marker for any `enabled` key).
+
+Laptop measurement, our derived image with our `config.yaml.example`:
+
+| Run | `platforms.api_server.enabled` in `config.yaml` | `API_SERVER_KEY` generated into `/opt/data/.env` | Port 8642 listening in the container | Block kept after the gateway rewrites `config.yaml` |
+|---|---|---|---|---|
+| control | absent | yes | yes | n/a |
+| disabled | `false` (top-level `platforms:` block) | yes | no | yes |
+
+Done about it (checklist v1.16): the template carries `platforms: {api_server: {enabled: false}}`; D2.1 authorises the file as `hermes-home-env`, holding `api-server-key` (a known secret for every leak check, listed in `credentials` with a `sha12`), and reports `credential_shaped_names` so a provider key placed there, which would override the gateway's own `.env`, is a FAIL; D4.1 `listeners` lists the gateway container's listening ports on every review, so a future default that opens a listener fails the review instead of passing unseen. `SECURITY-AUDIT.md` records the finding and what each re-audit now also checks.

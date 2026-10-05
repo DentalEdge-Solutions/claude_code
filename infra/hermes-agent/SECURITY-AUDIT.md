@@ -60,9 +60,10 @@ Findings, row by row against the original table:
 - MED, docker CLI + stage2 docker group logic: still present; still no Docker socket mounted.
 - MED, `network_mode: host`: our compose still avoids it.
 - MED, `install.sh` third-party installers: still N/A.
-- LOW, API server one edit from public exposure: still off.
+- LOW, API server one edit from public exposure: still off, from v0.21.5 only because our `config.yaml` says so (next row).
 - LOW, plaintext secrets under `/opt/data`: unchanged.
 - INFO, upstream image posture (digest-pinned base, immutable root-owned `/opt/hermes`, non-root uid 10000): still holds.
+- LOW, new at v0.21.5 (found on the box after the first re-audit): the start-up (`docker/stage2-hook.sh`) generates an `API_SERVER_KEY` into `/opt/data/.env`, and the gateway then starts its OpenAI-compatible API server on container loopback `127.0.0.1:8642` by default. Mitigated by `platforms.api_server.enabled: false` in `config.yaml` (measured: no listener, and the setting survives the gateway's rewrite of `config.yaml`). The key is still generated: it is inventoried as a secret (review item D2.1, `hermes-home-env` / `api-server-key`), and the gateway container's listening ports are measured on every review (D4.1 `listeners`).
 
 Verdict unchanged: GO, with the same conditions. No published GitHub security advisory; no recorded CVE affects v0.19.0, and every recorded CVE predates both pins (see the evaluation record).
 
@@ -81,4 +82,6 @@ Verdict unchanged: GO, with the same conditions. No published GitHub security ad
 7. Secrets: `chmod 600` `~/.hermes/.env`; dedicated non-priv host user; rotate keys on any exposure.
 8. Keep `approvals.mode: smart` (not `off`).
 9. Track `HERMES_GIT_SHA` (baked into image) for incident triage.
-10. Re-run this audit on every version bump.
+10. Re-run this audit on every version bump. The first v0.21.5 re-audit missed a new default; each re-audit also: diffs
+    `docker/stage2-hook.sh` against the previous pin; lists what the first start writes into `/opt/data`
+    (file names and assignment names only, never values); lists the gateway container's listening ports.

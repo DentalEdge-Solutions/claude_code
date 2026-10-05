@@ -879,6 +879,120 @@ class TestOptionBLayout(Base):
         self.assertEqual(d["secret_env"], {"openrouter-key": "unset", "dashboard-password": "unset"})
         self.assertEqual(set(secrets), {TOKEN})                         # no command's output became a "secret"
 
+    # ---- v1.16: the Hermes home secrets file (v0.21.5 writes a generated API_SERVER_KEY into it)
+    HERMES_HOME_ENV = CE.CHECKOUT + "/infra/hermes-agent/data/.env"
+    API_KEY = "c0ffee" * 10 + "0a1b"                                  # 64 hex, built so no hex run sits in the source
+    # Shaped like the bundled template: comments (one naming a provider key), non-secret defaults.
+    TEMPLATE = ("# Hermes Agent environment\n# OPENROUTER_API_KEY=your-key-here\n"
+                "HERMES_LOG_LEVEL=info\nexport TERMINAL_BACKEND=local\nBROWSER_HEADLESS=true\n")
+
+    def _hermes_home_env(self, body):
+        self._w(self.HERMES_HOME_ENV, body)
+        self.outputs[("find",)] = (0, self.HERMES_HOME_ENV + "\n", "")
+
+    def test_d2_1_the_hermes_home_env_is_authorised_and_its_key_inventoried(self):
+        self._hermes_home_env(self.TEMPLATE + f"API_SERVER_KEY={self.API_KEY}\n")
+        self.outputs[("journalctl", "-o")] = (0, f"api_server: key {self.API_KEY}\n", "")
+        bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)
+        row = bundle["items"]["D2.1"]["data"]["files"][0]
+        self.assertEqual((row["path"], row["kind"], row["label"]),
+                         (self.HERMES_HOME_ENV, "authorised-other", "hermes-home-env"))
+        self.assertEqual((row["secrets_held"], row["secrets_not_searchable"], row["credential_shaped_names"]),
+                         (["api-server-key"], [], []))
+        self.assertIn(self.API_KEY, secrets)
+        self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
+        self.assertNotIn(self.API_KEY, json.dumps(bundle))
+        self.assertIn({"label": "api-server-key", "sha12": R.sha12(self.API_KEY)}, bundle["credentials"])
+
+    def test_d2_1_names_a_credential_placed_in_the_hermes_home_env_and_never_its_value(self):
+        openrouter, github = "sk-or-v1-NOT-A-REAL-HOME-KEY-0123456789", "ghp_NOTAREALTOKEN-zyxwvutsrqponm"
+        self._hermes_home_env(self.TEMPLATE + f"API_SERVER_KEY={self.API_KEY}\n"
+                              f"OPENROUTER_API_KEY={openrouter}\n  export GITHUB_TOKEN = {github}\n")
+        bundle = CE.collect(self.host(), self.KEY)
+        row = bundle["items"]["D2.1"]["data"]["files"][0]
+        self.assertEqual(row["credential_shaped_names"], ["GITHUB_TOKEN", "OPENROUTER_API_KEY"])
+        text = json.dumps(bundle)
+        for value in (openrouter, github, self.API_KEY):
+            self.assertNotIn(value, text)
+
+    def test_credential_shaped_names_is_on_the_hermes_home_row_only(self):
+        self._gateway_env(f"OPENROUTER_API_KEY={self.OPENROUTER}\n")
+        self._w(self.HERMES_HOME_ENV, self.TEMPLATE + f"API_SERVER_KEY={self.API_KEY}\n")
+        self.outputs[("find",)] = (0, self.GATEWAY_ENV + "\n" + self.HERMES_HOME_ENV + "\n", "")
+        rows = {r["label"]: r for r in CE.collect(self.host(), self.KEY)["items"]["D2.1"]["data"]["files"]}
+        self.assertEqual(set(rows), {"gateway-env", "hermes-home-env"})
+        self.assertNotIn("credential_shaped_names", rows["gateway-env"])
+        self.assertEqual(rows["hermes-home-env"]["credential_shaped_names"], [])
+
+    # ---- v1.16: D4.1 `listeners`, the gateway container's listening ports
+    TCP_HEADER = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt"
+                  "   uid  timeout inode\n")
+    TCP = TCP_HEADER + (
+        "   0: 0100007F:21C2 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10000 0 1 1 0 100 0 0 10 0\n"
+        "   1: 0100007F:21C2 0100007F:D3F0 01 00000000:00000000 00:00000000 00000000 10000 0 2 1 0 20 4 30 10 -1\n"
+        "   2: 0100007F:9C40 0100007F:21C2 01 00000000:00000000 00:00000000 00000000 10000 0 3 1 0 20 4 30 10 -1\n")
+    TCP6_HEADER = ("  sl  local_address                         remote_address                        st tx_queue"
+                   " rx_queue tr tm->when retrnsmt   uid  timeout inode\n")
+    ANY6 = "0" * 32                                                   # the IPv6 any-address, as /proc spells it
+    TCP6 = TCP6_HEADER + (
+        f"   0: {ANY6}:239F {ANY6}:0000 0A "
+        "00000000:00000000 00:00000000 00000000 10000 0 4 1 0 100 0 0 10 0\n")
+
+    def _d4_1(self, cat):
+        gw = "a" * 64
+        self.outputs[("docker", "ps")] = (0, gw + "\n", "")
+        self.outputs[("docker", "exec", gw, "cat")] = cat
+        self.outputs[("docker", "exec", gw, "printenv")] = (1, "", "")
+        self.outputs[("docker", "exec", gw, "env")] = (0, "HOME=/opt/data\n", "")
+        self.outputs[("docker", "exec", gw, "sh")] = (0, "/opt/governance absent\n", "")
+        h = self.host()
+        return CE.d4_1(h, {}), h
+
+    def test_d4_1_listeners_are_the_listening_ports_of_both_tables(self):
+        d, h = self._d4_1((0, self.TCP + self.TCP6, ""))
+        self.assertEqual(d["listeners"], [8642, 9119])
+        self.assertIn(["docker", "exec", "a" * 64, "cat", "/proc/net/tcp", "/proc/net/tcp6"], h.calls)
+        self.assertNotIn("0100007F", json.dumps(d))
+
+    def test_d4_1_listeners_are_deduplicated(self):
+        tcp6 = self.TCP6_HEADER + self.TCP6.splitlines(True)[1].replace("239F", "21C2")
+        self.assertEqual(self._d4_1((0, self.TCP + tcp6, ""))[0]["listeners"], [8642])
+
+    DNS4 = "   0: 0B00007F:8693 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 5 1 0 100 0 0 10 0\n"
+    DASH4 = "   1: 00000000:239F 00000000:0000 0A 00000000:00000000 00:00000000 00000000 10000 0 6 1 0 100 0 0 10 0\n"
+
+    def test_d4_1_docker_dns_listener_is_counted_not_listed(self):
+        """The box: the dashboard on 0.0.0.0:9119 and Docker's embedded DNS on 127.0.0.11:34451."""
+        d, _ = self._d4_1((0, self.TCP_HEADER + self.DNS4 + self.DASH4 + self.TCP6_HEADER, ""))
+        self.assertEqual((d["listeners"], d["docker_dns_listeners"]), ([9119], 1))
+        self.assertNotIn("34451", json.dumps(d))
+
+    def test_d4_1_docker_dns_listener_in_tcp6_mapped_form_is_excluded(self):
+        mapped = "0" * 16 + "FFFF0000" + "0B00007F"
+        tcp6 = self.TCP6_HEADER + (f"   0: {mapped}:8693 {self.ANY6}:0000 0A "
+                                   "00000000:00000000 00:00000000 00000000 0 0 7 1 0 100 0 0 10 0\n")
+        d, _ = self._d4_1((0, self.TCP_HEADER + self.DASH4 + tcp6, ""))
+        self.assertEqual((d["listeners"], d["docker_dns_listeners"]), ([9119], 1))
+
+    def test_d4_1_a_loopback_listener_is_still_reported(self):
+        d, _ = self._d4_1((0, self.TCP + self.TCP6_HEADER, ""))         # 127.0.0.1:8642 LISTEN
+        self.assertEqual((d["listeners"], d["docker_dns_listeners"]), ([8642], 0))
+
+    def test_d4_1_listeners_empty_tables(self):
+        self.assertEqual(self._d4_1((0, self.TCP_HEADER + self.TCP6_HEADER, ""))[0]["listeners"], [])
+
+    def test_d4_1_listeners_could_not_check_keeps_the_rest_of_the_item(self):
+        for cat in ((1, "", "cat: /proc/net/tcp6: No such file or directory"),
+                    (0, "", ""), (0, "not a table\n", ""),
+                    (0, self.TCP, ""),                                   # one table only: tcp6 not read
+                    (0, self.TCP_HEADER + "   0: garbage\n" + self.TCP6_HEADER, "")):
+            with self.subTest(cat=cat):
+                d, _ = self._d4_1(cat)
+                self.assertEqual((d["listeners"], d["docker_dns_listeners"]), (R.COULD_NOT_CHECK,) * 2)
+                self.assertEqual(d["paths"], ["/opt/governance absent"])
+                self.assertEqual(d["secret_env"], {"openrouter-key": "unset", "dashboard-password": "unset"})
+                self.assertNotIn("No such file", json.dumps(d))
+
 
 class TestKeyedBundle(Base):
     def test_cids_are_keyed_and_key_id_recorded(self):
@@ -1622,7 +1736,7 @@ class TestD10(Base):
         self.assertEqual(d["secret_env"], self.HEALTHY)
         self.assertEqual(list(d["secret_env"]), ["openrouter-key", "dashboard-password"])
         self.assertEqual(set(d), {"paths", "google_ads_env_names", "anthropic_env_names", "openrouter_env_names",
-                                  "secret_env"})
+                                  "secret_env", "listeners", "docker_dns_listeners"})
         self.assertEqual(d["openrouter_env_names"], ["OPENROUTER_API_KEY"])
         self.assertEqual(bundle["credentials"], [{"label": "openrouter-key", "sha12": R.sha12(self.OPENROUTER)}])
         self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"], {"pattern_hits": 0, "known_secret_hits": 0})
