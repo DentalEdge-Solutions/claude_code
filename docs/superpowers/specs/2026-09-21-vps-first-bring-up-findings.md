@@ -660,6 +660,33 @@ Google (accepted under D3.2; revoke it when the shared grant can be separated), 
 suggestions for the next review (the collector could name the accounts that `sudoers.d` rules
 name; capture the whole Data Training section of the OpenRouter privacy screen).
 
+### F44 to F51: opened at or after the Hermes v0.21.5 upgrade and security review #7 (2026-10-06)
+
+Review #7 (PASS 34/34, checklist v1.16, `docs/security-reviews/2026-10-06-review-7.md`) decided
+these under D9.1 and in its sign-off, where they had no number yet. F44 was found on the box on
+2026-10-05, before the review. F45 to F47 come from the build and review of PR #100. F48 to F51
+were found during review #7 itself. None changes code in this section's own change: it is their
+record.
+
+| # | Finding | Decision at review #7 | Now |
+|---|---|---|---|
+| F44 | Hermes v0.21.5's start-up writes `data/.env` (the image's template plus a generated `API_SERVER_KEY`) and, with that key present, the gateway opens its OpenAI-compatible API server on container loopback port 8642. v0.19.0 did neither. The laptop upgrade evaluation missed it, because the file the first start writes was not inspected. | **fixed** (PR #100, checklist v1.16): `platforms.api_server.enabled: false` in `config.yaml`; the file and its key are inventoried (D2.1 `hermes-home-env`); the gateway's listening ports are measured at every review (D4.1 `listeners`); SECURITY-AUDIT has three more upgrade-audit steps | fixed; measured on the box: `listeners [9119]` |
+| F45 | Collector residuals: a zero-width character, internal whitespace or inner quotes around a key, or a padded password under 8 characters, can still pass the collector's output guard. | accepted: the gateway could not authenticate with such a value, and D4.1 `secret_env` shows the gateway's own value matching the file | accepted (standing) |
+| F46 | Auxiliary models: v0.21.5's auxiliary fallback can use a paid OpenRouter model, and it is not verified that Hermes sends `provider.data_collection: deny` on auxiliary calls. | accepted: the OpenRouter account settings deny data-collecting providers and enforce Zero Data Retention for every request made with the key; the key's $10 monthly limit caps the cost | accepted (standing). The reason holds only while the account settings of F48 stay as they are |
+| F47 | The dashboard basic-auth password is held in plaintext in the gateway `.env`, while v0.21.5 accepts a password hash (`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`). | accepted: the file is `root:root 0600`, the value is a known secret for the leak checks, and the dashboard is bound to loopback | accepted (standing); replacing it is dashboard work |
+| F48 | The OpenRouter account allowed free endpoints that train on request data: the "Allow free endpoints that train on request data" toggle was on. Review #6's privacy screen was cut off above it, so review #6 passed D10.5 on the statement that the account denied data-collecting providers, which was not fully true. | **fixed** on 2026-10-06: the toggle is off, and the whole Data Training section is in review #7's screen. Exposure while it was on: Zero Data Retention was on for every row, the config sends `data_collection: deny`, and the key's last 30 days show one paid model only. When it was switched on is not known, so the time before those 30 days is not covered by evidence: accepted | fixed. Every review captures the whole privacy page |
+| F49 | The OpenRouter key that review #6 called dedicated to the box was not. It was created on 2026-07-22 for the laptop build of Hermes, a copy sat in the laptop checkout's `.env`, and a laptop gateway container was still running with it, outside every review. Whether that gateway sent `data_collection: deny` is not known. | **fixed** on 2026-10-06: the laptop container was removed and the laptop key line blanked; a new key was created for the box only, typed once into the installer and stored nowhere else; the old key was deleted at OpenRouter after the new one was proven | fixed. README "The OpenRouter key is the box's alone" gives the rule and the replacement steps; a laptop stack uses its own key |
+| F50 | The two controls that keep the API server off (F44) live in files the gateway can write (`data/.env`, `data/config.yaml`) and are measured only at review time. A later Hermes version, or the gateway itself, could re-open a listener between reviews. | accepted for review #7: the port is on the container's loopback and is not published; D4.1 measures it at every review | accepted. Open decision: a periodic listener check (it changes `bin/` or `deploy/`, so it re-opens the review) |
+| F51 | The box's OpenRouter key never expires (the account's maximum key lifetime is "No expiration"), and no replacement interval was set. | accepted at sign-off, with the interval left open | **decided** 2026-10-06: replaced every 12 months, and at once on a suspected leak or a copy found outside the box (README). Next due by 2027-10-06 |
+
+Still open from review #7, not findings against the code: the previous key's deletion is the
+operator's statement (attach the API-keys list at the next review); the box bundle carries
+`D7.1.records`, a key the checklist does not describe (document it or drop it at the next checklist
+version); the reviewer cannot check some baselines alone (give it the previous PASS report's header,
+or carry them in the bundle); the key-replacement steps are in the README and belong in BRING-UP
+(a `deploy/` change, so it goes with the next change that re-opens the review); the console screens
+identify the account and stay in the git-ignored `security-reviews/` folder.
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,

@@ -7,9 +7,9 @@
 ## Where things stand
 
 - **Security review #7: PASS, 34 of 34, checklist v1.16**, signed 2026-10-06. Report:
-  `docs/security-reviews/2026-10-06-review-7.md`, on branch `docs/review-7-pass` with this handoff (not pushed
-  when this was written; the operator pushes and merges).
-- **`main` is at `3ced410`** (merge of PR #100). The box is at the same checkout.
+  `docs/security-reviews/2026-10-06-review-7.md` (merged with this handoff as PR #101).
+- **The box is at checkout `3ced410`** (merge of PR #100). `main` is ahead of it by docs only (PR #101 and the
+  follow-ups below), which the box fingerprint does not cover.
 - **The box** runs the derived image on **Hermes v0.21.5**, uid 10000, `ads_audit` with 3 tools.
   - `platforms.api_server.enabled: false` is in the live `data/config.yaml`; the gateway's listening ports are
     `9119` (the dashboard is on) and Docker's embedded DNS; 8642 does not listen.
@@ -38,23 +38,25 @@ not dedicated), then 34 of 34.
 
 ## Follow-ups (none blocks the PASS)
 
-Repo work, to batch in one change (plan, implementer, independent review, then ask before pushing):
+Done on 2026-10-06, after the PASS (branch `docs/review-7-follow-ups`; docs outside `bin/` and `deploy/`, so the
+box fingerprint is unaffected):
 
-- **Findings document.** Give F numbers to: the v0.21.5 API server (fixed, PR #100); the collector residuals,
-  the auxiliary models and the plaintext dashboard password (each accepted); the Data Training toggle; the
-  shared key and the laptop gateway. Annotate review #6's report about the toggle and the key.
-- **BRING-UP.** Add the key rotation as a named block: create the key box-only, `install-env-secret.py set`,
-  `docker compose up -d --force-recreate hermes-agent`, prove it by chat, delete the old key, then both probes
-  and a fresh collection. Add the checks this review used: search the laptop for a copy of the key, and capture
-  the privacy screen whole.
-- **Checklist (bumps the version above 1.16 and changes the box fingerprint, so it re-opens the review):**
-  document or drop `D7.1.records`; consider asking for the API-keys list as D10.5 evidence.
+- **Findings document.** F44 to F51 record the v0.21.5 API server, the collector residuals, the auxiliary
+  models, the plaintext dashboard password, the Data Training toggle, the shared key and the laptop gateway, the
+  API-server-off controls, and the key that never expires.
+- **Review #6's report** carries a dated correction about the toggle and the key.
+- **README** ("The OpenRouter key is the box's alone"): what dedicated means, the replacement steps, and the
+  operator's decision to **replace the key every 12 months** (next due by 2027-10-06), or at once on a suspected
+  leak or a copy found outside the box. The README also names the third secret file, `data/.env`.
 
-Operator decisions still open:
+Still to do, with the next change that re-opens the review (anything under `bin/` or `deploy/`, or a checklist
+change, which bumps the version above 1.16):
 
-- A rotation interval for the box's OpenRouter key (it never expires).
-- Whether the API-server-off controls, which sit in gateway-writable files and are measured only at review time,
-  get a periodic listener check.
+- **BRING-UP.** Move the key-replacement steps from the README into the runbook as a named block, with the two
+  checks this review used: search the laptop for a copy of the key, and capture the privacy screen whole.
+- **Checklist.** Document or drop `D7.1.records`; consider asking for the API-keys list as D10.5 evidence.
+- **F50, the operator's open decision.** Whether the API-server-off controls, which sit in gateway-writable
+  files and are measured only at review time, get a periodic listener check.
 - The reviewer's process suggestion: give the reviewer the previous PASS report's header, or carry the baselines
   in the bundle.
 

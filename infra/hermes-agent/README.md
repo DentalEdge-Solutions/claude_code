@@ -33,7 +33,7 @@ execution. See the project plan for the full rationale.
 ## First run
 
 ```bash
-cp .env.example .env          # local dev / before Option B: set OPENROUTER_API_KEY + ANTHROPIC_API_KEY (on the box the gateway .env holds OPENROUTER_API_KEY only)
+cp .env.example .env          # local dev / before Option B: set OPENROUTER_API_KEY + ANTHROPIC_API_KEY (on the box the gateway .env holds OPENROUTER_API_KEY only). A laptop stack uses its OWN OpenRouter key, never the box's (security review #7).
 cp config.yaml.example data/config.yaml
 docker compose up -d --build
 docker compose exec hermes-agent hermes gateway status   # -> running
@@ -1444,18 +1444,55 @@ not stop collateral within an account.
 | read | `hermes@…` | **READ_ONLY** on the manager | `.env.ga`, on the laptop, and on the box at `/etc/hermes/.env.ga` (`root:root 0400`, same token; passed per run to the audit containers, never mounted) | The platform backstop. Google refuses every mutate server-side, so a read path stays safe even if every allow-list, cap and kill switch failed. **Never upgrade this account.** |
 | write | **none — read-only posture** (2026-09-29) | — | no `.env.gaw` anywhere | Operator decision, security review D3.2: Hermes holds no write credential. Changes to client accounts are made by the apps that join the AI OS, not by Hermes core. The mutation tier is parked. |
 
-**The box's non-Google secrets.** Two files hold them. The gateway `.env`
+**The box's non-Google secrets.** Three files hold them. The gateway `.env`
 (`/opt/projects/claude_code/infra/hermes-agent/.env`, `root:root 0600`) holds the OpenRouter key
 (Hermes's own reasoning; dedicated to the box, with a credit limit) and, when the dashboard is
 switched on, the dashboard basic-auth password. `/etc/hermes/.env.anthropic` (`root:root 0400`)
 holds the **real** `ANTHROPIC_API_KEY` (workspace `hermes-box`, monthly spend limit; used only by
 the audit drafter, passed per run and never mounted). The gateway `.env` holds no Anthropic key.
-The review collector reports the two files as `kind: authorised-other` (`label: gateway-env` and
-`label: anthropic-key`; `AUTHORISED_OTHER` in `bin/collect-review-evidence.py`), names the secrets
-each holds (`secrets_held`; `OTHER_SECRET_NAMES` in the same file) and looks for their values in
-the shell histories and the journals. Adding another secret file to the box, or another secret to
-one of these two files, means adding it there and here, or the next review sees the file as
-`unlisted` or never looks for the value.
+The Hermes home secrets file (`data/.env` under the same directory, `/opt/data/.env` in the
+container; owner uid 10000, mode 0600) is written by Hermes v0.21.5's own start-up: the image's
+template plus one generated `API_SERVER_KEY`. The operator adds nothing to it, and the API server
+that key belongs to stays off (`platforms.api_server.enabled: false` in `config.yaml`).
+The review collector reports the three files as `kind: authorised-other` (`label: gateway-env`,
+`label: anthropic-key` and `label: hermes-home-env`; `AUTHORISED_OTHER` in
+`bin/collect-review-evidence.py`), names the secrets each holds (`secrets_held`;
+`OTHER_SECRET_NAMES` in the same file) and looks for their values in the shell histories and the
+journals. Adding another secret file to the box, or another secret to one of these three files,
+means adding it there and here, or the next review sees the file as `unlisted` or never looks for
+the value.
+
+**The OpenRouter key is the box's alone, and is replaced every 12 months** (operator decision,
+2026-10-06, security review #7). "Dedicated" means: created in the OpenRouter console for the box
+only, typed once into the installer prompt on the box, and stored nowhere else (no laptop file, no
+password manager, no note). A laptop Hermes stack uses a separate key of its own. Replace the key
+at once, without waiting for the 12 months, if a leak is suspected or a copy is found anywhere
+outside the box. The key in use was created on 2026-10-06, so the next replacement is due by
+2027-10-06.
+
+Replacing it changes the box, so it is followed by a fresh evidence collection. The order matters:
+the old key is deleted only after the new one is proven, and no backup copy of the old `.env` is
+made (the review's sweep reports one as `unlisted`, a FAIL).
+
+1. OpenRouter console: create a new key for the box only, credit limit $10, reset monthly. Copy it
+   once.
+2. Box, ALONE (the value is read from the terminal with echo off; `sudo -v` first, so the password
+   prompt cannot take the paste):
+   `cd /opt/hermes-agent && sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name OPENROUTER_API_KEY --prefix sk-or- --mode 0600`
+   Then clear the laptop's clipboard: `pbcopy < /dev/null`.
+3. Box: recreate the gateway, because a restart keeps the old environment:
+   `sudo docker compose up -d --force-recreate hermes-agent`, then `sudo docker compose ps -a`
+   (`Up`, not `Restarting`) and `sudo stat -c '%u %a %s' /opt/hermes-agent/data/.env` (owner, mode
+   and size unchanged: the start-up wrote nothing new).
+4. Box: prove the new key. `sudo docker compose exec -it hermes-agent hermes chat`, ask for a
+   one-word reply, and check that the new key's console page then shows a "Last Used" time.
+5. OpenRouter console: only now delete the old key. Capture the new key's whole page (limit, reset,
+   usage) and the API-keys list showing the old key gone.
+6. Laptop: check that no copy of either key is left there. Search the home directory for
+   OpenRouter-shaped keys with a command that prints file names only, never a value, and stop any
+   laptop gateway that was started with the box's key (`docker compose down`).
+7. Run a security review: both probes, a new box bundle and a same-day laptop bundle
+   (`deploy/BRING-UP.md`, "A security review"). D10.5's statement says where the key is stored.
 
 **Why there is no write credential (security review D3.2, 2026-09-29).** From 2026-08-18
 the write role reused the operator's own Google account at **ADMIN**. That carried user
