@@ -8,8 +8,9 @@
 
 - **Security review #7: PASS, 34 of 34, checklist v1.16**, signed 2026-10-06. Report:
   `docs/security-reviews/2026-10-06-review-7.md` (merged with this handoff as PR #101).
-- **The box is at checkout `3ced410`** (merge of PR #100). `main` is ahead of it by docs only (PR #101 and the
-  follow-ups below), which the box fingerprint does not cover.
+- **The box is at checkout `3ced410`** (merge of PR #100). `main` is ahead of it by docs only (PR #101; the
+  follow-ups below are on branch `docs/review-7-follow-ups` until merged), which the box fingerprint does not
+  cover.
 - **The box** runs the derived image on **Hermes v0.21.5**, uid 10000, `ads_audit` with 3 tools.
   - `platforms.api_server.enabled: false` is in the live `data/config.yaml`; the gateway's listening ports are
     `9119` (the dashboard is on) and Docker's embedded DNS; 8642 does not listen.
@@ -38,8 +39,8 @@ not dedicated), then 34 of 34.
 
 ## Follow-ups (none blocks the PASS)
 
-Done on 2026-10-06, after the PASS (branch `docs/review-7-follow-ups`; docs outside `bin/` and `deploy/`, so the
-box fingerprint is unaffected):
+Done on 2026-10-06, after the PASS (branch `docs/review-7-follow-ups`; docs outside the fingerprinted paths,
+`CODE_PATHS` in `bin/collect-review-evidence.py`, so the box fingerprint is unaffected):
 
 - **Findings document.** F44 to F51 record the v0.21.5 API server, the collector residuals, the auxiliary
   models, the plaintext dashboard password, the Data Training toggle, the shared key and the laptop gateway, the
@@ -85,7 +86,8 @@ Carried over from the previous handoff:
 - Collect both bundles and sign on the same UTC day. Re-collect the laptop bundle if the evidence is corrected
   later, and the box bundle after any change to the box.
 - D10.5: capture the whole privacy page and the key's page, state where the key is stored, and search the
-  laptop for a copy before stating that it is dedicated.
+  laptop for a copy before stating that it is dedicated. Attach the API-keys list (names and dates, fragments
+  redacted) showing the previous key gone: the review #7 sign-off promised it.
 - The summary script for a trial collection is not in the repo. It prints, from the bundle: each item's status;
   D4.1 `listeners`, `docker_dns_listeners` and `secret_env`; each labelled D2.1 row (label, kind, owner, mode,
   `secrets_held`, `credential_shaped_names`); D10.8 `out_of_whitelist` and the count of `run`/`ok` rows.

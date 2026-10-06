@@ -1462,15 +1462,16 @@ journals. Adding another secret file to the box, or another secret to one of the
 means adding it there and here, or the next review sees the file as `unlisted` or never looks for
 the value.
 
-**The OpenRouter key is the box's alone, and is replaced every 12 months** (operator decision,
-2026-10-06, security review #7). "Dedicated" means: created in the OpenRouter console for the box
+**The OpenRouter key is the box's alone, and is replaced every 12 months** (operator decision of
+2026-10-06, taken after security review #7's sign-off, which left the interval open). "Dedicated" means: created in the OpenRouter console for the box
 only, typed once into the installer prompt on the box, and stored nowhere else (no laptop file, no
 password manager, no note). A laptop Hermes stack uses a separate key of its own. Replace the key
 at once, without waiting for the 12 months, if a leak is suspected or a copy is found anywhere
 outside the box. The key in use was created on 2026-10-06, so the next replacement is due by
 2027-10-06.
 
-Replacing it changes the box, so it is followed by a fresh evidence collection. The order matters:
+Replacing it changes the box's authorised credential set, so fresh review evidence is collected
+afterwards (step 7). The order matters:
 the old key is deleted only after the new one is proven, and no backup copy of the old `.env` is
 made (the review's sweep reports one as `unlisted`, a FAIL).
 
@@ -1478,21 +1479,28 @@ made (the review's sweep reports one as `unlisted`, a FAIL).
    once.
 2. Box, ALONE (the value is read from the terminal with echo off; `sudo -v` first, so the password
    prompt cannot take the paste):
-   `cd /opt/hermes-agent && sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name OPENROUTER_API_KEY --prefix sk-or- --mode 0600`
+   `cd /opt/hermes-agent && sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name OPENROUTER_API_KEY --prefix sk-or- --mode 0600 --owner-uid 0 --owner-gid 0`
    Then clear the laptop's clipboard: `pbcopy < /dev/null`.
-3. Box: recreate the gateway, because a restart keeps the old environment:
-   `sudo docker compose up -d --force-recreate hermes-agent`, then `sudo docker compose ps -a`
-   (`Up`, not `Restarting`) and `sudo stat -c '%u %a %s' /opt/hermes-agent/data/.env` (owner, mode
-   and size unchanged: the start-up wrote nothing new).
-4. Box: prove the new key. `sudo docker compose exec -it hermes-agent hermes chat`, ask for a
-   one-word reply, and check that the new key's console page then shows a "Last Used" time.
+3. Box: note the Hermes home file first, `sudo stat -c '%u %a %s' /opt/hermes-agent/data/.env`
+   (owner and mode are `10000 600`). Then recreate the gateway, because a restart keeps the old
+   environment: `cd /opt/hermes-agent && sudo docker compose up -d --force-recreate hermes-agent`,
+   then `cd /opt/hermes-agent && sudo docker compose ps -a` (`Up`, not `Restarting`) and the same
+   `stat` again (owner, mode and size as before: the start-up wrote nothing new).
+4. Box: prove the new key. `cd /opt/hermes-agent && sudo docker compose exec -it hermes-agent hermes chat`,
+   ask for a one-word reply, and check that the new key's console page then shows a "Last Used"
+   time.
 5. OpenRouter console: only now delete the old key. Capture the new key's whole page (limit, reset,
-   usage) and the API-keys list showing the old key gone.
-6. Laptop: check that no copy of either key is left there. Search the home directory for
-   OpenRouter-shaped keys with a command that prints file names only, never a value, and stop any
-   laptop gateway that was started with the box's key (`docker compose down`).
-7. Run a security review: both probes, a new box bundle and a same-day laptop bundle
-   (`deploy/BRING-UP.md`, "A security review"). D10.5's statement says where the key is stored.
+   usage) and the API-keys list showing the old key gone. Both screens identify the account and
+   show a masked fragment of a key: keep them in the git-ignored `security-reviews/` folder and
+   never commit them.
+6. Laptop: check that no copy of either key is left there. Search `~/Projects`, `~/.hermes`,
+   `~/.config` and the shell start-up files for OpenRouter-shaped keys with a command that prints
+   file names only, never a value, and stop any laptop gateway that was started with the box's key
+   (`docker compose down`).
+7. Collect fresh evidence as for a security review: both probes, a new box bundle and a same-day
+   laptop bundle (`deploy/BRING-UP.md`, "A security review"). The box fingerprint does not change
+   (no component covers a credential), but the authorised credential set does, and D10.5's
+   statement must be restated for the new key, saying where it is stored.
 
 **Why there is no write credential (security review D3.2, 2026-09-29).** From 2026-08-18
 the write role reused the operator's own Google account at **ADMIN**. That carried user
