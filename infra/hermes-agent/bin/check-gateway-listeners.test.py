@@ -168,7 +168,7 @@ class TestRecordAndMain(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(self.d).st_mode), 0o700)
         for name in ("last.json", "history.jsonl"):
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.d, name)).st_mode), 0o600, name)
-        self.assertEqual(sorted(os.listdir(self.d)), ["history.jsonl", "last.json"])    # no temporary file left
+        self.assertEqual(sorted(os.listdir(self.d)), [".lock", "history.jsonl", "last.json"])   # no temporary file left
 
     def test_an_alert_exits_1_and_keeps_the_first_alert(self):
         bad = runner(cat=(0, TCP_HEADER + DNS4 + DASH4 + API4 + TCP6_HEADER, ""))
@@ -277,6 +277,97 @@ class TestRecordAndMain(unittest.TestCase):
         self.assertEqual(json.loads(text[:text.rindex("listener check:")])["history_counts"],
                          {"alert": 1, "ok": 1, "alert-cleared": 1})
         self.assertEqual(self.main(["--clear-alert"])[1], "hermes-listener-check: no alert to clear\n")
+
+    BAD = (0, TCP_HEADER + DNS4 + DASH4 + API4 + TCP6_HEADER, "")
+
+    def test_an_alert_is_still_marked_and_logged_when_the_history_is_damaged(self):
+        """The marker and the alert log are written first: a history file with a byte that is not
+        UTF-8, or one that cannot be rewritten at all, must not stop them."""
+        os.makedirs(self.d)
+        with open(os.path.join(self.d, "history.jsonl"), "wb") as f:
+            f.write(b'{"ts": "x", "status": "ok"}\n\xff\xfe not utf-8\n')
+        with open(os.path.join(self.d, "alerts.jsonl"), "wb") as f:
+            f.write(b"\xff damaged line\n")
+        rc, text = self.main(run=runner(cat=self.BAD))
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(json.loads(self.read("ALERT"))["unexpected"], [8642])
+        self.assertEqual(json.loads(open(os.path.join(self.d, "alerts.jsonl"), "rb").read().splitlines()[-1])["unexpected"], [8642])
+        rc, text = self.main(["--status"], now="2026-10-07T12:01:00Z")
+        s = json.loads(text[:text.rindex("listener check:")])
+        self.assertEqual((rc, s["alert_present"], s["alert_log"]["alert"], s["alert_log"]["?"]), (1, True, 1, 1))
+        self.assertEqual(s["history_counts"], {"ok": 1, "?": 1, "alert": 1})
+
+    def test_an_alert_is_marked_and_logged_even_when_the_history_cannot_be_written(self):
+        real = C._append_history
+        with unittest.mock.patch.object(C, "_append_history", side_effect=OSError(28, "No space left on device")):
+            rc, text = self.main(run=runner(cat=self.BAD))
+        self.assertEqual(rc, 2)                                        # the run failed: never the alert code by accident
+        self.assertIn("status=could-not-check reason=internal-error error=OSError", text)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "ALERT")))
+        self.assertEqual(len(self.read("alerts.jsonl").splitlines()), 1)
+        self.assertIs(C._append_history, real)
+
+    def test_an_unexpected_error_exits_2_never_the_alert_code(self):
+        def boom(argv, timeout=15):
+            raise RuntimeError("anything")
+        boom.read_tables = lambda pid: ""
+        rc, text = self.main(run=boom)
+        self.assertEqual((rc, text), (2, "hermes-listener-check: status=could-not-check reason=internal-error error=RuntimeError\n"))
+
+    def test_a_state_directory_that_is_a_file_or_a_symlink_is_refused_with_exit_2(self):
+        parent = os.path.dirname(self.d)
+        open(self.d, "w").close()
+        self.assertEqual(self.main()[0], 2)
+        os.unlink(self.d)
+        elsewhere = os.path.join(parent, "elsewhere"); os.makedirs(elsewhere)
+        os.symlink(elsewhere, self.d)
+        rc, text = self.main(run=runner(cat=self.BAD))
+        self.assertEqual(rc, 2)
+        self.assertEqual(os.listdir(elsewhere), [])                    # nothing was written through the link
+
+    def test_a_state_directory_with_a_wider_mode_is_put_back_to_0700(self):
+        os.makedirs(self.d, mode=0o755); os.chmod(self.d, 0o755)
+        self.main()
+        self.assertEqual(stat.S_IMODE(os.stat(self.d).st_mode), 0o700)
+
+    def test_the_alert_log_gets_one_line_per_event_not_one_per_run(self):
+        for minute in ("00", "15", "30"):                              # the same alert, three runs
+            self.main(run=runner(cat=self.BAD), now=f"2026-10-07T12:{minute}:00Z")
+        self.assertEqual(len(self.read("alerts.jsonl").splitlines()), 1)
+        self.assertEqual(len(self.read("history.jsonl").splitlines()), 3)
+        self.main(now="2026-10-07T12:45:00Z")                          # healthy
+        self.main(run=runner(cat=self.BAD), now="2026-10-07T13:00:00Z")    # the same port again, still not cleared
+        self.assertEqual(len(self.read("alerts.jsonl").splitlines()), 1)
+        self.main(["--clear-alert"], now="2026-10-07T13:05:00Z")
+        self.main(run=runner(cat=self.BAD), now="2026-10-07T13:15:00Z")    # after a clearing it is a new event
+        self.assertEqual([json.loads(l)["status"] for l in self.read("alerts.jsonl").splitlines()],
+                         ["alert", "alert-cleared", "alert"])
+
+    def test_clear_alert_logs_the_clearing_before_the_marker_goes(self):
+        self.main(run=runner(cat=self.BAD), now="2026-10-07T11:00:00Z")
+        with unittest.mock.patch.object(C, "_append_alert_log", side_effect=OSError(28, "No space left on device")):
+            rc, text = self.main(["--clear-alert"])
+        self.assertEqual(rc, 2)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "ALERT")))     # not cleared without a line saying so
+
+    def test_a_failed_write_leaves_no_temporary_file(self):
+        with unittest.mock.patch.object(C.os, "replace", side_effect=OSError(5, "Input/output error")):
+            self.assertEqual(self.main()[0], 2)
+        self.assertEqual([n for n in os.listdir(self.d) if ".tmp." in n], [])
+
+    def test_a_result_exactly_45_minutes_old_or_from_the_future_is_not_healthy(self):
+        self.main(now="2026-10-07T12:00:00Z")
+        for now, age in (("2026-10-07T12:45:00Z", 2700), ("2026-10-07T11:00:00Z", -3600)):
+            with self.subTest(age=age):
+                rc, text = self.main(["--status"], now=now)
+                self.assertEqual((rc, json.loads(text[:text.rindex("listener check:")])["last_age_seconds"]), (1, age))
+
+    def test_the_real_docker_calls_together_fit_inside_the_units_start_timeout(self):
+        import inspect
+        per_call = inspect.signature(C._run_real).parameters["timeout"].default
+        unit = open(os.path.join(os.path.dirname(HERE), "deploy", "hermes-listener-check.service")).read()
+        limit = int(next(l.split("=")[1] for l in unit.splitlines() if l.startswith("TimeoutStartSec=")))
+        self.assertLess(3 * per_call, limit)
 
     def test_status_and_clear_alert_run_nothing(self):
         run = runner()

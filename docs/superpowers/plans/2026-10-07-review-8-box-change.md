@@ -170,4 +170,14 @@ items), `bin/security-review-checklist.test.py`, `deploy/BRING-UP.md`, `README.m
 - **`REPORT-TEMPLATE.md` lists no items**, so it is unchanged; the checklist test compares the box
   items with the collector's `PROBES`, which now has `D4.5`.
 - The BRING-UP block for the dashboard is "Step 7d".
+- **From the independent review of the build:** checklist D2.1's `credentials` sentence named four
+  labels while the collector emits six (a healthy box would have failed review #8), now fixed and
+  tied to the collector by a test; on an alert the marker and the alert log are written first, under
+  a lock, and a damaged history no longer blocks them; `--clear-alert` logs before it removes the
+  marker; any unexpected error exits 2, never the alert code; D4.5 reports the state directory and
+  states its rules in order; step 7d removes the plaintext only after the gateway is shown to hold
+  the hash, and its prompting blocks are one function each; the test fixtures use a synthetic hash.
+- Also different from the task list above: the unit uses `ProtectHome=tmpfs` (F22: the Docker
+  client needs it), each result carries a fixed `reason` word, `max_age_seconds` is reported, and
+  the Docker calls time out after 15 seconds each.
 

@@ -827,6 +827,8 @@ def d4_5(host, ctx):
                                                    CHECKOUT + "/infra/hermes-agent/deploy/" + u)
                                      for u in LISTENER_UNITS},
             "drop_in_paths": {u: _drop_ins(host, u) for u in LISTENER_UNITS},
+            # The alert log's "never trimmed" rests on who may write here: root, 0700, a real directory.
+            "state_dir": _dir_row(host, L.STATE_DIR),
             "max_age_seconds": L.MAX_AGE_SECONDS,
             **state}
 

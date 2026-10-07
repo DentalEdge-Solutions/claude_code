@@ -382,8 +382,17 @@ class TestListenerCheckUnits(unittest.TestCase):
                      "ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/check-gateway-listeners.py",
                      "NoNewPrivileges=true", "PrivateTmp=true", "ProtectSystem=strict", "ProtectHome=tmpfs",
                      "ReadWritePaths=/var/lib/hermes/listener-check", "RestrictAddressFamilies=AF_UNIX",
-                     "TimeoutStartSec=60"):
+                     "TimeoutStartSec=60", "MemoryMax=128M"):
             self.assertIn(want, d)
+
+    def test_nothing_in_the_service_hides_other_processes_proc_from_it(self):
+        """The check reads /proc/<gateway pid>/net/tcp ON THE HOST (F53). These directives would
+        hide that file or take the capability needed to read it, and the check would only ever
+        say could-not-check."""
+        body = "\n".join(self.directives("hermes-listener-check.service"))
+        for banned in ("ProtectProc", "ProcSubset", "PrivatePIDs", "CapabilityBoundingSet", "PrivateUsers",
+                       "User=hermes", "DynamicUser"):
+            self.assertNotIn(banned, body)
 
     def test_the_service_writes_only_its_state_directory_and_takes_no_action(self):
         d = self.directives("hermes-listener-check.service")

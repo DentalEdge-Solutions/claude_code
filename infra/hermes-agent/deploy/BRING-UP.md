@@ -1405,7 +1405,8 @@ port 8642 by default (F44), and the two controls that keep it off sit in files t
 write. **It records only**: it stops nothing and flips no switch (operator decision, 2026-10-07).
 Review item D4.5 checks that it is live.
 
-Install it once, after a pull that brings `deploy/hermes-listener-check.service`:
+Install it once, after a pull that brings `deploy/hermes-listener-check.service`. Run `sudo -v`
+alone first, so sudo's password prompt cannot take a pasted line:
 
 ```bash
 sudo install -d -o root -g root -m 0700 /var/lib/hermes/listener-check
@@ -1417,11 +1418,22 @@ sudo ln -sf /opt/hermes-agent/deploy/show-listener-check /usr/local/sbin/show-li
 sudo systemctl start hermes-listener-check.service; echo "first_run_rc=$?"
 sudo show-listener-check; echo "status_rc=$?"
 systemctl is-active hermes-listener-check.timer; systemctl is-enabled hermes-listener-check.timer
+systemctl list-timers hermes-listener-check.timer --no-pager | head -3
+sudo journalctl -u hermes-listener-check -n 3 -o cat --no-pager
 ```
 
-Expected: `first_run_rc=0`; the status shows `"status": "ok"`, `"listeners": [9119]` (or `[]`
-with the dashboard off), `"docker_dns_listeners": 1`, `"alert_present": false`, then
-`listener check: OK` and `status_rc=0`; then `active` and `enabled`.
+Expected: `first_run_rc=0`. The status is JSON, one value to a line: under `"last"` it shows
+`"status": "ok"`, `"listeners"` holding `9119` (or nothing, with the dashboard off) and
+`"docker_dns_listeners": 1`; then `"alert_present": false`; it ends with `listener check: OK`, and
+`status_rc=0`. Then `active` and `enabled`; a timer line with a NEXT time about 15 minutes ahead;
+and the journal line `hermes-listener-check: status=ok reason=- listeners=[9119] unexpected=[]
+docker_dns_listeners=1`.
+
+Two things here are proven on the box for the first time, because neither can be tested on the
+laptop: that the service works inside its systemd sandbox (it reads another process's `/proc` on
+the host; `first_run_rc=0` with a real port list is that proof), and that the timer runs again
+after a run that did not exit 0 (check once, around a gateway restart: after a `could-not-check`
+run, `systemctl list-timers hermes-listener-check.timer` still shows a NEXT time).
 
 **This runs a `systemctl daemon-reload`.** The next review's D4.2 shows `matches_last_pass: false`
 for the proxy, and the operator's evidence carries the reconstruction of "A security review"
@@ -1433,7 +1445,7 @@ Reading it later:
   history's counts (about a month of runs) and the alert log (every alert and clearing ever
   recorded; `alerts.jsonl` is never trimmed, and a review compares it with the previous one's). It ends with `listener check: OK` (exit 0) only when the last result is `ok`,
   it is under 45 minutes old, and no alert is waiting. Make it part of the weekly look at the box.
-- `journalctl -u hermes-listener-check --since -1d -o cat --no-pager | tail` shows the runs: one
+- `sudo journalctl -u hermes-listener-check --since -1d -o cat --no-pager | tail` shows the runs: one
   line each, ports and fixed words only.
 - A run exits 1 on an alert and 2 when it could not look (the gateway was down), so
   `systemctl status hermes-listener-check` shows that run as failed. That is the signal, not a
@@ -1442,7 +1454,7 @@ Reading it later:
   expected.
 
 If an alert is waiting (`"alert_present": true`): the `ALERT` file names the first time it happened
-and the unexpected ports, and stays until you remove it. Find out what listened (`sudo docker
+and the unexpected ports, and stays until you remove it. Find out what listened (`cd /opt/hermes-agent && sudo docker
 compose exec hermes-agent sh -c 'cat /proc/net/tcp'` shows the table; port 8642 means the API
 server is back on: check that `platforms.api_server.enabled: false` is still in
 `data/config.yaml`), fix it, write down what it was for the next review (D4.5 asks), and only then:
@@ -1607,81 +1619,121 @@ lock you out of the dashboard, and each step below guards one:
 - **A mistyped password** makes a hash nobody knows the password of. The first block compares
   what you type with the password in use before it hashes anything.
 
-You never see, copy or paste the hash or the secret. SSH still works if the dashboard does not:
-the worst case is repeating this step.
+You never see, copy or paste the hash or the secret. The plaintext line is removed only AFTER the
+running gateway is shown to hold the exact hash, so sign-in keeps working at every point where
+you might stop. SSH still works if the dashboard does not: the worst case is repeating this step.
 
-Block 1 (`hermesops@<host>`): type the password you sign in with today.
+The two blocks that ask for the password are each ONE function followed by its call, so the
+prompt cannot take the next pasted line as your answer (step 7a's history has such a partial
+paste). Run `sudo -v` alone first, so sudo's own prompt cannot take one either.
+
+Block 0 (`hermesops@<host>`), alone:
 
 ```bash
 cd /opt/hermes-agent && sudo -v
-read -rs -p "Current dashboard password: " P; echo
-if [ "$P" = "$(sudo grep '^HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=' .env | cut -d= -f2-)" ] && [ ${#P} -ge 16 ]; then
-  printf '%s' "$P" | sudo docker compose exec -T -w /opt/hermes hermes-agent python3 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; sys.stdout.write(hash_password(sys.stdin.read()))' \
-    | sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH --prefix 'scrypt$' --quote single --mode 0600 --owner-uid 0 --owner-gid 0 --stdin
-else
-  echo "REFUSED: that is not the password in use (or it is under 16 characters) -- nothing written"
-fi
-unset P
 ```
 
-Expect `install-env-secret: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH set in …`. On `REFUSED`, or
-any other message, stop: nothing was changed.
+Block 1: type the password you sign in with today. It is compared with the one in use before
+anything is hashed.
 
-Block 2: the signing secret (made on the box, never shown), then the plaintext line removed.
+```bash
+step7d_hash() {
+  local P
+  cd /opt/hermes-agent || return
+  read -rs -p "Current dashboard password: " P; echo
+  if [ "$P" = "$(sudo grep '^HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=' .env | cut -d= -f2-)" ] && [ ${#P} -ge 16 ]; then
+    printf '%s' "$P" | sudo docker compose exec -T -w /opt/hermes hermes-agent python3 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; sys.stdout.write(hash_password(sys.stdin.read()))' \
+      | sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH --prefix 'scrypt$' --quote single --mode 0600 --owner-uid 0 --owner-gid 0 --stdin
+  else
+    echo "REFUSED: that is not the password in use (or it is under 16 characters) -- nothing written"
+  fi
+}; step7d_hash; unset -f step7d_hash
+```
+
+Expect `install-env-secret: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH set in /opt/hermes-agent/.env (mode 0600)`.
+On `REFUSED`, or any other message, stop: nothing was changed, and blocks 2 and 3 must not be run.
+
+Block 2: the signing secret (made on the box, never shown), then the gateway recreated with BOTH
+the old plaintext line and the new hash. The plaintext still wins, so sign-in is unchanged; the
+point is to see what the gateway received.
 
 ```bash
 cd /opt/hermes-agent
 sudo python3 bin/install-env-secret.py generate --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_SECRET --mode 0600 --owner-uid 0 --owner-gid 0
-sudo python3 bin/install-env-secret.py strip --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
-sudo grep -oE '^HERMES_DASHBOARD[A-Z_]*' .env | sort
+sudo docker compose up -d --force-recreate hermes-agent; echo "UP_EXIT=$?"
+sleep 25; sudo docker compose ps -a hermes-agent --format '{{.Service}} {{.State}} {{.Status}}'
+F=$(sudo python3 -c 'import sys; sys.path.insert(0, "bin"); import client_audit_lib as C; print((C.env_values(open(".env").read(), "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH") or [""])[0])')
+C=$(sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH)
+[ -n "$C" ] && [ "$F" = "$C" ] && echo "hash: file == container (len ${#C})" || echo "HASH DIFFERS (file ${#F}, container ${#C}): STOP"; unset F C
+sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_SECRET | awk '{print "secret: in the container (len " length($0) ")"}'
+```
+
+Expect `install-env-secret: HERMES_DASHBOARD_BASIC_AUTH_SECRET generated in …` (on a second run it
+refuses, because the name already has a value: that is fine), `UP_EXIT=0` with no line saying
+`variable is not set`, `hermes-agent running Up …`, `hash: file == container (len 86)` and
+`secret: in the container (len 44)`. On `HASH DIFFERS`, stop: the hash line is not single-quoted
+or is missing; run block 1 again. Nothing is broken at this point, because the plaintext line is
+still there.
+
+Block 3: only now the plaintext line goes, and only if the gateway holds the file's hash (the
+block checks again by itself).
+
+```bash
+cd /opt/hermes-agent
+F=$(sudo python3 -c 'import sys; sys.path.insert(0, "bin"); import client_audit_lib as C; print((C.env_values(open(".env").read(), "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH") or [""])[0])')
+C=$(sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH)
+if [ ${#C} -eq 86 ] && [ "$F" = "$C" ]; then
+  sudo python3 bin/install-env-secret.py strip --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
+  sudo docker compose up -d --force-recreate hermes-agent; echo "UP_EXIT=$?"; sleep 25
+else
+  echo "NOT STRIPPED: the gateway does not hold the file's hash (file ${#F}, container ${#C})"
+fi; unset F C
+sudo docker compose ps -a hermes-agent --format '{{.Service}} {{.State}} {{.Status}}'
+sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD >/dev/null && echo "PLAINTEXT STILL SET" || echo "plaintext: not in the container"
+sudo grep -oE '^HERMES_DASHBOARD_BASIC_AUTH[A-Z_]*' .env | sort
 sudo stat -c '%U %G %a' .env
 ```
 
-Expect `… generated in …`, `… removed from … (1 line(s))`, then exactly these names, and
-`root root 600`:
+Expect `install-env-secret: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD removed from /opt/hermes-agent/.env (1 line(s))`,
+`UP_EXIT=0`, `hermes-agent running Up …`, `plaintext: not in the container`, these three names and
+no other, and `root root 600`:
 
 ```
-HERMES_DASHBOARD
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH
 HERMES_DASHBOARD_BASIC_AUTH_SECRET
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME
 ```
 
-Block 3: recreate the gateway (a restart keeps the old environment) and compare, without printing
-either, the hash the file holds with the hash the gateway received.
-
-```bash
-cd /opt/hermes-agent
-sudo docker compose up -d --force-recreate hermes-agent 2>&1 | grep -ci 'variable is not set'
-sleep 25; sudo docker compose ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
-F=$(sudo python3 -c 'import sys; sys.path.insert(0, "bin"); import client_audit_lib as C; print(C.env_values(open(".env").read(), "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH")[0])')
-C=$(sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH)
-[ -n "$C" ] && [ "$F" = "$C" ] && echo "hash: file == container (len ${#C})" || echo "HASH DIFFERS (file ${#F}, container ${#C}): STOP"; unset F C
-sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD >/dev/null && echo "PLAINTEXT STILL SET: STOP" || echo "plaintext: not in the container"
-sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_SECRET | awk '{print "secret: in the container (len " length($0) ")"}'
-```
-
-Expect `0` (no Compose warning), `hermes-agent running Up …`, `hash: file == container (len 86)`,
-`plaintext: not in the container`, and `secret: in the container (len 44)`. On `HASH DIFFERS`,
-do not go on: the hash line is not single-quoted; run block 1 again.
+On `NOT STRIPPED`, nothing was removed: go back to block 2's check.
 
 Block 4: prove sign-in, wrong password first. The password travels on stdin, never on a command
 line.
 
 ```bash
-read -rs -p "Dashboard password: " P; echo
-login() { printf '{"provider":"basic","username":"hermesadmin","password":"%s"}' "$1" | curl -s -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:9119' --data @- http://127.0.0.1:9119/auth/password-login; }
-echo "wrong password -> $(login "not-the-password-0000")"
-echo "right password -> $(login "$P")"; unset P; unset -f login
+step7d_login() {
+  local P
+  read -rs -p "Dashboard password: " P; echo
+  login() { printf '{"provider":"basic","username":"hermesadmin","password":"%s"}' "$1" | curl -s -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:9119' --data @- http://127.0.0.1:9119/auth/password-login; }
+  echo "wrong password -> $(login "not-the-password-0000")"
+  echo "right password -> $(login "$P")"
+  unset -f login
+}; step7d_login; unset -f step7d_login
 ```
 
 Expect `wrong password -> 401` and `right password -> 200`. (A password with a `"` or a `\`
 would break this JSON; step 7a allows letters and digits only.) Then sign in from the laptop
-(browser or the Desktop app), run `sudo docker compose restart hermes-agent` once, and confirm you
-are still signed in: that is the signing secret at work. Sessions refresh for 30 days.
+(browser or the Desktop app), run `cd /opt/hermes-agent && sudo docker compose restart hermes-agent`
+once, and confirm you are still signed in: that is the signing secret at work. Sessions refresh
+for 30 days.
 
-If sign-in fails with the right password: put the plaintext line back with step 7a's block (it
-wins over the hash), recreate, and find out why before trying again.
+If sign-in fails with the right password: put a plaintext line back with step 7a's block (it wins
+over a hash) and recreate. Step 7a's block rewrites every `HERMES_DASHBOARD…` line, so it also
+removes the hash and the signing secret: once sign-in works again, find out why it failed, then
+start this step over from block 0.
+
+The plaintext password is now nowhere on the box, so a review's leak checks can no longer look
+for it in the histories and the journals: they look for its hash and for the signing secret
+(D10.7 says so). Keep the password in the password manager as before.
 
 After this step the next security review's D2.1 shows the gateway row's `secrets_held` as
 `["openrouter-key", "dashboard-password-hash", "dashboard-session-secret"]`, and D4.1's

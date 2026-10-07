@@ -46,3 +46,40 @@ that happens to contain a character Compose treats specially (base64 has no `$`)
 4. **A signing secret keeps the Desktop app signed in across restarts.** It is one more secret in the gateway
    `.env`: the review collector must list it and search for it, and the checklist must expect it.
 5. **Both changes alter what D2.1 and D4.1 expect**, so they go with a checklist version bump and a review.
+
+## 4 · Added while the change was built and reviewed (laptop, 2026-10-07)
+
+**The listener check's measurement path (finding F53).** The check reads the gateway's sockets from the
+host, not from inside the container. Measured against stand-in containers on the laptop's Docker (a Linux VM),
+with the check run as root in a `--pid=host` container, which is the closest a laptop gets to the box's root
+service:
+
+| What was measured | Result |
+|---|---|
+| A container listening on 8642, read from the host as `/proc/<State.Pid>/net/tcp` and `tcp6` | the port is seen (`21C2`, state `0A`); the reader's own namespace shows none of it |
+| The check against a labelled stand-in on a Compose-style network, listening on 9119 | `status=ok listeners=[9119] docker_dns_listeners=1`, exit 0 |
+| The same with 8642 also listening | `status=alert reason=unexpected-port unexpected=[8642]`, exit 1; `ALERT` and `alerts.jsonl` written |
+| No labelled container | `status=could-not-check reason=no-gateway`, exit 2; no alert |
+| The check against a real v0.21.5 gateway started WITHOUT the `platforms.api_server.enabled: false` switch | `status=alert … listeners=[8642, 9119] unexpected=[8642]`: it finds exactly F44 |
+
+Not measurable on the laptop, and first proven on the box at install time (BRING-UP "The listener check" says
+how): that the service works inside its systemd sandbox, and that the timer runs again after a run that did not
+exit 0. Both were reasoned from the unit files and from `hermes-broker.service`, which already runs the Docker
+client under the same sandbox settings.
+
+**BRING-UP step 7d, rehearsed end to end.** The runbook's own four blocks were run, unchanged except for the
+paths and without `sudo`, against a throwaway Compose project (service `hermes-agent`, the derived v0.21.5
+image, a scratch env file holding a plaintext password as step 7a leaves it):
+
+| Block | Result |
+|---|---|
+| 1, with a wrong password | `REFUSED`, nothing written |
+| 1, with the password in use | the hash line is installed, single-quoted |
+| 2 | the secret is generated; with both the plaintext and the hash present the gateway comes up, and `hash: file == container (len 86)`, `secret: in the container (len 44)` |
+| 3 | the plaintext line is removed (1 line), the gateway comes up, `plaintext: not in the container`, and the file holds the three expected names |
+| 4 | `wrong password -> 401`, `right password -> 200` |
+| A sign-in, then `restart` | the session is still valid (`/api/auth/me` 200) |
+| Blocks 1, 2 and 3 run again afterwards | 1 refuses (there is no plaintext to compare with), 2 refuses to regenerate the secret and re-checks, 3 removes 0 lines: nothing breaks |
+
+The order follows point 2 of section 3: the plaintext line is removed only after the running gateway is shown
+to hold the exact hash.

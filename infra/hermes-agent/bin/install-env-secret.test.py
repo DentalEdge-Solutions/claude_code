@@ -139,7 +139,7 @@ class T(unittest.TestCase):
 class TestQuoteAndGenerate(unittest.TestCase):
     """F52: Compose interpolates `$` in an env_file, so a dashboard password hash written bare is
     cut short in the container. And `generate`: a secret nobody types."""
-    HASH = "scrypt$16384$8$1$Tr/eBf/KpGpM+kmmX8qopA==$jOB8Q0D67VV5EQ4UfjTeRTxK9MjhuOqvUsKhsJHcJbM="
+    HASH = "scrypt$16384$8$1$bm90LWEtcmVhbC1zYWx0IQ==$bm90LWEtcmVhbC1zY3J5cHQtaGFzaC0wMTIzNDU2Nzg="
     NAME = "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH"
     SECRET = "HERMES_DASHBOARD_BASIC_AUTH_SECRET"
 
@@ -162,7 +162,7 @@ class TestQuoteAndGenerate(unittest.TestCase):
         rc, text = self.set_(self.HASH)
         self.assertEqual(rc, 2)
         self.assertIn("--quote single", text)
-        self.assertNotIn("Tr/eBf", text)
+        self.assertNotIn("bm90LW", text)
         self.assertEqual(open(self.f).read(), "OPENROUTER_API_KEY=sk-or-x\n")
 
     def test_quote_single_writes_the_value_literally_and_keeps_every_other_line(self):
@@ -171,7 +171,7 @@ class TestQuoteAndGenerate(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertEqual(open(self.f).read(),
                          "# c\nOPENROUTER_API_KEY=sk-or-x\nHERMES_DASHBOARD=1\n" + f"{self.NAME}='{self.HASH}'\n")
-        self.assertNotIn("Tr/eBf", text)
+        self.assertNotIn("bm90LW", text)
 
     def test_the_quoted_line_reads_back_as_the_exact_value(self):
         """The review collector's reader (client_audit_lib.env_values) must give the value the
@@ -204,7 +204,7 @@ class TestQuoteAndGenerate(unittest.TestCase):
                                 read_pipe=lambda: piped[:-1] if piped.endswith("\n") else piped)
                 self.assertEqual(rc, 0, out.getvalue())
                 self.assertEqual(open(self.f).read(), f"{self.NAME}='{self.HASH}'\n")
-                self.assertNotIn("Tr/eBf", out.getvalue())
+                self.assertNotIn("bm90LW", out.getvalue())
 
     def test_stdin_refuses_a_terminal_and_an_empty_pipe(self):
         with mock.patch.object(S.sys, "stdin", mock.Mock(isatty=lambda: True)):
@@ -256,6 +256,31 @@ class TestQuoteAndGenerate(unittest.TestCase):
                           random_bytes=lambda n: b"\x00" * n)
         self.assertEqual(rc, 0)
         self.assertEqual(open(self.f).read(), f"A=1\n{self.SECRET}={'A' * 43}=\nB=2\n")
+
+
+class TestTheRunbooksCommandLines(unittest.TestCase):
+    """Every `install-env-secret.py` command BRING-UP tells the operator to run must be one this
+    tool accepts: a flag renamed here and not there would fail on the box, mid-procedure."""
+    def test_every_command_in_bring_up_runs(self):
+        import re, shlex
+        with open(os.path.join(os.path.dirname(HERE), "deploy", "BRING-UP.md"), encoding="utf-8") as f:
+            text = f.read()
+        commands = re.findall(r"bin/install-env-secret\.py ((?:set|generate|strip) [^`\n|;]*)", text)
+        self.assertGreaterEqual(len({c.split()[0] for c in commands}), 3, commands)     # set, generate and strip all appear
+        for command in commands:
+            with self.subTest(command=command[:70]):
+                d = tempfile.mkdtemp(); f = os.path.join(d, "envfile")
+                argv = shlex.split(command)
+                self.assertTrue(argv[argv.index("--file") + 1].startswith("/"), argv)   # an absolute path on the box
+                argv[argv.index("--file") + 1] = f
+                for flag in ("--owner-uid", "--owner-gid"):              # not root here: keep the flag's parsing, not chown
+                    if flag in argv:
+                        i = argv.index(flag); self.assertEqual(argv[i + 1], "0"); del argv[i:i + 2]
+                prefix = argv[argv.index("--prefix") + 1] if "--prefix" in argv else ""
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                    rc = S.main(argv, read_value=lambda: prefix + "value", read_pipe=lambda: prefix + "value")
+                self.assertEqual(rc, 0, out.getvalue())
 
 
 if __name__ == "__main__":

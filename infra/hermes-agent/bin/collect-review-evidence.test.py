@@ -2507,6 +2507,7 @@ class TestD45ListenerCheck(Base):
         self.outputs[("systemctl", "is-enabled", "hermes-listener-check.timer")] = (0, "enabled\n", "")
         self._w(self.STATE + "/last.json", json.dumps(self.OK_LAST))
         self._w(self.STATE + "/history.jsonl", json.dumps(self.OK_LAST) + "\n" + json.dumps(self.OK_LAST) + "\n")
+        os.chmod(os.path.join(self.root, self.STATE.lstrip("/")), 0o700)
 
     def _d(self):
         with mock.patch.object(CE.R, "utc_now", return_value=self.NOW):
@@ -2521,6 +2522,7 @@ class TestD45ListenerCheck(Base):
             "timer_active": "active", "timer_enabled": "enabled",
             "installed_equal_repo": {u: True for u in CE.LISTENER_UNITS},
             "drop_in_paths": {u: [] for u in CE.LISTENER_UNITS},
+            "state_dir": {"owner": CE._owner(os.getuid()), "group": CE._group(os.stat(self.root).st_gid), "mode": "0o700"},
             "max_age_seconds": 2700, "last": self.OK_LAST, "last_age_seconds": 600,
             "alert_present": False, "alert": None, "history_counts": {"ok": 2},
             "alert_log": {"alert": 0, "alert-cleared": 0, "?": 0, "first_ts": None, "last_ts": None}})
@@ -2559,6 +2561,21 @@ class TestD45ListenerCheck(Base):
         d = self._d()
         self.assertEqual((d["last"], d["last_age_seconds"], d["alert_present"], d["history_counts"]),
                          (None, None, False, {}))
+        self.assertEqual(d["state_dir"], "absent")
+
+    def test_the_state_directory_is_reported_as_it_is_and_never_followed(self):
+        self._healthy()
+        state = os.path.join(self.root, self.STATE.lstrip("/"))
+        os.chmod(state, 0o755)
+        self.assertEqual(self._d()["state_dir"]["mode"], "0o755")
+        shutil.rmtree(state)
+        os.symlink(self.root, state)
+        d = self._d()
+        self.assertEqual(d["state_dir"], "symlink")
+        shutil.os.unlink(state)
+        open(state, "w").close()
+        d = self._d()                                                  # a file where the directory should be
+        self.assertEqual((d["state_dir"], d["last"], d["alert_present"]), ("not-a-directory", "could-not-check", True))
 
     def test_a_stale_result_shows_its_age(self):
         self._healthy()
@@ -2606,9 +2623,10 @@ class TestD45ListenerCheck(Base):
 class TestDashboardHashAndSessionSecret(Base):
     """Checklist v1.17: the gateway `.env` may hold the dashboard password as a scrypt hash (F47),
     written single-quoted because Compose interpolates `$` (F52), and a session-signing secret."""
+    # HASH is synthetic: its salt and hash decode to "not-a-real-salt!" and "not-a-real-scrypt-hash-…".
     GATEWAY_ENV = CE.GATEWAY_ENV_FILE
     OPENROUTER = "sk-or-v1-NOT-A-REAL-KEY-0123456789abcdef"
-    HASH = "scrypt$16384$8$1$Tr/eBf/KpGpM+kmmX8qopA==$jOB8Q0D67VV5EQ4UfjTeRTxK9MjhuOqvUsKhsJHcJbM="
+    HASH = "scrypt$16384$8$1$bm90LWEtcmVhbC1zYWx0IQ==$bm90LWEtcmVhbC1zY3J5cHQtaGFzaC0wMTIzNDU2Nzg="
     SECRET = "c2Vzc2lvbi1zaWduaW5nLXNlY3JldC1ub3QtcmVhbC0wMTIzNA=="
     GW = "a" * 64
     NAMES = ("OPENROUTER_API_KEY", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
@@ -2649,7 +2667,7 @@ class TestDashboardHashAndSessionSecret(Base):
         for value in (self.HASH, self.SECRET, self.OPENROUTER):
             self.assertIn(value, secrets)                               # a known secret for the leak checks
             self.assertNotIn(value, json.dumps(bundle))
-        self.assertNotIn("Tr/eBf", json.dumps(bundle))                  # nor a piece of the hash
+        self.assertNotIn("bm90LW", json.dumps(bundle))                  # nor a piece of the hash
 
     def test_the_hash_has_no_fingerprint_and_the_random_secret_has_one(self):
         self._new_form()
@@ -2660,7 +2678,7 @@ class TestDashboardHashAndSessionSecret(Base):
     def test_a_hash_written_bare_is_seen_as_differing_from_what_the_gateway_holds(self):
         """F52, on a box where it happened: the file holds the whole hash, bare; Compose gave the
         gateway a truncated one. The review must not say `matches-file`."""
-        truncated = "scrypt$16384$8$1/eBf/KpGpM+kmmX8qopA=="
+        truncated = "scrypt$16384$8$1" + self.HASH.split("$")[4][2:]
         self._new_form(hash_line=f"HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH={self.HASH}")
         self.outputs[("docker", "exec", self.GW, "printenv", self.NAMES[2])] = (0, truncated + "\n", "")
         bundle, secrets = CE.collect_with_secrets(self.host(), self.KEY)

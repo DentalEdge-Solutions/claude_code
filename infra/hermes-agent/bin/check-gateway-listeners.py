@@ -13,10 +13,15 @@ It RECORDS ONLY (operator decision, 2026-10-07): it stops nothing and flips no s
 writes, under STATE_DIR (root 0700, files 0600):
   last.json       the latest result
   history.jsonl   one line per run, kept to the last HISTORY_KEEP lines
-  alerts.jsonl    one line per alert and per --clear-alert, NEVER trimmed: an alert that was
-                  cleared must still be there for a review held months later
+  alerts.jsonl    one line per alert EVENT (a new alert, or a change in what is unexpected) and
+                  per --clear-alert, appended and NEVER trimmed: an alert that was cleared must
+                  still be there for a review held months later
   ALERT           created at the first alert and never overwritten; removed by --clear-alert
-and prints one line, which the journal keeps. Exit 0 ok, 1 alert, 2 could-not-check.
+and prints one line, which the journal keeps. Exit 0 ok, 1 alert, 2 could-not-check (also for
+anything unexpected in the check itself: only a measured alert exits 1).
+
+On an alert the marker and the alert log are written FIRST, before the files a damaged history
+could stop it reaching. A run and --clear-alert take one lock, so neither loses the other's line.
 
 WHERE THE MEASUREMENT COMES FROM. Not from inside the container: the gateway controls its own
 filesystem, so a `cat` run there (`docker exec`, as the review's D4.1 does, F35) could be made to
@@ -35,7 +40,7 @@ Nothing it writes or prints carries an address or any other field of /proc/net/t
 count, fixed words and timestamps only. A gateway that is not running is could-not-check, never
 an alert: nothing is listening in a container that does not exist.
 """
-import argparse, datetime, json, os, subprocess, sys
+import argparse, contextlib, datetime, fcntl, json, os, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import gateway_listeners as GL
@@ -48,7 +53,7 @@ EXIT = {OK: 0, ALERT: 1, COULD_NOT_CHECK: 2}
 TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def _run_real(argv, timeout=30):
+def _run_real(argv, timeout=15):       # three calls a run: well inside the unit's TimeoutStartSec=60
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -135,51 +140,107 @@ def _write(path, text, exclusive=False):
         raise
 
 
-def _history(state_dir):
-    """The history's lines as written, oldest first; [] when there is no history yet."""
+def _lines(path):
+    """A log's lines as written, oldest first; [] when there is no file yet. A byte that is not
+    UTF-8 is replaced, never an error: one damaged line must not stop an alert being recorded."""
     try:
-        with open(os.path.join(state_dir, "history.jsonl"), encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             return [l for l in f.read().splitlines() if l.strip()]
     except FileNotFoundError:
         return []
 
 
-def _append(state_dir, entry):
-    lines = _history(state_dir) + [json.dumps(entry, sort_keys=True)]
-    _write(os.path.join(state_dir, "history.jsonl"), "\n".join(lines[-HISTORY_KEEP:]) + "\n")
-    if entry.get("status") in (ALERT, CLEARED):
-        _append_alert_log(state_dir, entry)
+def _history(state_dir):
+    return _lines(os.path.join(state_dir, "history.jsonl"))
 
 
 def _alert_log(state_dir):
-    try:
-        with open(os.path.join(state_dir, "alerts.jsonl"), encoding="utf-8") as f:
-            return [l for l in f.read().splitlines() if l.strip()]
-    except FileNotFoundError:
-        return []
+    return _lines(os.path.join(state_dir, "alerts.jsonl"))
+
+
+def _append_history(state_dir, entry):
+    lines = _history(state_dir) + [json.dumps(entry, sort_keys=True)]
+    _write(os.path.join(state_dir, "history.jsonl"), "\n".join(lines[-HISTORY_KEEP:]) + "\n")
 
 
 def _append_alert_log(state_dir, entry):
-    """Every alert and every clearing, never trimmed (the history is): what a review reads to
-    learn that something listened and was cleared since the last one, however long ago."""
-    _write(os.path.join(state_dir, "alerts.jsonl"),
-           "\n".join(_alert_log(state_dir) + [json.dumps(entry, sort_keys=True)]) + "\n")
+    """One line appended (O_APPEND: nothing already there is rewritten) and synced. Never trimmed
+    (the history is): what a review reads to learn that something listened and was cleared since
+    the last one, however long ago."""
+    fd = os.open(os.path.join(state_dir, "alerts.jsonl"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _last_alert_event(state_dir):
+    """What the alert log's last line says is unexpected, or None when its last line is not an alert."""
+    lines = _alert_log(state_dir)
+    try:
+        e = json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        return None
+    if not isinstance(e, dict) or e.get("status") != ALERT:
+        return None
+    return (e.get("reason"), e.get("unexpected"), e.get("docker_dns_listeners"))
+
+
+def _prepare(state_dir):
+    """The state directory: a real directory (never a symlink), mode 0700. Raises OSError."""
+    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    st = os.lstat(state_dir)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise NotADirectoryError(state_dir)
+    if stat.S_IMODE(st.st_mode) != 0o700:
+        os.chmod(state_dir, 0o700)
+
+
+@contextlib.contextmanager
+def _locked(state_dir):
+    """One writer at a time: a timer run and --clear-alert must not lose each other's line."""
+    fd = os.open(os.path.join(state_dir, ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def record(state_dir, result, ts):
-    """Keep one result: last.json, one history line and, at the first alert, the ALERT marker."""
-    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    """Keep one result. On an alert, FIRST the ALERT marker (created once, never overwritten) and
+    the alert log (a line when the alert is new or what is unexpected changed), THEN last.json and
+    the history: the two that matter most do not wait behind a file that may be damaged."""
+    _prepare(state_dir)
     entry = {"ts": ts, **result}
-    _write(os.path.join(state_dir, "last.json"), json.dumps(entry, sort_keys=True) + "\n")
-    _append(state_dir, entry)
-    if result["status"] == ALERT:
-        try:
-            _write(os.path.join(state_dir, "ALERT"), json.dumps(
-                {"since": ts, "reason": result["reason"], "unexpected": result["unexpected"],
-                 "docker_dns_listeners": result["docker_dns_listeners"]}, sort_keys=True) + "\n",
-                exclusive=True)
-        except FileExistsError:
-            pass                            # the FIRST alert is the one that is kept
+    with _locked(state_dir):
+        if result["status"] == ALERT:
+            try:
+                _write(os.path.join(state_dir, "ALERT"), json.dumps(
+                    {"since": ts, "reason": result["reason"], "unexpected": result["unexpected"],
+                     "docker_dns_listeners": result["docker_dns_listeners"]}, sort_keys=True) + "\n",
+                    exclusive=True)
+            except FileExistsError:
+                pass                        # the FIRST alert is the one that is kept
+            if _last_alert_event(state_dir) != (result["reason"], result["unexpected"], result["docker_dns_listeners"]):
+                _append_alert_log(state_dir, entry)
+        _write(os.path.join(state_dir, "last.json"), json.dumps(entry, sort_keys=True) + "\n")
+        _append_history(state_dir, entry)
+
+
+def clear_alert(state_dir, ts):
+    """Remove the ALERT marker. The clearing is logged BEFORE the marker goes, so a marker never
+    disappears without a line saying so. False when there is no marker."""
+    _prepare(state_dir)
+    with _locked(state_dir):
+        if not os.path.lexists(os.path.join(state_dir, "ALERT")):
+            return False
+        entry = {"ts": ts, "status": CLEARED}
+        _append_alert_log(state_dir, entry)
+        _append_history(state_dir, entry)
+        os.unlink(os.path.join(state_dir, "ALERT"))
+    return True
 
 
 def line(result):
@@ -248,9 +309,10 @@ def summary(state_dir, now):
 
 
 def healthy(s):
-    """True only when the last result is `ok`, it is recent, and no alert is waiting."""
+    """True only when the last result is `ok`, it is recent (a negative age, a clock that went
+    back, is not), and no alert is waiting."""
     return (isinstance(s["last"], dict) and s["last"].get("status") == OK
-            and isinstance(s["last_age_seconds"], int) and 0 <= s["last_age_seconds"] <= MAX_AGE_SECONDS
+            and isinstance(s["last_age_seconds"], int) and 0 <= s["last_age_seconds"] < MAX_AGE_SECONDS
             and not s["alert_present"])
 
 
@@ -261,24 +323,22 @@ def main(argv=None, run=_run_real, state_dir=STATE_DIR, now=None, read_tables=_r
     g.add_argument("--clear-alert", action="store_true")
     a = ap.parse_args(argv)
     now = now or utc_now()
-    if a.status:
-        s = summary(state_dir, now)
-        print(json.dumps(s, indent=2, sort_keys=True))
-        print("listener check: " + ("OK" if healthy(s) else "LOOK AT THIS (last result not ok, too old, or an alert is waiting)"))
-        return 0 if healthy(s) else 1
-    if a.clear_alert:
-        try:
-            os.unlink(os.path.join(state_dir, "ALERT"))
-        except FileNotFoundError:
-            print("hermes-listener-check: no alert to clear")
+    try:
+        if a.status:
+            s = summary(state_dir, now)
+            print(json.dumps(s, indent=2, sort_keys=True))
+            print("listener check: " + ("OK" if healthy(s) else "LOOK AT THIS (last result not ok, too old, or an alert is waiting)"))
+            return 0 if healthy(s) else 1
+        if a.clear_alert:
+            print("hermes-listener-check: " + ("alert cleared" if clear_alert(state_dir, now) else "no alert to clear"))
             return 0
-        _append(state_dir, {"ts": now, "status": CLEARED})
-        print("hermes-listener-check: alert cleared")
-        return 0
-    result = measure(run, read_tables)
-    record(state_dir, result, now)
-    print(line(result))
-    return EXIT[result["status"]]
+        result = measure(run, read_tables)
+        record(state_dir, result, now)
+        print(line(result))
+        return EXIT[result["status"]]
+    except Exception as e:                  # exit 1 means a MEASURED alert, and nothing else
+        print(f"hermes-listener-check: status=could-not-check reason=internal-error error={type(e).__name__}")
+        return 2
 
 
 if __name__ == "__main__":
