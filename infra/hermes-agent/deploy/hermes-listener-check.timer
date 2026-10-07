@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Hermes gateway listener check every 15 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=hermes-listener-check.service
+
+[Install]
+WantedBy=timers.target

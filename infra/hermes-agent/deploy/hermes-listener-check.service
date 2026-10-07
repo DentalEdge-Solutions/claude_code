@@ -1,0 +1,20 @@
+[Unit]
+Description=Hermes gateway listener check (records the gateway container's listening ports; F50)
+# Records only: it stops nothing and flips no switch. Exit 1 (alert) or 2 (could-not-check)
+# leaves this unit "failed" in `systemctl status`, which is the point, not a fault to restart.
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/check-gateway-listeners.py
+TimeoutStartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# tmpfs, not true: the Docker client abandons plugin discovery on an unreadable ~/.docker (F22).
+ProtectHome=tmpfs
+ReadWritePaths=/var/lib/hermes/listener-check
+# It talks to the Docker daemon's unix socket and to nothing else.
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=128M

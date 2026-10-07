@@ -235,9 +235,9 @@ dashboard password:
   suit the app; an upgrade follows `SECURITY-AUDIT.md` and a review.
 
 For a security review, D2.1's dashboard statement says the dashboard is on and that the Desktop app
-is one of its clients. `HERMES_DASHBOARD_BASIC_AUTH_SECRET` is not set on the box, so the app is
-signed out whenever the gateway restarts; setting it adds a secret to the gateway `.env`, which the
-review collector must first be taught to list.
+is one of its clients. Until `deploy/BRING-UP.md` step 7d is applied, no
+`HERMES_DASHBOARD_BASIC_AUTH_SECRET` is set on the box and the app is signed out whenever the
+gateway restarts; step 7d sets it (the review collector lists it since checklist v1.17).
 
 ## Kanban review pipeline (first multi-agent orchestration — C2)
 
@@ -1525,7 +1525,9 @@ not stop collateral within an account.
 **The box's non-Google secrets.** Three files hold them. The gateway `.env`
 (`/opt/projects/claude_code/infra/hermes-agent/.env`, `root:root 0600`) holds the OpenRouter key
 (Hermes's own reasoning; dedicated to the box, with a credit limit) and, when the dashboard is
-switched on, the dashboard basic-auth password. `/etc/hermes/.env.anthropic` (`root:root 0400`)
+switched on, the dashboard's sign-in secret: the password's scrypt hash and a session-signing
+secret (the form since checklist v1.17; `deploy/BRING-UP.md` step 7d), or the plaintext password
+(the older form). `/etc/hermes/.env.anthropic` (`root:root 0400`)
 holds the **real** `ANTHROPIC_API_KEY` (workspace `hermes-box`, monthly spend limit; used only by
 the audit drafter, passed per run and never mounted). The gateway `.env` holds no Anthropic key.
 The Hermes home secrets file (`data/.env` under the same directory, `/opt/data/.env` in the
@@ -1548,37 +1550,8 @@ at once, without waiting for the 12 months, if a leak is suspected or a copy is 
 outside the box. The key in use was created on 2026-10-06, so the next replacement is due by
 2027-10-06.
 
-Replacing it changes the box's authorised credential set, so fresh review evidence is collected
-afterwards (step 7). The order matters:
-the old key is deleted only after the new one is proven, and no backup copy of the old `.env` is
-made (the review's sweep reports one as `unlisted`, a FAIL).
-
-1. OpenRouter console: create a new key for the box only, credit limit $10, reset monthly. Copy it
-   once.
-2. Box, ALONE (the value is read from the terminal with echo off; `sudo -v` first, so the password
-   prompt cannot take the paste):
-   `cd /opt/hermes-agent && sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name OPENROUTER_API_KEY --prefix sk-or- --mode 0600 --owner-uid 0 --owner-gid 0`
-   Then clear the laptop's clipboard: `pbcopy < /dev/null`.
-3. Box: note the Hermes home file first, `sudo stat -c '%u %a %s' /opt/hermes-agent/data/.env`
-   (owner and mode are `10000 600`). Then recreate the gateway, because a restart keeps the old
-   environment: `cd /opt/hermes-agent && sudo docker compose up -d --force-recreate hermes-agent`,
-   then `cd /opt/hermes-agent && sudo docker compose ps -a` (`Up`, not `Restarting`) and the same
-   `stat` again (owner, mode and size as before: the start-up wrote nothing new).
-4. Box: prove the new key. `cd /opt/hermes-agent && sudo docker compose exec -it hermes-agent hermes chat`,
-   ask for a one-word reply, and check that the new key's console page then shows a "Last Used"
-   time.
-5. OpenRouter console: only now delete the old key. Capture the new key's whole page (limit, reset,
-   usage) and the API-keys list showing the old key gone. Both screens identify the account and
-   show a masked fragment of a key: keep them in the git-ignored `security-reviews/` folder and
-   never commit them.
-6. Laptop: check that no copy of either key is left there. Search `~/Projects`, `~/.hermes`,
-   `~/.config` and the shell start-up files for OpenRouter-shaped keys with a command that prints
-   file names only, never a value, and stop any laptop gateway that was started with the box's key
-   (`docker compose down`).
-7. Collect fresh evidence as for a security review: both probes, a new box bundle and a same-day
-   laptop bundle (`deploy/BRING-UP.md`, "A security review"). The box fingerprint does not change
-   (no component covers a credential), but the authorised credential set does, and D10.5's
-   statement must be restated for the new key, saying where it is stored.
+The steps for replacing it, in the order that keeps a working key on the box throughout, are in
+`deploy/BRING-UP.md`, "Replace the OpenRouter key".
 
 **Why there is no write credential (security review D3.2, 2026-09-29).** From 2026-08-18
 the write role reused the operator's own Google account at **ADMIN**. That carried user

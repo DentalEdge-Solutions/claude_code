@@ -37,6 +37,33 @@ class TestChecklistSync(unittest.TestCase):
         lap = {k for k, v in items()[1].items() if v == "laptop"}
         self.assertEqual(lap, set(_load("cl", "collect-review-evidence-laptop.py").ITEMS))
 
+    def test_d2_1_and_d4_1_name_every_non_google_secret_label_the_collector_can_emit(self):
+        """Review #8's first draft bumped `secrets_held` and left the `credentials` sentence naming
+        four labels: a healthy box would have failed D2.1. Every label the collector lists must be
+        named in D2.1 (among them in its `credentials` sentence), every gateway label in D4.1,
+        and the count the checklist states must be the number of labels."""
+        ce = _load("ce", "collect-review-evidence.py")
+        labels = [label for names in ce.OTHER_SECRET_NAMES.values() for _, label in names]
+        blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
+        sentence = re.search(r"A `credentials` row whose label is not one of those (\w+) \(([^)]*)\)", blocks["D2.1"])
+        self.assertIsNotNone(sentence)
+        words = {"four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+        self.assertEqual(words[sentence.group(1)], len(labels))
+        self.assertEqual(sorted(re.findall(r"`([a-z-]+)`", sentence.group(2))), sorted(labels))
+        for label in labels:
+            self.assertIn(f"`{label}`", blocks["D2.1"])
+        for _, label in ce.OTHER_SECRET_NAMES[ce.GATEWAY_ENV_FILE]:
+            self.assertIn(f"`{label}`", blocks["D4.1"], label)
+        self.assertEqual({l for l in ce.UNFINGERPRINTED}, {l for l in labels if f"`{l}` with `sha12: null`" in blocks["D2.1"]})
+
+    def test_d4_5_names_every_field_the_collector_reports(self):
+        ce = _load("ce", "collect-review-evidence.py")
+        blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
+        import tempfile
+        host = ce.Host(tempfile.mkdtemp(), lambda argv, timeout=60: (0, "", ""))
+        for field in ce.d4_5(host, {}):
+            self.assertIn(f"`{field}`", blocks["D4.5"], field)
+
     def test_d10_6_states_the_committed_mcp_block(self):
         """D10.6 judges the box's `mcp_servers:` block by `equals_repo`, `reason` and the sha256 of
         its canonical form, which the checklist states: it must be config.yaml.example's, as the

@@ -23,6 +23,7 @@ sys.path.insert(0, HERE)
 import app_lib as A
 import changeset_lib as C
 import client_audit_lib as CAL
+import gateway_listeners as GL
 import host_layout as HL
 import mcp_config
 import package_lib as PK
@@ -36,7 +37,7 @@ UNITS = ("hermes-broker.service", "hermes-docker-proxy.service")
 # One entry per app mounted into the executor: the host side of docker-compose.yml's
 # HERMES_ADS_REPO_DIR bind (BRING-UP Phase 2). Add a line when an app is added.
 APP_HOST_DIRS = {"claude_google_ads": "/opt/projects/claude-google-ads"}
-GATEWAY_FILTER = "label=com.docker.compose.service=hermes-agent"
+GATEWAY_FILTER = GL.GATEWAY_FILTER
 GATEWAY_PROBE_PATHS = ("/opt/governance", "/var/lib/hermes/governance",
                        "/projects/claude_google_ads/.env", "/opt/hermes-agent/.env.gaw",
                        "/opt/hermes-agent/.env.ga",
@@ -69,14 +70,21 @@ AUTHORISED_OTHER = {GATEWAY_ENV_FILE: "gateway-env",
 OTHER_SECRET_NAMES = {
     "/etc/hermes/.env.anthropic": (("ANTHROPIC_API_KEY", "anthropic-key"),),
     GATEWAY_ENV_FILE: (("OPENROUTER_API_KEY", "openrouter-key"),
-                       ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password")),
+                       ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password"),
+                       # The preferred form since Hermes v0.21.5: no plaintext at rest (F47). It is
+                       # written single-quoted, because Compose interpolates `$` (F52).
+                       ("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH", "dashboard-password-hash"),
+                       # Signs the dashboard's session tokens, so a restart does not sign the
+                       # operator out. Random (install-env-secret.py generate).
+                       ("HERMES_DASHBOARD_BASIC_AUTH_SECRET", "dashboard-session-secret")),
     HERMES_HOME_ENV_FILE: (("API_SERVER_KEY", "api-server-key"),)}
 # D2.1 `credential_shaped_names` (the Hermes home file only): an assignment NAME holding one of
 # these is credential-shaped. Names only, never a value; the file's own key is expected there.
 CREDENTIAL_NAME_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH")
 HERMES_HOME_OWN_NAMES = ("API_SERVER_KEY",)
 # Listed, never fingerprinted: a short hash of a value a person may have chosen can be guessed offline.
-UNFINGERPRINTED = ("dashboard-password",)
+# The password's scrypt hash is a verifier of that same value, so it gets no fingerprint either.
+UNFINGERPRINTED = ("dashboard-password", "dashboard-password-hash")
 # What D4.1 says when there is no one gateway container to look into. Fixed text.
 NO_GATEWAY = "gateway container not running — isolation cannot be observed"
 # D4.1 `secret_env`: the only four things said about a secret in the running gateway's environment.
@@ -684,44 +692,25 @@ def d2_3(host, ctx):
 
 
 # ---------------------------------------------------------------- D4 isolation boundaries
-_PROC_NET_ROW_RE = re.compile(r"\d+:\s+([0-9A-Fa-f]+):([0-9A-Fa-f]{4})\s+[0-9A-Fa-f]+:[0-9A-Fa-f]{4}\s+([0-9A-Fa-f]{2})\s")
-
-
-# Docker's embedded DNS resolver, on 127.0.0.11 with an ephemeral TCP port in every user-defined
-# (Compose) network, as /proc/net/tcp spells the address and as tcp6 spells it IPv4-mapped.
-DOCKER_DNS_ADDRS = ("0B00007F", "0" * 16 + "FFFF0000" + "0B00007F")
-
-
 def _listeners(host, gw):
     """(listeners, docker_dns_listeners) for D4.1. `listeners`: the sorted, distinct local ports
     (decimal) of every socket in state 0A (LISTEN) in the gateway container's /proc/net/tcp and
     /proc/net/tcp6, read in one `docker exec cat`, except those bound to Docker's embedded DNS
-    address (DOCKER_DNS_ADDRS), which are only counted: `docker_dns_listeners`. Only ports and the
-    count are kept: no address or other field. Both are R.COULD_NOT_CHECK when the call fails,
-    when the output is not exactly two tables (two headers), or when any row does not parse."""
+    address, which are only counted: `docker_dns_listeners` (gateway_listeners.parse, shared with
+    the periodic check). Only ports and the count are kept: no address or other field. Both are
+    R.COULD_NOT_CHECK when the call fails, when the output is not exactly two tables (two
+    headers), or when any row does not parse."""
     failed = (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK)
     try:
-        rc, out, _ = host.run(["docker", "exec", gw, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
+        rc, out, _ = host.run(["docker", "exec", gw, "cat", *GL.PROC_TABLES])
     except (OSError, ValueError):
         return failed
     if rc != 0:
         return failed
-    headers, ports, dns = 0, set(), 0
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        if line.split()[0] == "sl":
-            headers += 1
-            continue
-        m = _PROC_NET_ROW_RE.match(line.strip())
-        if not m or not headers:
-            return failed
-        if m.group(3).upper() == "0A":
-            if m.group(1).upper() in DOCKER_DNS_ADDRS:
-                dns += 1
-            else:
-                ports.add(int(m.group(2), 16))
-    return (sorted(ports), dns) if headers == 2 else failed
+    try:
+        return GL.parse(out)
+    except ValueError:
+        return failed
 
 
 def d4_1(host, ctx):
@@ -801,6 +790,47 @@ def d4_4(host, ctx):
     rc, out, err = host.run(["runuser", "-u", "hermes-broker", "--", "python3", AGENT_DIR + "/bin/init-host-layout.py",
                              "--check", "--store-root", GOV, "--spool-root", SPOOL])
     return {"rc": rc, "output": (out + err).splitlines()[-40:]}
+
+
+LISTENER_UNITS = ("hermes-listener-check.service", "hermes-listener-check.timer")
+LISTENER_TIMER = "hermes-listener-check.timer"
+_LISTENER_CHECK = None
+
+
+def _listener_check():
+    """check-gateway-listeners.py as a module (its name has hyphens), loaded once: D4.5 reads the
+    check's state with the check's own reader, so the two cannot disagree about a file."""
+    global _LISTENER_CHECK
+    if _LISTENER_CHECK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("check_gateway_listeners",
+                                                      os.path.join(HERE, "check-gateway-listeners.py"))
+        _LISTENER_CHECK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_LISTENER_CHECK)
+    return _LISTENER_CHECK
+
+
+def d4_5(host, ctx):
+    """The periodic listener check (F50): is its timer running, are its units the reviewed ones,
+    and what has it recorded since the last review. `last` is the latest result (null when the
+    check never ran), `alert_present` and `alert` the marker the first alert leaves until the
+    operator clears it, `history_counts` every recorded run by status (about a month of them),
+    `alert_log` the counts and the first and last time of every alert and clearing ever recorded
+    (never trimmed). The check reads the gateway's sockets from the HOST's /proc, D4.1 from inside
+    the container: the checklist compares the two. Ports, counts, fixed words and timestamps only. is-active and is-enabled exit non-zero for every state but the good one:
+    the state is the answer; no answer at all is could-not-check."""
+    L = _listener_check()
+    state = L.summary(host.path(L.STATE_DIR), R.utc_now())
+    return {"timer_active": host.run(["systemctl", "is-active", LISTENER_TIMER])[1].strip() or R.COULD_NOT_CHECK,
+            "timer_enabled": host.run(["systemctl", "is-enabled", LISTENER_TIMER])[1].strip() or R.COULD_NOT_CHECK,
+            "installed_equal_repo": {u: _same_file(host, "/etc/systemd/system/" + u,
+                                                   CHECKOUT + "/infra/hermes-agent/deploy/" + u)
+                                     for u in LISTENER_UNITS},
+            "drop_in_paths": {u: _drop_ins(host, u) for u in LISTENER_UNITS},
+            # The alert log's "never trimmed" rests on who may write here: root, 0700, a real directory.
+            "state_dir": _dir_row(host, L.STATE_DIR),
+            "max_age_seconds": L.MAX_AGE_SECONDS,
+            **state}
 
 
 # ---------------------------------------------------------------- D5 governance store
@@ -1247,7 +1277,7 @@ def d10_8(host, ctx):
 
 PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6,
           "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3,
-          "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4,
+          "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4, "D4.5": d4_5,
           "D5.1": d5_1, "D5.2": d5_2, "D5.3": d5_3, "D5.4": d5_4,
           "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1,
           # D10.5 (the OpenRouter key limit and account privacy setting) is manual: no probe.

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed as /usr/local/sbin/show-listener-check (symlink, BRING-UP "The listener check").
+# Root only: the state directory is root 0700. Read-only: it runs no check and changes nothing.
+[ "$(id -u)" = 0 ] || { echo "show-listener-check: run with sudo" >&2; exit 2; }
+exec python3 /opt/hermes-agent/bin/check-gateway-listeners.py --status
