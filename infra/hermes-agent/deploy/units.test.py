@@ -371,5 +371,51 @@ class TestAppUnits(unittest.TestCase):
         self.assertIn("Unit=hermes-app-runner@%i.service", d)
 
 
+class TestListenerCheckUnits(unittest.TestCase):
+    """F50: the periodic listener check. It records only, so the unit must not be able to do more."""
+    def directives(self, name):
+        return live_lines(unit(name))
+
+    def test_the_service_is_a_sandboxed_root_oneshot_on_the_fixed_script(self):
+        d = self.directives("hermes-listener-check.service")
+        for want in ("Type=oneshot", "User=root", "UMask=0077",
+                     "ExecStart=/usr/bin/python3 /opt/hermes-agent/bin/check-gateway-listeners.py",
+                     "NoNewPrivileges=true", "PrivateTmp=true", "ProtectSystem=strict", "ProtectHome=tmpfs",
+                     "ReadWritePaths=/var/lib/hermes/listener-check", "RestrictAddressFamilies=AF_UNIX",
+                     "TimeoutStartSec=60"):
+            self.assertIn(want, d)
+
+    def test_the_service_writes_only_its_state_directory_and_takes_no_action(self):
+        d = self.directives("hermes-listener-check.service")
+        self.assertEqual([l for l in d if l.startswith("ReadWritePaths=")],
+                         ["ReadWritePaths=/var/lib/hermes/listener-check"])
+        self.assertEqual(len([l for l in d if l.startswith("Exec")]), 1)       # no ExecStartPost, no ExecStopPost
+        body = "\n".join(d)
+        for banned in ("OnFailure", "Restart=", "compose", "systemctl", "DISABLED", "--clear-alert"):
+            self.assertNotIn(banned, body)
+
+    def test_the_program_it_runs_exists_and_has_the_state_directory_the_unit_allows(self):
+        prog = os.path.join(AGENT, "bin", "check-gateway-listeners.py")
+        self.assertTrue(os.path.isfile(prog))
+        self.assertIn('STATE_DIR = "/var/lib/hermes/listener-check"', open(prog, encoding="utf-8").read())
+
+    def test_the_timer_runs_it_every_15_minutes_and_after_boot(self):
+        d = self.directives("hermes-listener-check.timer")
+        for want in ("OnBootSec=3min", "OnUnitActiveSec=15min", "AccuracySec=1min",
+                     "Unit=hermes-listener-check.service", "WantedBy=timers.target"):
+            self.assertIn(want, d)
+
+    def test_the_interval_is_inside_the_age_the_check_calls_stale(self):
+        """--status and review item D4.5 call a result older than 45 minutes stale: three missed runs."""
+        prog = open(os.path.join(AGENT, "bin", "check-gateway-listeners.py"), encoding="utf-8").read()
+        self.assertIn("MAX_AGE_SECONDS = 45 * 60", prog)
+
+    def test_the_status_wrapper_is_read_only_and_root_only(self):
+        body = unit("show-listener-check")
+        self.assertIn('exec python3 /opt/hermes-agent/bin/check-gateway-listeners.py --status', body)
+        self.assertIn('[ "$(id -u)" = 0 ]', body)
+        self.assertTrue(os.access(os.path.join(HERE, "show-listener-check"), os.X_OK))
+
+
 if __name__ == "__main__":
     unittest.main()

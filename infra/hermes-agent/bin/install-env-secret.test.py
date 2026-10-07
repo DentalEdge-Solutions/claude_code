@@ -136,5 +136,100 @@ class T(unittest.TestCase):
         self._no_temps()
 
 
+class TestQuoteAndGenerate(unittest.TestCase):
+    """F52: Compose interpolates `$` in an env_file, so a dashboard password hash written bare is
+    cut short in the container. And `generate`: a secret nobody types."""
+    HASH = "scrypt$16384$8$1$Tr/eBf/KpGpM+kmmX8qopA==$jOB8Q0D67VV5EQ4UfjTeRTxK9MjhuOqvUsKhsJHcJbM="
+    NAME = "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH"
+    SECRET = "HERMES_DASHBOARD_BASIC_AUTH_SECRET"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(); self.f = os.path.join(self.d, ".env")
+
+    def run_(self, argv, value=None, random_bytes=None):
+        out = io.StringIO()
+        kw = {"random_bytes": random_bytes} if random_bytes else {}
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = S.main(argv, read_value=lambda: value, **kw)
+        return rc, out.getvalue()
+
+    def set_(self, value, *extra):
+        return self.run_(["set", "--file", self.f, "--name", self.NAME, "--prefix", "scrypt$",
+                          "--mode", "0600", *extra], value)
+
+    def test_a_value_with_a_dollar_is_refused_bare_and_the_file_is_untouched(self):
+        open(self.f, "w").write("OPENROUTER_API_KEY=sk-or-x\n")
+        rc, text = self.set_(self.HASH)
+        self.assertEqual(rc, 2)
+        self.assertIn("--quote single", text)
+        self.assertNotIn("Tr/eBf", text)
+        self.assertEqual(open(self.f).read(), "OPENROUTER_API_KEY=sk-or-x\n")
+
+    def test_quote_single_writes_the_value_literally_and_keeps_every_other_line(self):
+        open(self.f, "w").write("# c\nOPENROUTER_API_KEY=sk-or-x\nHERMES_DASHBOARD=1\n")
+        rc, text = self.set_(self.HASH, "--quote", "single")
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(open(self.f).read(),
+                         "# c\nOPENROUTER_API_KEY=sk-or-x\nHERMES_DASHBOARD=1\n" + f"{self.NAME}='{self.HASH}'\n")
+        self.assertNotIn("Tr/eBf", text)
+
+    def test_the_quoted_line_reads_back_as_the_exact_value(self):
+        """The review collector's reader (client_audit_lib.env_values) must give the value the
+        gateway receives, or D4.1 `secret_env` would say differs-from-file for a healthy box."""
+        import sys
+        sys.path.insert(0, HERE)
+        import client_audit_lib as CAL
+        self.set_(self.HASH, "--quote", "single")
+        self.assertEqual(CAL.env_values(open(self.f).read(), self.NAME), [self.HASH])
+
+    def test_a_single_quote_inside_a_quoted_value_is_refused(self):
+        rc, text = self.set_("scrypt$1$it's", "--quote", "single")
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(self.f))
+
+    def test_quote_single_replaces_an_existing_line_in_place(self):
+        open(self.f, "w").write(f"A=1\n{self.NAME}=old\nB=2\n")
+        self.set_(self.HASH, "--quote", "single")
+        self.assertEqual(open(self.f).read(), f"A=1\n{self.NAME}='{self.HASH}'\nB=2\n")
+
+    def test_generate_writes_32_random_bytes_as_base64_and_never_prints_them(self):
+        open(self.f, "w").write("A=1\n"); os.chmod(self.f, 0o600)
+        rc, text = self.run_(["generate", "--file", self.f, "--name", self.SECRET, "--mode", "0600"],
+                             random_bytes=lambda n: bytes(range(n)))
+        self.assertEqual(rc, 0, text)
+        import base64
+        want = base64.b64encode(bytes(range(32))).decode()
+        self.assertEqual(open(self.f).read(), f"A=1\n{self.SECRET}={want}\n")
+        self.assertNotIn(want, text)
+        self.assertIn("generated", text)
+        self.assertNotIn("$", want)
+        self.assertEqual(stat.S_IMODE(os.stat(self.f).st_mode), 0o600)
+
+    def test_generate_uses_the_system_random_source_and_differs_each_time(self):
+        seen = set()
+        for i in range(2):
+            f = os.path.join(self.d, f"e{i}")
+            self.run_(["generate", "--file", f, "--name", self.SECRET, "--mode", "0600"])
+            value = open(f).read().split("=", 1)[1].strip()
+            self.assertEqual(len(value), 44)
+            seen.add(value)
+        self.assertEqual(len(seen), 2)
+
+    def test_generate_refuses_a_name_that_already_has_a_value(self):
+        open(self.f, "w").write(f"{self.SECRET}=keepme\n")
+        rc, text = self.run_(["generate", "--file", self.f, "--name", self.SECRET, "--mode", "0600"])
+        self.assertEqual(rc, 2)
+        self.assertIn("strip it first", text)
+        self.assertNotIn("keepme", text)
+        self.assertEqual(open(self.f).read(), f"{self.SECRET}=keepme\n")
+
+    def test_generate_fills_an_empty_assignment(self):
+        open(self.f, "w").write(f"A=1\n{self.SECRET}=\nB=2\n")
+        rc, _ = self.run_(["generate", "--file", self.f, "--name", self.SECRET, "--mode", "0600"],
+                          random_bytes=lambda n: b"\x00" * n)
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(self.f).read(), f"A=1\n{self.SECRET}={'A' * 43}=\nB=2\n")
+
+
 if __name__ == "__main__":
     unittest.main()

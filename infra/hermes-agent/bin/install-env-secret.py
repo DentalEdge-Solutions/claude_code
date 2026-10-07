@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """Install or strip ONE secret in an env file (Option B §6, BRING-UP). Stdlib only.
 
-  sudo install-env-secret.py set   --file F --name N --prefix P --mode 0400|0600 [--owner-uid U --owner-gid G]
-  sudo install-env-secret.py strip --file F --name N
+  sudo install-env-secret.py set      --file F --name N --prefix P --mode 0400|0600 [--quote single] [--owner-uid U --owner-gid G]
+  sudo install-env-secret.py generate --file F --name N --mode 0400|0600 [--owner-uid U --owner-gid G]
+  sudo install-env-secret.py strip    --file F --name N
 
 `set` reads the value from /dev/tty with echo off (never argv, never stdin of a paste), refuses
 a value without the expected prefix, and replaces or appends the one NAME= line. Every other
 line is kept byte-for-byte. The new file is written beside the old one (O_EXCL), fsync'd, given
 its owner and mode on the fd, and renamed over it: a governed file is never half-written, and a
-bad input never replaces a good file (the 2026-09-30 registry lesson). Never prints a value."""
-import argparse, getpass, os, re, stat, sys, warnings
+bad input never replaces a good file (the 2026-09-30 registry lesson). Never prints a value.
+
+`--quote single` writes NAME='value', for a value that holds `$`: Docker Compose interpolates `$`
+in an env_file, and a dashboard password hash (`scrypt$16384$8$1$<salt>$<hash>`) written bare
+reaches the container cut short, with only a warning (measured 2026-10-07, finding F52). Inside
+single quotes Compose takes the value literally. So `set` refuses a value with `$` unless it is
+quoted, and refuses a single quote inside a quoted value.
+
+`generate` makes the value itself: 32 random bytes, base64 (the form `openssl rand -base64 32`
+gives), for a secret nobody needs to know, such as the dashboard's session-signing key. It never
+leaves the file: nothing is typed, pasted or printed. It refuses a name that already has a
+value; `strip` it first to replace it."""
+import argparse, base64, getpass, os, re, stat, sys, warnings
 
 NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
@@ -82,17 +94,19 @@ def _write(path, lines, mode, uid, gid):
         raise
 
 
-def main(argv=None, read_value=_tty_value):
+def main(argv=None, read_value=_tty_value, random_bytes=os.urandom):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("set")
-    for p in (s, sub.add_parser("strip")):
+    s, g = sub.add_parser("set"), sub.add_parser("generate")
+    for p in (s, g, sub.add_parser("strip")):
         p.add_argument("--file", required=True)
         p.add_argument("--name", required=True)
     s.add_argument("--prefix", required=True)
-    s.add_argument("--mode", required=True, choices=("0400", "0600"))
-    s.add_argument("--owner-uid", type=int)
-    s.add_argument("--owner-gid", type=int)
+    s.add_argument("--quote", choices=("single",))
+    for p in (s, g):
+        p.add_argument("--mode", required=True, choices=("0400", "0600"))
+        p.add_argument("--owner-uid", type=int)
+        p.add_argument("--owner-gid", type=int)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "set" and not a.prefix:
@@ -107,14 +121,24 @@ def main(argv=None, read_value=_tty_value):
             _write(a.file, kept, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid)
             print(f"install-env-secret: {a.name} removed from {a.file} ({len(lines) - len(kept)} line(s))")
             return 0
-        v = read_value()
-        if not v or "\n" in v or "\r" in v or not v.startswith(a.prefix):
-            raise ValueError(f"refused: the value is empty, multi-line, or does not start with {a.prefix!r}")
-        try:
-            v.encode("utf-8")                             # strict: no lone surrogates
-        except UnicodeEncodeError:
-            raise ValueError("refused: the value is not valid UTF-8 text") from None
-        new = f"{a.name}={v}\n"
+        if a.cmd == "generate":
+            if any(_is_assign(l, a.name) and l.split("=", 1)[1].strip() for l in lines):
+                raise ValueError(f"refused: {a.name} already has a value in {a.file}; strip it first to replace it")
+            v, quote = base64.b64encode(random_bytes(32)).decode("ascii"), None
+        else:
+            v, quote = read_value(), a.quote
+            if not v or "\n" in v or "\r" in v or not v.startswith(a.prefix):
+                raise ValueError(f"refused: the value is empty, multi-line, or does not start with {a.prefix!r}")
+            try:
+                v.encode("utf-8")                         # strict: no lone surrogates
+            except UnicodeEncodeError:
+                raise ValueError("refused: the value is not valid UTF-8 text") from None
+            if quote is None and "$" in v:
+                raise ValueError("refused: the value holds `$`, which Docker Compose would interpolate; "
+                                 "write it with --quote single")
+            if quote == "single" and "'" in v:
+                raise ValueError("refused: a single-quoted value cannot hold a single quote")
+        new = f"{a.name}='{v}'\n" if quote == "single" else f"{a.name}={v}\n"
         idx = next((i for i, l in enumerate(lines) if _is_assign(l, a.name)), None)
         if idx is None:                                   # append, keeping a final newline
             out = kept + ([] if not kept or kept[-1].endswith("\n") else ["\n"]) + [new]
@@ -124,7 +148,7 @@ def main(argv=None, read_value=_tty_value):
         uid = a.owner_uid if a.owner_uid is not None else (st.st_uid if st else None)
         gid = a.owner_gid if a.owner_gid is not None else (st.st_gid if st else None)
         _write(a.file, out, int(a.mode, 8), uid, gid)
-        print(f"install-env-secret: {a.name} set in {a.file} (mode {a.mode})")
+        print(f"install-env-secret: {a.name} {'generated' if a.cmd == 'generate' else 'set'} in {a.file} (mode {a.mode})")
         return 0
     except (ValueError, OSError) as e:
         print(f"install-env-secret: {e}", file=sys.stderr)
