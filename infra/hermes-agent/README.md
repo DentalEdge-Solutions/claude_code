@@ -167,7 +167,8 @@ The Hermes Desktop app on the operator's laptop can use the box's Hermes as its 
 to the dashboard service (port 9119) with the dashboard's username and password; the API server
 (port 8642) is not involved and stays off. Measured on 2026-10-06
 (`docs/evaluations/2026-10-06-desktop-app-to-the-box-tailscale.md`): sign-in and chat work through
-the SSH forward of `deploy/BRING-UP.md` Phase 7, with no change to the box.
+the SSH forward of `deploy/BRING-UP.md` Phase 7, with no change to the box. The login item below
+has kept that forward open on the operator's laptop since 2026-10-07.
 
 **The link.** The box publishes the dashboard on its own loopback only, so the laptop reaches it
 through an SSH local forward: `127.0.0.1:19119` on the laptop is `127.0.0.1:9119` on the box. In the
@@ -190,16 +191,26 @@ To keep the forward open without a terminal window (laptop only; nothing changes
      AddKeysToAgent yes
      UseKeychain yes
    ```
-2. Prove the key works with no prompt BEFORE anything retries by itself:
-   `ssh -o BatchMode=yes hermes-box true && echo LINK_OK`. If the key has a passphrase, store it
-   in the macOS keychain once (`ssh-add --apple-use-keychain ~/.ssh/vps-hermes`) and repeat. The box
-   runs fail2ban: a login item that retries with a key the box refuses can get the laptop's address
-   banned.
+2. Prove the key works with no prompt BEFORE anything retries by itself. If the key has a
+   passphrase, first store it in the macOS keychain once
+   (`ssh-add --apple-use-keychain ~/.ssh/vps-hermes`, then `ssh-add -l` lists it); from then on the
+   Mac's login and screen lock are what protect the key. Then, once:
+   `ssh -o BatchMode=yes hermes-box true && echo LINK_OK`. The box runs fail2ban: every refused
+   attempt counts, and a login item that retries with a key the box refuses can get the laptop's
+   address banned. Two failures seen on first set-up (2026-10-07), and what they mean:
+   - `Host key verification failed`: the address in `~/.ssh/config` is not the one in
+     `~/.ssh/known_hosts`. It was a one-digit typo. SSH stops before it offers a key, so nothing
+     reaches the box. Compare the two files; never answer by switching the host-key check off.
+   - `Permission denied (publickey)`: the key has a passphrase and no agent holds it. This one IS a
+     failed login on the box, and the message prints the box's address: do not paste it anywhere.
 3. A LaunchAgent (`~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`) runs
    `/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -L 19119:127.0.0.1:9119 hermes-box`
    with `RunAtLoad`, `KeepAlive` and `ThrottleInterval` 120 (at most one attempt every two minutes).
    Start it with `launchctl bootstrap gui/$(id -u) <the plist>`; stop it for good with
    `launchctl bootout gui/$(id -u)/com.dentaledge.hermes-box-tunnel` and delete the file.
+   Check it: `launchctl print gui/$(id -u)/com.dentaledge.hermes-box-tunnel` shows `state = running`,
+   and `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19119/` answers `302` (the
+   dashboard's redirect to its sign-in page).
 
 **Rules for using it.** The app is a remote control for the gateway, with the same reach as the
 dashboard password:
