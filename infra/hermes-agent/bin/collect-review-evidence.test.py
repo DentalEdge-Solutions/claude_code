@@ -2522,7 +2522,8 @@ class TestD45ListenerCheck(Base):
             "installed_equal_repo": {u: True for u in CE.LISTENER_UNITS},
             "drop_in_paths": {u: [] for u in CE.LISTENER_UNITS},
             "max_age_seconds": 2700, "last": self.OK_LAST, "last_age_seconds": 600,
-            "alert_present": False, "alert": None, "history_counts": {"ok": 2}})
+            "alert_present": False, "alert": None, "history_counts": {"ok": 2},
+            "alert_log": {"alert": 0, "alert-cleared": 0, "?": 0, "first_ts": None, "last_ts": None}})
 
     def test_a_stopped_or_disabled_timer_is_reported_as_its_state(self):
         self._healthy()
@@ -2573,9 +2574,14 @@ class TestD45ListenerCheck(Base):
                "unexpected": [8642]}
         self._w(self.STATE + "/history.jsonl", "".join(json.dumps(e) + "\n" for e in (
             bad, self.OK_LAST, {"ts": "x", "status": "could-not-check"}, {"ts": "y", "status": "alert-cleared"})))
+        self._w(self.STATE + "/alerts.jsonl", json.dumps({**bad, "ts": "2026-06-01T00:00:00Z"}) + "\n"
+                + json.dumps({"ts": "2026-06-01T00:05:00Z", "status": "alert-cleared"}) + "\n" + json.dumps(bad) + "\n")
         d = self._d()
         self.assertEqual((d["alert_present"], d["alert"]), (True, alert))
         self.assertEqual(d["history_counts"], {"alert": 1, "ok": 1, "could-not-check": 1, "alert-cleared": 1})
+        # The log is never trimmed: it still holds the alert of June, which the history has lost.
+        self.assertEqual(d["alert_log"], {"alert": 2, "alert-cleared": 1, "?": 0,
+                                          "first_ts": "2026-06-01T00:00:00Z", "last_ts": "2026-10-07T12:00:00Z"})
 
     def test_damaged_state_files_are_could_not_check_for_their_field_only(self):
         self._healthy()

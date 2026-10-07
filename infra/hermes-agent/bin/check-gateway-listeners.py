@@ -13,8 +13,23 @@ It RECORDS ONLY (operator decision, 2026-10-07): it stops nothing and flips no s
 writes, under STATE_DIR (root 0700, files 0600):
   last.json       the latest result
   history.jsonl   one line per run, kept to the last HISTORY_KEEP lines
+  alerts.jsonl    one line per alert and per --clear-alert, NEVER trimmed: an alert that was
+                  cleared must still be there for a review held months later
   ALERT           created at the first alert and never overwritten; removed by --clear-alert
 and prints one line, which the journal keeps. Exit 0 ok, 1 alert, 2 could-not-check.
+
+WHERE THE MEASUREMENT COMES FROM. Not from inside the container: the gateway controls its own
+filesystem, so a `cat` run there (`docker exec`, as the review's D4.1 does, F35) could be made to
+lie. This check asks Docker for the container's init pid and reads /proc/<pid>/net/tcp and tcp6
+ON THE HOST: the host kernel's view of that network namespace, with no program of the
+container's run. It asks for the pid again afterwards, and a different answer (the gateway
+restarted meanwhile, so the pid may now be another process's) is could-not-check. D4.5 compares
+this result with D4.1's, so the two sources check each other.
+
+WHAT IT CANNOT SEE (known limits, in the findings document): it judges port NUMBERS, so another
+program listening on an allowed port (9119) passes; anything bound to Docker's DNS address is
+counted as the resolver, and only a count other than 1 is an alert; UDP and unix sockets are not
+looked at; and a listener that opens and closes between two runs is missed.
 
 Nothing it writes or prints carries an address or any other field of /proc/net/tcp: ports, one
 count, fixed words and timestamps only. A gateway that is not running is could-not-check, never
@@ -45,19 +60,44 @@ def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).strftime(TS_FMT)
 
 
-def measure(run=_run_real):
+def _read_tables(pid):
+    """The two tables of the network namespace process `pid` is in, read on the host."""
+    text = ""
+    for table in ("tcp", "tcp6"):
+        with open(f"/proc/{pid}/net/{table}", encoding="ascii", errors="replace") as f:
+            text += f.read()
+    return text
+
+
+def _gateway_pid(run, gw):
+    """The running gateway container's init pid, as Docker reports it; None when it has none."""
+    rc, out, _ = run(["docker", "inspect", "--format", "{{.State.Pid}} {{.State.Running}}", gw])
+    parts = out.split()
+    if rc != 0 or len(parts) != 2 or parts[1] != "true" or not parts[0].isdigit() or int(parts[0]) < 2:
+        return None
+    return int(parts[0])
+
+
+def measure(run=_run_real, read_tables=_read_tables):
     """One measurement: {status, listeners, unexpected, docker_dns_listeners, reason}. `reason` is
-    a fixed word: `-`, `unexpected-port`, `docker-dns`, `no-gateway`, `exec-failed`, `unparsable`."""
+    a fixed word: `-`, `unexpected-port`, `docker-dns`, `no-gateway`, `no-pid`, `proc-unreadable`,
+    `gateway-changed`, `unparsable`."""
     blank = {"listeners": COULD_NOT_CHECK, "unexpected": COULD_NOT_CHECK, "docker_dns_listeners": COULD_NOT_CHECK}
     rc, out, _ = run(["docker", "ps", "-q", "--no-trunc", "--filter", GL.GATEWAY_FILTER])
     gw = out.strip()
     if rc != 0 or len(gw) != 64:            # none, or more than one: there is no ONE gateway to look into
         return {"status": COULD_NOT_CHECK, "reason": "no-gateway", **blank}
-    rc, out, _ = run(["docker", "exec", gw, "cat", *GL.PROC_TABLES])
-    if rc != 0:
-        return {"status": COULD_NOT_CHECK, "reason": "exec-failed", **blank}
+    pid = _gateway_pid(run, gw)
+    if pid is None:
+        return {"status": COULD_NOT_CHECK, "reason": "no-pid", **blank}
     try:
-        ports, dns = GL.parse(out)
+        text = read_tables(pid)
+    except OSError:
+        return {"status": COULD_NOT_CHECK, "reason": "proc-unreadable", **blank}
+    if _gateway_pid(run, gw) != pid:        # it restarted while we read: that pid may be anything now
+        return {"status": COULD_NOT_CHECK, "reason": "gateway-changed", **blank}
+    try:
+        ports, dns = GL.parse(text)
     except ValueError:
         return {"status": COULD_NOT_CHECK, "reason": "unparsable", **blank}
     unexpected = [p for p in ports if p not in GL.ALLOWED_PORTS]
@@ -107,6 +147,23 @@ def _history(state_dir):
 def _append(state_dir, entry):
     lines = _history(state_dir) + [json.dumps(entry, sort_keys=True)]
     _write(os.path.join(state_dir, "history.jsonl"), "\n".join(lines[-HISTORY_KEEP:]) + "\n")
+    if entry.get("status") in (ALERT, CLEARED):
+        _append_alert_log(state_dir, entry)
+
+
+def _alert_log(state_dir):
+    try:
+        with open(os.path.join(state_dir, "alerts.jsonl"), encoding="utf-8") as f:
+            return [l for l in f.read().splitlines() if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def _append_alert_log(state_dir, entry):
+    """Every alert and every clearing, never trimmed (the history is): what a review reads to
+    learn that something listened and was cleared since the last one, however long ago."""
+    _write(os.path.join(state_dir, "alerts.jsonl"),
+           "\n".join(_alert_log(state_dir) + [json.dumps(entry, sort_keys=True)]) + "\n")
 
 
 def record(state_dir, result, ts):
@@ -169,10 +226,25 @@ def summary(state_dir, now):
             counts[status] = counts.get(status, 0) + 1
     except OSError:
         counts = COULD_NOT_CHECK
+    try:
+        log = {"alert": 0, "alert-cleared": 0, "?": 0, "first_ts": None, "last_ts": None}
+        for l in _alert_log(state_dir):
+            try:
+                e = json.loads(l)
+                status, ts = e.get("status"), e.get("ts")
+            except (ValueError, AttributeError):
+                status, ts = "?", None
+            log[status if status in (ALERT, CLEARED) else "?"] += 1
+            if isinstance(ts, str):
+                log["first_ts"] = log["first_ts"] or ts
+                log["last_ts"] = ts
+    except OSError:
+        log = COULD_NOT_CHECK
     return {"last": last,
             "last_age_seconds": _age_seconds(last.get("ts"), now) if isinstance(last, dict) else
             (None if last is None else COULD_NOT_CHECK),
-            "alert_present": alert is not None, "alert": alert, "history_counts": counts}
+            "alert_present": alert is not None, "alert": alert, "history_counts": counts,
+            "alert_log": log}
 
 
 def healthy(s):
@@ -182,7 +254,7 @@ def healthy(s):
             and not s["alert_present"])
 
 
-def main(argv=None, run=_run_real, state_dir=STATE_DIR, now=None):
+def main(argv=None, run=_run_real, state_dir=STATE_DIR, now=None, read_tables=_read_tables):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--status", action="store_true")
@@ -203,7 +275,7 @@ def main(argv=None, run=_run_real, state_dir=STATE_DIR, now=None):
         _append(state_dir, {"ts": now, "status": CLEARED})
         print("hermes-listener-check: alert cleared")
         return 0
-    result = measure(run)
+    result = measure(run, read_tables)
     record(state_dir, result, now)
     print(line(result))
     return EXIT[result["status"]]

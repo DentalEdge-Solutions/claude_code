@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install or strip ONE secret in an env file (Option B §6, BRING-UP). Stdlib only.
 
-  sudo install-env-secret.py set      --file F --name N --prefix P --mode 0400|0600 [--quote single] [--owner-uid U --owner-gid G]
+  sudo install-env-secret.py set      --file F --name N --prefix P --mode 0400|0600 [--quote single] [--stdin] [--owner-uid U --owner-gid G]
   sudo install-env-secret.py generate --file F --name N --mode 0400|0600 [--owner-uid U --owner-gid G]
   sudo install-env-secret.py strip    --file F --name N
 
@@ -16,6 +16,11 @@ in an env_file, and a dashboard password hash (`scrypt$16384$8$1$<salt>$<hash>`)
 reaches the container cut short, with only a warning (measured 2026-10-07, finding F52). Inside
 single quotes Compose takes the value literally. So `set` refuses a value with `$` unless it is
 quoted, and refuses a single quote inside a quoted value.
+
+`--stdin` takes the value from a PIPE instead of the terminal, for a value another program
+makes (the hash, computed inside the gateway container): `... | install-env-secret.py set ...
+--stdin`. It refuses a terminal on stdin, so it can never be the target of a paste, and it drops
+one trailing line break. The value still never touches argv, a file or the screen.
 
 `generate` makes the value itself: 32 random bytes, base64 (the form `openssl rand -base64 32`
 gives), for a secret nobody needs to know, such as the dashboard's session-signing key. It never
@@ -94,7 +99,19 @@ def _write(path, lines, mode, uid, gid):
         raise
 
 
-def main(argv=None, read_value=_tty_value, random_bytes=os.urandom):
+def _pipe_value():
+    """The value from stdin when stdin is a pipe or a file, without one trailing line break; None
+    when stdin is a terminal (a paste is what the hidden prompt is for) or cannot be read."""
+    try:
+        if sys.stdin.isatty():
+            return None
+        v = sys.stdin.read()
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return v[:-1] if v.endswith("\n") else v
+
+
+def main(argv=None, read_value=_tty_value, random_bytes=os.urandom, read_pipe=_pipe_value):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     s, g = sub.add_parser("set"), sub.add_parser("generate")
@@ -103,6 +120,7 @@ def main(argv=None, read_value=_tty_value, random_bytes=os.urandom):
         p.add_argument("--name", required=True)
     s.add_argument("--prefix", required=True)
     s.add_argument("--quote", choices=("single",))
+    s.add_argument("--stdin", action="store_true")
     for p in (s, g):
         p.add_argument("--mode", required=True, choices=("0400", "0600"))
         p.add_argument("--owner-uid", type=int)
@@ -126,7 +144,7 @@ def main(argv=None, read_value=_tty_value, random_bytes=os.urandom):
                 raise ValueError(f"refused: {a.name} already has a value in {a.file}; strip it first to replace it")
             v, quote = base64.b64encode(random_bytes(32)).decode("ascii"), None
         else:
-            v, quote = read_value(), a.quote
+            v, quote = (read_pipe() if a.stdin else read_value()), a.quote
             if not v or "\n" in v or "\r" in v or not v.startswith(a.prefix):
                 raise ValueError(f"refused: the value is empty, multi-line, or does not start with {a.prefix!r}")
             try:

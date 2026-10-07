@@ -814,8 +814,10 @@ def d4_5(host, ctx):
     """The periodic listener check (F50): is its timer running, are its units the reviewed ones,
     and what has it recorded since the last review. `last` is the latest result (null when the
     check never ran), `alert_present` and `alert` the marker the first alert leaves until the
-    operator clears it, `history_counts` every recorded run by status. Ports, counts, fixed words
-    and timestamps only. is-active and is-enabled exit non-zero for every state but the good one:
+    operator clears it, `history_counts` every recorded run by status (about a month of them),
+    `alert_log` the counts and the first and last time of every alert and clearing ever recorded
+    (never trimmed). The check reads the gateway's sockets from the HOST's /proc, D4.1 from inside
+    the container: the checklist compares the two. Ports, counts, fixed words and timestamps only. is-active and is-enabled exit non-zero for every state but the good one:
     the state is the answer; no answer at all is could-not-check."""
     L = _listener_check()
     state = L.summary(host.path(L.STATE_DIR), R.utc_now())

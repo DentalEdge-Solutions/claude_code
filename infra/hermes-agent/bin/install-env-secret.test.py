@@ -192,6 +192,33 @@ class TestQuoteAndGenerate(unittest.TestCase):
         self.set_(self.HASH, "--quote", "single")
         self.assertEqual(open(self.f).read(), f"A=1\n{self.NAME}='{self.HASH}'\nB=2\n")
 
+    def test_stdin_takes_the_value_from_a_pipe_and_drops_one_line_break(self):
+        for piped in (self.HASH, self.HASH + "\n"):
+            with self.subTest(piped=piped[-3:]):
+                if os.path.exists(self.f):
+                    os.unlink(self.f)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                    rc = S.main(["set", "--file", self.f, "--name", self.NAME, "--prefix", "scrypt$", "--quote", "single",
+                                 "--mode", "0600", "--stdin"], read_value=lambda: self.fail("the terminal was asked"),
+                                read_pipe=lambda: piped[:-1] if piped.endswith("\n") else piped)
+                self.assertEqual(rc, 0, out.getvalue())
+                self.assertEqual(open(self.f).read(), f"{self.NAME}='{self.HASH}'\n")
+                self.assertNotIn("Tr/eBf", out.getvalue())
+
+    def test_stdin_refuses_a_terminal_and_an_empty_pipe(self):
+        with mock.patch.object(S.sys, "stdin", mock.Mock(isatty=lambda: True)):
+            self.assertIsNone(S._pipe_value())
+        with mock.patch.object(S.sys, "stdin", io.StringIO("value\n\n")):
+            self.assertEqual(S._pipe_value(), "value\n")                 # ONE line break is the pipe's
+        for piped in (None, ""):                                          # a terminal, or a program that printed nothing
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = S.main(["set", "--file", self.f, "--name", self.NAME, "--prefix", "scrypt$", "--quote", "single",
+                             "--mode", "0600", "--stdin"], read_pipe=lambda: piped)
+            self.assertEqual(rc, 2)
+            self.assertFalse(os.path.exists(self.f))
+
     def test_generate_writes_32_random_bytes_as_base64_and_never_prints_them(self):
         open(self.f, "w").write("A=1\n"); os.chmod(self.f, 0o600)
         rc, text = self.run_(["generate", "--file", self.f, "--name", self.SECRET, "--mode", "0600"],

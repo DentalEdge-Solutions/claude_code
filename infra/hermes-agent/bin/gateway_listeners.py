@@ -15,6 +15,9 @@ _ROW_RE = re.compile(r"\d+:\s+([0-9A-Fa-f]+):([0-9A-Fa-f]{4})\s+[0-9A-Fa-f]+:[0-
 # (Compose) network, as /proc/net/tcp spells the address and as tcp6 spells it IPv4-mapped.
 DOCKER_DNS_ADDRS = ("0B00007F", "0" * 16 + "FFFF0000" + "0B00007F")
 PROC_TABLES = ("/proc/net/tcp", "/proc/net/tcp6")
+# Known limits of judging by port number (findings document, with F50): another program listening
+# on an allowed port passes; anything bound to Docker's DNS address is counted as the resolver,
+# whatever it is; UDP and unix sockets are not in these tables.
 
 
 def parse(text):

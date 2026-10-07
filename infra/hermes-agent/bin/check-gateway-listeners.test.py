@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, stat, sys, tempfile, unittest
+import contextlib, importlib.util, io, json, os, stat, sys, tempfile, unittest, unittest.mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import gateway_listeners as GL
@@ -16,14 +16,34 @@ ESTAB4 = "   3: 020012AC:D2F4 030012AC:01BB 01 00000000:00000000 00:00000000 000
 HEALTHY = TCP_HEADER + DNS4 + DASH4 + ESTAB4 + TCP6_HEADER
 
 
-def runner(ps=(0, GW + "\n", ""), cat=(0, HEALTHY, "")):
-    calls = []
+PID = 4242
+
+
+def runner(ps=(0, GW + "\n", ""), cat=(0, HEALTHY, ""), inspect=(0, f"{PID} true\n", "")):
+    """A fake Docker CLI and a fake host /proc. `cat` is (rc, text): what reading the gateway's two
+    tables on the host gives (a non-zero rc is an OSError). `inspect` is one answer, or a list
+    of answers given in turn."""
+    calls, answers, read = [], list(inspect) if isinstance(inspect, list) else None, []
 
     def run(argv, timeout=30):
         calls.append(argv)
-        return ps if argv[:2] == ["docker", "ps"] else cat
-    run.calls = calls
+        if argv[:2] == ["docker", "ps"]:
+            return ps
+        if argv[:2] == ["docker", "inspect"]:
+            return answers.pop(0) if answers else inspect
+        return (127, "", "not found")
+
+    def read_tables(pid):
+        read.append(pid)
+        if cat[0] != 0:
+            raise PermissionError(13, "Permission denied")
+        return cat[1]
+    run.calls, run.read_tables, run.read = calls, read_tables, read
     return run
+
+
+def measure(run):
+    return C.measure(run, run.read_tables)
 
 
 class TestParse(unittest.TestCase):
@@ -46,23 +66,42 @@ class TestParse(unittest.TestCase):
 class TestMeasure(unittest.TestCase):
     def test_healthy(self):
         run = runner()
-        self.assertEqual(C.measure(run), {"status": "ok", "reason": "-", "listeners": [9119],
+        self.assertEqual(measure(run), {"status": "ok", "reason": "-", "listeners": [9119],
                                           "unexpected": [], "docker_dns_listeners": 1})
-        self.assertEqual(run.calls[1], ["docker", "exec", GW, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
+        # The pid comes from Docker, the tables from the HOST's /proc, and Docker is asked again
+        # afterwards. Nothing is run inside the container: no `docker exec`.
+        ask = ["docker", "inspect", "--format", "{{.State.Pid}} {{.State.Running}}", GW]
+        self.assertEqual(run.calls[1:], [ask, ask])
+        self.assertEqual(run.read, [PID])
+        self.assertFalse([c for c in run.calls if "exec" in c])
+
+    def test_the_real_reader_reads_the_host_proc_of_that_pid_and_nothing_else(self):
+        opened = []
+
+        class F(io.StringIO):
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(path, **kw):
+            opened.append(path)
+            return F(TCP_HEADER if path.endswith("/tcp") else TCP6_HEADER)
+        with unittest.mock.patch("builtins.open", fake_open):
+            self.assertEqual(C._read_tables(PID), TCP_HEADER + TCP6_HEADER)
+        self.assertEqual(opened, [f"/proc/{PID}/net/tcp", f"/proc/{PID}/net/tcp6"])
 
     def test_the_dashboard_off_is_healthy(self):
-        r = C.measure(runner(cat=(0, TCP_HEADER + DNS4 + TCP6_HEADER, "")))
+        r = measure(runner(cat=(0, TCP_HEADER + DNS4 + TCP6_HEADER, "")))
         self.assertEqual((r["status"], r["listeners"]), ("ok", []))
 
     def test_the_api_server_port_is_an_alert(self):
-        r = C.measure(runner(cat=(0, TCP_HEADER + DNS4 + DASH4 + API4 + TCP6_HEADER, "")))
+        r = measure(runner(cat=(0, TCP_HEADER + DNS4 + DASH4 + API4 + TCP6_HEADER, "")))
         self.assertEqual((r["status"], r["reason"], r["listeners"], r["unexpected"]),
                          ("alert", "unexpected-port", [8642, 9119], [8642]))
 
     def test_a_docker_dns_count_other_than_one_is_an_alert(self):
         for cat, n in ((TCP_HEADER + DASH4 + TCP6_HEADER, 0), (TCP_HEADER + DNS4 + DNS4.replace("8693", "8694") + DASH4 + TCP6_HEADER, 2)):
             with self.subTest(n=n):
-                r = C.measure(runner(cat=(0, cat, "")))
+                r = measure(runner(cat=(0, cat, "")))
                 self.assertEqual((r["status"], r["reason"], r["docker_dns_listeners"], r["unexpected"]),
                                  ("alert", "docker-dns", n, []))
 
@@ -71,16 +110,34 @@ class TestMeasure(unittest.TestCase):
                    (124, "", "")):
             with self.subTest(ps=ps):
                 run = runner(ps=ps)
-                r = C.measure(run)
+                r = measure(run)
                 self.assertEqual((r["status"], r["reason"], r["listeners"]),
                                  ("could-not-check", "no-gateway", "could-not-check"))
-                self.assertEqual(len(run.calls), 1)                 # nothing is exec'd into
+                self.assertEqual((len(run.calls), run.read), (1, []))       # nothing more is asked or read
 
-    def test_a_failed_exec_and_unparsable_output(self):
-        self.assertEqual(C.measure(runner(cat=(1, "", "container is not running")))["reason"], "exec-failed")
+    def test_no_pid_is_could_not_check(self):
+        for inspect in ((1, "", "No such object"), (0, "0 false\n", ""), (0, f"{PID} false\n", ""), (0, "1 true\n", ""),
+                        (0, "garbage\n", ""), (0, "", ""), (0, f"{PID} true extra\n", "")):
+            with self.subTest(inspect=inspect):
+                run = runner(inspect=inspect)
+                r = measure(run)
+                self.assertEqual((r["status"], r["reason"], run.read), ("could-not-check", "no-pid", []))
+
+    def test_a_gateway_that_restarted_while_we_read_is_could_not_check_never_an_alert(self):
+        """The pid may be another process's by then: its tables (here the host's, with sshd and an
+        API port) must not be judged as the gateway's."""
+        for second in ((0, f"{PID + 1} true\n", ""), (0, "0 false\n", ""), (1, "", "No such object")):
+            with self.subTest(second=second):
+                run = runner(cat=(0, TCP_HEADER + API4 + TCP6_HEADER, ""), inspect=[(0, f"{PID} true\n", ""), second])
+                r = measure(run)
+                self.assertEqual((r["status"], r["reason"], r["unexpected"]),
+                                 ("could-not-check", "gateway-changed", "could-not-check"))
+
+    def test_an_unreadable_proc_and_unparsable_output(self):
+        self.assertEqual(measure(runner(cat=(1, "", "")))["reason"], "proc-unreadable")
         for out in ("", "garbage\n", TCP_HEADER + DASH4):
             with self.subTest(out=out[:10]):
-                r = C.measure(runner(cat=(0, out, "")))
+                r = measure(runner(cat=(0, out, "")))
                 self.assertEqual((r["status"], r["reason"]), ("could-not-check", "unparsable"))
 
 
@@ -89,9 +146,9 @@ class TestRecordAndMain(unittest.TestCase):
         self.d = os.path.join(tempfile.mkdtemp(), "listener-check")
 
     def main(self, argv=(), run=None, now="2026-10-07T12:00:00Z"):
-        out = io.StringIO()
+        out, run = io.StringIO(), run or runner()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            rc = C.main(list(argv), run=run or runner(), state_dir=self.d, now=now)
+            rc = C.main(list(argv), run=run, state_dir=self.d, now=now, read_tables=run.read_tables)
         return rc, out.getvalue()
 
     def read(self, name):
@@ -129,6 +186,24 @@ class TestRecordAndMain(unittest.TestCase):
         self.assertEqual(json.loads(self.read("ALERT")), first)                         # and never removed by a run
         self.assertEqual([json.loads(l)["status"] for l in self.read("history.jsonl").splitlines()],
                          ["alert", "alert", "ok"])
+        self.assertEqual([(json.loads(l)["ts"], json.loads(l)["unexpected"]) for l in self.read("alerts.jsonl").splitlines()],
+                         [("2026-10-07T12:00:00Z", [8642]), ("2026-10-07T12:15:00Z", [8080, 8642])])
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.d, "alerts.jsonl")).st_mode), 0o600)
+
+    def test_an_alert_and_its_clearing_outlive_the_history_cap(self):
+        """The history keeps about a month. A review held later must still learn that something
+        listened and that the marker was cleared: the alert log is never trimmed."""
+        self.main(run=runner(cat=(0, TCP_HEADER + DNS4 + DASH4 + API4 + TCP6_HEADER, "")), now="2026-06-01T00:00:00Z")
+        self.main(["--clear-alert"], now="2026-06-01T00:05:00Z")
+        with open(os.path.join(self.d, "history.jsonl"), "w") as f:      # months of healthy runs later
+            f.write("".join(json.dumps({"ts": "x", "status": "ok"}) + "\n" for _ in range(C.HISTORY_KEEP)))
+        self.main(now="2026-10-07T12:00:00Z")
+        rc, text = self.main(["--status"], now="2026-10-07T12:01:00Z")
+        s = json.loads(text[:text.rindex("listener check:")])
+        self.assertEqual(s["history_counts"], {"ok": C.HISTORY_KEEP})                   # the alert has aged out here
+        self.assertEqual(s["alert_log"], {"alert": 1, "alert-cleared": 1, "?": 0,
+                                          "first_ts": "2026-06-01T00:00:00Z", "last_ts": "2026-06-01T00:05:00Z"})
+        self.assertEqual(rc, 0)                                                         # healthy now; the log is for the review
 
     def test_could_not_check_exits_2_and_is_no_alert(self):
         rc, text = self.main(run=runner(ps=(0, "", "")))
@@ -148,8 +223,8 @@ class TestRecordAndMain(unittest.TestCase):
 
     def test_nothing_written_or_printed_carries_an_address_or_another_field(self):
         _, text = self.main(run=runner(cat=(0, TCP_HEADER + DNS4 + DASH4 + API4 + ESTAB4 + TCP6_HEADER, "")))
-        blob = text + self.read("last.json") + self.read("history.jsonl") + self.read("ALERT")
-        for fragment in ("0B00007F", "0100007F", "020012AC", "030012AC", "34451", "54004", "443", "10000", GW):
+        blob = text + self.read("last.json") + self.read("history.jsonl") + self.read("ALERT") + self.read("alerts.jsonl")
+        for fragment in ("0B00007F", "0100007F", "020012AC", "030012AC", "34451", "54004", "443", "10000", GW, str(PID)):
             self.assertNotIn(fragment, blob, fragment)
 
     def test_status_is_ok_only_for_a_fresh_ok_with_no_alert(self):
@@ -170,6 +245,7 @@ class TestRecordAndMain(unittest.TestCase):
         s = json.loads(text[:text.rindex("listener check:")])
         self.assertEqual((s["last"], s["last_age_seconds"], s["alert_present"], s["history_counts"]),
                          (None, None, False, {}))
+        self.assertEqual(s["alert_log"], {"alert": 0, "alert-cleared": 0, "?": 0, "first_ts": None, "last_ts": None})
         os.makedirs(self.d)
         with open(os.path.join(self.d, "last.json"), "w") as f:
             f.write("{not json")
