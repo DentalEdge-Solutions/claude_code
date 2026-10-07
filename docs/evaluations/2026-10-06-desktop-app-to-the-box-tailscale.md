@@ -3,8 +3,9 @@
 > **Date:** 2026-10-06 · **Asked:** is Tailscale a viable, secure way to connect the laptop's Hermes app to
 > the Hermes box? · **Answer:** yes as a second layer in front of the dashboard's own login, never instead of
 > it; but it is not needed to try the connection, which can be measured first over the SSH tunnel the box
-> already has. **Method:** official documentation read on 2026-10-06, and the repo's own records. Nothing was
-> measured, and nothing in the repo's code or on the box was changed by this evaluation.
+> already has. **Method:** official documentation read on 2026-10-06, the repo's own records, and one trial by
+> the operator on 2026-10-06 (section 4). Nothing in the repo's code or on the box was changed by this
+> evaluation.
 
 ## 1 · Sources, authority and what each verified (accessed 2026-10-06)
 
@@ -19,9 +20,8 @@
 | `.project-brain/decisions/candidates/2026-09-19-tailscale-is-the-one-adoption-…md` | repo (candidate, not canon) | Tailscale was already judged the one adoption from an external guide, as an ADDITIONAL layer beside mandatory dashboard auth; the guide's `--insecure` shape was rejected, because an unauthenticated dashboard was the entry point of the June 2026 attack recorded in SECURITY-AUDIT. Never implemented. |
 | `docs/security-reviews/2026-10-06-review-7.md`, D1.1 and D4.1 | repo | Host listeners today: SSH on 22, the dashboard on `127.0.0.1:9119`, the local DNS stubs. Gateway container listeners: `[9119]`. Port 8642 does not listen. |
 
-Not verified: whether Tailscale needs any inbound port on the host firewall (the ACL page does not say); whether
-the box's image runs the same backend under its dashboard service that the desktop page calls `hermes serve`;
-whether the desktop app accepts the box's basic auth through a forwarded port.
+Not verified: whether Tailscale needs any inbound port on the host firewall (the ACL page does not say). The
+two open questions about the desktop app were answered by the trial in section 4.
 
 ## 2 · Findings
 
@@ -55,3 +55,26 @@ whether the desktop app accepts the box's basic auth through a forwarded port.
 2. If always-on access is wanted, add Tailscale in the shape of finding 4, in the same box change as the
    periodic listener check (F50), so one security review covers both.
 3. Record the decision in the project brain when it is made; the 2026-09-19 candidate is still unpromoted.
+
+## 4 · Trial on 2026-10-06: the desktop app over the existing SSH tunnel
+
+The operator ran it; nothing on the box was changed, and no setting was edited from the app.
+
+| Step | Result |
+|---|---|
+| SSH local forward `19119 -> 127.0.0.1:9119` (BRING-UP Phase 7), then the dashboard in a browser | a wrong password was refused, the right one accepted |
+| Desktop app, Settings -> Gateways -> Remote gateway, URL `http://127.0.0.1:19119`, sign in with the dashboard's username and password | connected; the app asked for no other kind of sign-in |
+| One chat prompt asking for a one-word reply | answered by the box's Hermes |
+
+Versions: the box ran Hermes v0.21.5 (the pinned release). The laptop's Hermes was a git install on the `main`
+update channel at upstream `81c2145c` (2026-10-06), which is ahead of that release. So a newer laptop app worked
+against the older box for sign-in and chat; nothing else was exercised.
+
+What this settles: the box's dashboard service is a backend the desktop app can use, and its basic auth works
+through a forwarded port. The connection needs no change to the box and no Tailscale. Tailscale remains an
+optional convenience (finding 5), decided separately.
+
+Rule for use: while connected to the box, the app can edit the box's settings, model and stored credentials.
+A change made there alters reviewed configuration (`data/config.yaml`), so those screens are left alone unless
+the change is planned and followed by a review.
+
