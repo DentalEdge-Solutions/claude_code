@@ -161,6 +161,84 @@ Published to **loopback only** (`127.0.0.1:9119`), reachable only from this
 machine, and it **auto-restarts with the container**. Read your password with
 `grep HERMES_DASHBOARD_BASIC_AUTH_PASSWORD .env`.
 
+### Using the Hermes Desktop app against the box
+
+The Hermes Desktop app on the operator's laptop can use the box's Hermes as its backend. It connects
+to the dashboard service (port 9119) with the dashboard's username and password; the API server
+(port 8642) is not involved and stays off. Measured on 2026-10-06
+(`docs/evaluations/2026-10-06-desktop-app-to-the-box-tailscale.md`): sign-in and chat work through
+the SSH forward of `deploy/BRING-UP.md` Phase 7, with no change to the box. The login item below
+has kept that forward open on the operator's laptop since 2026-10-07.
+
+**The link.** The box publishes the dashboard on its own loopback only, so the laptop reaches it
+through an SSH local forward: `127.0.0.1:19119` on the laptop is `127.0.0.1:9119` on the box. In the
+app: Settings → Gateways → Remote gateway, URL `http://127.0.0.1:19119`. When the forward is down the
+app reports `connect ECONNREFUSED 127.0.0.1:19119`; that is the link, not the box.
+
+To keep the forward open without a terminal window (laptop only; nothing changes on the box):
+
+1. Give the box an alias in `~/.ssh/config`, so its address is written in one local file and nowhere
+   else:
+   ```
+   Host hermes-box
+     HostName <the box's address>
+     User hermesops
+     IdentityFile ~/.ssh/vps-hermes
+     IdentitiesOnly yes
+     ForwardAgent no
+     ServerAliveInterval 30
+     ServerAliveCountMax 3
+     AddKeysToAgent yes
+     UseKeychain yes
+   ```
+2. Prove the key works with no prompt BEFORE anything retries by itself. If the key has a
+   passphrase, first store it in the macOS keychain once
+   (`ssh-add --apple-use-keychain ~/.ssh/vps-hermes`, then `ssh-add -l` lists it); from then on the
+   Mac's login and screen lock are what protect the key. Then, once:
+   `ssh -o BatchMode=yes hermes-box true && echo LINK_OK`. The box runs fail2ban: every refused
+   attempt counts, and a login item that retries with a key the box refuses can get the laptop's
+   address banned. Two failures seen on first set-up (2026-10-07), and what they mean:
+   - `Host key verification failed`: the address in `~/.ssh/config` is not the one in
+     `~/.ssh/known_hosts`. It was a one-digit typo. SSH stops before it offers a key, so nothing
+     reaches the box. Compare the two files; never answer by switching the host-key check off.
+   - `Permission denied (publickey)`: the key has a passphrase and no agent holds it. This one IS a
+     failed login on the box, and the message prints the box's address: do not paste it anywhere.
+3. A LaunchAgent (`~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`) runs
+   `/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -L 19119:127.0.0.1:9119 hermes-box`
+   with `RunAtLoad`, `KeepAlive` and `ThrottleInterval` 120 (at most one attempt every two minutes).
+   Start it with `launchctl bootstrap gui/$(id -u) <the plist>`; stop it for good with
+   `launchctl bootout gui/$(id -u)/com.dentaledge.hermes-box-tunnel` and delete the file.
+   Check it: `launchctl print gui/$(id -u)/com.dentaledge.hermes-box-tunnel` shows `state = running`,
+   and `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19119/` answers `302` (the
+   dashboard's redirect to its sign-in page).
+
+**Rules for using it.** The app is a remote control for the gateway, with the same reach as the
+dashboard password:
+
+- **Chat only.** The app's Settings, Model and Credentials screens edit the BOX's configuration
+  (`data/config.yaml` and the gateway's stored settings), and it has a terminal and a file browser
+  inside the gateway container. A change made there alters what the security review measured (the
+  `mcp_servers` block of D10.6, the `platforms.api_server.enabled: false` switch of D4.1, the model
+  and its `provider_routing`). Change nothing there unless the change is planned and a review
+  follows.
+- **Know which Hermes you are talking to.** The app also lists "This device", the laptop's own
+  Hermes: a different model, different keys, no client data. Label the box's entry clearly.
+- **Audits keep their limits.** A chat-triggered audit asked from the app goes through the same
+  broker: one run per client per UTC day, and the kill switch applies.
+- **No key goes into the app.** The box's OpenRouter key stays on the box (see "The OpenRouter key is
+  the box's alone"). The app needs only the dashboard's username and password.
+- **The laptop is now part of the box's exposure.** Whoever can use the unlocked laptop while the
+  link is up and the app is signed in can drive the gateway. Lock the laptop; sign out of the app
+  before lending it.
+- **The fallback always works.** If an app update stops it talking to the box's pinned version, use
+  `sudo docker compose exec -it hermes-agent hermes chat` on the box. The box is never upgraded to
+  suit the app; an upgrade follows `SECURITY-AUDIT.md` and a review.
+
+For a security review, D2.1's dashboard statement says the dashboard is on and that the Desktop app
+is one of its clients. `HERMES_DASHBOARD_BASIC_AUTH_SECRET` is not set on the box, so the app is
+signed out whenever the gateway restarts; setting it adds a secret to the gateway `.env`, which the
+review collector must first be taught to list.
+
 ## Kanban review pipeline (first multi-agent orchestration — C2)
 
 The first AIOS multi-agent use-case: a fixed-template, **read-only** review pipeline
