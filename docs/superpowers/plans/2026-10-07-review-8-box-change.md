@@ -152,8 +152,22 @@ items), `bin/security-review-checklist.test.py`, `deploy/BRING-UP.md`, `README.m
    live refusal checks only if older than 30 days (last 2026-10-02), a trial collection, the real collection,
    a same-day laptop bundle, the evidence file, a fresh reviewer against v1.17.
 
-## Open questions for the build
+## What the build changed from this plan (2026-10-07)
 
-- Whether the collector's env reader already returns a single-quoted value unquoted (step 7 decides between
-  fixing the reader and choosing `$$`).
-- Whether `REPORT-TEMPLATE.md` and `security-review-checklist.test.py` pin the item list (step 9).
+- **The check reads the host's `/proc`, not the container's `cat`** (F53). Step 2 planned
+  `docker exec <id> cat /proc/net/tcp`. The check now takes the container's init pid from
+  `docker inspect` and reads `/proc/<pid>/net/tcp` and `tcp6` on the host; a pid that changed
+  during the read is `could-not-check` (`gateway-changed`). D4.5 expects the check's result to
+  equal D4.1's.
+- **An alert log that is never trimmed** (`alerts.jsonl`, F54): the capped history alone would
+  have lost a cleared alert after a month. D4.5 reports `alert_log`.
+- **The installer gained two things beyond `--quote single`:** `--stdin` (the value from a pipe,
+  never a terminal), so the hash goes from the container to the file without being seen or
+  pasted, and `generate` (32 random bytes, base64), so the signing secret is made on the box and
+  never shown.
+- **Single quotes are the one form for the hash.** The env reader returns a single-quoted value
+  exactly and a `$$`-escaped one as written, so `$$` would read as `differs-from-file`.
+- **`REPORT-TEMPLATE.md` lists no items**, so it is unchanged; the checklist test compares the box
+  items with the collector's `PROBES`, which now has `D4.5`.
+- The BRING-UP block for the dashboard is "Step 7d".
+
