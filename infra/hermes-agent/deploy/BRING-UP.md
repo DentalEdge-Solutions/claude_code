@@ -1507,7 +1507,7 @@ the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three 
 gitignored `security-reviews/`; only the report is committed.
 
 1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
-2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is four lines, each a unit's name followed by a date and time (a name with nothing after it means that unit is not running: stop and say so), then the box's boot time, then up to six lines of the update log. Then count the `Match` blocks in the sshd configuration (D1.7): `sudo sh -c 'cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -ciE "^[[:space:]]*match[[:space:]]"'` prints the number of `Match` lines; expected `0`. Put the number in the evidence file (D1.7 cannot pass without it); another number needs your statement of what each block sets. The command reads those two fixed places only: it also prints `0` when neither can be read, and a `Match` line in a file that an `Include` brings in from another directory is not counted, so say in the evidence that the count covers `/etc/ssh/sshd_config` and `/etc/ssh/sshd_config.d/*.conf` (rehearsed on a stand-in server: `0`, `1` and `2`; on the box it runs for the first time). After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
+2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is four lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. Then count the `Match` blocks in the sshd configuration (D1.7): `sudo sh -c 'cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -ciE "^[[:space:]]*match[[:space:]]"'` prints the number of `Match` lines; expected `0`. Put the number in the evidence file (D1.7 cannot pass without it); another number needs your statement of what each block sets. The command reads those two fixed places only: it also prints `0` when neither can be read, and a `Match` line in a file that an `Include` brings in from another directory is not counted, so say in the evidence that the count covers `/etc/ssh/sshd_config` and `/etc/ssh/sshd_config.d/*.conf` (rehearsed on a stand-in server: `0`, `1` and `2`; on the box it runs for the first time). After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
 3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):
    `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <review #5 execstart_sha256> --last-pass-collected-at <the last PASS box bundle's collected_at> > ~/bundle-box.json`
    (the collector re-runs both probes as D10.1 and D10.2, so this step takes as long as step 2 again; `--last-pass-execstart` is the last PASS report's D4.2 `execstart_sha256`, 64 lowercase hex characters. `--last-pass-collected-at` is in the last PASS report's header from review #9 on; for review #9 itself, read it from review #8's bundle.)
@@ -1840,15 +1840,22 @@ Expected: `STOP_EXIT=0`; `check_while_stopped_rc` NOT `0` (systemd reports the j
 could not look); `UP_EXIT=0`; `hermes-agent running Up …`; `hash: file == container (len 86)`;
 `secret: in the container (len 44)`; `plaintext: not in the container`; `check_after_rc=0`;
 `listener check: OK`; a timer line with a NEXT time. Keep this output for the next review's
-evidence (D4.5, D4.6). Every other output:
+evidence (D4.5, D4.6). Every other output is listed below. **These instructions are reasoned from
+the block's text, not measured:** every rehearsal of this block printed the expected lines, so none
+of the outputs below has been produced.
 
 - `STOP_EXIT` or `UP_EXIT` not `0`: the dashboard may be down. Run
   `sudo docker compose ps -a hermes-agent` and report what it prints. SSH is not affected.
 - `check_while_stopped_rc=0`: the check did not find the gateway down. It harms nothing in this
   step; write it in the evidence, because the review expects this run to have failed.
-- `HASH DIFFERS`: run block 1 again, then this block.
-- No `secret:` line at all: that line is printed once for each line the container returns, so no
-  line means the container holds no signing secret. Run block 1 again, then this block.
+- `HASH DIFFERS` together with a `secret:` line: run block 1 again, then this block.
+- `HASH DIFFERS` and no `secret:` line: the `docker compose exec` itself failed, so the gateway is
+  not up. See the `UP_EXIT` bullet above; do not run block 1 again for this.
+- `secret: in the container (len N)` with N other than `44`: the signing secret is not the one
+  block 1 generates. Run block 1 again, then this block.
+- No `secret:` line while the `hash:` line is as expected: that line is printed once for each line
+  the container returns, so no line means the container holds no signing secret. Run block 1 again,
+  then this block.
 - `PLAINTEXT STILL SET`: stop. Step 7d was not finished, and a plaintext password wins over the
   new hash.
 - `check_after_rc` not `0`, or a last line other than `listener check: OK`: run
@@ -1929,22 +1936,25 @@ The order rule: **the box runs fail2ban, so a refused login may count against th
 nothing that retries by itself is switched to the new key before the hand tests pass.** Whether the
 box accepts the new key at all is the first thing tested, by ONE login that is run alone (LAPTOP 3a,
 the gate). Nothing else runs until that one login prints the expected line. On a stand-in server
-with Ubuntu 24.04's own fail2ban (1.0.2, its default settings) one refused key did not raise
-fail2ban's count, and a login as a user that does not exist did. The box's fail2ban settings have
-not been read, so this step treats every refused login as counted. Two of the tests (T5b and T7)
+with Ubuntu 24.04's own fail2ban (1.0.2, its packaged settings except `maxretry`, which was raised
+to 100 for the rehearsal so that no ban could interfere) one refused key did not raise fail2ban's
+count, and a login as a user that does not exist did. The real box's jail was not measured, so this
+step treats every refused login as counted. Two of the tests (T5b and T7)
 were added after the first rehearsal: T5b because the port-1 limit depends on the kernel setting in
 the table, T7 because the first file-transfer test had been written with the wrong port option for
 `sftp`, so it failed whatever the key allowed and tested nothing.
 
-How the blocks below were rehearsed (the evaluation's section 1.8 has every run): the two box
+How the blocks below were rehearsed (the evaluation's sections 1.8 and 1.9 have every run): the two box
 blocks in an interactive bash on a stand-in server; LAPTOP 1, 2, 3a, 3b and 6 in an interactive zsh
 on a stand-in laptop (Linux) against that server; LAPTOP 1b, 4a, 5a and 5b in zsh on this Mac, with
 the home directory pointed at a scratch directory. **LAPTOP 4b, 4c, 5c and 6b could not be run for
 real** without changing the real login item, the real SSH agent or the login keychain: they ran
 only with `launchctl` and `ssh-add` replaced by stand-ins, so their `launchctl` and `ssh-add` lines
-run for the first time on this laptop. Each block says so where it stands.
+run for the first time on this laptop. The same holds for the one-line stop command after LAPTOP
+4c, which was not run at all. Each block says so where it stands.
 
-**Keep the administrative session on the box open from VPS 0 until LAPTOP 6 has succeeded.** It is
+**Keep the administrative session on the box open from VPS 0 until the clean-up at the end of this
+step, after LAPTOP 6 and LAPTOP 6b have succeeded.** It is
 the way back in if anything goes wrong with a key. If that session is lost and `ssh hermes-box` no
 longer gets in, the provider's browser terminal still reaches the box without SSH (step 1d, item 5).
 
@@ -1984,7 +1994,11 @@ printf '%s %s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:9119",permitlis
 
 Expected: `line on the clipboard: 182 characters` (181 and a line break). Any other number: do not
 paste; the key's public file is missing or is not as LAPTOP 1 made it (rehearsed with the file
-missing: `102 characters`). Stop and say so.
+missing: `102 characters`). VPS 1 is still waiting at `Paste the line:` on the box: press Return
+there, with nothing pasted. Expected: `REFUSED: not the expected line (other options, a cut key, or
+extra words) -- nothing written` after about a second, and the shell's prompt again (rehearsed on
+the stand-in server: that line, `authorized_keys` byte for byte unchanged, no backup made). Then
+stop and say so.
 
 VPS 1 (`hermesops@<host>`, alone; one function and its call):
 
@@ -2028,14 +2042,31 @@ addition does not overwrite that copy. Then on the laptop: `pbcopy < /dev/null`.
 LAPTOP 2: the alias, with the address copied from the existing one and never printed.
 
 ```bash
-A=$(ssh -G hermes-box | awk '$1=="hostname"{print $2}'); grep -q '^Host hermes-box-tunnel$' ~/.ssh/config && echo "alias exists" || printf '\nHost hermes-box-tunnel\n  HostName %s\n  User hermesops\n  IdentityFile ~/.ssh/hermes-box-tunnel\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  ServerAliveInterval 30\n  ServerAliveCountMax 3\n' "$A" >> ~/.ssh/config; unset A
+A=$(ssh -G hermes-box | awk '$1=="hostname"{print $2}'); if grep -q '^Host hermes-box-tunnel$' ~/.ssh/config; then echo "alias exists"; elif [ -z "$A" ]; then echo "STOPPED: could not read the hermes-box alias -- nothing written"; elif [ "$A" = hermes-box ]; then echo "STOPPED: the hermes-box alias has no HostName of its own -- nothing written"; else printf '\nHost hermes-box-tunnel\n  HostName %s\n  User hermesops\n  IdentityFile ~/.ssh/hermes-box-tunnel\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  ServerAliveInterval 30\n  ServerAliveCountMax 3\n' "$A" >> ~/.ssh/config; fi; unset A
 ssh -G hermes-box-tunnel | grep -cE '^(identityfile .*/hermes-box-tunnel|identitiesonly yes|identityagent none)$'
 ```
 
 Expected: `3` (alias exists: it prints `alias exists` first, then `3`). Measured on a stand-in
 laptop whose config held only the `hermes-box` block: `3`. A `Host *` block on the real laptop that
-sets `IdentityAgent` or `IdentitiesOnly` would change the count (reasoned, not measured). Another
-number: stop, and do not run `ssh -G hermes-box-tunnel` by itself (its output holds the address).
+sets `IdentityAgent` or `IdentitiesOnly` would change the count (reasoned, not measured). Every
+other output:
+
+- `STOPPED: could not read the hermes-box alias -- nothing written`, then `0`: `ssh` could not read
+  the `hermes-box` alias (its own message stands above the line; it names a file and a line number,
+  not the address). Nothing was written. Stop and report it.
+- `STOPPED: the hermes-box alias has no HostName of its own -- nothing written`, then `0`:
+  `~/.ssh/config` has no `Host hermes-box` block with a `HostName` line (or there is no such file).
+  For a name it has no block for, `ssh -G` answers with the name itself, so the new alias would
+  point at the word `hermes-box` and not at the box; the block refuses to write that. Stop and
+  report it.
+
+Both were rehearsed on the stand-in laptop: a config with no `hermes-box` block, a `hermes-box`
+block with no `HostName` line, no config file, and two configs `ssh` cannot read; each time the
+config was byte for byte unchanged and the count was `0`. The same on this Mac's own `ssh` with
+scratch configs (all but the missing file). The real `~/.ssh/config` was not read.
+
+A number other than `3` with no `STOPPED` line before it: stop, and do not run
+`ssh -G hermes-box-tunnel` by itself (its output holds the address).
 Run this instead, which prints only the three settings, and say which one differs from the block
 above; do not go on until the key, the agent setting and `IdentitiesOnly` are as that block writes
 them:
@@ -2123,7 +2154,7 @@ file is not the one the README describes (ten arguments, the last one `hermes-bo
 P=~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist; K=~/hermes-box-tunnel.plist.before-tunnel-key; B=/usr/libexec/PlistBuddy
 N=$($B -c 'Print :ProgramArguments' "$P" 2>/dev/null | grep -c .); A=$($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null)
 if [ "$N" = 12 ] && [ "$A" = hermes-box ]; then command cp -p "$P" "$K" && $B -c 'Set :ProgramArguments:9 hermes-box-tunnel' "$P" >/dev/null 2>&1; [ "$($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null)" = hermes-box-tunnel ] && echo "SWITCHED IN THE FILE" || echo "NOT SWITCHED: the change did not reach the file -- stop"; elif [ "$N" = 12 ] && [ "$A" = hermes-box-tunnel ]; then echo "ALREADY SWITCHED: nothing changed"; else echo "NOT SWITCHED: the file is not as expected -- stop"; fi
-echo "the alias the login item uses: $($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null)"; unset P K B N A
+A=$($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null); case "$A" in hermes-box-tunnel|hermes-box) echo "the alias the login item uses: $A";; *) echo "the alias the login item uses: something else (not shown)";; esac; unset P K B N A
 ```
 
 Expected: `SWITCHED IN THE FILE`, then `the alias the login item uses: hermes-box-tunnel`. Every
@@ -2131,8 +2162,10 @@ other output:
 
 - `ALREADY SWITCHED: nothing changed`, with `hermes-box-tunnel` on the second line: the block was
   run before. Go on.
-- `NOT SWITCHED: the file is not as expected -- stop`: nothing was changed. The second line shows
-  what stands in the tenth place. Stop and report it.
+- `NOT SWITCHED: the file is not as expected -- stop`: nothing was changed. The second line says
+  which of three things stands in the tenth place: `hermes-box-tunnel`, `hermes-box`, or
+  `something else (not shown)`. What it is, is not printed on purpose: a login item written with
+  `user@address` instead of an alias would print the address. Stop and report both lines.
 - `NOT SWITCHED: the change did not reach the file -- stop`: the file could not be written. Stop
   and report it.
 - A second line that does not end in `hermes-box-tunnel`: stop. LAPTOP 4b and LAPTOP 5c refuse to
@@ -2143,7 +2176,9 @@ and not next to the login item (whether macOS would read a second file in that f
 measured). Rehearsed on scratch copies of a file built from the README's ten arguments: the good
 file (ten arguments before and after, the tenth changed, every other value equal; the tool writes
 the keys back in another order); a second run; a file with one more `-o` pair; no file; a file that
-could not be written. `plutil -replace` is not used: on this macOS it inserted an eleventh argument
+could not be written (second line: `hermes-box`); a file whose tenth argument is written
+`user@host` (second line: `something else (not shown)`, as for the extra pair and for no file).
+`plutil -replace` is not used: on this macOS it inserted an eleventh argument
 instead of replacing the tenth (measured in the review of this runbook).
 
 LAPTOP 4b: reload the login item, only after LAPTOP 4a's second line reads `hermes-box-tunnel`.
@@ -2160,9 +2195,13 @@ not loaded) is not a failure by itself. Every other output:
 
 - `NOT RELOADED: the file does not name hermes-box-tunnel -- stop`: LAPTOP 4a did not switch the
   file. Nothing was touched. Do not go on to the next block.
-- `RELOADED: bootstrap rc=` another number: the login item may not be loaded now. The link and the
-  Desktop app are then down; nothing is retrying and the box is not affected. Run LAPTOP 4b once
-  more. If the number is again not `0`, stop and report it; do not go on to the next block.
+- `RELOADED: bootstrap rc=` another number (`rc=5`, for example): this is NOT a success, although
+  the line begins with `RELOADED`. Only `rc=0` is. One of two things is then true. Either the login
+  item is not loaded now: the link and the Desktop app are down and nothing is retrying. Or
+  `launchctl bootout` failed and the OLD definition is still loaded: the old item keeps running on
+  the administrative key, which still works. LAPTOP 4c's counts tell which (`ssh on the old alias:
+  1` is the second). The box is not affected in either case. Run LAPTOP 4b once more. If the number
+  is again not `0`, run LAPTOP 4c, then stop and report both outputs; do not go on to LAPTOP 5a.
 
 LAPTOP 4c: is the link up, and on which alias? Read-only; it can be run again. **First run on this
 laptop, not rehearsed for real**: its `launchctl print` ran only as a stand-in, and the other two
@@ -2177,15 +2216,39 @@ echo "ssh on the new alias: $(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box-tunne
 Expected: `state = running`; `dashboard through the link -> 302`; `ssh on the new alias: 1; ssh on
 the old alias: 0`. Every other output:
 
-- No `state = ` line, or another state: the login item starts its `ssh` at most once every two
-  minutes. Wait two minutes and run LAPTOP 4c again. If it is still not `running`, stop and report
-  it; do not go on to the next block.
-- A code other than `302`: the same (wait two minutes, run it again, then stop and report); do not
-  go on to the next block.
-- `ssh on the new alias: 0`: no forward is running on the new key. Do not go on to the next block.
+- No `state = ` line, or another state; or a code other than `302`; or `ssh on the new alias: 0`
+  (no forward is running on the new key): the login item starts its `ssh` at most once every two
+  minutes. Wait two minutes and run LAPTOP 4c again, ONCE. If any of the three is still not as
+  expected, do not go on to the next block, and FIRST stop the login item (below), then report.
 - `ssh on the old alias:` anything but `0`: a forward on the administrative key is still running.
   After LAPTOP 5c the box would refuse its next login every two minutes. Stop and report it; do not
-  go on to the next block.
+  go on to the next block. (LAPTOP 5c counts these processes again and refuses to run while there
+  is one.)
+
+**To stop the login item, so that nothing retries by itself.** After LAPTOP 4b the item is loaded
+on the new key, and macOS starts its `ssh` again every two minutes for as long as it is loaded:
+each start is a login at the box. When the second run of LAPTOP 4c is still not as expected, run
+this before you report anything. **First run on this laptop, not rehearsed** (it is the stop
+command the README gives for the login item; what it prints was not seen):
+
+```bash
+launchctl bootout gui/$(id -u)/com.dentaledge.hermes-box-tunnel
+```
+
+Then run LAPTOP 4c once more and report its lines with the rest: both counts must now be `0`, and
+there must be no `state = running` line. What this leaves: the link and the Desktop app are down;
+nothing is retrying; the administrative key is untouched (its passphrase is still in the keychain,
+because LAPTOP 5b and 5c have not run), and `ssh hermes-box` works as before.
+
+To go back to the working state from before the laptop part of this step, two commands, in this
+order: `command cp -p ~/hermes-box-tunnel.plist.before-tunnel-key ~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`
+puts back the file as LAPTOP 4a found it (rehearsed on a scratch copy, with `cp` set up to ask: no
+question, the file byte for byte as before, its tenth argument `hermes-box`), and
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`
+starts the login item from it (the README's start command; **not rehearsed**). The old alias still
+works at this point, because nothing of LAPTOP 5b and 5c has run. Then LAPTOP 4c must print
+`state = running`, `302` and `ssh on the new alias: 0; ssh on the old alias: 1`. The new key's line
+stays on the box; it harms nothing there.
 
 LAPTOP 5a: a check of the passphrase, BEFORE anything is removed (alone: it asks). It makes no
 connection; it only opens the key file on the laptop.
@@ -2249,28 +2312,42 @@ LAPTOP 5c: only now, the administrative key leaves the agent and the keychain (o
 its call). Run it only after LAPTOP 4c printed its three expected lines and LAPTOP 5a printed
 `PASSPHRASE OK` after asking. **First run on this laptop, not rehearsed against the real keychain**:
 the rehearsal ran it with `ssh-add` replaced by a stand-in that drops the two `--apple-…` options
-and talks to a scratch agent, so the counting and the two refusals were run, and the keychain was
-not.
+and talks to a scratch agent, so the counting and the three refusals were run, and the keychain was
+not. The line that counts `ssh` processes was run with another port number (`39119`) against
+stand-in processes, as in LAPTOP 4c.
 
 ```bash
 keychain_out() {
   local FP K="$HOME/.ssh/vps-hermes"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:9' "$HOME/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist" 2>/dev/null)" = hermes-box-tunnel ] || { echo "STOPPED: the login item's file does not name hermes-box-tunnel -- nothing removed"; return; }
+  [ "$(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box$' | wc -l | tr -d ' ')" = 0 ] || { echo "STOPPED: an ssh on the old alias (hermes-box) is still running -- nothing removed"; return; }
   FP=$(ssh-keygen -lf "$K.pub" 2>/dev/null | awk '{print $2}')
   [ -n "$FP" ] || { echo "STOPPED: could not read $K.pub -- nothing removed"; return; }
   ssh-add --apple-use-keychain "$K"; echo "in the agent before: $(ssh-add -l | grep -cF "$FP")"
   ssh-add --apple-use-keychain -d "$K"; echo "in the agent after: $(ssh-add -l | grep -cF "$FP")"
-  ssh-add --apple-load-keychain >/dev/null 2>&1; echo "supplied by the keychain: $(ssh-add -l | grep -cF "$FP")"
+  ssh-add --apple-load-keychain >/dev/null 2>&1; echo "keychain load rc=$?"; echo "supplied by the keychain: $(ssh-add -l | grep -cF "$FP")"
 }; keychain_out; unset -f keychain_out
 ```
 
 Expected: `Identity added: …`, `in the agent before: 1`, `Identity removed: …`, `in the agent
-after: 0`, `supplied by the keychain: 0`. If the first line asks for the passphrase (the keychain
-did not hold it, as on a second run), type it: that line stores it and the next line removes it
-again. Every other output:
+after: 0`, `keychain load rc=0`, `supplied by the keychain: 0`. If the first line asks for the
+passphrase (the keychain did not hold it, as on a second run), type it: that line stores it and the
+next line removes it again. Every other output:
 
 - `STOPPED: the login item's file does not name hermes-box-tunnel -- nothing removed`: LAPTOP 4a
   was not done. Stop; with the key gone the login item would be refused every two minutes.
+- `STOPPED: an ssh on the old alias (hermes-box) is still running -- nothing removed`: the FILE
+  names the new alias, but macOS runs the definition it LOADED, and an `ssh` of the old one is
+  still there: LAPTOP 4b's reload did not take. Stop, run LAPTOP 4c, and report its lines.
+  (Rehearsed with a stand-in process: this line, and the stand-in for `ssh-add` received no call.
+  The count is also `0` when `pgrep` itself cannot run; LAPTOP 4c's `ssh on the new alias: 1`, just
+  before, is what shows that it can.)
+- `keychain load rc=` anything but `0`: the laptop could not ask the keychain, so the
+  `supplied by the keychain: 0` under it proves nothing. Stop and report both lines; do not go on
+  to LAPTOP 6. (Rehearsed with a stand-in that ends with `1`: `keychain load rc=1`, then `0`. Not
+  measured: what the real `ssh-add --apple-load-keychain` ends with when the keychain holds no
+  passphrase at all. `rc=0` is what is expected of it; if the laptop prints another number in that
+  state, this stop is a false alarm, and it is still the right thing to report.)
 - `STOPPED: could not read …/vps-hermes.pub -- nothing removed`: the key's public file is missing.
   Stop and report it.
 - `in the agent before: 0`: the key could not be loaded, so the removal had nothing to act on.
@@ -2318,14 +2395,18 @@ keychain_check() {
   FP=$(ssh-keygen -lf "$K.pub" 2>/dev/null | awk '{print $2}')
   [ -n "$FP" ] || { echo "STOPPED: could not read $K.pub"; return; }
   echo "in the agent after the login: $(ssh-add -l | grep -cF "$FP")"
-  ssh-add --apple-load-keychain >/dev/null 2>&1; echo "supplied by the keychain after the login: $(ssh-add -l | grep -cF "$FP")"
+  ssh-add --apple-load-keychain >/dev/null 2>&1; echo "keychain load rc=$?"; echo "supplied by the keychain after the login: $(ssh-add -l | grep -cF "$FP")"
 }; keychain_check; unset -f keychain_check
 ```
 
-Expected: `in the agent after the login: 0` and `supplied by the keychain after the login: 0`.
-Every other output:
+Expected: `in the agent after the login: 0`, `keychain load rc=0` and `supplied by the keychain
+after the login: 0`. Every other output:
 
 - `STOPPED: could not read …/vps-hermes.pub`: report it.
+- `keychain load rc=` anything but `0`: the laptop could not ask the keychain, so the `0` under it
+  proves nothing. Stop and report both lines; the step is not complete, and the clean-up below
+  waits. (Rehearsed with a stand-in that ends with `1`; the real command's status with an empty
+  keychain was not measured, as in LAPTOP 5c.)
 - `in the agent after the login:` anything but `0`: `AddKeysToAgent` still applies to `hermes-box`,
   and the key stays in the agent until you log out of the laptop. Take it out with
   `ssh-add -d ~/.ssh/vps-hermes` (not rehearsed) and report it.
@@ -2333,10 +2414,12 @@ Every other output:
   `hermes-box`, and the passphrase is in the keychain again. The step is NOT complete. Report it;
   do not run LAPTOP 5c again by yourself.
 
-ONLY when LAPTOP 6 got you to the box's prompt by typing the passphrase: close the first
-administrative session, and remove the three backups. On the box (in the new session):
-`rm -f ~/.ssh/authorized_keys.before-tunnel-key`. On the laptop:
-`rm -f ~/.ssh/config.before-tunnel-key ~/hermes-box-tunnel.plist.before-tunnel-key`.
+ONLY when LAPTOP 6 got you to the box's prompt by typing the passphrase, AND LAPTOP 6b printed its
+three expected lines: remove the three backups, then close the first administrative session. On
+the box, in the FIRST administrative session (the one kept open since VPS 0; the session LAPTOP 6
+opened was closed with `exit`): `rm -f ~/.ssh/authorized_keys.before-tunnel-key`. On the laptop:
+`rm -f ~/.ssh/config.before-tunnel-key ~/hermes-box-tunnel.plist.before-tunnel-key`. Then type
+`exit` in the first administrative session.
 
 For a work session with several connections, `ssh-add -t 1h ~/.ssh/vps-hermes` keeps the key in
 memory for an hour and stores nothing in the keychain. To replace the limited key later: make a new
