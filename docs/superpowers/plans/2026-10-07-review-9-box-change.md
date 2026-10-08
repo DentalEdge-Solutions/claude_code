@@ -1410,8 +1410,7 @@ condition. Nothing here is run by the agent.
   expected: `client_audit_lib.py` changed after it started on 2026-10-01). Not during an audit. Record the time.
 - [ ] **Step 5:** quit the Desktop app. BRING-UP step 7e, blocks 0 to 3. Record block 2's output. Sign in again.
 - [ ] **Step 6:** BRING-UP step 7f, in the runbook's own order: VPS 0, LAPTOP 1, VPS 1 (left waiting), LAPTOP 1b, LAPTOP 2, LAPTOP 3a (the gate, alone), LAPTOP 3b, LAPTOP 4a, 4b, 4c, LAPTOP 5a, 5b, 5c, LAPTOP 6, 6b, then the clean-up. If Task 0 found a key on another account
-  and the operator chose to remove it, a block for that (the file moved aside, then deleted after a new
-  administrative login succeeds).
+  and the operator chose to remove it, the optional `VPS root key` block of step 7f, on the operator's decision.
 - [ ] **Step 7 (VPS):** `sudo show-listener-check` ends `listener check: OK`; a second trial collection shows
   D1.7 with exactly the two keys and D4.6 with empty file lists.
 
