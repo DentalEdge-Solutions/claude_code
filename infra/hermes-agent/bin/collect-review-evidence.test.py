@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, hashlib, importlib.util, io, json, os, shutil, sys, tempfile, time, unittest
+import base64, contextlib, hashlib, importlib.util, io, json, os, shutil, sys, tempfile, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -2705,6 +2705,139 @@ class TestDashboardHashAndSessionSecret(Base):
         bundle = CE.collect(self.host(), self.KEY)
         self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
         self.assertNotIn(self.SECRET, json.dumps(bundle))
+
+
+TUNNEL_OPTS = 'restrict,port-forwarding,permitopen="127.0.0.1:9119",permitlisten="127.0.0.1:1",command="/bin/false"'
+
+
+def _keybody(seed):
+    """A well-formed ed25519 public key body (test value: 32 equal bytes)."""
+    return base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00 " + bytes([seed]) * 32).decode()
+
+
+class TestD17AcceptedKeys(Base):
+    SSHD = ("authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2\nauthorizedkeyscommand none\n"
+            "authorizedprincipalsfile none\ntrustedusercakeys none\nallowtcpforwarding yes\n"
+            "allowstreamlocalforwarding yes\ngatewayports no\npermittunnel no\npermitrootlogin no\n")
+    PASSWD = ("root:x:0:0:root:/root:/bin/bash\n"
+              "hermesops:x:1000:1000::/home/hermesops:/bin/bash\n"
+              "hermes-broker:x:997:997::/var/lib/hermes-broker:/usr/sbin/nologin\n"
+              "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+              "bin:x:2:2:bin:/usr/sbin:/usr/sbin/nologin\n")
+
+    def setUp(self):
+        super().setUp()
+        self._w("/etc/passwd", self.PASSWD)
+        self.outputs[("sshd", "-T")] = (0, self.SSHD, "")
+
+    def _keys(self, home, body):
+        p = self._w(home + "/.ssh/authorized_keys", body)
+        os.chmod(p, 0o600)
+        return p
+
+    def _two(self):
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)} operator@laptop.example\n"
+                                      f"{TUNNEL_OPTS} ssh-ed25519 {_keybody(2)} hermes-box-tunnel\n")
+
+    def test_two_keys_one_bare_one_limited(self):
+        self._two()
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual(d["accounts_checked"], 5)
+        self.assertEqual(len(d["files"]), 1)
+        row = d["files"][0]
+        self.assertEqual((row["path"], row["users"], row["kind"], row["mode"], row["unparsed_lines"]),
+                         ("/home/hermesops/.ssh/authorized_keys", ["hermesops"], "file", "0o600", 0))
+        self.assertEqual(row["keys"][0], {"type": "ssh-ed25519", "options": [],
+                                          "sha12": hashlib.sha256(base64.b64decode(_keybody(1))).hexdigest()[:12]})
+        self.assertEqual(row["keys"][1]["options"],
+                         ['command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',
+                          "port-forwarding", "restrict"])
+        self.assertNotEqual(row["keys"][0]["sha12"], row["keys"][1]["sha12"])
+
+    def test_no_key_body_and_no_comment_leave_the_collector(self):
+        self._two()
+        out = json.dumps(CE.d1_7(self.host(), {}))
+        for gone in (_keybody(1), _keybody(2), "laptop.example", "operator@", "hermes-box-tunnel"):
+            self.assertNotIn(gone, out)
+
+    def test_the_sshd_settings_that_accept_keys_or_forwards_are_reported(self):
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual(d["sshd"], {"authorizedkeysfile": ".ssh/authorized_keys .ssh/authorized_keys2",
+                                     "authorizedkeyscommand": "none", "authorizedprincipalsfile": "none",
+                                     "trustedusercakeys": "none", "allowtcpforwarding": "yes",
+                                     "allowstreamlocalforwarding": "yes", "gatewayports": "no", "permittunnel": "no"})
+        self.assertEqual(d["files"], [])
+
+    def test_a_setting_sshd_did_not_print_is_could_not_check(self):
+        self.outputs[("sshd", "-T")] = (0, self.SSHD.replace("trustedusercakeys none\n", ""), "")
+        self.assertEqual(CE.d1_7(self.host(), {})["sshd"]["trustedusercakeys"], R.COULD_NOT_CHECK)
+
+    def test_sshd_failing_or_naming_no_key_file_is_could_not_check(self):
+        for result in ((1, "", "boom"), (0, "port 22\n", "")):
+            self.outputs[("sshd", "-T")] = result
+            with self.assertRaises(CE.CouldNotCheck):
+                CE.d1_7(self.host(), {})
+
+    def test_an_account_without_a_login_shell_is_read_too(self):
+        self._keys("/var/lib/hermes-broker", f"ssh-ed25519 {_keybody(3)}\n")
+        rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual([(r["users"], len(r["keys"])) for r in rows], [(["hermes-broker"], 1)])
+
+    def test_accounts_that_share_a_home_give_one_row_naming_both(self):
+        self._keys("/usr/sbin", f"ssh-ed25519 {_keybody(4)}\n")
+        rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual([r["users"] for r in rows], [["bin", "daemon"]])
+
+    def test_the_second_file_name_is_read(self):
+        self._w("/root/.ssh/authorized_keys2", f"ssh-ed25519 {_keybody(5)}\n")
+        rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual([r["path"] for r in rows], ["/root/.ssh/authorized_keys2"])
+
+    def test_percent_tokens_and_an_absolute_pattern_are_expanded(self):
+        self.outputs[("sshd", "-T")] = (0, self.SSHD.replace(".ssh/authorized_keys .ssh/authorized_keys2",
+                                                              "%h/.ssh/authorized_keys /etc/ssh/keys/%u"), "")
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
+        self._w("/etc/ssh/keys/root", f"ssh-ed25519 {_keybody(6)}\n")
+        self.assertEqual(sorted(r["path"] for r in CE.d1_7(self.host(), {})["files"]),
+                         ["/etc/ssh/keys/root", "/home/hermesops/.ssh/authorized_keys"])
+
+    def test_a_token_the_collector_does_not_expand_is_could_not_check(self):
+        self.outputs[("sshd", "-T")] = (0, self.SSHD.replace(".ssh/authorized_keys .ssh/authorized_keys2",
+                                                              "/etc/ssh/keys/%U"), "")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE.d1_7(self.host(), {})
+
+    def test_comments_and_blank_lines_are_skipped_and_other_lines_are_counted(self):
+        self._keys("/home/hermesops", f"# a comment\n\nssh-ed25519 {_keybody(1)}\nnot a key line\n"
+                                      f"ssh-ed25519 not*base64\nssh-ed25519\n"
+                                      f'command="unbalanced ssh-ed25519 {_keybody(2)}\n')
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((len(row["keys"]), row["unparsed_lines"]), (1, 4))
+
+    def test_a_quoted_value_with_a_space_and_a_comma_is_one_option(self):
+        self._keys("/home/hermesops", f'command="/bin/echo a,b c",no-pty ssh-ed25519 {_keybody(1)}\n')
+        key = CE.d1_7(self.host(), {})["files"][0]["keys"][0]
+        self.assertEqual(key["options"], ["command=<withheld>", "no-pty"])
+
+    def test_an_address_or_an_odd_command_is_withheld(self):
+        self._keys("/home/hermesops",
+                   f'from="203.0.113.7",permitopen="203.0.113.9:443",command="/usr/bin/x --token=abc",'
+                   f'permitopen="127.0.0.1:9119",environment="A=b" ssh-ed25519 {_keybody(1)}\n')
+        out = CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"]
+        self.assertEqual(out, ["command=<withheld>", "environment=<withheld>", "from=<withheld>",
+                               'permitopen="127.0.0.1:9119"', "permitopen=<withheld>"])
+        self.assertNotIn("203.0.113", json.dumps(out))
+
+    def test_a_symlink_in_place_of_the_file_is_never_read_as_empty(self):
+        os.makedirs(os.path.join(self.root, "home/hermesops/.ssh"))
+        os.symlink("/etc/passwd", os.path.join(self.root, "home/hermesops/.ssh/authorized_keys"))
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["kind"], row["keys"], row["unparsed_lines"]),
+                         ("symlink", R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_certificate_authority_line_is_a_key_with_that_option(self):
+        self._keys("/home/hermesops", f"cert-authority ssh-ed25519 {_keybody(7)}\n")
+        self.assertEqual(CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"], ["cert-authority"])
 
 
 if __name__ == "__main__":

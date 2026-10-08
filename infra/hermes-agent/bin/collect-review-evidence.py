@@ -17,7 +17,7 @@ probe. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys
+import argparse, base64, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import app_lib as A
@@ -298,6 +298,143 @@ def _getent_group_members(host, group):
 def d1_6(host, ctx):
     members = _getent_group_members(host, "docker")
     return {"docker_group_members": members if members is not None else []}
+
+
+# D1.7: the sshd settings that say where a key, a certificate or a forward may come from.
+SSHD_KEY_SOURCES = ("authorizedkeysfile", "authorizedkeyscommand", "authorizedprincipalsfile",
+                    "trustedusercakeys", "allowtcpforwarding", "allowstreamlocalforwarding",
+                    "gatewayports", "permittunnel")
+_KEY_TYPE_RE = re.compile(r"(ssh-(rsa|dss|ed25519)|ecdsa-sha2-nistp(256|384|521)"
+                          r"|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)(-cert-v01@openssh\.com)?")
+_KEY_BODY_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,3}")
+_OPTION_NAME_RE = re.compile(r"[A-Za-z0-9-]+")
+# The only option VALUES printed: a plain program path, and a loopback target. Any other value
+# (an address in from=, a command line with arguments, an environment assignment) is withheld.
+_SHOWN_OPTION_RES = {"command": re.compile(r"[A-Za-z0-9_./-]+"),
+                     "permitopen": re.compile(r"(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5}|\*)"),
+                     "permitlisten": re.compile(r"((127\.0\.0\.1|localhost|\[::1\]):)?(\d{1,5}|\*)")}
+
+
+def _split_unquoted(text, seps):
+    """(parts, unbalanced): `text` split on any character of `seps` outside double quotes. Inside
+    quotes a backslash keeps the next character, as sshd reads an option value. Empty parts are
+    dropped. `unbalanced` is True when a quote is never closed."""
+    parts, cur, quoted, i = [], [], False, 0
+    while i < len(text):
+        c = text[i]
+        if quoted and c == "\\" and i + 1 < len(text):
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if c == '"':
+            quoted = not quoted
+        if c in seps and not quoted:
+            if cur:
+                parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    if cur:
+        parts.append("".join(cur))
+    return parts, quoted
+
+
+def _shown_option(opt):
+    name, eq, value = opt.partition("=")
+    if not _OPTION_NAME_RE.fullmatch(name):
+        return WITHHELD
+    if not eq:
+        return name
+    inner = value[1:-1] if len(value) >= 2 and value[0] == value[-1] == '"' else value
+    rx = _SHOWN_OPTION_RES.get(name.lower())
+    return opt if rx and rx.fullmatch(inner) else f"{name}={WITHHELD}"
+
+
+def _key_row(line):
+    """One authorized_keys line as its key type, its options and a short fingerprint of the key
+    body, or None when it is not a key line. The body and the comment are never returned."""
+    tokens, unbalanced = _split_unquoted(line.strip(), " \t")
+    if unbalanced:
+        return None
+    for i in (0, 1):                                    # the key type is first, or second after the options
+        if len(tokens) > i + 1 and _KEY_TYPE_RE.fullmatch(tokens[i]) and _KEY_BODY_RE.fullmatch(tokens[i + 1]):
+            try:
+                body = base64.b64decode(tokens[i + 1], validate=True)
+            except ValueError:
+                return None
+            options = _split_unquoted(tokens[0], ",")[0] if i == 1 else []
+            return {"type": tokens[i], "options": sorted(_shown_option(o) for o in options),
+                    "sha12": PK.sha256_bytes(body)[:12]}
+    return None
+
+
+def _authorized_keys_paths(pattern, user, home):
+    """The files sshd reads for one account, from its AuthorizedKeysFile value: `%h`, `%u` and `%%`
+    expanded, a relative name taken under the home directory. Another token is could-not-check:
+    a file this collector cannot name is a file it did not read."""
+    out = []
+    for pat in pattern.split():
+        if pat == "none":
+            continue
+        p = pat.replace("%%", "\0").replace("%h", home).replace("%u", user)
+        if "%" in p:
+            raise CouldNotCheck("authorizedkeysfile holds a token this collector does not expand")
+        p = p.replace("\0", "%")
+        out.append(os.path.normpath(p if p.startswith("/") else os.path.join(home, p)))
+    return out
+
+
+def _authorized_keys_row(host, p, users):
+    st = os.lstat(host.path(p))
+    row = {"path": p, "users": sorted(users), "owner": _owner(st.st_uid), "group": _group(st.st_gid),
+           "mode": oct(stat.S_IMODE(st.st_mode)),
+           "kind": "file" if stat.S_ISREG(st.st_mode) else "symlink" if stat.S_ISLNK(st.st_mode) else "not-a-file"}
+    unread = {**row, "keys": R.COULD_NOT_CHECK, "unparsed_lines": R.COULD_NOT_CHECK}
+    if row["kind"] != "file":
+        return unread
+    try:
+        with open(host.path(p), encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return unread
+    keys, unparsed = [], 0
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        key = _key_row(line)
+        if key is None:
+            unparsed += 1
+        else:
+            keys.append(key)
+    return {**row, "keys": keys, "unparsed_lines": unparsed}
+
+
+def d1_7(host, ctx):
+    """Every SSH key the box accepts, for EVERY account in /etc/passwd: an account with no login
+    shell can still be used for a forward. Key types, options and short fingerprints only. The
+    sshd settings are the global ones (`sshd -T`): a `Match` block is not read here (the
+    fingerprint's entry_points component carries the whole of `sshd -T`)."""
+    got = {}
+    for line in _ok(host, ["sshd", "-T"]).splitlines():
+        k, _, v = line.partition(" ")
+        if k in SSHD_KEY_SOURCES:
+            got[k] = v.strip()
+    if "authorizedkeysfile" not in got:
+        raise CouldNotCheck("sshd -T printed no authorizedkeysfile")
+    users_of, accounts = {}, 0
+    with open(host.path("/etc/passwd")) as f:
+        for line in f:
+            parts = line.rstrip("\n").split(":")
+            if len(parts) != 7:
+                continue
+            accounts += 1
+            for p in _authorized_keys_paths(got["authorizedkeysfile"], parts[0], parts[5] or "/"):
+                if os.path.lexists(host.path(p)):
+                    users_of.setdefault(p, set()).add(parts[0])
+    return {"sshd": {k: got.get(k, R.COULD_NOT_CHECK) for k in SSHD_KEY_SOURCES},
+            "accounts_checked": accounts,
+            "files": [_authorized_keys_row(host, p, users_of[p]) for p in sorted(users_of)]}
 
 
 # ---------------------------------------------------------------- D2 credential inventory
