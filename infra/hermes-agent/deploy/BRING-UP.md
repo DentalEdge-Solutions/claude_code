@@ -1961,7 +1961,7 @@ stand-in, so their `launchctl` lines run for the first time on this laptop. The 
 one-line stop command after LAPTOP 4c, which was not run at all. Each block says so where it
 stands.
 
-**Keep the administrative session on the box open from VPS 0 until the clean-up at the end of this
+**Keep the administrative session on the box open from `VPS look` until the clean-up at the end of this
 step, after LAPTOP 6 and LAPTOP 6b have succeeded.** It is
 the way back in if anything goes wrong with a key. If that session is lost and `ssh hermes-box` no
 longer gets in, the provider's browser terminal still reaches the box without SSH (step 1d, item 5).
@@ -2012,10 +2012,13 @@ Every other output:
   ssh-ed25519; options=1`: rehearsed.)
 - `lines=` above `1` for `hermesops` before VPS 1: more than one key is accepted for the
   administrative account. Stop and say whose each one is.
-- A word after `types=` that is not a key type (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-…`,
-  `sk-…`): the block's pattern also catches a word of a key's comment when it looks like one
-  (rehearsed: a key whose comment is `ecdsa-test` added ` 1 ecdsa-test;`). Do not paste that
-  line; say that it happened and give the rest.
+- Anything after `types=` other than the expected text. Before this step adds a key, this box
+  prints exactly ` 1 ssh-ed25519;` after `types=` for each file (and ` 2 ssh-ed25519;` for
+  `hermesops` after VPS 1). If anything else stands after `types=` on a line, the block's pattern
+  has also caught a word of a key's comment when that word looks like a key type (rehearsed: a
+  key whose comment is `ecdsa-test` added ` 1 ecdsa-test;`), and a comment can be part of a name
+  or a host name. Do NOT paste that line anywhere; say only that the line had something else
+  after `types=`, and stop.
 - Nothing at all, or a message from `sudo`: run `sudo -v` alone, then the block again.
 
 Rehearsed on the stand-in server (Ubuntu 24.04, OpenSSH 9.6p1, `sudo` with a password typed at
@@ -2077,7 +2080,7 @@ Expected, four lines: `MOVED: /root/.ssh/authorized_keys ->
 `root authorized_keys2: no file`; `kept aside: /root/.ssh/authorized_keys.removed-by-step-7f`.
 The second and third lines are the proof: root has no file left under either of the two names
 `VPS look` showed sshd reading (`authorizedkeysfile`). Then run `VPS look` once more: it must
-print no `root` line (rehearsed). Every other output:
+print no `root` line (rehearsed). If it still prints a `root` line, stop and report it. Every other output:
 
 - `NOT MOVED: … is already there (this block ran before) -- nothing changed now`: fine after an
   earlier run, if the next two lines both say `no file`.
@@ -2583,7 +2586,7 @@ after the login: 0`. These counts are only meaningful if `ssh-add -l` reached th
 
 ONLY when LAPTOP 6 got you to the box's prompt by typing the passphrase, AND LAPTOP 6b printed its
 three expected lines: remove the three backups, then close the first administrative session. On
-the box, in the FIRST administrative session (the one kept open since VPS 0; the session LAPTOP 6
+the box, in the FIRST administrative session (the one kept open since `VPS look`; the session LAPTOP 6
 opened was closed with `exit`): `rm -f ~/.ssh/authorized_keys.before-tunnel-key`. On the laptop:
 `rm -f ~/.ssh/config.before-tunnel-key ~/hermes-box-tunnel.plist.before-tunnel-key`. ONLY if part
 (b) of `VPS root key` was run (the operator chose removal): also delete the file it moved aside,
@@ -2593,7 +2596,7 @@ Expected: `the moved file is gone` (rehearsed on the stand-in server, also a sec
 prints the same line when there was no such file, so run it only after part (b)). After it the
 way back of `VPS root key` no longer works. Then type `exit` in the first administrative session.
 
-After this step a review's D1.7 shows two keys for `hermesops`: one with no options and one with the five limited options. Put in the evidence file: whose each key is (the administrative key; the forward's key made in this step, with the date), and the `Match` count of "A security review" step 2. If root's key was kept, D1.7 also shows a row for `root`: the evidence says whose that key is and why it stays, at every review. The first review after this step has no earlier header to compare the keys' short fingerprints with; from the next one on the report header carries them.
+After this step a review's D1.7 shows two keys for `hermesops`: one with no options and one with the five limited options. Put in the evidence file: whose each key is (the administrative key; the forward's key made in this step, with the date), and the `Match` count of "A security review" step 2. If root's key was kept, D1.7 also shows a row for `root`: the evidence says whose that key is and why it stays, at every review. If root's key was removed with `VPS root key`, say so in the evidence file, with the date: the review then shows one key file, `hermesops`'s. The first review after this step has no earlier header to compare the keys' short fingerprints with; from the next one on the report header carries them.
 
 For a work session with several connections, `ssh-add -t 1h ~/.ssh/vps-hermes` keeps the key in
 memory for an hour and stores nothing in the keychain. To replace the limited key later: make a new
