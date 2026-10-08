@@ -2779,6 +2779,26 @@ class TestD17AcceptedKeys(Base):
             self._w(CE.UNPRIVILEGED_PORT_START, text)
             self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK, repr(text))
 
+    def _port_file(self, raw):
+        p = os.path.join(self.root, CE.UNPRIVILEGED_PORT_START.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(raw)
+
+    def test_only_a_plain_ascii_port_number_is_accepted(self):
+        for raw in ("١٠٢٤\n".encode(), "１０２４\n".encode(), b"0001\n", b"00\n", b"01024\n", b" 1024\n",
+                    b"1024 \n", b"1024\n\n", b"1024\r\n", b"+1024\n", b"1024\x00\n", b"\xff\xfe1024\n",
+                    b"\xff\n", b"1" * 4096):
+            self._port_file(raw)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK, repr(raw[:24]))
+        for raw, expected in ((b"1024\n", 1024), (b"1024", 1024), (b"0\n", 0), (b"65535\n", 65535)):
+            self._port_file(raw)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], expected, repr(raw))
+
+    def test_a_directory_in_place_of_the_port_setting_is_could_not_check(self):
+        os.makedirs(os.path.join(self.root, CE.UNPRIVILEGED_PORT_START.lstrip("/")))
+        self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK)
+
     def test_the_result_has_exactly_these_top_level_fields(self):
         self.assertEqual(sorted(CE.d1_7(self.host(), {})),
                          ["accounts_checked", "files", "sshd", "unprivileged_port_start"])

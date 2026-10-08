@@ -447,15 +447,17 @@ def _authorized_keys_row(host, p, users):
 
 def _unprivileged_port_start(host):
     """The first port an account without privileges may bind, as the kernel states it (a host's
-    default is 1024). Anything that is not one port number is could-not-check."""
+    default is 1024). Read as bytes, a few at most: anything that is not one plain ASCII port
+    number, with at most one line break after it, is could-not-check."""
     try:
-        with open(host.path(UNPRIVILEGED_PORT_START)) as f:
-            text = f.read().strip()
+        with open(host.path(UNPRIVILEGED_PORT_START), "rb") as f:
+            raw = f.read(16)
     except OSError:
         return R.COULD_NOT_CHECK
-    if not re.fullmatch(r"\d{1,5}", text) or int(text) > 65535:
+    m = re.fullmatch(rb"(0|[1-9][0-9]{0,4})\n?", raw)
+    if not m or int(m.group(1)) > 65535:
         return R.COULD_NOT_CHECK
-    return int(text)
+    return int(m.group(1))
 
 
 def d1_7(host, ctx):
