@@ -3107,6 +3107,25 @@ class TestD46StartTimes(Base):
             self.assertIn("--last-pass-collected-at", err.getvalue())
             self.assertIsNone(CE.LAST_PASS_COLLECTED_AT)
 
+    def test_main_passes_a_valid_last_pass_collected_at_and_does_not_leak_it(self):
+        def run(*extra):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = CE.main(["--fp-key-tty", *extra], host=self.host(), read_key=lambda: "11" * 32)
+            return rc, json.loads(out.getvalue())["items"]
+        rc, items = run("--last-pass-collected-at", "2026-10-07T10:00:00Z")
+        self.assertEqual(items["D4.6"]["status"], R.OBSERVED)
+        self.assertEqual(items["D4.6"]["data"]["last_pass_collected_at"], "2026-10-07T10:00:00Z")
+        self.assertTrue(items["D4.6"]["data"]["started_after_last_pass"]["gateway-container"])
+        self.assertIsNone(CE.LAST_PASS_COLLECTED_AT)
+        _, items = run()
+        self.assertIsNone(items["D4.6"]["data"]["last_pass_collected_at"])
+
+    def test_the_bundle_carries_both_new_items(self):
+        items = CE.collect(self.host(), self.KEY)["items"]
+        self.assertEqual(items["D4.6"]["status"], R.OBSERVED)
+        self.assertEqual(items["D1.7"]["status"], R.COULD_NOT_CHECK)      # no sshd in this fake host
+
 
 if __name__ == "__main__":
     unittest.main()

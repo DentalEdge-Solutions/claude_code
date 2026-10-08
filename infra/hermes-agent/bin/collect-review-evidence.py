@@ -1587,9 +1587,9 @@ def d10_8(host, ctx):
     return {"results": rows, "out_of_whitelist": bad}
 
 
-PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6,
+PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6, "D1.7": d1_7,
           "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3,
-          "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4, "D4.5": d4_5,
+          "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4, "D4.5": d4_5, "D4.6": d4_6,
           "D5.1": d5_1, "D5.2": d5_2, "D5.3": d5_3, "D5.4": d5_4,
           "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1,
           # D10.5 (the OpenRouter key limit and account privacy setting) is manual: no probe.
