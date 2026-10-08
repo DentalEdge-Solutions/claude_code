@@ -608,6 +608,199 @@ to `19119`.
 - In VPS 1, a multi-line paste whose last line has no line break: the last piece then stays at the shell's prompt, unrun
   (reasoned from how the terminal hands over lines; not run).
 
+### 1.9 Round 3: the points of the re-review
+
+Measured 2026-10-08, in the third fix round. A re-review of 1.8's sequence found every earlier finding addressed and a
+short list of new points in the round-2 text. This subsection records what changed for each and every rehearsal of the
+round. Nothing of 1.8 was run again except where a row says so, and no earlier measurement is restated differently here.
+Four blocks changed (LAPTOP 2, 4a, 5c, 6b); one one-line block is new and was **not run** (the stop command after
+LAPTOP 4c); every other block of step 7f, and the four blocks of step 7e, are byte for byte those of round 2.
+
+**Set-up.** As in 1.8 and appendix 1.C, rebuilt for the round: the stand-in server and the stand-in laptop from the
+Dockerfiles of 1.C, the same terminal stand-in, and this Mac's `/bin/zsh -i` with a clean environment, `HOME` and
+`ZDOTDIR` in a scratch directory, no `SSH_AUTH_SOCK` except the scratch agent's where a row says so. Differences from 1.C:
+
+- the stand-in for `ssh-add` ends its `--apple-load-keychain` branch with `return ${STANDIN_LOAD_RC:-0}` where 1.C's has
+  `return 0`, so that a failed load can be played;
+- a third scratch plist, the good one with its tenth argument written `hermesops@box.example` (a test value);
+- LAPTOP 5c was pasted with `19119` written `39119` (the only change to its text), for the reason 4c was in 1.8: on this
+  Mac a process with `19119` in its command line could be the real forward. The stand-in processes are 1.C's (a script
+  named `ssh` that sleeps, started with the README's arguments and the port `39119`);
+- the fail2ban `maxretry` change of 1.C was not made, and no login was made in this round: nothing here connects to the
+  server's sshd.
+
+Nothing under the real `~/.ssh`, the real agent, the login keychain, or the real login item (its file or its launchd
+job) was read, listed or written. `launchctl` was not run at all in this round, not even as a stand-in.
+
+#### LAPTOP 2 refuses an alias it cannot read (stand-in laptop, zsh 5.9, OpenSSH 9.6p1)
+
+The re-review's point: when `ssh -G hermes-box` fails or prints no `hostname` line, the address variable is empty and
+the alias is written with an empty `HostName`, "while the count still prints `3`"; and `ssh -G` of a name with no block
+prints a `hostname` line equal to the name. First what `ssh -G hermes-box` prints, for seven configs (run with
+`ssh -F <file> -G hermes-box`, not through the block):
+
+| Config | Status | `hostname` line |
+|---|---|---|
+| the `hermes-box` block only | 0 | `hostname rehearsal-server` |
+| no `hermes-box` block | 0 | `hostname hermes-box` |
+| an unknown option in the `hermes-box` block, or in another block | 255 | none (`Bad configuration option`) |
+| `HostName %Z` in the `hermes-box` block | 255 | none (`unknown key %Z`); the same file asked for another name: status 0 |
+| `HostName` with no value | 255 | none |
+| a `Match host hermes-box exec` whose command fails | 0 | `hostname hermes-box` |
+
+Then the block of round 2 and the block now in the runbook, each pasted into an interactive zsh as one bracketed paste,
+on seven configs. "Unchanged" means byte for byte (`cmp` against a copy taken before the paste).
+
+| Case | Block of round 2, measured | Block now in the runbook: expected | Measured | Match |
+|---|---|---|---|---|
+| a. the `hermes-box` block only | `3`; alias written, `HostName rehearsal-server` | alias written, `3` | `3`; one `Host hermes-box-tunnel` block, `HostName rehearsal-server`, config mode 600 | yes |
+| b. the block again | `alias exists`, `3` | `alias exists`, `3` | `alias exists`, `3`; still one block | yes |
+| c. **no `hermes-box` block** | **`3`, and an alias written with `HostName hermes-box`**: a pass over an alias that points at a word | a refusal, nothing written | `STOPPED: the hermes-box alias has no HostName of its own -- nothing written`, `0`; unchanged | yes |
+| d. a config `ssh` cannot read (unknown option in an unrelated block) | `ssh`'s two error lines, an alias written with an EMPTY `HostName`, then `ssh`'s errors again and **`0`** | a refusal, nothing written | `ssh`'s two error lines, `STOPPED: could not read the hermes-box alias -- nothing written`, the two error lines again, `0`; unchanged | yes |
+| e. `HostName %Z` in the `hermes-box` block, the rest readable | the expand error, an alias written with an EMPTY `HostName`, `no argument after keyword "hostname"`, **`0`** | a refusal, nothing written | the expand error, `STOPPED: could not read the hermes-box alias -- nothing written`, `0`; unchanged | yes |
+| f. no config file | `grep: … No such file or directory`, **`3`**, and a config CREATED (mode 644) with `HostName hermes-box` | a refusal, nothing written | the `grep` line, `STOPPED: the hermes-box alias has no HostName of its own -- nothing written`, `0`; no file created | yes |
+| g. a `hermes-box` block with no `HostName` line | `3`, `HostName hermes-box` | a refusal, nothing written | the same `STOPPED … no HostName of its own …`, `0`; unchanged | yes |
+
+**What the measurement corrects in the finding.** With an EMPTY address the old block did write a broken alias, but its
+count printed `0`, not `3` (cases d and e): the empty `HostName` line is itself a config error, so the second `ssh -G`
+fails. The case that printed `3` over a wrong alias is the other one, no `hermes-box` block (cases c, f, g).
+
+**The decision for a config with no `hermes-box` block.** The block refuses, with a message of its own, when the
+address it read is the word `hermes-box`. Reason: `ssh -G` returns the name it was given when no block supplies a
+`HostName`, so that value means "there is no address here"; an alias written from it would point at a name that
+resolves to nothing, or to something else, and would pass the count. The box's real `HostName` is an address, so the
+refusal cannot hit a correct config. The block never prints the value it read. No variable stays set (checked after each
+paste).
+
+**The same block on this Mac's own `ssh`** (OpenSSH 10.3p1; zsh with the scratch home; `ssh` a function that adds
+`-F <the scratch config>`, 1.C's stand-in for LAPTOP 5b, so the real configuration is not read; the test address is the
+name `box.example`): case a `3`, the alias written with `HostName box.example`; b `alias exists`, `3`; c and g
+`STOPPED: the hermes-box alias has no HostName of its own -- nothing written`, `0`; d and e `ssh`'s error,
+`STOPPED: could not read the hermes-box alias -- nothing written`, `0`; the scratch config byte for byte unchanged in c,
+d, e and g. So macOS's `ssh -G` also answers with the name itself for a name it has no block for. Case f (no config
+file) was not run on the Mac.
+
+#### LAPTOP 4a's second line says which of three things (this Mac)
+
+The second line printed the tenth argument verbatim. It now prints `hermes-box-tunnel`, `hermes-box`, or
+`something else (not shown)`. The six cases of 1.8 were run again on the changed block, plus one.
+
+| Case | Expected second line | Measured (both lines) | Match |
+|---|---|---|---|
+| 1. the good file | `… uses: hermes-box-tunnel` | `SWITCHED IN THE FILE`, `the alias the login item uses: hermes-box-tunnel`; 10 arguments before and after, only the tenth changed (`plistlib`), `plutil -lint` OK | yes |
+| 2. the block again | `… hermes-box-tunnel` | `ALREADY SWITCHED: nothing changed`, `… uses: hermes-box-tunnel`; file unchanged | yes |
+| 3. one extra `-o` pair (the tenth argument is `-L`) | `… something else (not shown)` | `NOT SWITCHED: the file is not as expected -- stop`, `… uses: something else (not shown)`; file unchanged | yes |
+| 4. no file | `… something else (not shown)` | the same two lines; nothing created. (In 1.8 this line printed `File Doesn't Exist, Will Create: <path>`.) | yes |
+| 5. the file and its folder not writable | `… hermes-box` | `NOT SWITCHED: the change did not reach the file -- stop`, `… uses: hermes-box` | yes |
+| 7. the tenth argument written `hermesops@box.example` | `… something else (not shown)` | `NOT SWITCHED: the file is not as expected -- stop`, `… uses: something else (not shown)`; the value is nowhere in the output; file unchanged | yes |
+| 6. an older backup present, `cp` aliased to `cp -i` | `… hermes-box-tunnel` | `SWITCHED IN THE FILE`, `… uses: hermes-box-tunnel`, no question | yes |
+
+No variable stays set after any case.
+
+#### LAPTOP 5c: a count of running `ssh` on the old alias; the keychain load's status (this Mac, stand-ins)
+
+**Not run against the login keychain or the real agent**, as in 1.8. Two changes. (1) The guard read the login item's
+FILE; launchd runs the definition it LOADED. The function now also counts running processes whose command line ends in
+`19119:127.0.0.1:9119 hermes-box` (LAPTOP 4c's pattern) and stops when the count is not `0`. (2)
+`ssh-add --apple-load-keychain >/dev/null 2>&1` discarded its status, so `supplied by the keychain: 0` was printed also
+when the load had failed; the status is now printed (`keychain load rc=N`). `pgrep` (outside the block) confirmed the
+stand-in processes before each paste.
+
+| Case | Expected | Measured | Calls the `ssh-add` stand-in received | Match |
+|---|---|---|---|---|
+| 1. the scratch file switched, no stand-in process | the six lines | `Identity added`, `in the agent before: 1`, `Identity removed`, `in the agent after: 0`, `keychain load rc=0`, `supplied by the keychain: 0` | six | yes |
+| 2. the stand-in keychain still supplies the key | last line `1` | …, `keychain load rc=0`, `supplied by the keychain: 1` | six | yes |
+| 3. the stand-in's load ends with status 1 | `rc=1` shown | …, `keychain load rc=1`, `supplied by the keychain: 0` | six | yes |
+| 4. the file still names `hermes-box` | the first refusal | `STOPPED: the login item's file does not name hermes-box-tunnel -- nothing removed` | none | yes |
+| 5. **the file names `hermes-box-tunnel`, one stand-in process on the OLD alias** | the new refusal | `STOPPED: an ssh on the old alias (hermes-box) is still running -- nothing removed` | none | yes |
+| 6. the same, and a process on the new alias too | the new refusal | the same line | none | yes |
+| 7. only a process on the NEW alias (the state 4c expects) | it runs | the six lines of case 1 | six | yes |
+| 8. `vps-hermes.pub` missing, one other key in the agent | the third refusal | `STOPPED: could not read <path>/vps-hermes.pub -- nothing removed` | none | yes |
+
+In round 2's block, case 5 would have run to the end: its guard read the file only (not run again here; the old guard
+has no line that looks at processes).
+
+**What the new guard prints when `pgrep` itself cannot run:** nothing, and the function goes on: a failed `pgrep` gives
+a count of `0` (reasoned from the pipeline; not produced). The runbook says so at the block and names what covers it:
+LAPTOP 4c, run just before, prints `ssh on the new alias: 1` only when `pgrep` works.
+
+#### LAPTOP 6b: the same status line (this Mac, stand-ins)
+
+| Case | Expected | Measured | Match |
+|---|---|---|---|
+| 1. nothing in the agent, the stand-in keychain supplies nothing | `0`, `rc=0`, `0` | `in the agent after the login: 0`, `keychain load rc=0`, `supplied by the keychain after the login: 0` | yes |
+| 2. the stand-in keychain supplies the key | `0`, `rc=0`, `1` | `0`, `keychain load rc=0`, `1` | yes |
+| 3. the stand-in's load ends with status 1 | `0`, `rc=1`, `0` | `0`, `keychain load rc=1`, `0` | yes |
+| 4. the key is in the agent | `1`, `rc=0`, `1` | `1`, `keychain load rc=0`, `1` | yes |
+
+**Not measured, and it matters for the expected line:** what the real `ssh-add --apple-load-keychain` ends with when the
+keychain holds no passphrase at all. The runbook expects `rc=0` and tells the operator to stop and report on any other
+number; if macOS ends that command with another status in the clean state, that stop is a false alarm. It could not be
+found out without reading the login keychain. The stand-in's `0` was written for the rehearsal; it is not a record of
+what `ssh-add` does.
+
+#### VPS 1: leaving the waiting prompt (stand-in server, interactive bash)
+
+When LAPTOP 1b prints another number there is nothing to paste, and VPS 1 is waiting. The block is unchanged; the case
+"Return alone" was not among 1.8's.
+
+| Case | Expected | Measured | Match |
+|---|---|---|---|
+| the block pasted, then Return alone at `Paste the line:` | `REFUSED: not the expected line …`, nothing written | an empty line, then `REFUSED: not the expected line (other options, a cut key, or extra words) -- nothing written`, the shell's prompt 1.9 seconds after the Return (the function reads on for one second); `authorized_keys` byte for byte the original, no backup, the function no longer defined, the next command ran normally | yes |
+| the same, Return twice quickly | the same | the same refusal; file unchanged, no backup | yes |
+
+#### The single command of the way back
+
+LAPTOP 4c's stop text gives two commands to go back to the state before the laptop part. The first was run; the second
+was not.
+
+| Command, where | Measured |
+|---|---|
+| `command cp -p ~/hermes-box-tunnel.plist.before-tunnel-key ~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`, this Mac, scratch home, after LAPTOP 4a had switched a scratch file, `cp` aliased to `cp -i` | no question; the file byte for byte the one from before the switch; its tenth argument `hermes-box` |
+| `launchctl bootout gui/$(id -u)/com.dentaledge.hermes-box-tunnel` (the new fenced block) | **not run** |
+| `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist` | **not run** |
+
+Both `launchctl` commands are the ones the README gives for stopping and starting the login item. What they print, and
+that the item stops retrying after `bootout`, has not been seen in any rehearsal; the runbook says so at the block and
+asks for LAPTOP 4c afterwards (both counts `0`, no `state = running` line).
+
+#### Text only (nothing run)
+
+- *Step 7e, block 2.* The runbook now says, where the operator reads the bullets, that they are reasoned and that none of
+  those outputs was produced (2.9 already said it), and has two more: `secret: in the container (len N)` with N other
+  than `44`, and no `secret:` line together with `HASH DIFFERS` (the `docker compose exec` itself failed). Both are
+  reasoned from the block's text; neither was produced.
+- *LAPTOP 4b.* `RELOADED: bootstrap rc=5` is not a success, only `rc=0` is; and "nothing is retrying" holds only when the
+  item is not loaded: if `bootout` failed, the old definition is still loaded and keeps running on the administrative
+  key. 1.8 measured the block printing `RELOADED: bootstrap rc=5` with a stand-in; the two states behind it are reasoned.
+- *LAPTOP 4c.* After the one retry: stop the login item first, then report; what that leaves; the way back.
+- *The fail2ban sentence.* It now says the stand-in's `maxretry` was raised to 100 (1.8) and that the real box's jail was
+  not measured.
+- *"A security review", step 2.* A unit name with nothing after it means the unit never became active since boot; the
+  lines show when each unit last started, not that it runs now. This is the re-review's statement of what
+  `ActiveEnterTimestamp` holds; it was not run here (the stand-in has no systemd), and the loop itself is still not
+  rehearsed (3.3).
+- *The closing paragraph.* The clean-up on the box uses the first administrative session, after LAPTOP 6b's expected
+  lines, and that session is closed last.
+
+**Mechanical comparison.** A script compared every fenced block of steps 7e and 7f with the runbook as committed after
+round 2 and with the files pasted: the four changed blocks equal the files this round pasted (SHA-256 prefix at the paste
+line of each record; for LAPTOP 5c the text with `39119`), the thirteen others equal both the committed block and round
+2's pasted file, the new one-line block equals the README's command and is reported as not rehearsed. Outside steps 7e
+and 7f the runbook differs from the committed one in one line (the sentence of "A security review"). All `same`.
+
+**What this subsection does NOT show** (1.8's list stands unchanged; these are added or sharpened):
+
+- `launchctl bootout` and `launchctl bootstrap` as the stop and the way back: not run, not even with a stand-in.
+- The real `ssh-add --apple-load-keychain`'s status, with a keychain that holds the passphrase and with one that does
+  not; `rc=0` as the expected value is an assumption.
+- LAPTOP 5c's new guard against real processes and the real port `19119`: stand-in processes and `39119` only. And a
+  `pgrep` that cannot run (reasoned).
+- LAPTOP 2 against the operator's real `~/.ssh/config`: scratch configs only, on Linux (9.6p1) and on this Mac (10.3p1,
+  through the `-F` stand-in). The real config was not read, so what the block prints for it is first seen on the laptop.
+- LAPTOP 4a against the real login item's file: scratch files only, as in 1.8.
+- VPS 1's Return case on the box; step 7e's two new bullets; the two states behind `bootstrap rc` other than `0`.
+
 ### Not measured
 
 - The box's real OpenSSH version, its own `sshd_config` (a global `AllowTcpForwarding`, any `Match` block that
