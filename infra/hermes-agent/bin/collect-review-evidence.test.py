@@ -2768,6 +2768,21 @@ class TestD17AcceptedKeys(Base):
                                      "allowstreamlocalforwarding": "yes", "gatewayports": "no", "permittunnel": "no"})
         self.assertEqual(d["files"], [])
 
+    def test_the_first_unprivileged_port_is_reported(self):
+        for text, expected in (("1024\n", 1024), ("0\n", 0), ("1\n", 1), ("65535\n", 65535)):
+            self._w(CE.UNPRIVILEGED_PORT_START, text)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], expected, text)
+
+    def test_a_missing_or_odd_unprivileged_port_setting_is_could_not_check(self):
+        self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK)   # no file
+        for text in ("", "\n", "abc\n", "-1\n", "1024 2048\n", "10.5\n", "999999\n"):
+            self._w(CE.UNPRIVILEGED_PORT_START, text)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK, repr(text))
+
+    def test_the_result_has_exactly_these_top_level_fields(self):
+        self.assertEqual(sorted(CE.d1_7(self.host(), {})),
+                         ["accounts_checked", "files", "sshd", "unprivileged_port_start"])
+
     def test_a_setting_sshd_did_not_print_is_could_not_check(self):
         self.outputs[("sshd", "-T")] = (0, self.SSHD.replace("trustedusercakeys none\n", ""), "")
         self.assertEqual(CE.d1_7(self.host(), {})["sshd"]["trustedusercakeys"], R.COULD_NOT_CHECK)

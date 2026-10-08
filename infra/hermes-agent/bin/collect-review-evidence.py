@@ -305,6 +305,9 @@ def d1_6(host, ctx):
 SSHD_KEY_SOURCES = ("authorizedkeysfile", "authorizedkeyscommand", "authorizedprincipalsfile",
                     "trustedusercakeys", "allowtcpforwarding", "allowstreamlocalforwarding",
                     "gatewayports", "permittunnel")
+# D1.7: the limited key's `permitlisten="127.0.0.1:1"` refuses a remote forward only while an
+# unprivileged account cannot bind port 1 (measured: with this setting at 0 the listener opens).
+UNPRIVILEGED_PORT_START = "/proc/sys/net/ipv4/ip_unprivileged_port_start"
 _KEY_TYPE_RE = re.compile(r"(ssh-(rsa|dss|ed25519)|ecdsa-sha2-nistp(256|384|521)"
                           r"|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)(-cert-v01@openssh\.com)?")
 _KEY_BODY_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,3}")
@@ -442,11 +445,26 @@ def _authorized_keys_row(host, p, users):
     return {**row, "keys": keys, "unparsed_lines": unparsed}
 
 
+def _unprivileged_port_start(host):
+    """The first port an account without privileges may bind, as the kernel states it (a host's
+    default is 1024). Anything that is not one port number is could-not-check."""
+    try:
+        with open(host.path(UNPRIVILEGED_PORT_START)) as f:
+            text = f.read().strip()
+    except OSError:
+        return R.COULD_NOT_CHECK
+    if not re.fullmatch(r"\d{1,5}", text) or int(text) > 65535:
+        return R.COULD_NOT_CHECK
+    return int(text)
+
+
 def d1_7(host, ctx):
     """Every SSH key the box accepts, for EVERY account in /etc/passwd: an account with no login
     shell can still be used for a forward. Key types, options and short fingerprints only. The
     sshd settings are the global ones (`sshd -T`): a `Match` block is not read here (the
-    fingerprint's entry_points component carries the whole of `sshd -T`)."""
+    fingerprint's entry_points component carries the whole of `sshd -T`). The kernel's
+    net.ipv4.ip_unprivileged_port_start setting is read because the limited key's permitlisten
+    depends on it."""
     got = {}
     for line in _ok(host, ["sshd", "-T"]).splitlines():
         k, _, v = line.partition(" ")
@@ -471,6 +489,7 @@ def d1_7(host, ctx):
                 users_of.setdefault(p, set()).add(parts[0])
     return {"sshd": {k: got.get(k, R.COULD_NOT_CHECK) for k in SSHD_KEY_SOURCES},
             "accounts_checked": accounts,
+            "unprivileged_port_start": _unprivileged_port_start(host),
             "files": [_authorized_keys_row(host, p, users_of[p]) for p in sorted(users_of)]}
 
 
