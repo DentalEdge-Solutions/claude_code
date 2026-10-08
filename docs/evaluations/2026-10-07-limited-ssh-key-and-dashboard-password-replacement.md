@@ -9,7 +9,9 @@
 > time); section 3 holds the two rehearsals of the same round that belong to neither: the `awk` that edits the laptop's
 > SSH config, and the `Match` count of the security review. A second fix round, after a review of the runbook, added 1.8
 > and appendix 1.C (step 7f's sequence redesigned and rehearsed block by block), 2.9 and 3.3; where an earlier subsection
-> describes a block that 1.8 replaces, a sentence there says so.
+> describes a block that 1.8 replaces, a sentence there says so. A final edit (2026-10-08) added the read-only look at the
+> box to 1.1, subsection 1.10 and appendix 1.D, and dated notes ("Confirmed 2026-10-08", "Note 2026-10-08") after the
+> sentences they bring up to date; no earlier measurement was rewritten.
 
 ## 1 · The limited key, measured against a throwaway server
 
@@ -20,10 +22,26 @@
 | Local `man sshd`, section "AUTHORIZED_KEYS FILE FORMAT" (laptop OpenSSH 10.3p1) | primary | `restrict` disables port, agent and X11 forwarding, PTY allocation and `~/.ssh/rc`; its list does not include command execution, so a `command=` is needed to stop commands. `port-forwarding` re-enables forwarding in both directions ("Enable port forwarding previously disabled by the `restrict` option"). `permitopen="host:port"` limits `-L`; `permitlisten="[host:]port"` limits `-R`. `permitlisten` has no "none" form, so a port that cannot be bound stands in for it. |
 | Local `man ssh-add` (`--apple-use-keychain`) | primary | With `-d`, `--apple-use-keychain` removes the passphrase from the keychain as well. |
 | Image source `hermes_cli/dashboard_auth/routes.py` (section 2.1) | primary | The password-login throttle: 10 attempts per 60 s per client IP, in memory. |
-| The box's OpenSSH version | **not yet known** | The operator was asked and has not answered. Until then the rehearsal used `ubuntu:24.04`, which ships the version in 1.2. **The box's version is still to be confirmed against it.** |
+| The box's OpenSSH version | **not yet known** | The operator was asked and has not answered. Until then the rehearsal used `ubuntu:24.04`, which ships the version in 1.2. **The box's version is still to be confirmed against it.** **Confirmed 2026-10-08:** the box prints `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`, the release the rehearsals used (the table "The read-only look at the box" below). |
 | This rehearsal (1.2 to 1.6, appendix 1.A) | measurement | The results below. |
 | Local `man ssh-add` and `man ssh-agent` (laptop OpenSSH 10.3p1; accessed 2026-10-08, for 1.8) | primary | `--apple-load-keychain`: "Add identities to the agent using any passphrase stored in the user's keychain." `ssh-agent` creates its socket under `$HOME/.ssh/agent` unless `-T` puts it in the temporary directory. |
 | The rehearsals of 1.8 (appendix 1.C) | measurement | Step 7f's sequence as it stands in the runbook after the review. |
+| The read-only look at the box, by the operator (2026-10-08) | measurement on the box itself | The table below. Values only were reported; no hostname and no address is recorded anywhere. |
+| The rehearsals of 1.10 (appendix 1.D), 2026-10-08 | measurement | The `VPS look` and `VPS root key` blocks on a stand-in server; the keychain lines of LAPTOP 5c and 6b on this Mac's login keychain with a throwaway key. |
+
+**The read-only look at the box (2026-10-08).** Added in the final edit. The operator ran the read-only blocks on the
+box and reported what they printed. Nothing was changed there.
+
+| Read on the box | Value |
+|---|---|
+| `ssh -V` | `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19` (the release of 1.2) |
+| `sshd -T`, the eight settings the `VPS look` block of BRING-UP step 7f filters | `gatewayports no`, `allowtcpforwarding yes`, `allowstreamlocalforwarding yes`, `trustedusercakeys none`, `authorizedprincipalsfile none`, `authorizedkeyscommand none`, `authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2`, `permittunnel no` |
+| Key files, by account (the second half of the same block) | `root authorized_keys`: 1 line, 1 `ssh-ed25519`, 0 lines with options. `hermesops authorized_keys`: 1 line, 1 `ssh-ed25519`, 0 lines with options. No other account has one. |
+| `/proc/sys/net/ipv4/ip_unprivileged_port_start` | `1024` |
+| `systemctl show docker -p ActiveEnterTimestamp --value` | a line of the form `Mon 2026-09-21 16:49:31 UTC` |
+
+What the look does not show: the box's `Match` blocks (the `Match` count of 3.2 has not been run there), its fail2ban
+jail, and everything that needs a login with the new key (LAPTOP 3a and 3b).
 
 ### 1.2 The throwaway server
 
@@ -107,6 +125,7 @@ observed directly (above), and the "cannot bind" part holds only where the setti
 open a loopback-only listener on its port 1, for another local process to connect to; that is a gap rather than
 a path to a shell or a file. The box's value is **not measured**; the runbook should read it
 (`cat /proc/sys/net/ipv4/ip_unprivileged_port_start`) and the checklist should expect `1024` or higher.
+**Confirmed 2026-10-08:** read on the box by the operator: `1024` (1.1).
 
 ### 1.5 T7 re-measured: file transfer (the limited key and the control)
 
@@ -274,6 +293,8 @@ T5b stays refused with it because the kernel setting stops the bind, which is T5
   (`ADDED: 2 key line(s), mode 600`; running the block again with the same line: `already present`). The 2 therefore
   assumes the file held exactly one key; on the box that is what the read-only look of the first trial collection showed.
   Another count is not an error by itself, but it must equal what that look showed plus one. The runbook says so.
+  **Note 2026-10-08:** no trial collection had been made when that sentence was written. The look was made on
+  2026-10-08 with the `VPS look` block (1.10): `lines=1` for `hermesops`, so the expected count is 2.
 - *LAPTOP 4 on a second run, or with the login item not loaded.* `launchctl bootout` prints an error when the login item
   is not loaded, and (read from the commands) `launchctl bootstrap` prints one when it already is; the runbook says that
   such a message is not a failure by itself. **LAPTOP 4 was NOT rehearsed**: it edits and reloads the real login item of
@@ -290,6 +311,8 @@ T5b stays refused with it because the kernel setting stops the bind, which is T5
 - Whether the operator's terminal swallows pasted lines in T2 without the fix (the fix is in; the behaviour without it
   was seen on a pseudo-terminal fed line by line).
 - The box itself: its OpenSSH version, its `sshd_config`, its kernel setting and the dashboard's `302`.
+  **Note 2026-10-08:** the version, eight global `sshd -T` settings and the kernel setting are now measured (1.1); the
+  `Match` blocks, the dashboard's `302` through the new key and the box's fail2ban jail are not.
 - VPS 0 and VPS 1 on the box (they ran as `hermesops` in a container on this laptop).
 
 ### 1.8 Step 7f's sequence after the review of the runbook
@@ -557,7 +580,8 @@ So counting by fingerprint can fail and can pass (the review's finding was that 
 two refusals work. What this does not show: `--apple-use-keychain`, `--apple-use-keychain -d` and `--apple-load-keychain`
 themselves, that is, whether the passphrase leaves the keychain and whether the last line would show it if it had not.
 Those lines run for the first time on the operator's laptop. The operator has been asked whether a throwaway key may be
-put into the login keychain and taken out again to rehearse them; that would be a later round.
+put into the login keychain and taken out again to rehearse them; that would be a later round. **Note 2026-10-08:** the
+operator allowed it; the rehearsal is in 1.10.
 
 #### LAPTOP 6 on the stand-in laptop
 
@@ -595,12 +619,16 @@ to `19119`.
   on port 19119. Stand-ins only.
 - **LAPTOP 5c and 6b for real:** the login keychain, the real agent, the three `--apple-…` forms of `ssh-add`, and the
   two single commands `ssh-add --apple-use-keychain ~/.ssh/vps-hermes` and `ssh-add -d ~/.ssh/vps-hermes` of the text.
+  **Note 2026-10-08:** the three `--apple-…` forms were run against the login keychain with a throwaway key and a private
+  agent (1.10). Still not shown: the same with the administrative key, the agent macOS provides, and plain `ssh-add -d`.
 - **LAPTOP 6 on macOS**, where the keychain could answer the prompt; and LAPTOP 5a with the real key, for the same reason.
 - **macOS's own `nc`, `curl` and `ssh` against a real server:** on this Mac 3a and 3b ran with stand-ins for `ssh`, `scp`
   and `curl`; the real logins were made from Linux (OpenSSH 9.6p1, netcat-openbsd, curl 8.5.0).
 - **Terminal.app itself:** every paste was made by the terminal stand-in, which sends what a terminal sends.
 - **The box:** its OpenSSH version, its sshd configuration and log level, its kernel setting, the dashboard's own `302`,
   and its fail2ban (version, jail settings, journal back end). The fail2ban column is a stand-in's.
+  **Note 2026-10-08:** the version, eight global `sshd -T` settings and the kernel setting are now measured (1.1). Its
+  log level, its `Match` blocks, the dashboard's own `302` and its fail2ban are not.
 - The gate against an address that does not answer (the 10-second `ConnectTimeout`): only a name that does not resolve.
 - The operator's real `~/.ssh/config`, real login item file and real keys: none was read. Whether the real config has
   a `Host *` block, a link, or `UseKeychain` lines elsewhere is first seen when LAPTOP 5b runs.
@@ -737,7 +765,9 @@ LAPTOP 4c, run just before, prints `ssh on the new alias: 1` only when `pgrep` w
 keychain holds no passphrase at all. The runbook expects `rc=0` and tells the operator to stop and report on any other
 number; if macOS ends that command with another status in the clean state, that stop is a false alarm. It could not be
 found out without reading the login keychain. The stand-in's `0` was written for the rehearsal; it is not a record of
-what `ssh-add` does.
+what `ssh-add` does. **Note 2026-10-08:** measured in 1.10 with a throwaway key: `rc=0`, with the throwaway key's passphrase
+absent from the keychain and one other key still supplied by it. A keychain holding no SSH passphrase at all is still
+not measured.
 
 #### VPS 1: leaving the waiting prompt (stand-in server, interactive bash)
 
@@ -794,6 +824,8 @@ and 7f the runbook differs from the committed one in one line (the sentence of "
 - `launchctl bootout` and `launchctl bootstrap` as the stop and the way back: not run, not even with a stand-in.
 - The real `ssh-add --apple-load-keychain`'s status, with a keychain that holds the passphrase and with one that does
   not; `rc=0` as the expected value is an assumption.
+  **Note 2026-10-08:** measured for a throwaway key in both states (`rc=0` each time, 1.10); a keychain with no SSH
+  passphrase at all is not.
 - LAPTOP 5c's new guard against real processes and the real port `19119`: stand-in processes and `39119` only. And a
   `pgrep` that cannot run (reasoned).
 - LAPTOP 2 against the operator's real `~/.ssh/config`: scratch configs only, on Linux (9.6p1) and on this Mac (10.3p1,
@@ -801,10 +833,221 @@ and 7f the runbook differs from the committed one in one line (the sentence of "
 - LAPTOP 4a against the real login item's file: scratch files only, as in 1.8.
 - VPS 1's Return case on the box; step 7e's two new bullets; the two states behind `bootstrap rc` other than `0`.
 
+### 1.10 The final edit: the look and root-key blocks, and the keychain lines run for real
+
+Measured 2026-10-08, after the operator's read-only look at the box (1.1) and with the operator's permission for one
+rehearsal against this Mac's login keychain. Nothing of 1.8 or 1.9 was run again, and no block that was in step 7f
+before this edit changed. Four fenced blocks are new in the runbook (`VPS look`, `VPS root key` parts (a) and (b), and
+the way back for part (b)), with three single commands in its text. How to rebuild the set-up: appendix 1.D.
+
+**How blocks were fed.** The terminal stand-in of 1.8 (appendix 1.C), unchanged. On the stand-in server: an
+interactive `bash` as `hermesops`, each case in a new shell that first received `sudo -v` alone (the test password
+typed at its prompt), then the block as one bracketed paste and a Return. On this Mac: an interactive `/bin/zsh` with a
+clean environment, described under "The keychain lines" below.
+
+#### `VPS look` (stand-in server)
+
+The block is the one the operator ran on the box on 2026-10-08, character for character (compared by script with the
+text the operator was given). On the box it printed the eight settings and the two key-file values of 1.1. It was run
+again here because it is cheap, and to see what it prints in states the box is not in.
+
+| Case | Expected | Measured | Match |
+|---|---|---|---|
+| L1. as built: `root` and `hermesops` each hold one `ssh-ed25519` key, no options | the eight settings, two key-file lines | `gatewayports no`, `allowtcpforwarding yes`, `allowstreamlocalforwarding yes`, `trustedusercakeys none`, `authorizedprincipalsfile none`, `authorizedkeyscommand none`, `authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2`, `permittunnel no`, then `root authorized_keys lines=1 types= 1 ssh-ed25519; options=0` and `hermesops authorized_keys lines=1 types= 1 ssh-ed25519; options=0` | yes |
+| L2. a second account holds an `ssh-ed25519` key in `authorized_keys` and an ECDSA key in `authorized_keys2` | two more lines, one per file | the ten lines of L1, then `otheracct authorized_keys lines=1 types= 1 ssh-ed25519; options=0` and `otheracct authorized_keys2 lines=1 types= 1 ecdsa-sha2-nistp256; 1 ecdsa-test; options=0` | yes, **with a finding** (below) |
+| L3. the limited key's line present in the `hermesops` file | `lines=2`, `options=1` | `hermesops authorized_keys lines=2 types= 2 ssh-ed25519; options=1`; the other nine lines as in L1 | yes |
+| L4. a comment line, an empty line and a second plain key in the `hermesops` file | `lines=2`, `options=0` | `hermesops authorized_keys lines=2 types= 2 ssh-ed25519; options=0` | yes |
+| L5. no key file on any account | the eight settings and nothing else | the eight settings and nothing else | yes |
+
+So the eight settings of the stand-in server (Ubuntu 24.04's packaged defaults) are the eight the box gave, in the order
+the operator reported them; the two key-file lines of L1 carry the box's values (1 line, 1 `ssh-ed25519`, 0 with options,
+for each account) in the form the block prints them. The exact text of the box's own ten lines was not handed over, only
+the values.
+
+**Finding (L2): `types=` can show a word of a key's comment.** The block finds key types with the pattern
+`(ssh|ecdsa|sk)-[a-z0-9@.-]+`, which also matches a word of that shape in a comment: the test key's comment
+`ecdsa-test` was printed as ` 1 ecdsa-test;`. A comment is free text and could hold a name. On the box the block printed
+one `ssh-ed25519` per file and nothing else, so nothing of that kind was shown there. The block was not changed (it is
+the one proven on the box); the runbook tells the operator not to paste such a line.
+
+What it prints when something is broken: a setting that differs shows as a different line among the first eight (not
+produced: the stand-in's settings were not changed); a key file on another account shows as a line (L2); no key file
+shows as no line (L5). Not produced: a failing `sshd -T` and an account whose home directory cannot be read.
+
+#### `VPS root key`, part (a): same key or not (stand-in server)
+
+Written for this edit. It reads the two files and prints one line. "Unchanged" means the first twelve characters of each
+file's SHA-256, owner and mode, read before and after the paste.
+
+| Case | Expected | Measured | Match |
+|---|---|---|---|
+| A1. root holds the same key as `hermesops` | `same` | `root key vs the first hermesops key: same`; both files unchanged | yes |
+| A4. the block again in the same shell | `same` | the same line; both files unchanged | yes |
+| A2. root holds another key | `different` | `root key vs the first hermesops key: different` | yes |
+| A3. root has no `authorized_keys` | its own line | `root key: root has no authorized_keys file` | yes |
+| A5. root holds two keys | a refusal | `root key: NOT COMPARED: root holds 2 key(s), or the hermesops file holds none -- stop` | yes |
+| A10. root's file is there and empty | a refusal | `root key: NOT COMPARED: root holds 0 key(s), or the hermesops file holds none -- stop` | yes |
+| A6. `hermesops` holds the administrative key, then the limited key; root holds the administrative key | `same` | `… same` | yes |
+| A7. root holds the administrative key written with options (one of them with a space inside quotes), under a comment line | `same` | `… same` | yes |
+| A9. root holds the limited key with its five options | `different` | `… different` | yes |
+| A8. the `hermesops` file is missing | a refusal | `root key: NOT COMPARED: the hermesops file is missing -- stop` | yes |
+| A11. the `hermesops` file holds only a comment line | a refusal | `root key: NOT COMPARED: root holds 1 key(s), or the hermesops file holds none -- stop` | yes |
+
+No record of these runs holds a key body (searched for `AAAA`: none). What the block compares is the word after the key
+type on each line; it does not compare options or comments. Not run: a root line whose forced command itself contains
+the text of a key type followed by a space (the block would then take the wrong word, and say `different` or `same`
+about that word).
+
+#### `VPS root key`, part (b): the file moved aside, the way back, the clean-up line (stand-in server)
+
+Written for this edit. Part (b) moves `/root/.ssh/authorized_keys` to
+`/root/.ssh/authorized_keys.removed-by-step-7f` and then says, for each of the two names sshd reads, whether root still
+has a file there.
+
+| Case | Expected | Measured | Match |
+|---|---|---|---|
+| B1. root holds one key file | moved; two `no file` lines | `MOVED: /root/.ssh/authorized_keys -> /root/.ssh/authorized_keys.removed-by-step-7f`, `root authorized_keys: no file`, `root authorized_keys2: no file`, `kept aside: /root/.ssh/authorized_keys.removed-by-step-7f`. The moved file: same SHA-256 prefix, owner `root`, mode 600, as the file before (read in B6) | yes |
+| then `VPS look` | no `root` line | the eight settings and the `hermesops` line only | yes |
+| B2. part (b) again | nothing changed | `NOT MOVED: … is already there (this block ran before) -- nothing changed now`, the two `no file` lines, `kept aside: …` | yes |
+| B3. the way back | the file back | `PUT BACK: /root/.ssh/authorized_keys, lines=1, mode 600`; then `VPS look` printed the `root` line of L1 again | yes |
+| the way back a second time | a refusal | `NOT PUT BACK: /root/.ssh/authorized_keys is there -- nothing changed` | yes |
+| B4. root has no `authorized_keys` | a refusal | `NOT MOVED: … is missing or is a link -- nothing changed`, two `no file` lines, `kept aside: nothing` | yes |
+| B5. root's `authorized_keys` is a link | a refusal | the same `NOT MOVED` line, then `root authorized_keys: STILL THERE, lines=1`, `root authorized_keys2: no file`, `kept aside: nothing` | yes |
+| B6. root also has an `authorized_keys2` | moved, and the other file reported | `MOVED: …`, `root authorized_keys: no file`, `root authorized_keys2: STILL THERE, lines=1`, `kept aside: …` | yes |
+| B7. a moved file is there and a new `authorized_keys` too | nothing changed, the new file reported | `NOT MOVED: … is already there …`, `root authorized_keys: STILL THERE, lines=1`, `root authorized_keys2: no file`, `kept aside: …` | yes |
+| B8. **a made failure**: a second container of the same image, `/root/.ssh` made unchangeable (`chattr +i`) | the failure said, nothing moved | `mv: cannot move … Operation not permitted`, `NOT MOVED: the move failed -- stop`, `root authorized_keys: STILL THERE, lines=1`, `root authorized_keys2: no file`, `kept aside: nothing` | yes |
+| C1. after a move, the clean-up line of the runbook's text | the moved file gone | `the moved file is gone`; run again: the same line; then the way back: `NOT PUT BACK: … is missing -- nothing changed` | yes |
+
+The clean-up line prints `the moved file is gone` also when there never was such a file (second run of C1): it shows
+that the file is not there, not that it was deleted just now. The runbook says so.
+
+**Does sshd really ignore the moved file?** Measured in the same container, with `sshd` started for the test and root
+login allowed there (the image's packaged default, `permitrootlogin without-password`; on the box it is `no`). A login
+as `root` with the key of that file, from inside the container to `127.0.0.1`: with the file in place `IN`, `rc=0`;
+after the move `rc=255`; after moving it back `IN`, `rc=0`. `sshd -T` there printed
+`authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2`, the box's value. On the box this cannot be shown by a
+login, because root login is off; there the proof is the two `no file` lines and `VPS look`.
+
+#### Two single commands of the text (stand-in server)
+
+| Command, where it stands | Case | Expected | Measured | Match |
+|---|---|---|---|---|
+| VPS 1 (the block is unchanged), then `chmod 600 ~/.ssh/authorized_keys; stat -c %a ~/.ssh/authorized_keys`, after VPS 1 | the `hermesops` file made mode 644 before VPS 1 | `ADDED: … mode 644`, then `600` | `ADDED: 2 key line(s), mode 644`, then `600`; the file mode 600 afterwards | yes |
+| the same command | a file that is already 600 | `600` | `600` | yes |
+| `K=$(openssl rand -hex 32); echo "throwaway key: $K"`, "A security review" step 2 | | the key shown | `throwaway key: ` and 64 hexadecimal characters | yes |
+
+#### The keychain lines of LAPTOP 5c and LAPTOP 6b, on this Mac's login keychain
+
+**What ran, and within which limits.** macOS 27.0.1 (build 26A434), `/usr/bin/ssh-add` and `/usr/bin/ssh-agent` of
+OpenSSH 10.3p1 (LibreSSL 3.3.6), zsh 5.9. A throwaway ed25519 key with the passphrase `test-passphrase-0000`, made at a
+scratch path. A private agent started for the test (`ssh-agent -D -a a.sock`, its socket a relative path inside the
+scratch directory because the absolute scratch path is too long for a socket; its own `HOME` a scratch directory) and
+killed right after the last count. The shell was an interactive `/bin/zsh` on a pseudo-terminal with an environment
+built from nothing: `PATH`, `TERM`, `LANG`, `USER`, `LOGNAME`, `SHELL`, the real `HOME` (so that the login keychain is
+the one a Terminal window uses), `ZDOTDIR` at a scratch directory whose `.zshrc` only sets the prompt, and
+`SSH_AUTH_SOCK=a.sock`. The `SSH_AUTH_SOCK` this session inherited was never read, and the agent macOS provides was
+never contacted. The passphrase prompt was answered **through the pseudo-terminal**, as a person types it (no
+`SSH_ASKPASS`). From the agent only counts were taken: `ssh-add -l | grep -cF "$FP"` for the throwaway key (its
+fingerprint read from its public file into a shell variable and never printed) and the number of lines of `ssh-add -l` that hold a
+fingerprint for a total (a `grep -c` for the word `SHA256` and a colon; the pattern is written out in words so that this
+document holds no string shaped like a fingerprint). Every wait had a time limit of 25 seconds and nothing was to be retried. No network connection was made. Nothing
+under the real `~/.ssh` was read, listed or written by any command of the rehearsal, with one disclosed exception that
+is inherent to the line under test: `ssh-add --apple-load-keychain` loads every key whose passphrase the keychain holds
+(row 2b and steps 4 and 5).
+
+Each line is the runbook's, with the key path substituted, and with the status and a total echoed after it (the
+runbook's lines do not print them). "Total" is the number of identities in the private agent.
+
+| Step | Line (paths left out) | Expected | Measured |
+|---|---|---|---|
+| 0. before anything | `ssh-add -l` | an empty agent | status 1, total 0, throwaway key 0 |
+| 1. LAPTOP 5c's first line | `ssh-add --apple-use-keychain "$K"; echo "in the agent before: $(ssh-add -l \| grep -cF "$FP")"` | it asks for the passphrase; count 1 | it asked once (`Enter passphrase for <path>:`), then `Identity added: <path> (<comment>)`; status 0; `in the agent before: 1`; total 1 |
+| 2b. **added to the six steps: a positive control for the last line** | `ssh-add -D`, then LAPTOP 5c's third line: `ssh-add --apple-load-keychain >/dev/null 2>&1; echo "keychain load rc=$?"; echo "supplied by the keychain: $(ssh-add -l \| grep -cF "$FP")"`, then `ssh-add -D` | the keychain holds the passphrase, so count 1 | total before 0; `keychain load rc=0`; `supplied by the keychain: 1`; total after **2**; after `ssh-add -D`: 0 |
+| 2. the first line again on the emptied agent, no passphrase supplied | as step 1 | silent, count 1 | it did **not** ask; `Identity added: …`; status 0; `in the agent before: 1`; total 1 |
+| 3. LAPTOP 5c's second line | `ssh-add --apple-use-keychain -d "$K"; echo "in the agent after: $(ssh-add -l \| grep -cF "$FP")"` | count 0 | `Identity removed: <path> ED25519 (<comment>)`; status 0; `in the agent after: 0`; total 0 |
+| 4. LAPTOP 5c's third line | the load line of 2b, then `ssh-add -D` | `rc`, count 0, the total | total before 0; `keychain load rc=0`; `supplied by the keychain: 0`; total after **1**; after `ssh-add -D`: 0 |
+| 5a. clean state (the key neither in the agent nor in the keychain) | `ssh-add --apple-use-keychain -d "$K"` | to be recorded | `Could not remove identity "<path>": agent refused operation`; status 1; throwaway key 0, total 0 |
+| 5b. clean state, the load line as LAPTOP 6b has it | the load line, then `ssh-add -D` | `rc` to be recorded, count 0 | total before 0; `keychain load rc=0`; `supplied by the keychain: 0`; total after **1**; after `ssh-add -D`: 0. Then the private agent was killed |
+| 6. is the keychain item gone? | `security find-generic-password -a <the throwaway key's path> -s SSH`, status only | not found | status 44 (not found). **This proves nothing by itself: see below** |
+
+**No command blocked.** Each one came back to the prompt within its time limit, so no permission dialog held any of
+them up (the screen itself was not looked at). No step asked for a passphrase other than step 1.
+
+**What the measurement shows.**
+
+- `ssh-add --apple-use-keychain <key>` asks once and stores the passphrase: the same line on an emptied agent then adds
+  the key without asking (step 2), and `--apple-load-keychain` supplies it (2b: count 1).
+- `ssh-add --apple-use-keychain -d <key>` takes the key out of the agent and the passphrase out of the keychain: after
+  it the load line supplies the key no longer (step 4 and 5b: count 0), where before it did (2b: count 1). So the last
+  line of LAPTOP 5c and of LAPTOP 6b **can print `1` and can print `0`**, measured against the real keychain.
+- `keychain load rc=0` in all three runs of the load line: with the throwaway key's passphrase in the keychain (2b) and
+  without it (4, 5b).
+- **The disclosed side effect, as a count.** Each run of `--apple-load-keychain` put **one** identity that is not the
+  throwaway key into the private agent (totals 2, 1, 1 with the throwaway key counted 1, 0, 0). So this Mac's keychain
+  holds the passphrase of one other SSH key. That identity was removed from the private agent with `ssh-add -D` after
+  each count; the agent was killed after 5b; no connection was made with it. Nothing about it was printed or recorded
+  but the number.
+
+**Differences from what the runbook assumed, and what changed.**
+
+1. *`keychain load rc=0` in the clean state* was an assumption (1.9). Measured: `rc=0` with the throwaway key's
+   passphrase absent. **But the keychain was not empty of SSH passphrases in any run** (one other key, above), so the
+   state "no SSH passphrase at all", which is this laptop's state after LAPTOP 5c if the administrative key's is the only
+   one stored, is **still not measured**. No block changed. The runbook's text at LAPTOP 5c and 6b now says what was
+   measured and keeps the sentence about a possible false alarm for the unmeasured state.
+2. *"From the manual; not measured"* for the other keys the last line loads: now measured as a count; the text says so.
+3. *`security find-generic-password` cannot see the item.* The query of step 6 ended with status 44 **also while the
+   item existed** (straight after step 1), with `-s SSH`, with `-s OpenSSH` and with the account alone; it ended with 44
+   before step 1 and after step 3 as well. On this macOS that tool does not see what `ssh-add` stores, so "not found"
+   at the end is no proof. No wider query was tried: every query named the throwaway key's path as its account, and
+   none asked for a secret. The proof that the throwaway item is gone is the load line: count 1 while it was stored
+   (2b), count 0 after the removal (4, 5b). The runbook does not use `security`, so nothing changed there.
+4. *`ssh-add -l | grep -c .` is not a total.* With an empty agent `ssh-add -l` prints the sentence `The agent has no
+   identities.` on standard output and ends with status 1, so that count would be 1. The totals above count the lines
+   that hold a fingerprint. The runbook's counts use `grep -cF "$FP"` and are not affected.
+5. *`--apple-use-keychain -d` on a key that is not in the agent* (5a): `agent refused operation`, status 1, as the
+   reviewer had measured for a plain `-d`. LAPTOP 5c never runs it in that state: its first line loads the key first.
+
+**What was rehearsed, and what was not.** Rehearsed for real: the three `--apple-…` forms of `ssh-add` against the
+login keychain, each followed by its count, with a throwaway key and a private agent; and with them the single command
+`ssh-add --apple-use-keychain <key>` that LAPTOP 6's text gives for putting a passphrase back. **Not rehearsed:** the
+same lines with the administrative key and with the agent macOS itself provides; LAPTOP 5c and 6b as whole functions
+against the keychain (their refusals and their order ran with stand-ins, 1.8 and 1.9); the load line's status with no
+SSH passphrase at all in the keychain; LAPTOP 6's login on macOS and LAPTOP 6b after a real login; a passphrase that
+`ssh` itself stored through `UseKeychain` (the item here was stored by `ssh-add`); plain `ssh-add -d` and
+`ssh-add -t 1h` of the text; a locked keychain, and a keychain that answers with a permission dialog.
+
+**Clean-up, checked.** The throwaway key's passphrase is out of the keychain (load line: count 0, twice). The private
+agent is killed (its exit status was read; no such process and no socket file left). The throwaway key files were
+deleted. Besides that keychain item, created and removed, nothing outside the scratch directory was changed on this Mac.
+
+#### Mechanical comparison
+
+A script (a file, run by path) compared every fenced block of the runbook with the runbook at commit `1cbf032`:
+80 blocks there, all 80 found identical and in the same order now; 84 blocks now, the four new ones all in step 7f
+(21 blocks of steps 7e and 7f before, 25 now). Each new block equals, character for character, the file the terminal
+stand-in pasted, and that file's SHA-256 prefix stands at a paste line of the records; `VPS look` equals the block the
+operator was given; the three single commands of the text are the rehearsed strings. `README.md` is unchanged.
+
+#### What this subsection does NOT show
+
+- **The new blocks on the box**, except `VPS look`, which the operator ran there. `VPS root key` (a), (b), the way back
+  and the clean-up line have run only on the stand-in server; whether root's key on the box is the administrative key
+  is not known until part (a) runs there.
+- `sudo` on the box for these blocks (the stand-in asked for a test password at `sudo -v`; the box's `sudo` settings were
+  not read).
+- The box's `Match` blocks, its fail2ban jail, and everything that needs a login with the new key.
+- The keychain items listed as not rehearsed above; Terminal.app itself (the terminal stand-in pasted every block).
+- `VPS look` with a setting that differs, with a failing `sshd -T`, or with accounts that are not in `/etc/passwd`
+  (`getent passwd` lists what the system's name services give; the stand-in had local accounts only).
+
 ### Not measured
 
 - The box's real OpenSSH version, its own `sshd_config` (a global `AllowTcpForwarding`, any `Match` block that
   could override the key's options) and its `net.ipv4.ip_unprivileged_port_start` (1.1, 1.4).
+  **Confirmed 2026-10-08:** the box's OpenSSH version, its global `sshd -T` settings (`allowtcpforwarding yes` among the
+  eight of 1.1) and its `ip_unprivileged_port_start` (`1024`) are now measured. Still not measured: its `Match` blocks,
+  its fail2ban jail, and everything that needs a login with the new key.
 - A real host, as opposed to Docker's network: every connection came from the Docker bridge address.
 - A key with `restrict` and **no** `command=`: every test ran with `command="/bin/false"`, so "`restrict` alone does
   not stop commands" rests on the manual, not on a run.
@@ -1266,6 +1509,79 @@ docker rm -f rehearsal-server rehearsal-laptop; docker network rm rehearsal-net;
 pbcopy < /dev/null
 ```
 
+### 1.D Appendix: how to rebuild the set-up of 1.10
+
+`$X` is a scratch directory. Test values only.
+
+**The stand-in server** (`$X/server/Dockerfile`): Ubuntu 24.04 with `openssh-server`, `sudo` and `openssl`; `hermesops`
+in the `sudo` group with a test password; a second account for case L2; test keys kept in `/opt/keys` to build the
+cases from; `root` and `hermesops` each start with the same one key. No network, no published port.
+
+```dockerfile
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server sudo openssl && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -s /bin/bash hermesops && usermod -aG sudo hermesops && echo 'hermesops:test-password-0000' | chpasswd \
+ && useradd -m -s /bin/bash otheracct \
+ && install -d -m 700 -o hermesops -g hermesops /home/hermesops/.ssh && install -d -m 700 /root/.ssh /opt/keys && mkdir -p /run/sshd \
+ && for k in admin second tunnel; do ssh-keygen -q -t ed25519 -N "" -C "$k-test" -f /opt/keys/$k; done \
+ && ssh-keygen -q -t ecdsa -N "" -C ecdsa-test -f /opt/keys/ec \
+ && cp /opt/keys/admin.pub /home/hermesops/.ssh/authorized_keys && chown hermesops:hermesops /home/hermesops/.ssh/authorized_keys && chmod 600 /home/hermesops/.ssh/authorized_keys \
+ && cp /opt/keys/admin.pub /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+CMD ["sleep", "infinity"]
+```
+
+```bash
+docker build -q -t rehearsal-fe-server "$X/server"
+docker run -d --rm --name rehearsal-fe-server --network none --hostname rehearsalbox --add-host rehearsalbox:127.0.0.1 --sysctl net.ipv4.ip_unprivileged_port_start=1024 rehearsal-fe-server
+# for the made failure B8 only: a second container of the same image, and `chattr +i /root/.ssh` in it before the paste
+docker run -d --rm --name rehearsal-fe-server-ro --network none --hostname rehearsalbox --add-host rehearsalbox:127.0.0.1 --cap-add LINUX_IMMUTABLE rehearsal-fe-server
+```
+
+(`--hostname` and `--add-host` only stop `sudo` from complaining that it cannot resolve the container's name; the first
+start, without them, printed that complaint.) Measured inside: `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`, Ubuntu 24.04.5,
+`sudo` 1.9.15p5, `awk` is `mawk`, GNU `grep` 3.11, the kernel setting `1024`.
+
+**The shell and the cases.** The terminal stand-in of 1.C started
+`docker exec -it -u hermesops -e TERM=xterm-256color -e 'PS1=B$ ' rehearsal-fe-server bash --norc -i`, pasted `sudo -v`
+alone and typed the test password, then pasted the block. Before each case the state was reset as `root`
+(`docker exec -u root`): root's and `hermesops`'s files back to the one administrative test key, mode 600; then the
+case's own change, for example `cp /opt/keys/second.pub /root/.ssh/authorized_keys` (A2), `ln -s` (B5), or the limited
+line built as LAPTOP 1b builds it and appended to the `hermesops` file (L3, A6). File states were read the same way
+(owner, mode, the first twelve characters of the SHA-256).
+
+**The login as `root` of 1.10** (inside the container, as `root`; `T` was run with the file in place, moved, and back):
+
+```bash
+/usr/sbin/sshd
+T() { ssh -n -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/kh -o IdentitiesOnly=yes -o IdentityAgent=none -i /opt/keys/admin root@127.0.0.1 "echo IN" 2>/dev/null; echo "rc=$?"; }
+```
+
+**The keychain lines on this Mac.** `$C` is a scratch directory, the working directory of everything below. The driver
+is a Python script built on the terminal stand-in; it starts each process with the environment written here and
+nothing else, so the `SSH_AUTH_SOCK` of the session that runs it is never read.
+
+```bash
+env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$C/home" /usr/bin/ssh-keygen -q -t ed25519 -N 'test-passphrase-0000' -C rehearsal-throwaway -f "$C/throwaway-key"
+env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$C/home" /usr/bin/ssh-agent -D -a a.sock     # a child of the driver, killed by it
+env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin TERM=xterm-256color LANG=en_US.UTF-8 USER="$USER" LOGNAME="$USER" SHELL=/bin/zsh HOME="$HOME" ZDOTDIR="$C/zd" SSH_AUTH_SOCK=a.sock /bin/zsh -i
+```
+
+These three lines are written as commands for the reader; the driver started the three programs itself with exactly
+these arguments and environments. `$C/zd/.zshrc` holds `PS1='Z> '` and nothing else. In that zsh, first
+`K=<the throwaway key's path>; FP=$(ssh-keygen -lf "$K.pub" 2>/dev/null | awk '{print $2}')`, then the lines of 1.10's
+table, each pasted as one bracketed paste. The total was `ssh-add -l 2>/dev/null` piped into a `grep -c` for the word `SHA256` and a colon; the `security`
+queries were `security find-generic-password -a "$K" -s SSH >/dev/null 2>&1; echo rc=$?`, the same with `-s OpenSSH`, and
+the same without `-s`. At a passphrase prompt the driver typed the test passphrase when the step expected a prompt
+(step 1 only) and would otherwise have pressed Ctrl+C and noted that it asked; on a wait longer than 25 seconds it
+would have pressed Ctrl+C once, stopped, and killed the agent. Neither happened.
+
+**Teardown**
+
+```bash
+docker rm -f rehearsal-fe-server rehearsal-fe-server-ro; docker rmi rehearsal-fe-server ubuntu:24.04
+rm -f "$C/throwaway-key" "$C/throwaway-key.pub" "$C/a.sock"
+```
+
 ## 2 · Step 7e, rehearsed
 
 Measured 2026-10-08 on the laptop, against a throwaway Compose project (`step7e-rehearsal`). Nothing on the box
@@ -1649,7 +1965,8 @@ addition, the two after the indented `Host other-indented` line (lines 8 and 9) 
 **Not measured:** `gawk` or `mawk` (the operator's `awk` is the one tested); the whole LAPTOP 5 first line (the `cp -p`,
 the redirection into `~/.ssh/config` and the `chmod`), which was not run; a `Host hermes-box # comment` line (it has more
 than two fields, so the block is not recognised and the settings stay: a safe failure); `Host=hermes-box` written with an
-equals sign; the real configuration (never read); `ssh-add --apple-use-keychain -d` and the keychain.
+equals sign; the real configuration (never read); `ssh-add --apple-use-keychain -d` and the keychain. **Note 2026-10-08:**
+`ssh-add --apple-use-keychain -d` was run against the login keychain with a throwaway key (1.10).
 
 ### 3.2 The `Match` count of the security review (checklist item D1.7)
 
