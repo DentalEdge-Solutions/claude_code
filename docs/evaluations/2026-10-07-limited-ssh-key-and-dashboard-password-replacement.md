@@ -1534,11 +1534,11 @@ Each ran as a script file (`bash b0.sh` .. `bash b3.sh`), the first line setting
 
 ```bash
 ##### BLOCK 0, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
-S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+S=<scratch>/step7e-rehearsal; BIN=<repo>/infra/hermes-agent/bin
 cd "$S" && grep -oE '^HERMES_DASHBOARD_BASIC_AUTH[A-Z_]*' gateway.env | sort
 
 ##### BLOCK 1, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
-S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+S=<scratch>/step7e-rehearsal; BIN=<repo>/infra/hermes-agent/bin
 step7e_set() {
   local P Q E="$S/gateway.env"
   cd "$S" || return
@@ -1555,7 +1555,7 @@ step7e_set() {
 }; step7e_set; unset -f step7e_set
 
 ##### BLOCK 2, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
-S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+S=<scratch>/step7e-rehearsal; BIN=<repo>/infra/hermes-agent/bin
 cd "$S"
 docker compose stop hermes-agent; echo "STOP_EXIT=$?"
 docker compose up -d --force-recreate hermes-agent; echo "UP_EXIT=$?"
@@ -1567,7 +1567,7 @@ docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_SECRET 
 docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD >/dev/null && echo "PLAINTEXT STILL SET" || echo "plaintext: not in the container"
 
 ##### BLOCK 3, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
-S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+S=<scratch>/step7e-rehearsal; BIN=<repo>/infra/hermes-agent/bin
 step7e_login() {
   local OLD NEW
   read -rs -p "OLD dashboard password: " OLD; echo

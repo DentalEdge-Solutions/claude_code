@@ -6,6 +6,8 @@
 > independent review, then ask the operator before pushing. Tasks 0, 9 and 10 are the operator's, block by
 > block; the build runs nothing on the box.
 
+> **SUPERSEDED BLOCKS — do not paste from this file.** The command blocks in Tasks 1, 2 and 6 below are the first drafts. Rehearsal and review found several of them unsafe (seven logins in one paste with no gate; a login-item edit that inserts instead of replacing; a keychain removal before the passphrase is proven) and replaced them. The blocks to run are ONLY those in `infra/hermes-agent/deploy/BRING-UP.md`, steps 7e and 7f; what was measured is in `docs/evaluations/2026-10-07-limited-ssh-key-and-dashboard-password-replacement.md`. The checklist text in Task 5 was also revised: `CHECKLIST.md` is the text that counts.
+
 **Goal:** Close review #8's open entries on the box (a dashboard password that was once plaintext, an always-on
 link that uses the administrative key, restarts a review cannot see) and let review #9 judge the result.
 
@@ -214,7 +216,7 @@ services:
     ports: ["127.0.0.1:29119:9119"]
 EOF
 printf 'HERMES_DASHBOARD=1\nHERMES_DASHBOARD_BASIC_AUTH_USERNAME=hermesadmin\nKEEP_ME=unchanged # a line that must survive byte for byte\n' > gateway.env
-BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+BIN=<repo>/infra/hermes-agent/bin
 printf '%s' 'OldTestPassword000000000000' | docker run --rm -i -w /opt/hermes --entrypoint python3 hermes-eval-derived:v0.21.5 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; sys.stdout.write(hash_password(sys.stdin.read()))' \
   | python3 "$BIN/install-env-secret.py" set --file "$S/gateway.env" --name HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH --prefix 'scrypt$' --quote single --mode 0600 --stdin
 python3 "$BIN/install-env-secret.py" generate --file "$S/gateway.env" --name HERMES_DASHBOARD_BASIC_AUTH_SECRET --mode 0600
@@ -1092,6 +1094,8 @@ python3 infra/hermes-agent/bin/check-checklist-version.py --base main; echo "ver
 
 ### Task 6: The runbook and the README
 
+> Superseded: paste nothing from this task. See the banner at the top.
+
 **Files:**
 - Modify: `infra/hermes-agent/deploy/BRING-UP.md` (new "Step 7e" after step 7d; new "The limited key for the
   laptop link" after it; "A security review" steps 2a and 3)
@@ -1397,7 +1401,7 @@ condition. Nothing here is run by the agent.
 
 - [ ] **Step 1 (VPS):** `sudo -v` alone; then pull: `cd /opt/projects/claude_code && sudo git pull --ff-only && git log --oneline -1`.
 - [ ] **Step 2 (VPS):** BRING-UP "A security review" step 2's start-time lines; record them.
-- [ ] **Step 3 (VPS):** a trial collection with a throwaway key (the handoff's summary script, extended by
+- [ ] **Step 3 (VPS):** a trial collection (the collector run with a throwaway key and piped into the summary script of the handoff `docs/superpowers/handoffs/2026-10-07-next-session-open-items.md`, "The trial-collection summary") with a throwaway key (the handoff's summary script, extended by
   `print("D1.7", …)` and `print("D4.6", …)` lines that print counts, key types, option lists, times and file
   names). Expected before the change: D1.7 shows what Task 0 found; D4.6 shows real UTC times (this is the
   first sight of `ActiveEnterTimestamp` in the collector's parser: a `could-not-check` here means the box
@@ -1405,7 +1409,7 @@ condition. Nothing here is run by the agent.
 - [ ] **Step 4 (VPS):** restart every service D4.6 named in `files_newer_than_start` (the app broker is
   expected: `client_audit_lib.py` changed after it started on 2026-10-01). Not during an audit. Record the time.
 - [ ] **Step 5:** quit the Desktop app. BRING-UP step 7e, blocks 0 to 3. Record block 2's output. Sign in again.
-- [ ] **Step 6:** BRING-UP step 7f, LAPTOP 1 to LAPTOP 6 and VPS 1. If Task 0 found a key on another account
+- [ ] **Step 6:** BRING-UP step 7f, in the runbook's own order: VPS 0, LAPTOP 1, VPS 1 (left waiting), LAPTOP 1b, LAPTOP 2, LAPTOP 3a (the gate, alone), LAPTOP 3b, LAPTOP 4a, 4b, 4c, LAPTOP 5a, 5b, 5c, LAPTOP 6, 6b, then the clean-up. If Task 0 found a key on another account
   and the operator chose to remove it, a block for that (the file moved aside, then deleted after a new
   administrative login succeeds).
 - [ ] **Step 7 (VPS):** `sudo show-listener-check` ends `listener check: OK`; a second trial collection shows
