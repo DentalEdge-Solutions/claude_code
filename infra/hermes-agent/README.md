@@ -181,6 +181,21 @@ What follows describes the link once BRING-UP step 7f has been run. Until then t
 step 3 still names the `hermes-box` alias and uses the administrative key, whose passphrase is in
 the macOS keychain (security review #8, finding F57); step 7f is what changes that.
 
+The ADMINISTRATIVE alias, `hermes-box`, stays in `~/.ssh/config`: BRING-UP's step 7f LAPTOP 2 copies
+the box's address from it. It is used for work on the box and asks for the key's passphrase once step
+7f has been run; before step 7f it also holds the two lines `AddKeysToAgent yes` and `UseKeychain yes`
+(step 7f removes them):
+```
+Host hermes-box
+  HostName <the box's address>
+  User hermesops
+  IdentityFile ~/.ssh/vps-hermes
+  IdentitiesOnly yes
+  ForwardAgent no
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+```
+
 1. Give the link an alias of its own in `~/.ssh/config`, so the box's address is written in one local
    file and nowhere else. It uses a key made only for this forward (BRING-UP step 7f makes the key
    and this alias; the block below is that step's alias, with the address copied from the

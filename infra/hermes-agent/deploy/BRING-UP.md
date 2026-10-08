@@ -1507,9 +1507,9 @@ the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three 
 gitignored `security-reviews/`; only the report is committed.
 
 1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
-2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is four lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. Then count the `Match` blocks in the sshd configuration (D1.7): `sudo sh -c 'cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -ciE "^[[:space:]]*match[[:space:]]"'` prints the number of `Match` lines; expected `0`. Put the number in the evidence file (D1.7 cannot pass without it); another number needs your statement of what each block sets. The command reads those two fixed places only: it also prints `0` when neither can be read, and a `Match` line in a file that an `Include` brings in from another directory is not counted, so say in the evidence that the count covers `/etc/ssh/sshd_config` and `/etc/ssh/sshd_config.d/*.conf` (rehearsed on a stand-in server: `0`, `1` and `2`; on the box it runs for the first time). After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
+2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is four lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. Then count the `Match` blocks in the sshd configuration (D1.7): `sudo sh -c 'cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -ciE "^[[:space:]]*match[[:space:]]"'` prints the number of `Match` lines; expected `0`. Put the number in the evidence file (D1.7 cannot pass without it); another number needs your statement of what each block sets. The command reads those two fixed places only: it also prints `0` when neither can be read, and a `Match` line in a file that an `Include` brings in from another directory is not counted, so say in the evidence that the count covers `/etc/ssh/sshd_config` and `/etc/ssh/sshd_config.d/*.conf` (rehearsed on a stand-in server: `0`, `1` and `2`; on the box it runs for the first time). After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's (the collector run once with a throwaway key before the real collection, to see that every item is observed: `K=$(openssl rand -hex 32)`, pasted at the key prompt) D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
 3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):
-   `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <review #5 execstart_sha256> --last-pass-collected-at <the last PASS box bundle's collected_at> > ~/bundle-box.json`
+   `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <the last PASS report's execstart_sha256> --last-pass-collected-at <the last PASS box bundle's collected_at> > ~/bundle-box.json`
    (the collector re-runs both probes as D10.1 and D10.2, so this step takes as long as step 2 again; `--last-pass-execstart` is the last PASS report's D4.2 `execstart_sha256`, 64 lowercase hex characters. `--last-pass-collected-at` is in the last PASS report's header from review #9 on; for review #9 itself, read it from review #8's bundle.)
    Once the key is pasted, clear the laptop's clipboard: `pbcopy < /dev/null`.
    If the proxy's `ExecStart` hash will not match the last PASS (D4.2) because `systemctl daemon-reload` ran since
@@ -1519,7 +1519,7 @@ gitignored `security-reviews/`; only the report is committed.
    `L=$(systemctl show hermes-docker-proxy -p ExecStart --no-pager); P=$(systemctl show hermes-docker-proxy -p MainPID --value); T=$(systemctl show hermes-docker-proxy -p ExecMainStartTimestamp --value); echo "pid=$P start=$T"; printf '%s\n' "$L" | sha256sum; printf '%s\n' "$L" | sed "s/start_time=\[n\/a\] ; stop_time=\[n\/a\] ; pid=0/start_time=[$T] ; stop_time=[n\/a] ; pid=$P/" | sha256sum`
 4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file, and refuses one with any group or other access: it is `0600`; the ads repo checked out at the pin, with `.claude/settings.json` stashed).
 5. Copy the box bundle to the laptop's `security-reviews/`, and delete it from the box. Check that both bundles show the same `cid_key_id`.
-6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`) and D10.8's statement that the `ok` run came from chat.
+6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement that the `ok` run came from chat, D1.7's statement of whose each accepted key is (and the `Match` count of step 2), D4.6's statement of each restart since the last PASS (what started, when, why).
 
 ---
 
@@ -1967,6 +1967,8 @@ cat /proc/sys/net/ipv4/ip_unprivileged_port_start
 
 Expected: `1024` or more. A smaller number: stop, do not add the key, and report it.
 
+If the read-only look at the box showed a key file under another account than `hermesops`, the operator decides: remove that key, or keep it and state why. Nothing is removed in this step without that decision. A key on `root` cannot be used to log in while `permitrootlogin no` holds (D1.3), but it must be explained in the evidence (D1.7). This step has no block for a removal: it has not been rehearsed and the decision has not been made.
+
 LAPTOP 1: make the key, and nothing else.
 
 ```bash
@@ -2019,10 +2021,7 @@ tunnel_key_add() {
 }; tunnel_key_add; unset -f tunnel_key_add
 ```
 
-Expected: `ADDED: 2 key line(s), mode 600`. The 2 assumes `authorized_keys` held exactly one key
-before (the administrative key), which is what the read-only look of the first trial collection
-showed. Another count is not an error by itself, but it must equal what that look showed plus one:
-if it does not, stop and say so. Every other output:
+Expected: `ADDED: 2 key line(s), mode 600`. `ADDED: 2 key line(s)` assumes the file held exactly one key before. The number to expect is the count the read-only look at the box gave (two blocks, run before this step; D1.7 of a trial collection shows the same) plus one; another number is not an error by itself, but stop and say so. `mode` must be `600`: sshd accepts other modes, but review item D1.7 fails them. If it prints another mode, run `chmod 600 ~/.ssh/authorized_keys` and say so. Every other output:
 
 - `REFUSED: …` (more than one line was pasted; the file is missing; not the expected line; a
   character that is not base64): nothing was written. Run LAPTOP 1b again, paste VPS 1 again, and
@@ -2347,7 +2346,7 @@ next line removes it again. Every other output:
   to LAPTOP 6. (Rehearsed with a stand-in that ends with `1`: `keychain load rc=1`, then `0`. Not
   measured: what the real `ssh-add --apple-load-keychain` ends with when the keychain holds no
   passphrase at all. `rc=0` is what is expected of it; if the laptop prints another number in that
-  state, this stop is a false alarm, and it is still the right thing to report.)
+  state, this stop is a false alarm, and it is still the right thing to report.) At this point the key has already left the agent and the keychain. You are not locked out: the first administrative session is still open, and LAPTOP 5a showed that you can type the passphrase. Report it before going on.
 - `STOPPED: could not read …/vps-hermes.pub -- nothing removed`: the key's public file is missing.
   Stop and report it.
 - `in the agent before: 0`: the key could not be loaded, so the removal had nothing to act on.
@@ -2400,7 +2399,7 @@ keychain_check() {
 ```
 
 Expected: `in the agent after the login: 0`, `keychain load rc=0` and `supplied by the keychain
-after the login: 0`. Every other output:
+after the login: 0`. These counts are only meaningful if `ssh-add -l` reached the agent: a line "Could not open a connection to your authentication agent" above them means it did not; stop and report. Every other output:
 
 - `STOPPED: could not read …/vps-hermes.pub`: report it.
 - `keychain load rc=` anything but `0`: the laptop could not ask the keychain, so the `0` under it
@@ -2420,6 +2419,8 @@ the box, in the FIRST administrative session (the one kept open since VPS 0; the
 opened was closed with `exit`): `rm -f ~/.ssh/authorized_keys.before-tunnel-key`. On the laptop:
 `rm -f ~/.ssh/config.before-tunnel-key ~/hermes-box-tunnel.plist.before-tunnel-key`. Then type
 `exit` in the first administrative session.
+
+After this step a review's D1.7 shows two keys for `hermesops`: one with no options and one with the five limited options. Put in the evidence file: whose each key is (the administrative key; the forward's key made in this step, with the date), and the `Match` count of "A security review" step 2. The first review after this step has no earlier header to compare the keys' short fingerprints with; from the next one on the report header carries them.
 
 For a work session with several connections, `ssh-add -t 1h ~/.ssh/vps-hermes` keeps the key in
 memory for an hour and stores nothing in the keychain. To replace the limited key later: make a new
