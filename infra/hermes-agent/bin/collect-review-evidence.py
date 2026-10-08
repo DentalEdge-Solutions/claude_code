@@ -317,13 +317,14 @@ _SHOWN_OPTION_RES = {"command": re.compile(r"[A-Za-z0-9_./-]+"),
 
 
 def _split_unquoted(text, seps):
-    """(parts, unbalanced): `text` split on any character of `seps` outside double quotes. Inside
-    quotes a backslash keeps the next character, as sshd reads an option value. Empty parts are
-    dropped. `unbalanced` is True when a quote is never closed."""
+    """(parts, unbalanced): `text` split on any character of `seps` outside double quotes, as
+    sshd's option scan reads a line: a backslash escapes only a double quote (the pair is kept
+    and never toggles quoting, inside or outside quotes); any other backslash is an ordinary
+    character. Empty parts are dropped. `unbalanced` is True when a quote is never closed."""
     parts, cur, quoted, i = [], [], False, 0
     while i < len(text):
         c = text[i]
-        if quoted and c == "\\" and i + 1 < len(text):
+        if c == "\\" and text[i + 1:i + 2] == '"':
             cur.append(text[i:i + 2])
             i += 2
             continue
@@ -355,7 +356,7 @@ def _shown_option(opt):
 def _key_row(line):
     """One authorized_keys line as its key type, its options and a short fingerprint of the key
     body, or None when it is not a key line. The body and the comment are never returned."""
-    tokens, unbalanced = _split_unquoted(line.strip(), " \t")
+    tokens, unbalanced = _split_unquoted(line.strip(" \t"), " \t")      # sshd skips only spaces and tabs
     if unbalanced:
         return None
     for i in (0, 1):                                    # the key type is first, or second after the options
@@ -386,22 +387,52 @@ def _authorized_keys_paths(pattern, user, home):
     return out
 
 
+AUTHORIZED_KEYS_READ_LIMIT = 1 << 20      # bytes; a larger key file is could-not-check, never a partial list
+
+
+def _read_key_file(fd):
+    """The lines of the open key file, or None when it is larger than the limit. sshd ends a line
+    at a newline only (str.splitlines would also split on \\r, \\f and U+2028)."""
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(AUTHORIZED_KEYS_READ_LIMIT + 1)
+    if len(data) > AUTHORIZED_KEYS_READ_LIMIT:
+        return None
+    return data.decode("utf-8", errors="replace").split("\n")
+
+
 def _authorized_keys_row(host, p, users):
-    st = os.lstat(host.path(p))
-    row = {"path": p, "users": sorted(users), "owner": _owner(st.st_uid), "group": _group(st.st_gid),
-           "mode": oct(stat.S_IMODE(st.st_mode)),
-           "kind": "file" if stat.S_ISREG(st.st_mode) else "symlink" if stat.S_ISLNK(st.st_mode) else "not-a-file"}
-    unread = {**row, "keys": R.COULD_NOT_CHECK, "unparsed_lines": R.COULD_NOT_CHECK}
-    if row["kind"] != "file":
-        return unread
-    try:
-        with open(host.path(p), encoding="utf-8", errors="replace") as f:
-            lines = f.read().splitlines()
+    full = host.path(p)
+    row = {"path": p, "users": sorted(users)}
+    unread = {"keys": R.COULD_NOT_CHECK, "unparsed_lines": R.COULD_NOT_CHECK}
+    fd = None
+    try:                                    # one open, never through a link: what is read is what was examined
+        fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        st = os.fstat(fd)
     except OSError:
-        return unread
+        if fd is not None:
+            os.close(fd)
+        try:
+            st = os.lstat(full)             # a link, or a file that cannot be opened: describe it, read nothing
+        except OSError:
+            return {**row, "kind": R.COULD_NOT_CHECK, "owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK,
+                    "mode": R.COULD_NOT_CHECK, **unread}
+        fd = None
+    kind = "file" if stat.S_ISREG(st.st_mode) else "symlink" if stat.S_ISLNK(st.st_mode) else "not-a-file"
+    row.update(kind=kind, owner=_owner(st.st_uid), group=_group(st.st_gid), mode=oct(stat.S_IMODE(st.st_mode)))
+    if fd is not None and (kind != "file" or st.st_size > AUTHORIZED_KEYS_READ_LIMIT):
+        os.close(fd)
+        fd = None
+    if fd is None:
+        return {**row, **unread}
+    try:
+        lines = _read_key_file(fd)
+    except OSError:
+        return {**row, **unread}
+    if lines is None:
+        return {**row, **unread}
     keys, unparsed = [], 0
     for line in lines:
-        if not line.strip() or line.lstrip().startswith("#"):
+        if not line.strip(" \t") or line.lstrip(" \t").startswith("#"):
             continue
         key = _key_row(line)
         if key is None:
@@ -431,8 +462,13 @@ def d1_7(host, ctx):
                 continue
             accounts += 1
             for p in _authorized_keys_paths(got["authorizedkeysfile"], parts[0], parts[5] or "/"):
-                if os.path.lexists(host.path(p)):
-                    users_of.setdefault(p, set()).add(parts[0])
+                try:
+                    os.lstat(host.path(p))
+                except (FileNotFoundError, NotADirectoryError):
+                    continue                # no such file: nothing accepts a key from it
+                except OSError:
+                    pass                    # cannot tell: keep the path, the row says so
+                users_of.setdefault(p, set()).add(parts[0])
     return {"sshd": {k: got.get(k, R.COULD_NOT_CHECK) for k in SSHD_KEY_SOURCES},
             "accounts_checked": accounts,
             "files": [_authorized_keys_row(host, p, users_of[p]) for p in sorted(users_of)]}

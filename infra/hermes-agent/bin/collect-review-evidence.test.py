@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64, contextlib, hashlib, importlib.util, io, json, os, shutil, sys, tempfile, time, unittest
+import base64, contextlib, hashlib, importlib.util, io, json, os, shutil, stat, sys, tempfile, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -2838,6 +2838,96 @@ class TestD17AcceptedKeys(Base):
     def test_a_certificate_authority_line_is_a_key_with_that_option(self):
         self._keys("/home/hermesops", f"cert-authority ssh-ed25519 {_keybody(7)}\n")
         self.assertEqual(CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"], ["cert-authority"])
+
+    def test_an_escaped_backslash_before_a_quote_does_not_close_it_early_as_sshd_reads_it(self):
+        """sshd: a backslash escapes only a double quote. In `command="a\\" ssh-ed25519 B1 x"` the
+        `\\"` is a backslash then an escaped quote, so the value runs to the last quote and the
+        accepted key is body 2; body 1 is only text inside the option."""
+        self._keys("/home/hermesops", f'command="a\\\\" ssh-ed25519 {_keybody(1)} x" ssh-ed25519 {_keybody(2)}\n')
+        out = CE.d1_7(self.host(), {})
+        keys = out["files"][0]["keys"]
+        self.assertEqual([k["sha12"] for k in keys], [hashlib.sha256(base64.b64decode(_keybody(2))).hexdigest()[:12]])
+        self.assertNotIn(hashlib.sha256(base64.b64decode(_keybody(1))).hexdigest()[:12], json.dumps(out))
+
+    def test_an_escaped_quote_inside_a_value_stays_in_the_value(self):
+        self._keys("/home/hermesops", f'command="echo \\"hi\\"",no-pty ssh-ed25519 {_keybody(1)}\n')
+        key = CE.d1_7(self.host(), {})["files"][0]["keys"][0]
+        self.assertEqual(key["options"], ["command=<withheld>", "no-pty"])
+
+    def test_blanks_before_the_key_are_skipped(self):
+        self._keys("/home/hermesops", f"  \t ssh-ed25519 {_keybody(1)}\n \tno-pty ssh-ed25519 {_keybody(2)}\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual(([k["options"] for k in row["keys"]], row["unparsed_lines"]), ([[], ["no-pty"]], 0))
+
+    def test_only_a_newline_ends_a_line_as_sshd_reads_the_file(self):
+        """Python's splitlines also splits on \\r, \\f and U+2028; sshd does not. A key after one of
+        them in a comment line is not a key, and a decoy key in front of one is not the line's key."""
+        self._keys("/home/hermesops", f"# note\rssh-ed25519 {_keybody(1)}\n# note\u2028ssh-ed25519 {_keybody(2)}\n"
+                                      f"\x0cssh-ed25519 {_keybody(3)}\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["keys"], row["unparsed_lines"]), ([], 1))
+
+    def test_a_file_that_is_swapped_for_a_symlink_is_not_followed(self):
+        """The path is a file when it is first examined and a link by the time it is opened (once,
+        between the examination and the open, whichever way the collector examines it)."""
+        p = self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
+        real_lstat, real_open, state = os.lstat, os.open, {"seen": 0, "swapped": False}
+        def swap():
+            if not state["swapped"]:
+                state["swapped"] = True
+                os.unlink(p)
+                os.symlink("/etc/passwd", p)
+        def lstat(path, *a, **kw):
+            st = real_lstat(path, *a, **kw)
+            if path == p:
+                state["seen"] += 1
+                if state["seen"] == 2:                  # d1_7 looked once; the row looks again
+                    swap()
+            return st
+        def opener(path, *a, **kw):
+            if path == p:
+                swap()
+            return real_open(path, *a, **kw)
+        with mock.patch.object(os, "lstat", lstat), mock.patch.object(os, "open", opener):
+            row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["kind"], row["keys"], row["unparsed_lines"]),
+                         ("symlink", R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_file_over_the_read_limit_is_could_not_check_not_a_partial_list(self):
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\nssh-ed25519 {_keybody(2)}\n")
+        with mock.patch.object(CE, "AUTHORIZED_KEYS_READ_LIMIT", 64):
+            row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["kind"], row["keys"], row["unparsed_lines"]),
+                         ("file", R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_file_that_grows_past_the_limit_while_read_is_could_not_check(self):
+        """fstat said small; the bytes read exceed the limit: still no partial list."""
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\nssh-ed25519 {_keybody(2)}\n")
+        real_fstat = os.fstat
+        def small(fd):
+            r = real_fstat(fd)
+            return os.stat_result((r.st_mode, r.st_ino, r.st_dev, r.st_nlink, r.st_uid, r.st_gid, 1, 0, 0, 0))
+        with mock.patch.object(CE, "AUTHORIZED_KEYS_READ_LIMIT", 64), mock.patch.object(os, "fstat", small):
+            row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["keys"], row["unparsed_lines"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_path_that_cannot_be_examined_is_reported_not_skipped(self):
+        p = self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
+        real_lstat, real_open = os.lstat, os.open
+        def deny(real):
+            def call(path, *a, **kw):
+                if path == p:
+                    raise PermissionError(13, "denied")
+                return real(path, *a, **kw)
+            return call
+        with mock.patch.object(os, "lstat", deny(real_lstat)), mock.patch.object(os, "open", deny(real_open)):
+            rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual({k: rows[0][k] for k in ("path", "users", "kind", "owner", "group", "mode", "keys", "unparsed_lines")},
+                         {"path": "/home/hermesops/.ssh/authorized_keys", "users": ["hermesops"],
+                          "kind": R.COULD_NOT_CHECK, "owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK,
+                          "mode": R.COULD_NOT_CHECK, "keys": R.COULD_NOT_CHECK, "unparsed_lines": R.COULD_NOT_CHECK})
+        self.assertEqual(set(rows[0]), {"path", "users", "kind", "owner", "group", "mode", "keys", "unparsed_lines"})
 
 
 class TestD46StartTimes(Base):
