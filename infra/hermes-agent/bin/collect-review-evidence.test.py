@@ -2964,6 +2964,28 @@ class TestD17AcceptedKeys(Base):
                           "mode": R.COULD_NOT_CHECK, "keys": R.COULD_NOT_CHECK, "unparsed_lines": R.COULD_NOT_CHECK})
         self.assertEqual(set(rows[0]), {"path", "users", "kind", "owner", "group", "mode", "keys", "unparsed_lines"})
 
+    def test_a_six_field_account_line_is_could_not_check_not_skipped(self):
+        self._w("/etc/passwd", self.PASSWD + "short:x:1002:1002::/home/short\n")
+        self._keys("/home/short", f"ssh-ed25519 {_keybody(6)}\n")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE.d1_7(self.host(), {})
+
+    def test_an_eight_field_account_line_is_could_not_check(self):
+        self._w("/etc/passwd", self.PASSWD + "long:x:1003:1003::/home/long:/bin/sh:extra\n")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE.d1_7(self.host(), {})
+
+    def test_blank_lines_and_comment_lines_in_passwd_are_skipped(self):
+        self._w("/etc/passwd", "\n# a comment\n" + self.PASSWD + "\n#another\n\n")
+        self.assertEqual(CE.d1_7(self.host(), {})["accounts_checked"], 5)
+
+    def test_full_width_digits_in_a_forward_target_are_withheld(self):
+        self._keys("/home/hermesops",
+                   f'permitopen="127.0.0.1:９１１９",permitlisten="127.0.0.1:１" '
+                   f'ssh-ed25519 {_keybody(1)}\n')
+        out = CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"]
+        self.assertEqual(out, ["permitlisten=<withheld>", "permitopen=<withheld>"])
+
 
 class TestD46StartTimes(Base):
     START = "Wed 2026-10-07 06:45:46 UTC"      # as `systemctl show -p ActiveEnterTimestamp --value` prints it
@@ -3106,6 +3128,28 @@ class TestD46StartTimes(Base):
             self.assertEqual((rc, out.getvalue()), (2, ""), repr(bad))
             self.assertIn("--last-pass-collected-at", err.getvalue())
             self.assertIsNone(CE.LAST_PASS_COLLECTED_AT)
+
+    def test_main_refuses_a_collected_at_written_with_full_width_digits(self):
+        bad = "２０２６-10-07T16:21:22Z"
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = CE.main(["--fp-key-tty", "--last-pass-collected-at", bad], host=self.host(),
+                         read_key=lambda: "11" * 32)
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertIn("--last-pass-collected-at", err.getvalue())
+
+    def test_a_systemd_or_docker_time_with_full_width_digits_is_could_not_check(self):
+        self._start("hermes-broker", "Wed ２０２６-10-07 06:45:46 UTC")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["hermes-broker"], R.COULD_NOT_CHECK)
+        self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = \
+            (0, "２０２６-10-07T15:39:12Z\n", "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["gateway-container"], R.COULD_NOT_CHECK)
+
+    def test_a_script_too_deep_to_parse_is_could_not_check_for_that_service_only(self):
+        self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "x = " + "1+" * 200000 + "1\n")
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"]["hermes-broker"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["files_newer_than_start"]["hermes-docker-proxy"], [])
 
     def test_main_passes_a_valid_last_pass_collected_at_and_does_not_leak_it(self):
         def run(*extra):

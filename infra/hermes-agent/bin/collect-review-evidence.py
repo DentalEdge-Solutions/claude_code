@@ -315,8 +315,8 @@ _OPTION_NAME_RE = re.compile(r"[A-Za-z0-9-]+")
 # The only option VALUES printed: a plain program path, and a loopback target. Any other value
 # (an address in from=, a command line with arguments, an environment assignment) is withheld.
 _SHOWN_OPTION_RES = {"command": re.compile(r"[A-Za-z0-9_./-]+"),
-                     "permitopen": re.compile(r"(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5}|\*)"),
-                     "permitlisten": re.compile(r"((127\.0\.0\.1|localhost|\[::1\]):)?(\d{1,5}|\*)")}
+                     "permitopen": re.compile(r"(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5}|\*)"),
+                     "permitlisten": re.compile(r"((127\.0\.0\.1|localhost|\[::1\]):)?([0-9]{1,5}|\*)")}
 
 
 def _split_unquoted(text, seps):
@@ -477,9 +477,15 @@ def d1_7(host, ctx):
     users_of, accounts = {}, 0
     with open(host.path("/etc/passwd")) as f:
         for line in f:
-            parts = line.rstrip("\n").split(":")
-            if len(parts) != 7:
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
                 continue
+            parts = line.split(":")
+            # Not measured (no container image here): whether the system's own account lookup
+            # accepts a short line. A line this collector cannot read as an account may still be
+            # one, and its key file would go unlisted, so the whole item is could-not-check.
+            if len(parts) != 7:
+                raise CouldNotCheck("an /etc/passwd line does not have seven fields")
             accounts += 1
             for p in _authorized_keys_paths(got["authorizedkeysfile"], parts[0], parts[5] or "/"):
                 try:
@@ -1036,9 +1042,9 @@ SERVICE_FILES = {"hermes-docker-proxy": ("hermes-docker-proxy.service", "docker-
                  "hermes-broker": ("hermes-broker.service", "hermes-broker.py"),
                  "hermes-app-broker@" + APP: ("hermes-app-broker@.service", "hermes-app-broker.py")}
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-_ISO_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
-_SYSTEMD_TS_RE = re.compile(r"[A-Z][a-z]{2} (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) UTC")
-_DOCKER_TS_RE = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z")
+_ISO_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_SYSTEMD_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2}) UTC")
+_DOCKER_TS_RE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?Z")
 _PY_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\.py")
 
 
@@ -1118,7 +1124,7 @@ def _files_newer_than_start(host, unit, started_at):
         paths.update({n: os.path.join(bin_dir, n) for n in _loaded_files(bin_dir, script)})
         start = _epoch(started_at)
         return sorted(n for n, p in paths.items() if int(os.stat(p).st_mtime) > start), len(paths)
-    except (OSError, SyntaxError, ValueError):
+    except (OSError, SyntaxError, ValueError, RecursionError):
         return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
 
 
