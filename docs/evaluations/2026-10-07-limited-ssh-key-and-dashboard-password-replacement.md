@@ -14,6 +14,7 @@
 |---|---|---|
 | Local `man sshd`, section "AUTHORIZED_KEYS FILE FORMAT" (laptop OpenSSH 10.3p1) | primary | `restrict` disables port, agent and X11 forwarding, PTY allocation and `~/.ssh/rc`; its list does not include command execution, so a `command=` is needed to stop commands. `port-forwarding` re-enables forwarding in both directions ("Enable port forwarding previously disabled by the `restrict` option"). `permitopen="host:port"` limits `-L`; `permitlisten="[host:]port"` limits `-R`. `permitlisten` has no "none" form, so a port that cannot be bound stands in for it. |
 | Local `man ssh-add` (`--apple-use-keychain`) | primary | With `-d`, `--apple-use-keychain` removes the passphrase from the keychain as well. |
+| Image source `hermes_cli/dashboard_auth/routes.py` (section 2.1) | primary | The password-login throttle: 10 attempts per 60 s per client IP, in memory. |
 | The box's OpenSSH version | **not yet known** | The operator was asked and has not answered. Until then the rehearsal used `ubuntu:24.04`, which ships the version in 1.2. **The box's version is still to be confirmed against it.** |
 | This rehearsal (1.2 to 1.5) | measurement | The results below. |
 
@@ -119,4 +120,110 @@ defence, not the main one.
 
 ## 2 · Step 7e, rehearsed
 
-To be added by the step 7e rehearsal.
+Measured 2026-10-08 on the laptop, against a throwaway Compose project (`step7e-rehearsal`). Nothing on the box
+was touched. Test values only: user `hermesadmin`, passwords `OldTestPassword000000000000`,
+`NewTestPassword111111111111` and (second run) `ThirdTestPassword2222222222`.
+
+### 2.1 Sources and what each verified (accessed 2026-10-08)
+
+| Source | Authority | Verified there |
+|---|---|---|
+| Image source in `hermes-eval-derived:v0.21.5`, `hermes_cli/dashboard_auth/routes.py` lines 335 to 358 | primary | The password login is throttled by a process-local sliding window per client IP: `_PW_RATE_MAX_ATTEMPTS = 10` per `_PW_RATE_WINDOW_SEC = 60.0`; an attempt is recorded only when allowed; a refused one answers 429. The comment says it "resets on restart". |
+| This rehearsal (2.2 to 2.6) | measurement | The results below. |
+
+### 2.2 Set-up
+
+The throwaway project is the brief's: one service `hermes-agent` (image `hermes-eval-derived:v0.21.5`, command
+`gateway run`, `env_file: gateway.env`, `./data:/opt/data`, port `127.0.0.1:29119:9119`). The env file held
+`HERMES_DASHBOARD=1`, the username, a line `KEEP_ME=unchanged # a line that must survive byte for byte`, and (as
+step 7d leaves the box) a scrypt hash of the old password and a signing secret, both written with
+`install-env-secret.py`. The gateway started without a `config.yaml`: **the `config.yaml.example` copy was not
+needed.** Set-up output: `install-env-secret: ...PASSWORD_HASH set ... (mode 0600)`,
+`install-env-secret: ...SECRET generated ... (mode 0600)`, `hermes-agent running`.
+
+The blocks were run as `bash b0.sh` .. `bash b3.sh` (each a file holding the block as adapted below). **Input:**
+the answers to the `read -rs` prompts were supplied on the script's standard input (`printf 'pw\npw\n' | bash b1.sh`),
+one line per prompt. This is safe in block 1 because `docker compose exec -T` reads the pipe fed by the inner
+`printf`, not the script's standard input, and `read` has already consumed its two lines by then; block 3's `curl`
+reads its body from its own pipe. With no terminal, `read -p` does not print its prompt text, so prompts are absent
+from the transcript; on the box they appear.
+
+**Substitutions made to the blocks** (all of them; nothing else was changed):
+
+- `sudo ` removed everywhere (including `sudo -v`); `docker compose` run directly.
+- `.env` became `gateway.env`: block 0's `grep ... .env`, block 1's `E=/opt/hermes-agent/.env` (now `E="$S/gateway.env"`),
+  block 2's `open(".env")` (now `open("gateway.env")`).
+- `cd /opt/hermes-agent` became `cd "$S"` (blocks 0, 1, 2), `S` being the scratch directory.
+- `bin/install-env-secret.py` became `"$BIN/install-env-secret.py"`; in block 2's one-line Python,
+  `sys.path.insert(0, "bin")` became `sys.path.insert(0, "'"$BIN"'")` (the shell closes and reopens the single quotes
+  around the path); `BIN` is the repo's `infra/hermes-agent/bin`.
+- `--owner-uid 0 --owner-gid 0` removed from the `set` and `generate` calls.
+- Port `9119` became `29119` in block 3 (the `Origin` header and the URL).
+- Block 2: the two `systemctl start hermes-listener-check.service` lines with their `echo`, the
+  `show-listener-check` line and the `systemctl list-timers` line removed (no systemd on the laptop).
+
+The exact text as run is kept in the working notes (`task-2-blocks-as-run.txt`, git-ignored) for comparison with
+the runbook.
+
+### 2.3 The session with the old password, and the four blocks
+
+| Step | Expected | Measured | Match |
+|---|---|---|---|
+| Sign in with the old password | `login 200` | `login 200` | yes |
+| Session before | `200` | `session before 200` | yes |
+| Block 0 | the three names only | `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`, `..._SECRET`, `..._USERNAME` | yes |
+| Block 1, two different entries (`...111` and `...222`) | `REFUSED`; file unchanged | `REFUSED: ... nothing written`; `cmp` silent (`cmp: identical` printed by an added `&& echo`) | yes |
+| Block 1, 23-character entry, twice | same | same | yes |
+| Block 1, entry with a `$` (27 characters), twice | same | same | yes |
+| Block 1, the real run | hash `set`, secret `removed` (1 line), secret `generated` | `...PASSWORD_HASH set ... (mode 0600)`; `...SECRET removed ... (1 line(s))`; `...SECRET generated ... (mode 0600)` | yes |
+| Block 2: stop, recreate | `STOP_EXIT=0`, `UP_EXIT=0`, `hermes-agent running Up ...` | `STOP_EXIT=0`, `UP_EXIT=0`, `hermes-agent running Up 25 seconds` | yes |
+| Block 2: hash | `hash: file == container (len 86)` | `hash: file == container (len 86)` | yes |
+| Block 2: secret | `secret: in the container (len 44)` | `secret: in the container (len 44)` | yes |
+| Block 2: plaintext | `plaintext: not in the container` | `plaintext: not in the container` | yes |
+| Block 3 | `401`, `401`, `200` | `old password -> 401`, `wrong password -> 401`, `new password -> 200` | yes |
+| Session after (the cookie jar from the old sign-in) | `401` | `session after 401` | yes |
+| `KEEP_ME` line byte for byte | `1` | `1` | yes |
+| Names in the env file | each once | `HERMES_DASHBOARD`, `..._PASSWORD_HASH`, `..._SECRET`, `..._USERNAME`, `KEEP_ME`: 1 each | yes |
+| File mode | not in the brief | `600` | extra |
+
+A refused attempt did not touch the file: a copy taken before each refusal compared identical afterwards.
+
+### 2.4 Lock-out after repeated failures (measured)
+
+Fifteen wrong passwords in a row, then the right one, straight after block 3 (which had made three attempts on the
+same gateway process):
+
+`401 401 401 401 401 401 401 429 429 429 429 429 429 429 429`, then the right one: `429`.
+
+So the dashboard does refuse the right password for a while after failures. The count fits the source (2.1): ten
+attempts are allowed in a 60-second sliding window per IP, and the three of block 3 plus the first seven here made
+ten; the eighth was the first refused. **Duration, measured:** polled once a minute; the first poll, 68 seconds
+after the burst (13:20:53Z to 13:22:01Z), already gave `200`. So the lock lasts under about a minute, and it ends
+without the operator doing anything. Refused attempts are not recorded, so repeating them does not extend it. The
+window is in the process's memory: a gateway restart also clears it (stated in the source comment; the restart
+case was not run).
+
+**What the runbook should say:** the step makes at most three login attempts (block 3), under the limit of ten; if
+a mistyped attempt is followed by `429`, wait one minute and run block 3 again. Behind the box's tunnel the address
+the dashboard sees may be the same for every client, so the Desktop app and a browser share the budget (reasoned
+from the source comment about proxies, not measured).
+
+### 2.5 The second full run
+
+With `ThirdTestPassword2222222222` (27 characters), after a sign-in with the second password. All of: block 0 (three
+names); block 1 (three `install-env-secret:` lines as above); block 2 (`STOP_EXIT=0`, `UP_EXIT=0`,
+`hermes-agent running Up 25 seconds`, `hash: file == container (len 86)`, `secret: in the container (len 44)`,
+`plaintext: not in the container`); block 3 with the second password as "old" and the third as "new"
+(`401`, `401`, `200`); the session taken before block 1 answered `200` before and `401` after; `KEEP_ME` still `1`,
+each name once, mode `600`. **Same results as the first run: the step is repeatable.**
+
+### 2.6 Bugs found in the blocks
+
+None. Every measured value matched the plan; no block was changed to make it pass.
+
+### Not measured
+
+- The Desktop app's own behaviour when its saved password stops working.
+- The listener-check lines of block 2 (`systemctl`, `show-listener-check`, the timer): the laptop has no systemd.
+- The real box: `sudo`, `--owner-uid 0 --owner-gid 0`, file ownership, and the box's own port 9119.
+- A restart clearing the throttle, and several clients sharing one address (both from the source, not run).
