@@ -4,7 +4,7 @@
 > local port-forward to `127.0.0.1:9119` and do nothing else? · **Method:** the candidate `authorized_keys`
 > option string was run against a throwaway OpenSSH server in Docker on the laptop, with a fixed set of tests and
 > a control key. Nothing on the box was touched. This document has two sections: section 1 is this measurement;
-> section 2 (step 7e, rehearsed) is added later.
+> section 2 (step 7e, rehearsed) is the rehearsal of the dashboard password replacement, measured 2026-10-08.
 
 ## 1 · The limited key, measured against a throwaway server
 
@@ -320,7 +320,8 @@ was touched. Test values only: user `hermesadmin`, passwords `OldTestPassword000
 | Source | Authority | Verified there |
 |---|---|---|
 | Image source in `hermes-eval-derived:v0.21.5`, `hermes_cli/dashboard_auth/routes.py` lines 335 to 358 | primary | The password login is throttled by a process-local sliding window per client IP: `_PW_RATE_MAX_ATTEMPTS = 10` per `_PW_RATE_WINDOW_SEC = 60.0`; an attempt is recorded only when allowed; a refused one answers 429. The comment says it "resets on restart". |
-| This rehearsal (2.2 to 2.6) | measurement | The results below. |
+| `docs/evaluations/2026-10-07-dashboard-password-hash-and-session-secret.md` | earlier measurement | A session survived a restart and a recreate with a signing secret set, and did not without one. |
+| This rehearsal (2.2 to 2.8, appendix 2.A) | measurement | The results below. |
 
 ### 2.2 Set-up
 
@@ -332,7 +333,7 @@ step 7d leaves the box) a scrypt hash of the old password and a signing secret, 
 needed.** Set-up output: `install-env-secret: ...PASSWORD_HASH set ... (mode 0600)`,
 `install-env-secret: ...SECRET generated ... (mode 0600)`, `hermes-agent running`.
 
-The blocks were run as `bash b0.sh` .. `bash b3.sh` (each a file holding the block as adapted below). **Input:**
+The blocks were run as `bash b0.sh` .. `bash b3.sh` (each a file holding the block as run, in appendix 2.A). **Input:**
 the answers to the `read -rs` prompts were supplied on the script's standard input (`printf 'pw\npw\n' | bash b1.sh`),
 one line per prompt. This is safe in block 1 because `docker compose exec -T` reads the pipe fed by the inner
 `printf`, not the script's standard input, and `read` has already consumed its two lines by then; block 3's `curl`
@@ -353,8 +354,7 @@ from the transcript; on the box they appear.
 - Block 2: the two `systemctl start hermes-listener-check.service` lines with their `echo`, the
   `show-listener-check` line and the `systemctl list-timers` line removed (no systemd on the laptop).
 
-The exact text as run is kept in the working notes (`task-2-blocks-as-run.txt`, git-ignored) for comparison with
-the runbook.
+The exact text as run is in appendix 2.A, for comparison with the runbook.
 
 ### 2.3 The session with the old password, and the four blocks
 
@@ -372,34 +372,93 @@ the runbook.
 | Block 2: secret | `secret: in the container (len 44)` | `secret: in the container (len 44)` | yes |
 | Block 2: plaintext | `plaintext: not in the container` | `plaintext: not in the container` | yes |
 | Block 3 | `401`, `401`, `200` | `old password -> 401`, `wrong password -> 401`, `new password -> 200` | yes |
-| Session after (the cookie jar from the old sign-in) | `401` | `session after 401` | yes |
+| Session after (the cookie jar from the old sign-in) | `401` | `session after 401` (what ended it is separated in 2.4) | yes |
 | `KEEP_ME` line byte for byte | `1` | `1` | yes |
 | Names in the env file | each once | `HERMES_DASHBOARD`, `..._PASSWORD_HASH`, `..._SECRET`, `..._USERNAME`, `KEEP_ME`: 1 each | yes |
 | File mode | not in the brief | `600` | extra |
 
 A refused attempt did not touch the file: a copy taken before each refusal compared identical afterwards.
 
-### 2.4 Lock-out after repeated failures (measured)
+### 2.4 What ended the old session: three controls
 
-Fifteen wrong passwords in a row, then the right one, straight after block 3 (which had made three attempts on the
-same gateway process):
+Step 7e both replaces the signing secret and recreates the container, so the `401` of 2.3 does not say which of
+the two ended the old session. Three controls, each in one fresh throwaway project (set up as in 2.2, the old
+password, a signing secret), one change at a time. Sessions were read on `/api/auth/me`. To show a secret changed
+or not, only whether the SHA-256 of the container's value was equal before and after was printed.
+
+| Control | What changed in `gateway.env`, then a recreate | Secret in the container | The old session answered |
+|---|---|---|---|
+| Before any change | nothing | n/a | `200` (sign-in `200`, `/api/auth/me` `200`) |
+| A | nothing at all | same | **`200`** |
+| B | the secret only (`strip` then `generate`); password unchanged | different | **`401`** |
+| B, positive control | the same password, signed in again on the new process | n/a | a fresh session answered **`200`** |
+| C | the password hash only (a new password); secret unchanged | same | **`200`** for two sessions taken with the old password (one of them taken after B's recreate, on the then-current secret) |
+
+After C's recreate, signing in with the old password answered `401` and with the new one `200`, and that new session
+answered `200`.
+
+What this shows, and no more:
+
+- **A recreate alone does not end a session** (A: `200`, same secret). This agrees with the earlier measurement.
+- **Replacing the signing secret ends the sessions signed with the old one** (B: `401`), and a session can be valid on
+  the new process (B's fresh sign-in: `200`), so the `401` is not a dead gateway or a failure to read the cookie.
+- **Replacing the password alone does not end an old session** (C: `200` while the old password was already refused
+  at the sign-in). So the secret replacement in step 7e is not optional: without it, a session taken with the old
+  password stays valid after the password change. This is the reason block 1 replaces the secret.
+- The `401` after step 7e in 2.3 is therefore caused by the secret replacement (B), not by the recreate (A) and not
+  by the new password (C). These controls were each run once, on one process each; the lifetime limit of a session
+  (12 hours by default, per the earlier document) was not tested.
+
+### 2.5 Lock-out after repeated failures (measured)
+
+**The first measurement:** fifteen wrong passwords in a row, then the right one, straight after block 3 (which had
+made three attempts on the same gateway process):
 
 `401 401 401 401 401 401 401 429 429 429 429 429 429 429 429`, then the right one: `429`.
 
-So the dashboard does refuse the right password for a while after failures. The count fits the source (2.1): ten
-attempts are allowed in a 60-second sliding window per IP, and the three of block 3 plus the first seven here made
-ten; the eighth was the first refused. **Duration, measured:** polled once a minute; the first poll, 68 seconds
-after the burst (13:20:53Z to 13:22:01Z), already gave `200`. So the lock lasts under about a minute, and it ends
-without the operator doing anything. Refused attempts are not recorded, so repeating them does not extend it. The
-window is in the process's memory: a gateway restart also clears it (stated in the source comment; the restart
-case was not run).
+**How the codes add up.** The source (2.1) allows ten attempts in a sliding 60-second window per client IP.
+Every attempt that is allowed counts, successful ones included. Block 3's three attempts (`401`, `401`, `200`) plus
+the first seven wrong ones made ten; the eighth was the first `429`. In the controls below, on a fresh process, the
+fifteen wrong passwords in one second gave ten `401` and then five `429`: more than ten attempts within 60 seconds
+from one address are refused. A mistyped password is answered `401`, not `429`.
 
-**What the runbook should say:** the step makes at most three login attempts (block 3), under the limit of ten; if
-a mistyped attempt is followed by `429`, wait one minute and run block 3 again. Behind the box's tunnel the address
-the dashboard sees may be the same for every client, so the Desktop app and a browser share the budget (reasoned
-from the source comment about proxies, not measured).
+**Duration, measured (fresh process, 15 wrong in about one second, then the right password):**
 
-### 2.5 The second full run
+| Time after the start of the burst | Right password every 10 seconds | Wrong password every 5 seconds (a separate run) |
+|---|---|---|
+| +0 s | `429` | |
+| +6 to +56 s | `429` at +10, +20, +30, +40, +50 | `429` at each of +6, +11, +16, +21, +26, +31, +36, +41, +46, +51, +56 |
+| +60 or +61 s | **`200`** at +60 | **`401`** at +61 (the lock had ended) |
+| +66 to +92 s | | `401` at each of +66, +71, +77, +82, +87, +92; then the right password at +92: `200` |
+
+So the lock ended 56 to 61 seconds after the burst, that is when the ten recorded attempts left the 60-second
+window, and it ended without the operator doing anything. The first measurement ("had ended by 68 seconds", one poll)
+is consistent with this. **Refused attempts did not extend it, measured:** eleven refused wrong attempts spread
+over the lock, and in the first run six refused polls of the right password, did not move the end past about 60
+seconds. The poll that got `200` was itself an allowed attempt, and so counted toward the next window.
+
+**Does a recreate empty the count? Yes, measured.** On a fresh process, a burst of fifteen wrong passwords, the right
+password `429`; then `docker compose up -d --force-recreate hermes-agent`; the right password, tried as soon as the
+new process answered, 10 seconds after the burst began (well inside the 60 seconds), gave **`200`**. The
+window lives in the process's memory, so recreating the container clears it. (A plain restart was not run; the
+source comment says it resets on restart.)
+
+**What the operator should be told** (follows from the measurements above; the Desktop app and shared-address points
+are reasoned, as marked):
+
+- A mistyped password in block 3 shows as `401`, never `429`.
+- `429` means the limiter, not a wrong password: more than ten sign-in attempts within 60 seconds from one address,
+  successful ones included.
+- Block 3 makes three attempts, so it can be run three times within a minute before the fourth run meets a `429`.
+- The Desktop app retrying a saved password after step 7e uses the same budget (reasoned from the source: one
+  window per client IP; not measured). Behind the box's tunnel the address the dashboard sees may be the same for
+  every client, so the Desktop app and a browser may share it (reasoned from the source comment about proxies, not
+  measured).
+- If block 3 prints `429` on any line: wait two minutes and run block 3 again. The lock ended within 61 seconds in
+  every run; two minutes is a margin. Nothing needs to be redone: the password and secret are already replaced.
+- Recreating the container empties the count, so block 2 followed at once by block 3 starts from zero.
+
+### 2.6 The second full run
 
 With `ThirdTestPassword2222222222` (27 characters), after a sign-in with the second password. All of: block 0 (three
 names); block 1 (three `install-env-secret:` lines as above); block 2 (`STOP_EXIT=0`, `UP_EXIT=0`,
@@ -408,7 +467,7 @@ names); block 1 (three `install-env-secret:` lines as above); block 2 (`STOP_EXI
 (`401`, `401`, `200`); the session taken before block 1 answered `200` before and `401` after; `KEEP_ME` still `1`,
 each name once, mode `600`. **Same results as the first run: the step is repeatable.**
 
-### 2.6 Bugs found in the blocks
+### 2.7 Bugs found in the blocks
 
 None. Every measured value matched the plan; no block was changed to make it pass.
 
@@ -416,5 +475,64 @@ None. Every measured value matched the plan; no block was changed to make it pas
 
 - The Desktop app's own behaviour when its saved password stops working.
 - The listener-check lines of block 2 (`systemctl`, `show-listener-check`, the timer): the laptop has no systemd.
-- The real box: `sudo`, `--owner-uid 0 --owner-gid 0`, file ownership, and the box's own port 9119.
-- A restart clearing the throttle, and several clients sharing one address (both from the source, not run).
+- The real box: `sudo` (including `sudo` inside the pipes of blocks 1 and 2), `--owner-uid 0 --owner-gid 0`, root
+  ownership of the real file, and the box's own port 9119.
+- The box's own image and env-file wiring, as opposed to `hermes-eval-derived:v0.21.5` and `gateway.env`.
+- A real terminal's behaviour for the hidden `read -rs` prompts: all input was piped.
+- The three refusals of block 1 (two different entries, 23 characters, an entry with a `$`) were each run once.
+- A plain restart clearing the limiter (a recreate was measured), and several clients sharing one address (from the
+  source, not run).
+- The 12-hour lifetime of a session, and the controls of 2.4 beyond one run each.
+
+### 2.A Appendix: the four blocks as run
+
+Each ran as a script file (`bash b0.sh` .. `bash b3.sh`), the first line setting the laptop's two shell variables
+(`S` the scratch directory, `BIN` the repo's `infra/hermes-agent/bin`). They hold no secret.
+
+```bash
+##### BLOCK 0, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
+S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+cd "$S" && grep -oE '^HERMES_DASHBOARD_BASIC_AUTH[A-Z_]*' gateway.env | sort
+
+##### BLOCK 1, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
+S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+step7e_set() {
+  local P Q E="$S/gateway.env"
+  cd "$S" || return
+  read -rs -p "NEW dashboard password: " P; echo
+  read -rs -p "The same again: " Q; echo
+  if [ "$P" = "$Q" ] && [ ${#P} -ge 24 ] && case "$P" in *[!A-Za-z0-9]*) false;; *) true;; esac; then
+    printf '%s' "$P" | docker compose exec -T -w /opt/hermes hermes-agent python3 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; sys.stdout.write(hash_password(sys.stdin.read()))' \
+      | python3 "$BIN/install-env-secret.py" set --file "$E" --name HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH --prefix 'scrypt$' --quote single --mode 0600 --stdin \
+      && python3 "$BIN/install-env-secret.py" strip --file "$E" --name HERMES_DASHBOARD_BASIC_AUTH_SECRET \
+      && python3 "$BIN/install-env-secret.py" generate --file "$E" --name HERMES_DASHBOARD_BASIC_AUTH_SECRET --mode 0600
+  else
+    echo "REFUSED: the two entries differ, or it is under 24 characters, or it holds something other than letters and digits -- nothing written"
+  fi
+}; step7e_set; unset -f step7e_set
+
+##### BLOCK 2, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
+S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+cd "$S"
+docker compose stop hermes-agent; echo "STOP_EXIT=$?"
+docker compose up -d --force-recreate hermes-agent; echo "UP_EXIT=$?"
+sleep 25; docker compose ps -a hermes-agent --format '{{.Service}} {{.State}} {{.Status}}'
+F=$(python3 -c 'import sys; sys.path.insert(0, "'"$BIN"'"); import client_audit_lib as C; print((C.env_values(open("gateway.env").read(), "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH") or [""])[0])')
+C=$(docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH)
+[ ${#C} -eq 86 ] && [ "$F" = "$C" ] && echo "hash: file == container (len ${#C})" || echo "HASH DIFFERS (file ${#F}, container ${#C}): STOP"; unset F C
+docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_SECRET | awk '{print "secret: in the container (len " length($0) ")"}'
+docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD >/dev/null && echo "PLAINTEXT STILL SET" || echo "plaintext: not in the container"
+
+##### BLOCK 3, exactly as run (first line = the two shell variables set for the laptop: S = scratch dir, BIN = the repo's infra/hermes-agent/bin)
+S=/private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/d39c558e-d127-4fdd-9112-e44fbb972f9d/scratchpad/step7e-rehearsal; BIN=/Users/ericksicard/Projects/claude_code/infra/hermes-agent/bin
+step7e_login() {
+  local OLD NEW
+  read -rs -p "OLD dashboard password: " OLD; echo
+  read -rs -p "NEW dashboard password: " NEW; echo
+  login() { printf '{"provider":"basic","username":"hermesadmin","password":"%s"}' "$1" | curl -s -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:29119' --data @- http://127.0.0.1:29119/auth/password-login; }
+  echo "old password -> $(login "$OLD")"
+  echo "wrong password -> $(login "not-the-password-0000")"
+  echo "new password -> $(login "$NEW")"
+  unset -f login
+}; step7e_login; unset -f step7e_login
+```
