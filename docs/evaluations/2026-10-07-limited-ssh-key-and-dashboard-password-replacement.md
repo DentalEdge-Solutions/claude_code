@@ -7,7 +7,9 @@
 > (1.7 and appendix 1.B were added when the runbook blocks were rehearsed as written); section 2 (step 7e, rehearsed)
 > is the rehearsal of the dashboard password replacement, measured 2026-10-08 (2.8 and appendix 2.B added at the same
 > time); section 3 holds the two rehearsals of the same round that belong to neither: the `awk` that edits the laptop's
-> SSH config, and the `Match` count of the security review.
+> SSH config, and the `Match` count of the security review. A second fix round, after a review of the runbook, added 1.8
+> and appendix 1.C (step 7f's sequence redesigned and rehearsed block by block), 2.9 and 3.3; where an earlier subsection
+> describes a block that 1.8 replaces, a sentence there says so.
 
 ## 1 · The limited key, measured against a throwaway server
 
@@ -20,6 +22,8 @@
 | Image source `hermes_cli/dashboard_auth/routes.py` (section 2.1) | primary | The password-login throttle: 10 attempts per 60 s per client IP, in memory. |
 | The box's OpenSSH version | **not yet known** | The operator was asked and has not answered. Until then the rehearsal used `ubuntu:24.04`, which ships the version in 1.2. **The box's version is still to be confirmed against it.** |
 | This rehearsal (1.2 to 1.6, appendix 1.A) | measurement | The results below. |
+| Local `man ssh-add` and `man ssh-agent` (laptop OpenSSH 10.3p1; accessed 2026-10-08, for 1.8) | primary | `--apple-load-keychain`: "Add identities to the agent using any passphrase stored in the user's keychain." `ssh-agent` creates its socket under `$HOME/.ssh/agent` unless `-T` puts it in the temporary directory. |
+| The rehearsals of 1.8 (appendix 1.C) | measurement | Step 7f's sequence as it stands in the runbook after the review. |
 
 ### 1.2 The throwaway server
 
@@ -162,7 +166,9 @@ apart):
 | line cut after `ssh-ed25519` (first run) | `REFUSED: not the expected line`: the pattern check, not the length check |
 
 So the floor of 180 is **measured**: 179 is refused and 180 is accepted. The right line is 181 characters, so
-the floor leaves one character of room and is a second line of defence, not the main one.
+the floor leaves one character of room and is a second line of defence, not the main one. (The function described in
+this subsection was replaced after the review of the runbook, because a body cut by one character passed that floor:
+the function now in the runbook, and its rehearsal, are in 1.8.)
 
 ### 1.7 The runbook's own LAPTOP 2 and LAPTOP 3 blocks, run verbatim under zsh
 
@@ -189,7 +195,7 @@ rebuild both: appendix 1.B).
 - **`pbcopy`** does not exist on Linux: LAPTOP 1 ran verbatim with a stand-in `pbcopy` (a two-line script that writes
   its input to `~/clipboard`). Its result: `KEY MADE, line on the clipboard`, and the stand-in held a line of 181
   characters (182 bytes with the line break) with two spaces in it, the length that `tunnel_key_add` of appendix 1.A
-  expects.
+  expects. (LAPTOP 1 was since split into LAPTOP 1 and LAPTOP 1b, and LAPTOP 1b was run with the real `pbcopy`: 1.8.)
 - **VPS 0 and VPS 1** ran verbatim as `hermesops` in the server container: `docker exec -u hermesops rehearsal-server
   bash -c "<the block>"`, and for VPS 1 the pasted line was fed on standard input (`docker exec -i ... < clipboard line`),
   as `read` would get it from a terminal; `read -p` prints no prompt when its input is not a terminal.
@@ -224,7 +230,8 @@ operator's own terminal, which normally pastes with bracketed-paste markers and 
 command, would hit this was not measured; the fix is harmless either way, and the line with `-n` is the one that was
 rehearsed next and is in the runbook.
 
-**LAPTOP 3, second run, with `-n` in T2, limited key** (the block exactly as in the runbook, typed into `zsh -i`):
+**LAPTOP 3, second run, with `-n` in T2, limited key** (the block exactly as in the runbook at that time, typed into
+`zsh -i`; this block was replaced after the review of the runbook by LAPTOP 3a and LAPTOP 3b, rehearsed in 1.8):
 
 | Test | Expected | Measured | Match |
 |---|---|---|---|
@@ -270,7 +277,7 @@ T5b stays refused with it because the kernel setting stops the bind, which is T5
 - *LAPTOP 4 on a second run, or with the login item not loaded.* `launchctl bootout` prints an error when the login item
   is not loaded, and (read from the commands) `launchctl bootstrap` prints one when it already is; the runbook says that
   such a message is not a failure by itself. **LAPTOP 4 was NOT rehearsed**: it edits and reloads the real login item of
-  this laptop.
+  this laptop. (LAPTOP 4 was replaced by LAPTOP 4a, 4b and 4c; what of them was run, and how, is in 1.8.)
 
 **What this subsection does NOT show.**
 
@@ -284,6 +291,322 @@ T5b stays refused with it because the kernel setting stops the bind, which is T5
   was seen on a pseudo-terminal fed line by line).
 - The box itself: its OpenSSH version, its `sshd_config`, its kernel setting and the dashboard's `302`.
 - VPS 0 and VPS 1 on the box (they ran as `hermesops` in a container on this laptop).
+
+### 1.8 Step 7f's sequence after the review of the runbook
+
+Measured 2026-10-08, in the second fix round. A review of the runbook as committed found that step 7f's laptop sequence
+was not safe to hand to the operator. This subsection records what the review found, the sequence that replaced it, and
+every rehearsal of the round. The drafts of the new blocks came from the controller, written from the findings and never
+run; each was rehearsed, and where a draft misbehaved or a defect was seen it was corrected and the corrected text
+rehearsed. Both are recorded. How to rebuild the set-up: appendix 1.C.
+
+**What the review found (its own measurements, not repeated here unless a row below says so).**
+
+- *Seven logins in one paste.* The old LAPTOP 3, pasted as one bracketed paste into macOS zsh with `ssh` and `scp`
+  replaced by stand-ins that print "Permission denied" and end with 255, made 7 calls in 27 seconds and printed
+  `T1 -> 000`, `T2 -> [] rc=255`, then `T4 -> 0 bytes`, `T5a -> refused`, `T5b -> refused`, `T6 -> 0 bytes`,
+  `T7 -> rc=255`: the last five are exactly the expected lines. The text's "every one of these logs in successfully" was
+  the thing under test, not a fact. A key line whose body was cut by one character was accepted by `tunnel_key_add`
+  (`ADDED: 2 key line(s)`), and the clipboard order made a refusal the likely first outcome: copying the VPS 1 block
+  replaces the key line that LAPTOP 1 put on the clipboard.
+- *The login item switched or not, the same output.* `plutil -replace ProgramArguments.9` INSERTED on this macOS (a scratch
+  plist with the README's ten arguments: the count went 10 to 11). With one extra `-o` pair in the file the old guard
+  failed silently, nothing was replaced, the reload ran regardless, and the block still printed `state = running` and
+  `-> 302`.
+- *The keychain emptied before the passphrase was proven.* LAPTOP 5 removed the passphrase from the keychain before the
+  operator had typed it anywhere, and `ssh-add -l | grep -c vps-hermes` could not fail: `ssh-add -l` prints a key's
+  comment, not its file name (`0` while the key was loaded, `0` after its removal).
+- *The config edit.* A second run overwrote the backup with the edited file; under zsh's `noclobber` the redirect failed
+  and the next line still removed the key; the `awk` missed `HOST` and `MATCH` in capitals and kept `UseKeychain=yes`.
+- LAPTOP 2's stop text told the operator to read `ssh -G hermes-box-tunnel`, which prints the address.
+
+**The sequence now in the runbook.** VPS 0 (unchanged) · LAPTOP 1 (the key only) · VPS 1 pasted first and left waiting,
+LAPTOP 1b (the line to the clipboard), the paste at the waiting prompt · LAPTOP 2 (unchanged) · **LAPTOP 3a, one login
+alone, the gate** · LAPTOP 3b (the other tests, one function that stops by itself after T1) · LAPTOP 4a (the login
+item's file) · LAPTOP 4b (reload) · LAPTOP 4c (checks) · LAPTOP 5a (the passphrase, proven locally before anything is
+removed) · LAPTOP 5b (the config edit) · LAPTOP 5c (the agent and the keychain) · LAPTOP 6 (the interactive login) ·
+LAPTOP 6b (did that login put the key back) · only then the first session is closed and the backups removed. The old
+LAPTOP 6 (a deliberate failed login) is dropped: it cost an attempt and, with `UseKeychain` gone from the alias, proved
+nothing about the keychain.
+
+**How blocks were fed in this round.** Every block was pasted by a small terminal stand-in (a Python script that runs
+the shell on a pseudo-terminal 500 columns wide): when the shell has switched bracketed paste on, as zsh and bash do at
+their prompt, the block goes in between the paste markers in one piece and a Return follows; otherwise the text goes in
+raw with each line break as a carriage return, which is what happens at a `read` prompt. The record says which for each
+paste, with the first 16 characters of the SHA-256 of the pasted text; the same file is what the runbook's block was
+built from. Three places:
+
+- **the stand-in server** (`rehearsal-server`, Ubuntu 24.04, OpenSSH 9.6p1, sysctl `1024`, as in 1.7), now also with
+  `rsyslog`, Ubuntu's own `fail2ban` 1.0.2 with its default `sshd` jail reading `/var/log/auth.log`, and a page on
+  `127.0.0.1:9119` that answers `302` to `/login?next=%2F` as the dashboard does: an interactive `bash` as `hermesops`;
+- **the stand-in laptop** (`rehearsal-laptop`, as in 1.7, without the `pbcopy` stand-in): an interactive `zsh` 5.9 as
+  the user `laptop`;
+- **this Mac** (macOS 27.0.1, zsh 5.9, BSD awk 20200816, OpenSSH 10.3p1): an interactive `/bin/zsh` with a clean
+  environment, `HOME` pointed at a scratch directory so that `~` in a block is the scratch directory, and `ZDOTDIR` at a
+  scratch directory whose `.zshrc` sets the prompt and, where a row says so, defines stand-in functions. Nothing under
+  the real `~/.ssh`, the real agent, the login keychain or the real login item was read or written.
+
+#### VPS 1: `tunnel_key_add`
+
+The draft checked the line by exact comparison (`the options, "ssh-ed25519", one more word`), an exact length (181) and
+a base64-only body. Rehearsed as written, then corrected in two places and rehearsed again. Each case started from a file
+holding the administrative key only, except where the row says otherwise; "unchanged" means byte for byte (`cmp`).
+
+| Case | Expected | Draft, measured | Corrected block, measured |
+|---|---|---|---|
+| a. the right line | `ADDED`, 2 lines | `ADDED: 2 key line(s), mode 600`; `ssh-keygen` reads 2 keys; backup = the file before | the same |
+| h. the same line again | `already present` | `already present: nothing to do` | the same |
+| l. after that, a DIFFERENT valid line (a second test key) | not in the draft's list | `ADDED: 3 …`, and **the backup was overwritten** (it then held 2 lines, so the restore command would have left the first limited key in place) | `ADDED: 3 …`; the backup still the original file |
+| b. body cut by ONE character (180) | `REFUSED` | `REFUSED: not the expected line …`; unchanged, no backup | the same |
+| c. one character of the body replaced by `*` | `REFUSED` | `REFUSED: the key holds a character that is not base64 …`; unchanged | the same |
+| d. a bare key | `REFUSED` | `REFUSED: not the expected line …`; unchanged | the same |
+| e. a fourth word | `REFUSED` | the same refusal; unchanged | the same |
+| k. a trailing space | `ADDED` | `ADDED: 2 …`, last line 181 characters | the same |
+| m. other options (port 9120), same length | `REFUSED` | `REFUSED: not the expected line …`; unchanged | the same |
+| g. the block's own text pasted at the prompt | `REFUSED`, nothing written | `REFUSED: not the expected line …`, then **the block's other eleven lines ran as commands at the shell's prompt**: `local: can only be used in a function`, a second `Paste the line:` prompt that swallowed one line, a second `REFUSED` line, two syntax errors, `return: can only return from a function` twice, and `cp`, `tail`, `grep` and a redirect each failing on an empty file name. Nothing was written, because the file name lives in a variable that is empty outside the function | `REFUSED: more than one line was pasted -- nothing written`, and nothing else: no line ran as a command |
+| i. a file with no final line break | `ADDED`, 2 lines | `ADDED: 2 …`; 2 lines, the first equal to the original | the same |
+| j. the file missing | `REFUSED` | `REFUSED: /home/hermesops/.ssh/authorized_keys is missing …`; nothing created | the same |
+| f. the line followed by a carriage return | `ADDED`, no carriage return in the file | fed on standard input (`docker exec -i … bash -c "<the block>" < line`): `ADDED: 2 …`, 0 carriage returns in the file. Through the terminal the carriage return arrives as a second line break | the same on standard input; through the terminal `ADDED: 2 …` (the empty extra line is not counted as a second line) |
+
+**The two corrections, and why.** (1) After `read`, the function now reads on for one second
+(`while read -r -t 1 X; do [ -z "$X" ] || N=1; done`) and refuses when anything but empty lines followed: case g, which
+the review saw happen. (2) `[ -e "$F.before-tunnel-key" ] || cp -p …`: the first backup is kept (case l). A refused key
+is then removable with the runbook's restore command whatever was added in between. Every case ran in an interactive
+bash on a pseudo-terminal: the block as one bracketed paste and a Return, then the line raw with its line break, as the
+clipboard gives it.
+
+#### LAPTOP 1 and LAPTOP 1b
+
+| Block, where | Case | Expected | Measured | Match |
+|---|---|---|---|---|
+| LAPTOP 1, stand-in laptop | first run | `KEY MADE` | `KEY MADE`; both key files present | yes |
+| LAPTOP 1, stand-in laptop | second run | `EXISTS …` | `EXISTS: not overwritten (fine if you made it a moment ago)` | yes |
+| LAPTOP 1b, this Mac, scratch key, the real `pbcopy` and `pbpaste` | the key present | `182 characters` | `line on the clipboard: 182 characters`; `pbpaste` gave 182 bytes, one line break at the end, three words, the first the option string, the third 68 characters | yes |
+| the hand-over | that clipboard content pasted at VPS 1's waiting prompt on the stand-in server (VPS 1 had been pasted first) | `ADDED` | `ADDED: 3 key line(s), mode 600` (the file already held the administrative key and the stand-in laptop's limited key); `ssh-keygen` read 3 keys | yes |
+| LAPTOP 1b, this Mac | the `.pub` file missing | another number | `cut: … No such file or directory`, then `line on the clipboard: 102 characters` | yes |
+| `pbcopy < /dev/null`, this Mac | | clipboard empty | `pbpaste | wc -c`: `0` | yes |
+
+This replaced the operator's clipboard twice and then emptied it. `pbcopy` and the hand-over are therefore measured on
+this Mac, with the paste into the server done by the terminal stand-in, not by Terminal.app.
+
+#### LAPTOP 2, LAPTOP 3a and LAPTOP 3b on the stand-in laptop, with the server's log
+
+The server's log (`/var/log/auth.log`, sshd at `LogLevel VERBOSE` unless the row says otherwise) was read after each
+paste, with fail2ban's counters (`fail2ban-client status sshd`). The jail's `maxretry` was raised to 100 for the round so
+that no ban could interfere; nothing else in fail2ban's stock configuration was changed (`mode = normal`).
+
+| Step | Expected | Measured (laptop) | The server's log for that paste | fail2ban total failed |
+|---|---|---|---|---|
+| VPS 0 | `1024` | `1024` | | |
+| VPS 1, the line at the waiting prompt | `ADDED: 2 …` | `ADDED: 2 key line(s), mode 600` | | 0 |
+| LAPTOP 2 | `3` | `3` | no login | 0 |
+| LAPTOP 2 again | `alias exists`, `3` | `alias exists`, `3` | no login | 0 |
+| **LAPTOP 3a, key in place** | `gate rc=1` | `gate rc=1` | 1 `Accepted publickey`, 1 `Starting session: forced-command (key-option) '/bin/false'` | 0 |
+| **LAPTOP 3b, key in place** | the six lines | `T1 … -> 302`; `T4 … -> 0 bytes, link up`; `T5a … -> refused`; `T5b … -> refused`; `T6 … -> 0 bytes, link up`; `T7 … -> rc=255`; 24 seconds; nothing in the server's `/tmp` | 6 `Accepted publickey`, 0 refused; a denied connect to port 22, a denied remote forward, `bind [127.0.0.1]:1: Permission denied`, a denied connect to `/run/dbus/system_bus_socket`, one forced-command session | 0 |
+| CONTROL: 3a with the alias argument replaced by `hermes-box` | `MARK`, `gate rc=0` | `MARK`, `gate rc=0` | `Starting session: command` | 0 |
+| CONTROL: 3b the same way | everything allowed but T5b | `302`; `20 bytes, link up`; `OPENED`; `refused` (the sysctl); `13 bytes, link up`; `rc=0`, the file arrived | 6 `Accepted publickey`; `Starting session: subsystem 'sftp'` | 0 |
+| **REFUSED: 3a alone, the limited key's line taken off the server** (with the runbook's restore command) | `gate rc=255`, ONE refused login | `gate rc=255` | exactly 1 `Failed publickey for hermesops` and 1 `Connection closed by authenticating user hermesops … [preauth]` (one login), 0 accepted | 0 |
+| REFUSED: 3b pasted although the gate failed | it stops after one login | `T1 … -> 000`, `STOPPED after T1: the other tests were NOT run` | 1 `Failed publickey`, 1 `Connection closed by authenticating user` | 0 |
+| REFUSED: 3a alone, sshd at `LogLevel INFO` (the default, which the box's `provision.sh` does not change) | `gate rc=255` | `gate rc=255` | 1 `Connection closed by authenticating user hermesops … [preauth]`, no `Failed publickey` line | 0 |
+| **UNRESTRICTED: 3a alone, the same key on the server WITHOUT its options** | `MARK`, `gate rc=0` | `MARK`, `gate rc=0` | `Starting session: command` | 0 |
+| 3a after the line was added again with VPS 1 | `gate rc=1` | `ADDED: 2 …` (the first backup still the original), then `gate rc=1` | forced-command session | 0 |
+| 3a with the server taken off the Docker network | `gate rc=255` | `gate rc=255` within 2 seconds (the name did not resolve; a silent address with the 10-second timeout was not run) | none | |
+| positive control for fail2ban's counter (not a runbook block): a login as a user that does not exist | counted | `rc=255` | `Connection closed by invalid user nosuchuser … [preauth]` | **1** |
+
+**What the fail2ban column shows, and what it does not.** With Ubuntu 24.04's `fail2ban` 1.0.2 as packaged, a refused
+public key for an existing user did not raise the count (three such logins: `0`), and a login as a user that does not
+exist did (`1`): the counter was working. That is a measurement on a stand-in with the packaged defaults. The box's own
+fail2ban version, jail settings and log source have **not** been read, so the runbook treats
+every refused login as counted. "ONE refused login" above is counted in sshd's own log.
+
+**zsh's notices.** In a function the background `ssh` is job 2, not job 1 (`[2] 186`, `[2]  + done ssh …`,
+`[2]  + exit 255 ssh …`; on this Mac's zsh a killed stand-in showed `[2]  + terminated ssh …`). The old block's
+`kill %1` would have addressed the wrong job inside a function; the new block uses `$!`.
+
+**The draft of LAPTOP 3b** was "T1, T4, T5a, T5b, T6, T7 as now", the committed lines without T2. Run as written with
+the key in place it gave the six expected values (`302`, `0 bytes`, `refused`, `refused`, `0 bytes`, `rc=255`; 6 accepted
+logins). It was replaced, not because that run misbehaved, but for what it prints when something is wrong:
+
+| Defect of the draft | The block now in the runbook |
+|---|---|
+| Six logins whatever the first one did (the review's measurement; with the gate before it, a refusal is unlikely but each one would count) | one function; after T1 it stops unless T1 printed `302` (measured above: ONE login, `STOPPED after T1`) |
+| T4 and T6 print `0 bytes` also when their `ssh` was not running | each prints `link up` or `link DOWN` (`kill -0 $!` at the time of the test), and their `ssh` now has `ExitOnForwardFailure=yes`, so `link up` also means the local port was bound |
+| `kill %1` assumes no other job, and prints `kill: %1: no such job` when the `ssh` had ended; `wait` with no argument waits for every job of the terminal | `kill $! 2>/dev/null; wait $! 2>/dev/null` |
+| T1's `ssh` printed its errors, which hold the address | `2>/dev/null` on T1's `ssh` too |
+
+**On this Mac** LAPTOP 3a and 3b were also pasted into zsh 5.9 as one bracketed paste with `ssh`, `scp` and `curl`
+replaced by stand-in functions (no login leaves the Mac; `nc` is the real one), to see how macOS zsh runs the blocks'
+own logic and how many logins one paste makes:
+
+| Stand-ins behave as | LAPTOP 3a | LAPTOP 3b | `ssh`/`scp` calls from the one paste of 3b |
+|---|---|---|---|
+| a refused login (every call ends with 255) | `gate rc=255` | `T1 … -> 000`, `STOPPED after T1 …` | **1** (the old block: 7, the review's measurement) |
+| the limited key (`-L` stays up, `-R` ends with 255, a command ends with 1, `scp` 255) | `gate rc=1` | the six expected lines, `link up` twice | 6 |
+| an unlimited key (everything stays up, the command prints `MARK`) | `MARK`, `gate rc=0` | `302`, `0 bytes, link up` (nothing listens behind a stand-in), `OPENED`, `OPENED`, `0 bytes, link up`, `rc=0` | 6 |
+
+#### LAPTOP 4a, 4b and 4c on this Mac
+
+Scratch plists built from the README's ten arguments (`Label`, `ProgramArguments`, `RunAtLoad`, `KeepAlive`,
+`ThrottleInterval` 120), at `<scratch home>/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`. The real file
+was not read. The state afterwards was read with `PlistBuddy`, `plutil -lint` and Python's `plistlib`.
+
+| Case | Draft, measured | Block now in the runbook, measured |
+|---|---|---|
+| 1. the good file | `SWITCHED IN THE FILE`, `… uses: hermes-box-tunnel`; 10 arguments before and after, the tenth changed, every other value equal. `PlistBuddy` wrote the keys back in another order (`KeepAlive` moved): the text differs in more than one line, the data in one value. The backup was written next to the login item, in `LaunchAgents`. `P` and `B` stayed set in the shell | the same two lines; the same data result; the backup at `~/hermes-box-tunnel.plist.before-tunnel-key`; no variable left set |
+| 2. the block again | `NOT SWITCHED: the file is not as expected -- stop` over `… uses: hermes-box-tunnel`: a correct state reported as a stop | `ALREADY SWITCHED: nothing changed`, `… uses: hermes-box-tunnel`; the file unchanged |
+| 3. one extra `-o` pair (12 arguments) | `NOT SWITCHED …`, `… uses: -L`; the file unchanged | the same |
+| 4. no file | `NOT SWITCHED …`, `PlistBuddy`'s own error, and `… uses: File Doesn't Exist, Will Create: <path>`; nothing created | `NOT SWITCHED …` and the same last line; nothing created |
+| 5. the file and its folder not writable | (the draft's backup could not be written there, so its `Set` never ran: `cp: … Permission denied`, `… uses: hermes-box`) | see below |
+| 6. an older backup already there and `cp` aliased to `cp -i` | not run | `SWITCHED IN THE FILE`, no question asked |
+
+**Case 5 found a defect in the first corrected form.** With the backup moved to the home directory the `Set` ran on a file
+it could not write: `PlistBuddy` printed `Error Opening Destination: … [Permission denied]` and **ended with status 0**,
+so the block printed `SWITCHED IN THE FILE` over `the alias the login item uses: hermes-box`. The message now comes from
+reading the file back, not from the tool's status: second form, case 5: `NOT SWITCHED: the change did not reach the file
+-- stop`, `… uses: hermes-box`. A second defect came from case 6 on that second form: with `cp` aliased to `cp -i` and a
+backup already present, zsh stopped at `overwrite …? (y/n [n])`; answered `n`, the block printed `NOT SWITCHED: the change
+did not reach the file`. The third form writes `command cp -p`, which is the one in the runbook; all six cases were run
+again on it.
+
+**LAPTOP 4b and 4c were NOT run for real**: they would unload and reload the real login item. They ran with `launchctl`
+replaced by a stand-in function that records its arguments and touches nothing:
+
+| Block | Case | Measured | Calls the stand-in received |
+|---|---|---|---|
+| 4b | the scratch file names `hermes-box-tunnel` | `RELOADED: bootstrap rc=0` | `bootout gui/501/com.dentaledge.hermes-box-tunnel`, then `bootstrap gui/501 <the scratch plist>` |
+| 4b | the same, the stand-in's `bootstrap` ends with 5 | `RELOADED: bootstrap rc=5` | the same two |
+| 4b | the file still names `hermes-box`; a file with an extra `-o` pair; no file | `NOT RELOADED: the file does not name hermes-box-tunnel -- stop` (each) | none |
+| 4c, port `19119` written `39119` | stand-in `state = running`, a scratch page answering `302` on 39119, one stand-in process whose command line ends in `hermes-box-tunnel` | `state = running`; `dashboard through the link -> 302`; `ssh on the new alias: 1; ssh on the old alias: 0` | `print …` |
+| 4c | plus a stand-in process ending in `hermes-box` | `… new alias: 1; ssh on the old alias: 1` | |
+| 4c | the stand-in says "not loaded", nothing listens, only the old process | no `state =` line; `-> 000`; `new alias: 0; … old alias: 1` | |
+| 4c | nothing at all | no `state =` line; `-> 000`; `0`; `0` | |
+
+So the `pgrep` patterns tell the two aliases apart (the first ends in `hermes-box-tunnel$`, the second in `hermes-box$`),
+measured on stand-in processes (a script named `ssh` started with the README's arguments and the other port). 4c's text
+was changed in one place for the run, `19119` to `39119`, because on this Mac `127.0.0.1:19119` is the real forward to the
+box. What this does not show: `launchctl bootout`, `bootstrap` and `print` themselves, their messages, and how long the
+login item takes to start its `ssh`.
+
+#### LAPTOP 5a on this Mac
+
+A scratch key with the passphrase `test-passphrase-0000` at `<scratch home>/.ssh/vps-hermes`; the prompt was answered
+through the pseudo-terminal (not `SSH_ASKPASS`).
+
+| Case | Expected | Measured | Match |
+|---|---|---|---|
+| the right passphrase | `PASSPHRASE OK` | prompt `Enter passphrase for "<path>":`, then `PASSPHRASE OK` | yes |
+| a wrong one | `NOT OK …` | `Load key "<path>": incorrect passphrase supplied to decrypt private key`, `NOT OK: stop, nothing was changed`; it asked once | yes |
+| Return alone | `NOT OK …` | the same two lines | yes |
+| Ctrl+C at the prompt | not planned | neither line printed | extra |
+| a key with NO passphrase in its place | not planned | **`PASSPHRASE OK` without asking** | extra: the runbook says the check counts only when it asked |
+| no key file | not planned | `… No such file or directory`, `NOT OK …` | extra |
+
+#### LAPTOP 5b on this Mac
+
+Scratch configs at `<scratch home>/.ssh/config`; `ssh` in the block's second line was a function that calls the real
+`ssh` with `-F <the scratch config>` added, so the real configuration was never read. Config A: the `hermes-box` block
+with both settings, then `HOST upper` and `MATCH host y.example` in capitals, an unrelated block, an indented
+`Host other-indented`, `Match host x.example`, `Host hermes-box-tunnel` and `Host hermes-box other`, each with both
+settings. B: `UseKeychain=yes` and `AddKeysToAgent = yes` in the block, then a block written `Host=eq-form` with both.
+C: the block and one unrelated block. D: the block and a `Host *` block with both.
+
+| Case | Draft, measured | Block now in the runbook, measured |
+|---|---|---|
+| 1. config A | `EDITED: 2 line(s) removed`; `diff`: lines 5 and 6 deleted, nothing added; config mode 600; backup = the input | the same edit; then `addkeystoagent true` (the `hermes-box other` block also applies) and `UseKeychain lines left in the file: 6` |
+| 2. the block again | `A BACKUP EXISTS …`; config and backup unchanged | the same |
+| 3. config A under `setopt noclobber` | `EDITED: 2 …`, the same `diff` | the same |
+| 4. config B | **`EDITED: 4 line(s) removed`**: the two under `Host=eq-form` went too | `EDITED: 2 …`: lines 3 and 4 only; `addkeystoagent false`; `UseKeychain lines left in the file: 1` |
+| 5. config C | `EDITED: 2 …`; `addkeystoagent false` | the same, and `UseKeychain lines left in the file: 0` |
+| 6. config D | `EDITED: 2 …`; `addkeystoagent true` | the same, and `… left in the file: 1` |
+| 7. config C, `cp`, `mv` and `rm` aliased to `-i` | zsh stopped at `overwrite <config>? (y/n [n])`; answered `n`, **it printed `EDITED: 0 line(s) removed`** with the config untouched and a `config.new` left behind | `EDITED: 2 …`, no question (`mv -f`) |
+| 8. a made failure (`config.new` is a directory) | `zsh: is a directory`, **no message from the block**, the config byte-identical, and a backup left behind, so a second run says `A BACKUP EXISTS` | `NOT EDITED: a command failed -- stop`; the config byte-identical; no backup |
+| 9. the config is a link to another file | `EDITED: 2 …`: **the link was replaced by a plain file**, the file it pointed to unchanged | `NOT EDITED: ~/.ssh/config is missing or is a link -- stop`; the link and its target unchanged |
+| 10. no config | `cp: … No such file or directory`, nothing else | `NOT EDITED: ~/.ssh/config is missing or is a link -- stop` |
+
+**A finding about the check line.** The draft's second line printed `ssh -G hermes-box` filtered for `usekeychain` and
+`addkeystoagent`. On this Mac `ssh -G` printed `addkeystoagent true` or `false` and **no `usekeychain` line in any case**,
+with the setting present or absent. So that line cannot show whether `UseKeychain` still applies. The block now prints
+the `addkeystoagent` line and, separately, the number of `UseKeychain` lines left anywhere in the file, and LAPTOP 6b
+tests after the login whether the keychain supplies the key again. Other changes to the draft: the edit is made from
+the config itself and the backup is taken only when the edited text exists (case 8); the `awk` takes the keyword up to
+an `=` (case 4); `mv -f` (case 7); a refusal for a link or a missing file (cases 9 and 10).
+
+The restore command in the runbook's text was first written `cp -pf …`. With `cp` aliased to `cp -i` it **still asked**
+(`overwrite …? (y/n [n])`), the next pasted command was taken as the answer (`not overwritten`), and the config was not
+restored. It is now `command cp -p …`: run with the same aliases, no question, the config equal to the backup. The
+clean-up `rm -f …` ran with `rm` aliased to `rm -i`, twice, without a question.
+
+#### LAPTOP 5c and LAPTOP 6b on this Mac, with a stand-in for `ssh-add`
+
+**Not run against the login keychain or the real agent.** `ssh-add` in the blocks was a function that calls the real
+`ssh-add` WITHOUT the two `--apple-…` options, against a scratch agent (`ssh-agent -s -T`, killed afterwards); for
+`--apple-load-keychain` it does nothing, or, when told to play a keychain that still holds the passphrase, adds the
+scratch key to the scratch agent. The scratch key has a passphrase, typed through the pseudo-terminal.
+
+| Case | Draft (four lines), measured | Block now in the runbook (one function), measured |
+|---|---|---|
+| 1. the login item's scratch file switched, the key not in the agent | `Identity added`, `in the agent before: 1`, `Identity removed`, `in the agent after: 0`, `supplied by the keychain: 0` | the same |
+| 2. the stand-in keychain still supplies the key | `1`, `0`, then `supplied by the keychain: 1` | the same |
+| 3. the login item's file still names `hermes-box` | **it ran all the same**: `1`, `0`, `0` | `STOPPED: the login item's file does not name hermes-box-tunnel -- nothing removed`; the stand-in received no call |
+| 4. `vps-hermes.pub` missing, one OTHER key in the agent | `ssh-keygen: … No such file or directory`, then **`in the agent before: 2`, `after: 1`, `supplied by the keychain: 1`**: with an empty fingerprint every key is counted | `STOPPED: could not read <path>/vps-hermes.pub -- nothing removed`; no call |
+| 6b 1. nothing in the agent, the stand-in keychain supplies nothing | | `in the agent after the login: 0`, `supplied by the keychain after the login: 0` |
+| 6b 2. the stand-in keychain supplies the key | | `0`, then `1` |
+| 6b 3. the key is in the agent | | `1`, `1` |
+
+So counting by fingerprint can fail and can pass (the review's finding was that the old count could do neither), and the
+two refusals work. What this does not show: `--apple-use-keychain`, `--apple-use-keychain -d` and `--apple-load-keychain`
+themselves, that is, whether the passphrase leaves the keychain and whether the last line would show it if it had not.
+Those lines run for the first time on the operator's laptop. The operator has been asked whether a throwaway key may be
+put into the login keychain and taken out again to rehearse them; that would be a later round.
+
+#### LAPTOP 6 on the stand-in laptop
+
+The throwaway administrative key was given the passphrase `test-passphrase-0000` (`ssh-keygen -p`), then `ssh hermes-box`
+on the pseudo-terminal:
+
+| Case | Measured (laptop) | The server's log | fail2ban total failed |
+|---|---|---|---|
+| the right passphrase | `Enter passphrase for key '/home/laptop/.ssh/vps-hermes':`, then the server's prompt; `whoami`: `hermesops`; `exit` | 1 `Accepted publickey`, `Starting session: shell on pts/0` | unchanged |
+| a wrong passphrase at each of the three prompts | three prompts, then `hermesops@rehearsal-server: Permission denied (publickey).` | ONE `Connection closed by authenticating user hermesops … [preauth]` for the three | unchanged |
+| Ctrl+C at the prompt | back at the laptop's prompt | one such line | unchanged |
+
+On the real laptop the last message prints the box's address in place of the stand-in's name, which is why the runbook
+says to describe it and not paste it.
+
+#### The single commands in the runbook's text
+
+| Command, where | Measured |
+|---|---|
+| `ssh -G hermes-box-tunnel \| grep -E '^(identityfile\|identitiesonly\|identityagent) '`, stand-in laptop, and this Mac through the `-F` stand-in | `identitiesonly yes`, `identityagent none`, `identityfile ~/.ssh/hermes-box-tunnel`; no `hostname` line |
+| `cp -p ~/.ssh/authorized_keys.before-tunnel-key ~/.ssh/authorized_keys`, stand-in server | 1 key line afterwards; the next gate printed `gate rc=255` |
+| `rm -f /tmp/t7-must-not-arrive`, then `rm -f ~/.ssh/authorized_keys.before-tunnel-key` (twice), stand-in server | the file and the backup gone; 2 key lines left; no message the second time |
+| `command cp -p ~/.ssh/config.before-tunnel-key ~/.ssh/config`, this Mac, scratch home, `cp` aliased to `cp -i` | no question; the config equal to the backup |
+| `rm -f ~/.ssh/config.before-tunnel-key ~/hermes-box-tunnel.plist.before-tunnel-key` (twice), the same | both gone; no question, no message |
+| `pbcopy < /dev/null`, this Mac | clipboard `0` characters |
+
+**Mechanical comparison.** Every fenced block of step 7f in the runbook was compared, by a script, with the file that
+the terminal stand-in pasted in the last rehearsal of that block (exact string equality, and the SHA-256 prefix written in
+the record at the paste): all `same`. For LAPTOP 4c the comparison is against the pasted text with `39119` written back
+to `19119`.
+
+**What this subsection does NOT show.**
+
+- **LAPTOP 4b and 4c for real:** `launchctl bootout`, `bootstrap` and `print`, the real login item, and the real forward
+  on port 19119. Stand-ins only.
+- **LAPTOP 5c and 6b for real:** the login keychain, the real agent, the three `--apple-…` forms of `ssh-add`, and the
+  two single commands `ssh-add --apple-use-keychain ~/.ssh/vps-hermes` and `ssh-add -d ~/.ssh/vps-hermes` of the text.
+- **LAPTOP 6 on macOS**, where the keychain could answer the prompt; and LAPTOP 5a with the real key, for the same reason.
+- **macOS's own `nc`, `curl` and `ssh` against a real server:** on this Mac 3a and 3b ran with stand-ins for `ssh`, `scp`
+  and `curl`; the real logins were made from Linux (OpenSSH 9.6p1, netcat-openbsd, curl 8.5.0).
+- **Terminal.app itself:** every paste was made by the terminal stand-in, which sends what a terminal sends.
+- **The box:** its OpenSSH version, its sshd configuration and log level, its kernel setting, the dashboard's own `302`,
+  and its fail2ban (version, jail settings, journal back end). The fail2ban column is a stand-in's.
+- The gate against an address that does not answer (the 10-second `ConnectTimeout`): only a name that does not resolve.
+- The operator's real `~/.ssh/config`, real login item file and real keys: none was read. Whether the real config has
+  a `Host *` block, a link, or `UseKeychain` lines elsewhere is first seen when LAPTOP 5b runs.
+- Whether macOS reads a second file left in `~/Library/LaunchAgents`: not measured; the backup is kept out of that folder.
+- In VPS 1, a multi-line paste whose last line has no line break: the last piece then stays at the shell's prompt, unrun
+  (reasoned from how the terminal hands over lines; not run).
 
 ### Not measured
 
@@ -515,6 +838,241 @@ The control's block file is the LAPTOP 3 block through `sed -E 's/hermes-box-tun
 docker rm -f rehearsal-server rehearsal-laptop; docker network rm rehearsal-net; docker rmi rehearsal-sshd rehearsal-laptop
 ```
 
+### 1.C Appendix: how to rebuild the set-up of 1.8
+
+`$X` is a scratch directory. The two containers and the network are the ones of appendix 1.B, with these differences.
+
+**Server** (`$X/server/`): `server_unix.py` as in 1.B, plus a page that answers as the dashboard does, a start script, and
+`rsyslog` and `fail2ban` in the image.
+
+`$X/server/page302.py`
+
+```python
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(302); self.send_header('Location', '/login?next=%2F'); self.end_headers()
+        else:
+            self.send_response(200); self.end_headers(); self.wfile.write(b'stand-in sign-in page\n')
+    def log_message(self, *a):
+        pass
+HTTPServer(('127.0.0.1', 9119), H).serve_forever()
+```
+
+`$X/server/start.sh` (the container of this round was started with `touch /var/log/auth.log` in the fourth line, which
+left the file owned by root so that `rsyslogd` could not write it; it was corrected in the running container with
+`chown syslog:adm /var/log/auth.log` and a restart of `rsyslogd`. The line below is the corrected one and has not been
+run as a start-up.)
+
+```bash
+#!/bin/sh
+# LOGLEVEL comes from the container's environment (VERBOSE or INFO)
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nLogLevel %s\n' "${LOGLEVEL:-VERBOSE}" > /etc/ssh/sshd_config.d/10-test.conf
+install -o syslog -g adm -m 640 /dev/null /var/log/auth.log
+rsyslogd
+python3 /opt/rehearsal/server_unix.py &
+runuser -u hermesops -- python3 /opt/rehearsal/page302.py &
+fail2ban-server -b >/dev/null 2>&1
+exec /usr/sbin/sshd -D
+```
+
+`$X/server/Dockerfile`
+
+```dockerfile
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server python3 iproute2 rsyslog fail2ban && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -s /bin/bash hermesops && install -d -m 700 -o hermesops -g hermesops /home/hermesops/.ssh && mkdir -p /run/sshd /run/dbus /run/fail2ban \
+ && printf '[sshd]\nenabled = true\nbackend = polling\nlogpath = /var/log/auth.log\n' > /etc/fail2ban/jail.d/zz-rehearsal.local
+COPY --chown=hermesops:hermesops --chmod=600 authorized_keys /home/hermesops/.ssh/authorized_keys
+COPY server_unix.py page302.py start.sh /opt/rehearsal/
+CMD ["sh", "/opt/rehearsal/start.sh"]
+```
+
+**Laptop** (`$X/laptop/Dockerfile`): as in 1.B without the `pbcopy` stand-in, and with the prompt set in `.zshrc`.
+
+```dockerfile
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client zsh curl netcat-openbsd ca-certificates && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -s /usr/bin/zsh laptop && install -d -m 700 -o laptop -g laptop /home/laptop/.ssh && printf "PS1='Z> '\n" > /home/laptop/.zshrc && chown laptop:laptop /home/laptop/.zshrc
+CMD ["sleep", "infinity"]
+```
+
+**Bring-up**: as in 1.B, with `-e LOGLEVEL=VERBOSE` added to the server's `docker run`, then
+`docker exec rehearsal-server fail2ban-client set sshd maxretry 100`. The log level was switched in the running container
+with `sed -i 's/^LogLevel .*/LogLevel INFO/' /etc/ssh/sshd_config.d/10-test.conf; kill -HUP 1` and back the same way. The
+unreachable case: `docker network disconnect rehearsal-net rehearsal-server`, the gate, `docker network connect …`.
+
+**The terminal stand-in** (Python, standard library): `pty.fork()` and `exec` of the shell; a window 500 columns wide
+(`TIOCSWINSZ`); output read until the prompt (`Z> ` for zsh, `B$ ` for bash) is the last thing printed and nothing more
+has arrived for 0.6 seconds. A paste is sent as `ESC [ 200 ~`, the text, `ESC [ 201 ~` when the last of `ESC [ ? 2004 h`
+and `ESC [ ? 2004 l` in the shell's output is the `h`; otherwise as the raw text with each line break as a carriage
+return. Return is a carriage return. The shells:
+
+```bash
+docker exec -it -u laptop -e TERM=xterm-256color rehearsal-laptop zsh -i
+docker exec -it -u hermesops -e TERM=xterm-256color -e 'PS1=B$ ' rehearsal-server bash --norc -i
+env -i HOME="$X/mac/home" ZDOTDIR="$X/mac/<one of the directories below>" PATH=/usr/bin:/bin:/usr/sbin:/sbin TERM=xterm-256color LANG=en_US.UTF-8 /bin/zsh -i
+```
+
+The third line is written as a command for the reader; the stand-in started `/bin/zsh -i` itself with exactly that
+environment plus `USER`, `LOGNAME`, `SHELL=/bin/zsh` and `TMPDIR` (and, for LAPTOP 5c and 6b, `SSH_AUTH_SOCK` set to the
+scratch agent's socket; for the stand-ins, the variable that selects their behaviour).
+
+**The stand-ins on this Mac** (each a `.zshrc` in its own `ZDOTDIR`; all start with `PS1='Z> '`).
+
+For LAPTOP 5b and the single commands (the real `ssh`, made to read the scratch config; two more directories add
+`setopt noclobber`, or `alias mv='mv -i' cp='cp -i' rm='rm -i'`):
+
+```zsh
+ssh() { command ssh -F "$HOME/.ssh/config" "$@" }
+```
+
+For LAPTOP 4b and 4c (nothing reaches launchd):
+
+```zsh
+launchctl() {
+  echo "$*" >> "$HOME/launchctl.calls"
+  case "$1" in
+    print) if [ "$STANDIN_PRINT" = running ]; then printf 'gui/501/com.dentaledge.hermes-box-tunnel = {\n\tactive count = 1\n\tpath = (stand-in)\n\ttype = LaunchAgent\n\tstate = running\n\n\tprogram = /usr/bin/ssh\n}\n'; else echo 'Bad request.' >&2; echo 'Could not find service "com.dentaledge.hermes-box-tunnel" in domain for user gui: 501' >&2; return 113; fi;;
+    bootstrap) echo "[stand-in for launchctl] bootstrap called"; return ${STANDIN_BOOTSTRAP_RC:-0};;
+    bootout) echo "[stand-in for launchctl] bootout called"; return ${STANDIN_BOOTOUT_RC:-0};;
+  esac
+}
+```
+
+The words this stand-in prints for `print` were written for the rehearsal; they are not a record of what `launchctl`
+prints. The stand-in processes for 4c were a two-line script named `ssh` (`sleep 90`) started as
+`$X/mac/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -L 39119:127.0.0.1:9119 hermes-box-tunnel` (and with
+`hermes-box`), and the scratch page was `page302.py` with the port `39119`.
+
+For LAPTOP 5c and 6b (the login keychain is never touched; `SSH_AUTH_SOCK` is the scratch agent's socket):
+
+```zsh
+ssh-add() {
+  echo "$*" | sed "s#$HOME#~#g" >> "$HOME/ssh-add.calls"
+  local a keep; keep=()
+  for a in "$@"; do
+    case "$a" in
+      --apple-load-keychain) [ -n "$STANDIN_KEYCHAIN_SUPPLIES" ] && command ssh-add -q "$HOME/.ssh/vps-hermes"; return 0;;
+      --apple-use-keychain) ;;
+      *) keep+=("$a");;
+    esac
+  done
+  [ ${#keep} -gt 0 ] || return 0
+  command ssh-add "${keep[@]}"
+}
+```
+
+The scratch agent was started with `env -i PATH=/usr/bin:/bin HOME="$X/mac/home" TMPDIR="$TMPDIR" /usr/bin/ssh-agent -s -T`
+(`-T`: its socket in the temporary directory; without it OpenSSH 10.3 puts the socket under `$HOME/.ssh/agent`, and the
+scratch path was too long for a socket) and killed at the end.
+
+For LAPTOP 3a and 3b on this Mac (no login leaves the Mac):
+
+```zsh
+ssh() {
+  echo "ssh $*" >> "$HOME/calls"
+  case "$STANDIN" in
+    refused) return 255;;
+    limited) case "$*" in *MARK*) return 1;; *' -R '*) return 255;; *) exec sleep 60;; esac;;
+    open) case "$*" in *MARK*) echo MARK; return 0;; *) exec sleep 60;; esac;;
+  esac
+}
+scp() { echo "scp $*" >> "$HOME/calls"; [ "$STANDIN" = open ] && return 0; return 255 }
+curl() { echo "curl" >> "$HOME/calls.other"; [ "$STANDIN" = refused ] && printf 000 || printf 302 }
+```
+
+**The scratch plist** (`good.plist`; the variant with an extra pair has `-o`, `ServerAliveInterval=30` before `-L`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.dentaledge.hermes-box-tunnel</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/ssh</string>
+		<string>-N</string>
+		<string>-T</string>
+		<string>-o</string>
+		<string>BatchMode=yes</string>
+		<string>-o</string>
+		<string>ExitOnForwardFailure=yes</string>
+		<string>-L</string>
+		<string>19119:127.0.0.1:9119</string>
+		<string>hermes-box</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>120</integer>
+</dict>
+</plist>
+```
+
+**The blocks that were replaced in this round, as they were run** (the blocks now in the runbook are in the runbook).
+
+The draft of VPS 1:
+
+```bash
+tunnel_key_add() {
+  local L F="$HOME/.ssh/authorized_keys" O='restrict,port-forwarding,permitopen="127.0.0.1:9119",permitlisten="127.0.0.1:1",command="/bin/false"'
+  read -r -p "Paste the line: " L
+  L=${L%$'\r'}
+  [ -f "$F" ] || { echo "REFUSED: $F is missing -- nothing written"; return; }
+  [ "$L" = "$O ssh-ed25519 ${L##* }" ] && [ ${#L} -eq $(( ${#O} + 81 )) ] || { echo "REFUSED: not the expected line (other options, a cut key, or extra words) -- nothing written"; return; }
+  case "${L##* }" in *[!A-Za-z0-9+/]*) echo "REFUSED: the key holds a character that is not base64 -- nothing written"; return;; esac
+  grep -qxF "$L" "$F" && { echo "already present: nothing to do"; return; }
+  cp -p "$F" "$F.before-tunnel-key" || return
+  [ -z "$(tail -c1 "$F")" ] || echo >> "$F"
+  printf '%s\n' "$L" >> "$F" && echo "ADDED: $(grep -cvE '^\s*(#|$)' "$F") key line(s), mode $(stat -c %a "$F")"
+}; tunnel_key_add; unset -f tunnel_key_add
+```
+
+The draft of LAPTOP 4a:
+
+```bash
+P=~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist; B=/usr/libexec/PlistBuddy
+if [ "$($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null)" = "hermes-box" ] && [ "$($B -c 'Print :ProgramArguments' "$P" | grep -c .)" -eq 12 ]; then cp -p "$P" "$P.before-tunnel-key" && $B -c 'Set :ProgramArguments:9 hermes-box-tunnel' "$P" && echo "SWITCHED IN THE FILE"; else echo "NOT SWITCHED: the file is not as expected -- stop"; fi
+echo "the alias the login item uses: $($B -c 'Print :ProgramArguments:9' "$P")"
+```
+
+The first corrected form of LAPTOP 4a differed from the block in the runbook in its third line only:
+`… then cp -p "$P" "$K" && $B -c 'Set :ProgramArguments:9 hermes-box-tunnel' "$P" && echo "SWITCHED IN THE FILE"; elif …`;
+the second form had the runbook's third line with `cp -p` in place of `command cp -p`.
+
+The draft of LAPTOP 5b:
+
+```bash
+C=~/.ssh/config
+if [ -e "$C.before-tunnel-key" ]; then echo "A BACKUP EXISTS: this block was run before -- stop and read the text below"; else cp -p "$C" "$C.before-tunnel-key" && awk 'tolower($1)=="host"||tolower($1)=="match"{inblk=(tolower($1)=="host" && $2=="hermes-box" && NF==2)} !(inblk && tolower($1) ~ /^(usekeychain|addkeystoagent)(=|$)/)' "$C.before-tunnel-key" >| "$C.new" && chmod 600 "$C.new" && mv "$C.new" "$C" && echo "EDITED: $(( $(grep -c '' "$C.before-tunnel-key") - $(grep -c '' "$C") )) line(s) removed"; fi
+ssh -G hermes-box | grep -iE '^(usekeychain|addkeystoagent) '
+```
+
+The draft of LAPTOP 5c:
+
+```bash
+FP=$(ssh-keygen -lf ~/.ssh/vps-hermes.pub | awk '{print $2}')
+ssh-add --apple-use-keychain ~/.ssh/vps-hermes; echo "in the agent before: $(ssh-add -l | grep -cF "$FP")"
+ssh-add --apple-use-keychain -d ~/.ssh/vps-hermes; echo "in the agent after: $(ssh-add -l | grep -cF "$FP")"
+ssh-add --apple-load-keychain >/dev/null 2>&1; echo "supplied by the keychain: $(ssh-add -l | grep -cF "$FP")"; unset FP
+```
+
+The draft of LAPTOP 3b was the LAPTOP 3 block of 1.7 without its T2 line. LAPTOP 1, LAPTOP 1b, LAPTOP 3a and
+LAPTOP 5a entered the runbook as drafted.
+
+**Teardown**
+
+```bash
+docker rm -f rehearsal-server rehearsal-laptop; docker network rm rehearsal-net; docker rmi rehearsal-sshd rehearsal-laptop ubuntu:24.04
+pbcopy < /dev/null
+```
+
 ## 2 · Step 7e, rehearsed
 
 Measured 2026-10-08 on the laptop, against a throwaway Compose project (`step7e-rehearsal`). Nothing on the box
@@ -740,6 +1298,29 @@ new one.
 **After the change:** `install-env-secret.test.py` passes (26 tests, including `test_every_command_in_bring_up_runs`).
 Hash and secret values are described here, never shown.
 
+### 2.9 Text added around blocks 1, 2 and 3 after the review of the runbook
+
+Second fix round, 2026-10-08. **No block of step 7e changed, and nothing of section 2 was run again.** The review found
+outputs of these blocks that the runbook gave no instruction for; the text now has one for each. What supports each
+sentence:
+
+- *Block 1, the state after a partial run.* From 2.8's made failure: the hash's `set` line, the removal's failure
+  message, no `generated` line; the file then holds the new hash and the old secret, and the next run completed. The
+  other partial state (the removal works, `generate` fails, no secret left in the file) was **not** rehearsed; the runbook
+  says so and points at block 2's `secret:` line.
+- *Block 2.* A stop instruction for `STOP_EXIT` or `UP_EXIT` not `0`, `check_while_stopped_rc=0`, a missing `secret:`
+  line, `PLAINTEXT STILL SET`, `check_after_rc` not `0` and a missing timer line. None of these outputs was produced
+  in a rehearsal: every run of block 2 printed the expected lines (2.3, 2.6, 2.8), and the four listener-check lines have
+  not run at all. The instructions are **reasoned from the block's text**: for example, the `secret:` line comes from an
+  `awk` that prints once per line it is given, so no line means the container returned none.
+- *Block 2, what the laptop rehearsal changed.* The runbook's sentence now names every substitution of 2.2, not only
+  the four listener-check lines.
+- *Block 3.* `old password -> 401` is also what a mistyped old password prints (the wrong-password line of every run:
+  `401`); the runbook now says that the proof is block 2's `hash: file == container` line, and that `old password -> 200`
+  can also mean block 2 did not recreate the gateway (reasoned: 2.8 found the running gateway untouched by block 1, so
+  until a recreate it still holds the old hash). It also says to clear the clipboard after the last paste
+  (`pbcopy < /dev/null`: run on this Mac in 1.8, the clipboard then held `0` characters).
+
 ### Not measured
 
 - The Desktop app's own behaviour when its saved password stops working.
@@ -865,6 +1446,8 @@ awk rc=0
 `diff` showed exactly two deletions (lines 4 and 5, inside the `hermes-box` block) and no addition; every other line,
 including the two settings in each of the four other places, survived byte for byte. Run again on its own output, the
 program changed nothing (`cmp` silent). BSD awk accepted the program on the first try (no correction was needed).
+(This program and the line around it were replaced after the review of the runbook: LAPTOP 5b and its rehearsal are
+in 1.8.)
 
 For the record, the **previous program** on the same input deleted six lines: the two in the `hermes-box` block and, in
 addition, the two after the indented `Host other-indented` line (lines 8 and 9) and the two in the `Match host x` block
@@ -897,6 +1480,24 @@ command printed `0`). **Not measured:** the box's own configuration (it is read 
 pass without the number); `sudo` on the box; an `Include` of a path other than `sshd_config.d/*.conf` (not read by the
 command: reasoned, which is why another number needs a statement of what each block sets, and `0` is a floor for the
 files it reads, not a proof about files it does not).
+
+### 3.3 The start-time lines of the security review (checklist item D4.6): not rehearsed
+
+BRING-UP's "A security review", step 2, starts with a loop that prints each service's start time
+(`systemctl show <unit> -p ActiveEnterTimestamp --value` for four units), then `uptime -s`, then the last six
+`Start-Date` and `Commandline` lines of `/var/log/apt/history.log`. They were added in the first writing of the runbook
+and appeared nowhere in this document. Second fix round, 2026-10-08: run as written (no `sudo` in them) as `root` in the
+stand-in server of 1.8, which has **no systemd**: the loop printed `systemctl: command not found` four times and each
+unit's name with nothing after it; `uptime -s` printed the container's start time; the `grep` printed six lines of the
+image's own update log. So only the last two commands are rehearsed, and the loop is **not**: it runs for the first time
+on the box. The lines only read. The runbook says so at the block and describes a healthy output (four names each
+followed by a date and time, the boot time, up to six log lines); that description is **reasoned** from the commands, not
+measured.
+
+In 3.2, the runbook's text now also says what the `Match` count does not cover: it reads two fixed places, prints `0` when
+neither can be read, and does not count a `Match` in a file brought in by an `Include` of another directory (3.2's "Not
+measured" already says the last; for the second, the same command with two paths that do not exist was run in the
+stand-in server and printed `0`).
 
 ### Not measured (section 3)
 
