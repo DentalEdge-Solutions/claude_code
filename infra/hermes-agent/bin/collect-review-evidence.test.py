@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, hashlib, importlib.util, io, json, os, shutil, sys, tempfile, time, unittest
+import base64, contextlib, hashlib, importlib.util, io, json, os, shutil, stat, sys, tempfile, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -2705,6 +2705,470 @@ class TestDashboardHashAndSessionSecret(Base):
         bundle = CE.collect(self.host(), self.KEY)
         self.assertEqual(bundle["items"]["D2.3"]["data"]["journal"]["known_secret_hits"], 1)
         self.assertNotIn(self.SECRET, json.dumps(bundle))
+
+
+TUNNEL_OPTS = 'restrict,port-forwarding,permitopen="127.0.0.1:9119",permitlisten="127.0.0.1:1",command="/bin/false"'
+
+
+def _keybody(seed):
+    """A well-formed ed25519 public key body (test value: 32 equal bytes)."""
+    return base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00 " + bytes([seed]) * 32).decode()
+
+
+class TestD17AcceptedKeys(Base):
+    SSHD = ("authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2\nauthorizedkeyscommand none\n"
+            "authorizedprincipalsfile none\ntrustedusercakeys none\nallowtcpforwarding yes\n"
+            "allowstreamlocalforwarding yes\ngatewayports no\npermittunnel no\npermitrootlogin no\n")
+    PASSWD = ("root:x:0:0:root:/root:/bin/bash\n"
+              "hermesops:x:1000:1000::/home/hermesops:/bin/bash\n"
+              "hermes-broker:x:997:997::/var/lib/hermes-broker:/usr/sbin/nologin\n"
+              "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+              "bin:x:2:2:bin:/usr/sbin:/usr/sbin/nologin\n")
+
+    def setUp(self):
+        super().setUp()
+        self._w("/etc/passwd", self.PASSWD)
+        self.outputs[("sshd", "-T")] = (0, self.SSHD, "")
+
+    def _keys(self, home, body):
+        p = self._w(home + "/.ssh/authorized_keys", body)
+        os.chmod(p, 0o600)
+        return p
+
+    def _two(self):
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)} operator@laptop.example\n"
+                                      f"{TUNNEL_OPTS} ssh-ed25519 {_keybody(2)} hermes-box-tunnel\n")
+
+    def test_two_keys_one_bare_one_limited(self):
+        self._two()
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual(d["accounts_checked"], 5)
+        self.assertEqual(len(d["files"]), 1)
+        row = d["files"][0]
+        self.assertEqual((row["path"], row["users"], row["kind"], row["mode"], row["unparsed_lines"]),
+                         ("/home/hermesops/.ssh/authorized_keys", ["hermesops"], "file", "0o600", 0))
+        self.assertEqual(row["keys"][0], {"type": "ssh-ed25519", "options": [],
+                                          "sha12": hashlib.sha256(base64.b64decode(_keybody(1))).hexdigest()[:12]})
+        self.assertEqual(row["keys"][1]["options"],
+                         ['command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',
+                          "port-forwarding", "restrict"])
+        self.assertNotEqual(row["keys"][0]["sha12"], row["keys"][1]["sha12"])
+
+    def test_no_key_body_and_no_comment_leave_the_collector(self):
+        self._two()
+        out = json.dumps(CE.d1_7(self.host(), {}))
+        for gone in (_keybody(1), _keybody(2), "laptop.example", "operator@", "hermes-box-tunnel"):
+            self.assertNotIn(gone, out)
+
+    def test_the_sshd_settings_that_accept_keys_or_forwards_are_reported(self):
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual(d["sshd"], {"authorizedkeysfile": ".ssh/authorized_keys .ssh/authorized_keys2",
+                                     "authorizedkeyscommand": "none", "authorizedprincipalsfile": "none",
+                                     "trustedusercakeys": "none", "allowtcpforwarding": "yes",
+                                     "allowstreamlocalforwarding": "yes", "gatewayports": "no", "permittunnel": "no"})
+        self.assertEqual(d["files"], [])
+
+    def test_the_first_unprivileged_port_is_reported(self):
+        for text, expected in (("1024\n", 1024), ("0\n", 0), ("1\n", 1), ("65535\n", 65535)):
+            self._w(CE.UNPRIVILEGED_PORT_START, text)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], expected, text)
+
+    def test_a_missing_or_odd_unprivileged_port_setting_is_could_not_check(self):
+        self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK)   # no file
+        for text in ("", "\n", "abc\n", "-1\n", "1024 2048\n", "10.5\n", "999999\n"):
+            self._w(CE.UNPRIVILEGED_PORT_START, text)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK, repr(text))
+
+    def _port_file(self, raw):
+        p = os.path.join(self.root, CE.UNPRIVILEGED_PORT_START.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(raw)
+
+    def test_only_a_plain_ascii_port_number_is_accepted(self):
+        for raw in ("١٠٢٤\n".encode(), "１０２４\n".encode(), b"0001\n", b"00\n", b"01024\n", b" 1024\n",
+                    b"1024 \n", b"1024\n\n", b"1024\r\n", b"+1024\n", b"1024\x00\n", b"\xff\xfe1024\n",
+                    b"\xff\n", b"1" * 4096):
+            self._port_file(raw)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK, repr(raw[:24]))
+        for raw, expected in ((b"1024\n", 1024), (b"1024", 1024), (b"0\n", 0), (b"65535\n", 65535)):
+            self._port_file(raw)
+            self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], expected, repr(raw))
+
+    def test_a_directory_in_place_of_the_port_setting_is_could_not_check(self):
+        os.makedirs(os.path.join(self.root, CE.UNPRIVILEGED_PORT_START.lstrip("/")))
+        self.assertEqual(CE.d1_7(self.host(), {})["unprivileged_port_start"], R.COULD_NOT_CHECK)
+
+    def test_the_result_has_exactly_these_top_level_fields(self):
+        self.assertEqual(sorted(CE.d1_7(self.host(), {})),
+                         ["accounts_checked", "files", "sshd", "unprivileged_port_start"])
+
+    def test_a_setting_sshd_did_not_print_is_could_not_check(self):
+        self.outputs[("sshd", "-T")] = (0, self.SSHD.replace("trustedusercakeys none\n", ""), "")
+        self.assertEqual(CE.d1_7(self.host(), {})["sshd"]["trustedusercakeys"], R.COULD_NOT_CHECK)
+
+    def test_sshd_failing_or_naming_no_key_file_is_could_not_check(self):
+        for result in ((1, "", "boom"), (0, "port 22\n", "")):
+            self.outputs[("sshd", "-T")] = result
+            with self.assertRaises(CE.CouldNotCheck):
+                CE.d1_7(self.host(), {})
+
+    def test_an_account_without_a_login_shell_is_read_too(self):
+        self._keys("/var/lib/hermes-broker", f"ssh-ed25519 {_keybody(3)}\n")
+        rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual([(r["users"], len(r["keys"])) for r in rows], [(["hermes-broker"], 1)])
+
+    def test_accounts_that_share_a_home_give_one_row_naming_both(self):
+        self._keys("/usr/sbin", f"ssh-ed25519 {_keybody(4)}\n")
+        rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual([r["users"] for r in rows], [["bin", "daemon"]])
+
+    def test_the_second_file_name_is_read(self):
+        self._w("/root/.ssh/authorized_keys2", f"ssh-ed25519 {_keybody(5)}\n")
+        rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual([r["path"] for r in rows], ["/root/.ssh/authorized_keys2"])
+
+    def test_percent_tokens_and_an_absolute_pattern_are_expanded(self):
+        self.outputs[("sshd", "-T")] = (0, self.SSHD.replace(".ssh/authorized_keys .ssh/authorized_keys2",
+                                                              "%h/.ssh/authorized_keys /etc/ssh/keys/%u"), "")
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
+        self._w("/etc/ssh/keys/root", f"ssh-ed25519 {_keybody(6)}\n")
+        self.assertEqual(sorted(r["path"] for r in CE.d1_7(self.host(), {})["files"]),
+                         ["/etc/ssh/keys/root", "/home/hermesops/.ssh/authorized_keys"])
+
+    def test_a_token_the_collector_does_not_expand_is_could_not_check(self):
+        self.outputs[("sshd", "-T")] = (0, self.SSHD.replace(".ssh/authorized_keys .ssh/authorized_keys2",
+                                                              "/etc/ssh/keys/%U"), "")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE.d1_7(self.host(), {})
+
+    def test_comments_and_blank_lines_are_skipped_and_other_lines_are_counted(self):
+        self._keys("/home/hermesops", f"# a comment\n\nssh-ed25519 {_keybody(1)}\nnot a key line\n"
+                                      f"ssh-ed25519 not*base64\nssh-ed25519\n"
+                                      f'command="unbalanced ssh-ed25519 {_keybody(2)}\n')
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((len(row["keys"]), row["unparsed_lines"]), (1, 4))
+
+    def test_a_quoted_value_with_a_space_and_a_comma_is_one_option(self):
+        self._keys("/home/hermesops", f'command="/bin/echo a,b c",no-pty ssh-ed25519 {_keybody(1)}\n')
+        key = CE.d1_7(self.host(), {})["files"][0]["keys"][0]
+        self.assertEqual(key["options"], ["command=<withheld>", "no-pty"])
+
+    def test_an_address_or_an_odd_command_is_withheld(self):
+        self._keys("/home/hermesops",
+                   f'from="203.0.113.7",permitopen="203.0.113.9:443",command="/usr/bin/x --token=abc",'
+                   f'permitopen="127.0.0.1:9119",environment="A=b" ssh-ed25519 {_keybody(1)}\n')
+        out = CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"]
+        self.assertEqual(out, ["command=<withheld>", "environment=<withheld>", "from=<withheld>",
+                               'permitopen="127.0.0.1:9119"', "permitopen=<withheld>"])
+        self.assertNotIn("203.0.113", json.dumps(out))
+
+    def test_a_symlink_in_place_of_the_file_is_never_read_as_empty(self):
+        os.makedirs(os.path.join(self.root, "home/hermesops/.ssh"))
+        os.symlink("/etc/passwd", os.path.join(self.root, "home/hermesops/.ssh/authorized_keys"))
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["kind"], row["keys"], row["unparsed_lines"]),
+                         ("symlink", R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_certificate_authority_line_is_a_key_with_that_option(self):
+        self._keys("/home/hermesops", f"cert-authority ssh-ed25519 {_keybody(7)}\n")
+        self.assertEqual(CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"], ["cert-authority"])
+
+    def test_an_escaped_backslash_before_a_quote_does_not_close_it_early_as_sshd_reads_it(self):
+        """sshd: a backslash escapes only a double quote. In `command="a\\" ssh-ed25519 B1 x"` the
+        `\\"` is a backslash then an escaped quote, so the value runs to the last quote and the
+        accepted key is body 2; body 1 is only text inside the option."""
+        self._keys("/home/hermesops", f'command="a\\\\" ssh-ed25519 {_keybody(1)} x" ssh-ed25519 {_keybody(2)}\n')
+        out = CE.d1_7(self.host(), {})
+        keys = out["files"][0]["keys"]
+        self.assertEqual([k["sha12"] for k in keys], [hashlib.sha256(base64.b64decode(_keybody(2))).hexdigest()[:12]])
+        self.assertNotIn(hashlib.sha256(base64.b64decode(_keybody(1))).hexdigest()[:12], json.dumps(out))
+
+    def test_an_escaped_quote_inside_a_value_stays_in_the_value(self):
+        self._keys("/home/hermesops", f'command="echo \\"hi\\"",no-pty ssh-ed25519 {_keybody(1)}\n')
+        key = CE.d1_7(self.host(), {})["files"][0]["keys"][0]
+        self.assertEqual(key["options"], ["command=<withheld>", "no-pty"])
+
+    def test_blanks_before_the_key_are_skipped(self):
+        self._keys("/home/hermesops", f"  \t ssh-ed25519 {_keybody(1)}\n \tno-pty ssh-ed25519 {_keybody(2)}\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual(([k["options"] for k in row["keys"]], row["unparsed_lines"]), ([[], ["no-pty"]], 0))
+
+    def test_only_a_newline_ends_a_line_as_sshd_reads_the_file(self):
+        """Python's splitlines also splits on \\r, \\f and U+2028; sshd does not. A key after one of
+        them in a comment line is not a key, and a decoy key in front of one is not the line's key."""
+        self._keys("/home/hermesops", f"# note\rssh-ed25519 {_keybody(1)}\n# note\u2028ssh-ed25519 {_keybody(2)}\n"
+                                      f"\x0cssh-ed25519 {_keybody(3)}\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["keys"], row["unparsed_lines"]), ([], 1))
+
+    def test_a_file_that_is_swapped_for_a_symlink_is_not_followed(self):
+        """The path is a file when it is first examined and a link by the time it is opened (once,
+        between the examination and the open, whichever way the collector examines it)."""
+        p = self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
+        real_lstat, real_open, state = os.lstat, os.open, {"seen": 0, "swapped": False}
+        def swap():
+            if not state["swapped"]:
+                state["swapped"] = True
+                os.unlink(p)
+                os.symlink("/etc/passwd", p)
+        def lstat(path, *a, **kw):
+            st = real_lstat(path, *a, **kw)
+            if path == p:
+                state["seen"] += 1
+                if state["seen"] == 2:                  # d1_7 looked once; the row looks again
+                    swap()
+            return st
+        def opener(path, *a, **kw):
+            if path == p:
+                swap()
+            return real_open(path, *a, **kw)
+        with mock.patch.object(os, "lstat", lstat), mock.patch.object(os, "open", opener):
+            row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["kind"], row["keys"], row["unparsed_lines"]),
+                         ("symlink", R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_file_over_the_read_limit_is_could_not_check_not_a_partial_list(self):
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\nssh-ed25519 {_keybody(2)}\n")
+        with mock.patch.object(CE, "AUTHORIZED_KEYS_READ_LIMIT", 64):
+            row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["kind"], row["keys"], row["unparsed_lines"]),
+                         ("file", R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_file_that_grows_past_the_limit_while_read_is_could_not_check(self):
+        """fstat said small; the bytes read exceed the limit: still no partial list."""
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\nssh-ed25519 {_keybody(2)}\n")
+        real_fstat = os.fstat
+        def small(fd):
+            r = real_fstat(fd)
+            return os.stat_result((r.st_mode, r.st_ino, r.st_dev, r.st_nlink, r.st_uid, r.st_gid, 1, 0, 0, 0))
+        with mock.patch.object(CE, "AUTHORIZED_KEYS_READ_LIMIT", 64), mock.patch.object(os, "fstat", small):
+            row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["keys"], row["unparsed_lines"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_path_that_cannot_be_examined_is_reported_not_skipped(self):
+        p = self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
+        real_lstat, real_open = os.lstat, os.open
+        def deny(real):
+            def call(path, *a, **kw):
+                if path == p:
+                    raise PermissionError(13, "denied")
+                return real(path, *a, **kw)
+            return call
+        with mock.patch.object(os, "lstat", deny(real_lstat)), mock.patch.object(os, "open", deny(real_open)):
+            rows = CE.d1_7(self.host(), {})["files"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual({k: rows[0][k] for k in ("path", "users", "kind", "owner", "group", "mode", "keys", "unparsed_lines")},
+                         {"path": "/home/hermesops/.ssh/authorized_keys", "users": ["hermesops"],
+                          "kind": R.COULD_NOT_CHECK, "owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK,
+                          "mode": R.COULD_NOT_CHECK, "keys": R.COULD_NOT_CHECK, "unparsed_lines": R.COULD_NOT_CHECK})
+        self.assertEqual(set(rows[0]), {"path", "users", "kind", "owner", "group", "mode", "keys", "unparsed_lines"})
+
+    def test_a_six_field_account_line_is_could_not_check_not_skipped(self):
+        self._w("/etc/passwd", self.PASSWD + "short:x:1002:1002::/home/short\n")
+        self._keys("/home/short", f"ssh-ed25519 {_keybody(6)}\n")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE.d1_7(self.host(), {})
+
+    def test_an_eight_field_account_line_is_could_not_check(self):
+        self._w("/etc/passwd", self.PASSWD + "long:x:1003:1003::/home/long:/bin/sh:extra\n")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE.d1_7(self.host(), {})
+
+    def test_blank_lines_and_comment_lines_in_passwd_are_skipped(self):
+        self._w("/etc/passwd", "\n# a comment\n" + self.PASSWD + "\n#another\n\n")
+        self.assertEqual(CE.d1_7(self.host(), {})["accounts_checked"], 5)
+
+    def test_full_width_digits_in_a_forward_target_are_withheld(self):
+        self._keys("/home/hermesops",
+                   f'permitopen="127.0.0.1:９１１９",permitlisten="127.0.0.1:１" '
+                   f'ssh-ed25519 {_keybody(1)}\n')
+        out = CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"]
+        self.assertEqual(out, ["permitlisten=<withheld>", "permitopen=<withheld>"])
+
+
+class TestD46StartTimes(Base):
+    START = "Wed 2026-10-07 06:45:46 UTC"      # as `systemctl show -p ActiveEnterTimestamp --value` prints it
+    START_ISO = "2026-10-07T06:45:46Z"
+    BOOT = 1758448800                          # /proc/stat btime, seconds since the epoch
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, CE, "LAST_PASS_COLLECTED_AT", None)
+        CE.LAST_PASS_COLLECTED_AT = None
+        for unit in ("docker", *CE.SERVICE_FILES):
+            self._start(unit, self.START)
+        self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
+        self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = (0, "2026-10-07T15:39:12.123456789Z\n", "")
+        self._w("/proc/stat", f"cpu  1 2 3\nbtime {self.BOOT}\nprocesses 5\n")
+        self.t0 = CE._epoch(self.START_ISO)
+        for unit_file, script in CE.SERVICE_FILES.values():
+            self._file("/etc/systemd/system/" + unit_file, "[Unit]\n")
+            self._file(CE.AGENT_DIR + "/bin/" + script, "import os\n")
+
+    def _start(self, unit, text):
+        self.outputs[("systemctl", "show", unit, "-p", "ActiveEnterTimestamp", "--value")] = (0, text + "\n", "")
+
+    def _file(self, rel, body, age=-3600):
+        """A file whose modification time is `age` seconds after the services' start."""
+        p = self._w(rel, body)
+        os.utime(p, (self.t0 + age, self.t0 + age))
+        return p
+
+    APP = "hermes-app-broker@ads-audit"
+
+    def test_every_start_is_reported_in_utc(self):
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(sorted(d["started_at"]), sorted(["boot", "docker", "gateway-container", "hermes-broker",
+                                                          "hermes-docker-proxy", self.APP]))
+        for unit in ("docker", "hermes-broker", "hermes-docker-proxy", self.APP):
+            self.assertEqual(d["started_at"][unit], self.START_ISO)
+        self.assertEqual(d["started_at"]["gateway-container"], "2026-10-07T15:39:12Z")
+        self.assertEqual(d["started_at"]["boot"], CE._iso(self.BOOT))
+        self.assertRegex(d["started_at"]["boot"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_without_a_baseline_nothing_is_compared(self):
+        d = CE.d4_6(self.host(), {})
+        self.assertIsNone(d["last_pass_collected_at"])
+        self.assertEqual(set(d["started_after_last_pass"].values()), {None})
+
+    def test_a_start_after_the_last_pass_is_marked(self):
+        CE.LAST_PASS_COLLECTED_AT = "2026-10-07T10:00:00Z"
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["last_pass_collected_at"], "2026-10-07T10:00:00Z")
+        self.assertEqual(d["started_after_last_pass"],
+                         {"boot": False, "docker": False, "hermes-broker": False, "hermes-docker-proxy": False,
+                          self.APP: False, "gateway-container": True})
+        CE.LAST_PASS_COLLECTED_AT = self.START_ISO          # the same second is not "after"
+        self.assertFalse(CE.d4_6(self.host(), {})["started_after_last_pass"]["hermes-broker"])
+
+    def test_a_time_that_is_empty_or_not_utc_is_could_not_check(self):
+        CE.LAST_PASS_COLLECTED_AT = "2026-10-07T10:00:00Z"
+        for text in ("", "n/a", "Wed 2026-10-07 08:45:46 CEST", "2026-10-07 06:45:46", "Wed 2026-10-07 06:45:46 UTC extra"):
+            self._start("hermes-broker", text)
+            d = CE.d4_6(self.host(), {})
+            self.assertEqual(d["started_at"]["hermes-broker"], R.COULD_NOT_CHECK, text)
+            self.assertEqual(d["started_after_last_pass"]["hermes-broker"], R.COULD_NOT_CHECK, text)
+            self.assertEqual(d["files_newer_than_start"]["hermes-broker"], R.COULD_NOT_CHECK, text)
+            self.assertEqual(d["started_at"]["hermes-docker-proxy"], self.START_ISO)   # control: the others stand
+
+    def test_systemctl_failing_is_could_not_check(self):
+        self.outputs[("systemctl", "show", "docker", "-p", "ActiveEnterTimestamp", "--value")] = (1, self.START, "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["docker"], R.COULD_NOT_CHECK)
+
+    def test_no_gateway_or_an_odd_container_time_is_could_not_check(self):
+        self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = (0, "0001-01-01T00:00:00+02:00\n", "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["gateway-container"], R.COULD_NOT_CHECK)
+        self.outputs[("docker", "ps")] = (0, "", "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["gateway-container"], R.COULD_NOT_CHECK)
+
+    def test_no_boot_time_is_could_not_check(self):
+        self._w("/proc/stat", "cpu  1 2 3\n")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["boot"], R.COULD_NOT_CHECK)
+
+    def test_files_older_than_the_start_are_not_listed(self):
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"], {"hermes-broker": [], "hermes-docker-proxy": [], self.APP: []})
+        self.assertEqual(d["files_checked"], {"hermes-broker": 2, "hermes-docker-proxy": 2, self.APP: 2})
+
+    def test_a_script_or_a_unit_file_changed_after_the_start_is_listed(self):
+        self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "import os\n", age=60)
+        self._file("/etc/systemd/system/hermes-app-broker@.service", "[Unit]\n", age=60)
+        d = CE.d4_6(self.host(), {})["files_newer_than_start"]
+        self.assertEqual(d, {"hermes-broker": ["hermes-broker.py"], "hermes-docker-proxy": [], self.APP: ["unit"]})
+
+    def test_a_file_changed_in_the_same_second_as_the_start_is_not_listed(self):
+        self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "import os\n", age=0)
+        self.assertEqual(CE.d4_6(self.host(), {})["files_newer_than_start"]["hermes-broker"], [])
+
+    def test_an_import_inside_a_function_and_a_transitive_import_are_followed(self):
+        b = CE.AGENT_DIR + "/bin/"
+        self._file(b + "hermes-app-broker.py", "import os, app_lib as A\n\ndef f():\n    from lazy_lib import x\n")
+        self._file(b + "app_lib.py", "import vault_lib\n")
+        self._file(b + "vault_lib.py", "import json\n", age=60)
+        self._file(b + "lazy_lib.py", "x = 1\n", age=60)
+        self._file(b + "unrelated_lib.py", "y = 1\n", age=60)
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"][self.APP], ["lazy_lib.py", "vault_lib.py"])
+        self.assertEqual(d["files_checked"][self.APP], 5)       # the unit, the script and three modules
+
+    def test_a_file_loaded_by_its_name_is_followed(self):
+        b = CE.AGENT_DIR + "/bin/"
+        self._file(b + "hermes-broker.py", 'import os\nP = os.path.join(HERE, "side-loaded.py")\n')
+        self._file(b + "side-loaded.py", "z = 1\n", age=60)
+        self.assertEqual(CE.d4_6(self.host(), {})["files_newer_than_start"]["hermes-broker"], ["side-loaded.py"])
+
+    def test_a_missing_or_unparsable_script_costs_that_service_only(self):
+        os.remove(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "bin/hermes-broker.py"))
+        self._file(CE.AGENT_DIR + "/bin/docker-create-proxy.py", "def broken(:\n")
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"], {"hermes-broker": R.COULD_NOT_CHECK,
+                                                       "hermes-docker-proxy": R.COULD_NOT_CHECK, self.APP: []})
+        self.assertEqual(d["files_checked"]["hermes-broker"], R.COULD_NOT_CHECK)
+
+    def test_each_service_is_paired_with_the_script_its_unit_runs(self):
+        deploy = os.path.join(os.path.dirname(HERE), "deploy")
+        for unit_file, script in CE.SERVICE_FILES.values():
+            with open(os.path.join(deploy, unit_file)) as f:
+                self.assertRegex(f.read(), r"(?m)^ExecStart=.*/opt/hermes-agent/bin/" + script.replace(".", r"\."), unit_file)
+
+    def test_the_repos_own_app_broker_loads_what_review_8_named(self):
+        loaded = CE._loaded_files(HERE, "hermes-app-broker.py")
+        for name in ("hermes-app-broker.py", "app_lib.py", "vault_lib.py", "governance_lib.py", "client_audit_lib.py"):
+            self.assertIn(name, loaded)
+        self.assertNotIn("collect-review-evidence.py", loaded)
+
+    def test_main_refuses_an_invalid_last_pass_collected_at(self):
+        for bad in ("2026-10-07", "2026-10-07T16:21:22", "2026-10-07T16:21:22+00:00", "2026-13-40T00:00:00Z",
+                    "2026-10-07T16:21:22Z\n", ""):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = CE.main(["--fp-key-tty", "--last-pass-collected-at", bad], host=self.host(),
+                             read_key=lambda: "11" * 32)
+            self.assertEqual((rc, out.getvalue()), (2, ""), repr(bad))
+            self.assertIn("--last-pass-collected-at", err.getvalue())
+            self.assertIsNone(CE.LAST_PASS_COLLECTED_AT)
+
+    def test_main_refuses_a_collected_at_written_with_full_width_digits(self):
+        bad = "２０２６-10-07T16:21:22Z"
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = CE.main(["--fp-key-tty", "--last-pass-collected-at", bad], host=self.host(),
+                         read_key=lambda: "11" * 32)
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertIn("--last-pass-collected-at", err.getvalue())
+
+    def test_a_systemd_or_docker_time_with_full_width_digits_is_could_not_check(self):
+        self._start("hermes-broker", "Wed ２０２６-10-07 06:45:46 UTC")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["hermes-broker"], R.COULD_NOT_CHECK)
+        self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = \
+            (0, "２０２６-10-07T15:39:12Z\n", "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["gateway-container"], R.COULD_NOT_CHECK)
+
+    def test_a_script_too_deep_to_parse_is_could_not_check_for_that_service_only(self):
+        self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "x = " + "1+" * 200000 + "1\n")
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"]["hermes-broker"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["files_newer_than_start"]["hermes-docker-proxy"], [])
+
+    def test_main_passes_a_valid_last_pass_collected_at_and_does_not_leak_it(self):
+        def run(*extra):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = CE.main(["--fp-key-tty", *extra], host=self.host(), read_key=lambda: "11" * 32)
+            return rc, json.loads(out.getvalue())["items"]
+        rc, items = run("--last-pass-collected-at", "2026-10-07T10:00:00Z")
+        self.assertEqual(items["D4.6"]["status"], R.OBSERVED)
+        self.assertEqual(items["D4.6"]["data"]["last_pass_collected_at"], "2026-10-07T10:00:00Z")
+        self.assertTrue(items["D4.6"]["data"]["started_after_last_pass"]["gateway-container"])
+        self.assertIsNone(CE.LAST_PASS_COLLECTED_AT)
+        _, items = run()
+        self.assertIsNone(items["D4.6"]["data"]["last_pass_collected_at"])
+
+    def test_the_bundle_carries_both_new_items(self):
+        items = CE.collect(self.host(), self.KEY)["items"]
+        self.assertEqual(items["D4.6"]["status"], R.OBSERVED)
+        self.assertEqual(items["D1.7"]["status"], R.COULD_NOT_CHECK)      # no sshd in this fake host
 
 
 if __name__ == "__main__":

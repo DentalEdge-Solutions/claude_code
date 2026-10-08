@@ -1501,16 +1501,16 @@ of the old `.env` is made (the review's sweep reports one as `unlisted`, a FAIL)
 
 ## A security review
 
-Since checklist v1.17 it also needs the listener check installed and running ("The listener check"; D4.5), and reads the dashboard's secrets in whichever form Phase 7 left them (D2.1, D4.1).
+Since checklist v1.17 it also needs the listener check installed and running ("The listener check"; D4.5), and reads the dashboard's secrets in whichever form Phase 7 left them (D2.1, D4.1); since v1.18 it also reads the accepted SSH keys (D1.7) and each service's start time (D4.6).
 Run it after parts 1 and 2 are applied and the rollback backups are shredded (part 2 step 10;
 the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three live refusal checks of part 2 step 11 must have been run within the last 30 days (D10.7). The chat audit of part 2 step 10 must have returned `ok` within the last 7 days (D10.8: the broker deletes a result 7 days after writing it): collect the evidence within 7 days of that audit, or run another chat audit first. Raw bundles live in the
 gitignored `security-reviews/`; only the report is committed.
 
 1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
-2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`, then `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
+2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is four lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. Then count the `Match` blocks in the sshd configuration (D1.7): `sudo sh -c 'cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -ciE "^[[:space:]]*match[[:space:]]"'` prints the number of `Match` lines; expected `0`. Put the number in the evidence file (D1.7 cannot pass without it); another number needs your statement of what each block sets. The command reads those two fixed places only: it also prints `0` when neither can be read, and a `Match` line in a file that an `Include` brings in from another directory is not counted, so say in the evidence that the count covers `/etc/ssh/sshd_config` and `/etc/ssh/sshd_config.d/*.conf` (rehearsed on a stand-in server: `0`, `1` and `2`; on the box it runs for the first time). After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's (the collector run once with a throwaway key before the real collection, to see that every item is observed: `K=$(openssl rand -hex 32); echo "throwaway key: $K"` prints the key, 64 characters, which is typed or pasted at the collector's key prompt and discarded afterwards) D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
 3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):
-   `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <review #5 execstart_sha256> > ~/bundle-box.json`
-   (the collector re-runs both probes as D10.1 and D10.2, so this step takes as long as step 2 again; `--last-pass-execstart` is the last PASS report's D4.2 `execstart_sha256`, 64 lowercase hex characters.)
+   `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <the last PASS report's execstart_sha256> --last-pass-collected-at <the last PASS box bundle's collected_at> > ~/bundle-box.json`
+   (the collector re-runs both probes as D10.1 and D10.2, so this step takes as long as step 2 again; `--last-pass-execstart` is the last PASS report's D4.2 `execstart_sha256`, 64 lowercase hex characters. `--last-pass-collected-at` is in the last PASS report's header from review #9 on; for review #9 itself, read it from review #8's bundle.)
    Once the key is pasted, clear the laptop's clipboard: `pbcopy < /dev/null`.
    If the proxy's `ExecStart` hash will not match the last PASS (D4.2) because `systemctl daemon-reload` ran since
    then (part 2 step 4 runs one, and so does "The listener check"; the line then shows `start_time=[n/a]` and `pid=0` for a running proxy), put this
@@ -1519,7 +1519,7 @@ gitignored `security-reviews/`; only the report is committed.
    `L=$(systemctl show hermes-docker-proxy -p ExecStart --no-pager); P=$(systemctl show hermes-docker-proxy -p MainPID --value); T=$(systemctl show hermes-docker-proxy -p ExecMainStartTimestamp --value); echo "pid=$P start=$T"; printf '%s\n' "$L" | sha256sum; printf '%s\n' "$L" | sed "s/start_time=\[n\/a\] ; stop_time=\[n\/a\] ; pid=0/start_time=[$T] ; stop_time=[n\/a] ; pid=$P/" | sha256sum`
 4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file, and refuses one with any group or other access: it is `0600`; the ads repo checked out at the pin, with `.claude/settings.json` stashed).
 5. Copy the box bundle to the laptop's `security-reviews/`, and delete it from the box. Check that both bundles show the same `cid_key_id`.
-6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`) and D10.8's statement that the `ok` run came from chat.
+6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement that the `ok` run came from chat, D1.7's statement of whose each accepted key is (and the `Match` count of step 2), D4.6's statement of each restart since the last PASS (what started, when, why).
 
 ---
 
@@ -1738,6 +1738,870 @@ for it in the histories and the journals: they look for its hash and for the sig
 After this step the next security review's D2.1 shows the gateway row's `secrets_held` as
 `["openrouter-key", "dashboard-password-hash", "dashboard-session-secret"]`, and D4.1's
 `secret_env` shows `matches-file` for those three and `unset` for `dashboard-password`.
+
+### Step 7e: Replace the dashboard password
+
+Step 7d hashed the password but did not change it: the value that was in plaintext in the gateway
+`.env` until 2026-10-07 still signs in. It must stop working (security review #8, finding F56).
+This step sets a NEW password and replaces the signing secret in the same pass (operator decision,
+2026-10-07), so every session that is open now ends.
+
+The secret is replaced too because a new password alone would not end an old session. Measured on
+2026-10-08, one change at a time, on a throwaway copy of the setup
+(`docs/evaluations/2026-10-07-limited-ssh-key-and-dashboard-password-replacement.md`, section 2.4):
+with only the password hash replaced, sessions opened with the old password kept answering
+(control C); with the signing secret replaced they stopped (control B); a recreate of the container
+alone left them alive (control A).
+
+The new password is never on a command line, in a file or on the screen: it is typed at a hidden
+prompt, hashed inside the gateway container, and only the hash is written. The recovery from any
+failure below is to run the step again; SSH is not involved, so nothing here can lock you out of
+the box. **Quit the Hermes Desktop app first, so nothing retries the old password while this
+runs.**
+
+**The sign-in limit.** The dashboard allows 10 sign-in attempts per 60 seconds from one address,
+and successful attempts count. The eleventh is answered `429` whatever the password; a mistyped
+password is answered `401`, not `429`. The limit ended 56 to 61 seconds after a burst in every
+run, and refused attempts did not extend it. Recreating the gateway empties it, and block 2 does.
+Block 3 makes 3 attempts, so it can be run three times within a minute. (Measured on a throwaway
+setup, section 2.5 of the evaluation; the box itself has not run it yet.)
+
+Run `sudo -v` alone first as in step 7d. The blocks that ask for the password are each ONE
+function followed by its call and are pasted alone. Generate the new password in the password
+manager first: letters and digits only, 24 or more.
+
+Block 0 (`hermesops@<host>`), alone:
+
+```bash
+cd /opt/hermes-agent && sudo -v && sudo grep -oE '^HERMES_DASHBOARD_BASIC_AUTH[A-Z_]*' .env | sort
+```
+
+Expected: exactly `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`, `HERMES_DASHBOARD_BASIC_AUTH_SECRET` and
+`HERMES_DASHBOARD_BASIC_AUTH_USERNAME`. A line `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` means step 7d
+was not finished: stop, because a plaintext password would win over the new hash.
+
+Block 1, alone (one function and its call). It asks for the new password twice and writes nothing
+unless the two match, there are 24 or more characters and they are all letters and digits.
+
+```bash
+step7e_set() {
+  local P Q
+  cd /opt/hermes-agent || return
+  read -rs -p "NEW dashboard password: " P; echo
+  read -rs -p "The same again: " Q; echo
+  if [ "$P" = "$Q" ] && [ ${#P} -ge 24 ] && case "$P" in *[!A-Za-z0-9]*) false;; *) true;; esac; then
+    if printf '%s' "$P" | sudo docker compose exec -T -w /opt/hermes hermes-agent python3 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; sys.stdout.write(hash_password(sys.stdin.read()))' \
+      | sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH --prefix 'scrypt$' --quote single --mode 0600 --owner-uid 0 --owner-gid 0 --stdin; then
+      if sudo python3 bin/install-env-secret.py strip --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_SECRET; then
+        sudo python3 bin/install-env-secret.py generate --file /opt/hermes-agent/.env --name HERMES_DASHBOARD_BASIC_AUTH_SECRET --mode 0600 --owner-uid 0 --owner-gid 0
+      fi
+    fi
+  else
+    echo "REFUSED: the two entries differ, or it is under 24 characters, or it holds something other than letters and digits -- nothing written"
+  fi
+}; step7e_set; unset -f step7e_set
+```
+
+Expected: three `install-env-secret:` lines (`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH set …`,
+`HERMES_DASHBOARD_BASIC_AUTH_SECRET removed … (1 line(s))`, `HERMES_DASHBOARD_BASIC_AUTH_SECRET
+generated …`). On `REFUSED`, or any other message, or fewer than three `install-env-secret:` lines,
+stop: run block 1 again. (If the removal fails, the block stops there and never writes a new
+secret: rehearsed on a throwaway copy; it prints the failure and ends without an error status, so
+count the lines.) The running gateway still has the old password until block 2.
+
+After a partial run (rehearsed: the hash's `set` line, then the removal's failure message, and no
+`generated` line) the file holds the NEW hash and the OLD signing secret, nothing has been
+recreated, and the running gateway is unchanged: the dashboard still works with the old password.
+Running block 1 again is the remedy (rehearsed on that state: the second run set the hash again,
+removed the secret and generated a new one). Not rehearsed: a removal that works followed by a
+`generate` that fails, which would leave the file without a signing secret; block 2's `secret:`
+line is where that would show. If block 1 fails twice, stop and report it, and do not run block 2.
+
+Block 2: the gateway is stopped and recreated. The two listener-check runs are review #8's entry 10:
+the first must fail because the gateway is down, the second must be `ok`.
+
+```bash
+cd /opt/hermes-agent
+sudo docker compose stop hermes-agent; echo "STOP_EXIT=$?"
+sudo systemctl start hermes-listener-check.service; echo "check_while_stopped_rc=$?"
+sudo docker compose up -d --force-recreate hermes-agent; echo "UP_EXIT=$?"
+sleep 25; sudo docker compose ps -a hermes-agent --format '{{.Service}} {{.State}} {{.Status}}'
+F=$(sudo python3 -c 'import sys; sys.path.insert(0, "bin"); import client_audit_lib as C; print((C.env_values(open(".env").read(), "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH") or [""])[0])')
+C=$(sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH)
+[ ${#C} -eq 86 ] && [ "$F" = "$C" ] && echo "hash: file == container (len ${#C})" || echo "HASH DIFFERS (file ${#F}, container ${#C}): STOP"; unset F C
+sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_SECRET | awk '{print "secret: in the container (len " length($0) ")"}'
+sudo docker compose exec -T hermes-agent printenv HERMES_DASHBOARD_BASIC_AUTH_PASSWORD >/dev/null && echo "PLAINTEXT STILL SET" || echo "plaintext: not in the container"
+sudo systemctl start hermes-listener-check.service; echo "check_after_rc=$?"
+sudo show-listener-check | tail -n 1
+systemctl list-timers hermes-listener-check.timer --no-pager | head -3
+```
+
+Expected: `STOP_EXIT=0`; `check_while_stopped_rc` NOT `0` (systemd reports the job failed: the check
+could not look); `UP_EXIT=0`; `hermes-agent running Up …`; `hash: file == container (len 86)`;
+`secret: in the container (len 44)`; `plaintext: not in the container`; `check_after_rc=0`;
+`listener check: OK`; a timer line with a NEXT time. Keep this output for the next review's
+evidence (D4.5, D4.6). Every other output is listed below. **These instructions are reasoned from
+the block's text, not measured:** every rehearsal of this block printed the expected lines, so none
+of the outputs below has been produced.
+
+- `STOP_EXIT` or `UP_EXIT` not `0`: the dashboard may be down. Run
+  `sudo docker compose ps -a hermes-agent` and report what it prints. SSH is not affected.
+- `check_while_stopped_rc=0`: the check did not find the gateway down. It harms nothing in this
+  step; write it in the evidence, because the review expects this run to have failed.
+- `HASH DIFFERS` together with a `secret:` line: run block 1 again, then this block.
+- `HASH DIFFERS` and no `secret:` line: the `docker compose exec` itself failed, so the gateway is
+  not up. See the `UP_EXIT` bullet above; do not run block 1 again for this.
+- `secret: in the container (len N)` with N other than `44`: the signing secret is not the one
+  block 1 generates. Run block 1 again, then this block.
+- No `secret:` line while the `hash:` line is as expected: that line is printed once for each line
+  the container returns, so no line means the container holds no signing secret. Run block 1 again,
+  then this block.
+- `PLAINTEXT STILL SET`: stop. Step 7d was not finished, and a plaintext password wins over the
+  new hash.
+- `check_after_rc` not `0`, or a last line other than `listener check: OK`: run
+  `sudo show-listener-check` and report what it prints. A review fails while the last run is not
+  `ok`.
+- No timer line with a NEXT time: report it ("The listener check" has the timer's set-up).
+
+The first proof on the box, as with the listener check itself. The laptop rehearsal ran this block
+with these changes and no others: no `sudo`; the gateway's env file under another name, in a
+scratch directory instead of `/opt/hermes-agent`; the installer and its library by their path in
+the repository; no `--owner-uid 0 --owner-gid 0`; and without the four listener-check lines,
+because the laptop has no systemd. Whether `check_while_stopped_rc` is not `0` and
+`check_after_rc` is `0` is therefore seen here for the first time, and so are `sudo` and the root
+ownership of the file.
+
+Block 3, alone (one function and its call): the OLD password must now be refused.
+
+```bash
+step7e_login() {
+  local OLD NEW
+  read -rs -p "OLD dashboard password: " OLD; echo
+  read -rs -p "NEW dashboard password: " NEW; echo
+  login() { printf '{"provider":"basic","username":"hermesadmin","password":"%s"}' "$1" | curl -s -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:9119' --data @- http://127.0.0.1:9119/auth/password-login; }
+  echo "old password -> $(login "$OLD")"
+  echo "wrong password -> $(login "not-the-password-0000")"
+  echo "new password -> $(login "$NEW")"
+  unset -f login
+}; step7e_login; unset -f step7e_login
+```
+
+Expected: `old password -> 401`, `wrong password -> 401`, `new password -> 200`. `old password -> 200`
+means the new password is the old one, or block 2 did not recreate the gateway (look at its
+`UP_EXIT` and its `hash:` line): run the step again with a different password. `new password
+-> 401` means a typing slip in block 1: run the step again. A `429` on any of the three lines is the
+sign-in limit, not a wrong password: wait two minutes and run block 3 again; nothing needs to be
+redone.
+
+`old password -> 401` shows only that the old password AS YOU TYPED IT HERE is refused: a mistyped
+old password prints `401` too. The proof that the old password is dead is block 2's
+`hash: file == container (len 86)`: the container holds block 1's new hash and no other, and block
+1 hashed only what you typed twice.
+
+If you pasted a password from the password manager, clear the laptop's clipboard after the last
+paste, as other steps do: `pbcopy < /dev/null`. Then open the Desktop app, sign in with the new
+password, and store it in the password manager.
+
+After this step a review's header shows a new short fingerprint for `dashboard-session-secret`
+(the hash is never fingerprinted), and D4.6 shows the gateway container started after the last
+PASS: state "BRING-UP step 7e, <date and time UTC>" in the evidence.
+
+### Step 7f: A key of its own for the laptop's forward
+
+Until now the login item that keeps the laptop's forward open used the administrative key, whose
+passphrase was in the macOS keychain: an unlocked laptop gave a shell on the box as well as the
+dashboard's sign-in page (security review #8, entry 4; finding F57). This step gives the forward a
+key of its own that the box limits to ONE thing: a local forward to the dashboard's port,
+`127.0.0.1:9119`. The key cannot give a terminal, run a command, transfer a file, open any other
+forward, or open a forward in the other direction (to a port other than 1, see the table; port 1
+rests on a kernel setting, read by VPS 0 below). Then the administrative key leaves the keychain.
+
+The line on the box carries five options. Each is listed with what was MEASURED for it, against a
+throwaway OpenSSH server (Ubuntu 24.04, OpenSSH 9.6p1) with a control key that has no options
+(`docs/evaluations/2026-10-07-limited-ssh-key-and-dashboard-password-replacement.md`, section 1):
+
+| Option | What it is for | What was measured |
+|---|---|---|
+| `restrict` | no terminal, no agent or X11 forwarding, no `~/.ssh/rc` | A terminal request was refused (`PTY allocation request failed`). Agent and X11 forwarding were not run; they rest on the manual. |
+| `port-forwarding` | puts forwarding back, which `restrict` removed | The forward to 9119 worked (`200`). |
+| `permitopen="127.0.0.1:9119"` | a local forward may reach the dashboard's port and nothing else | A forward to another port was refused, and so was a forward to a unix socket, and so was a forward whose target is the NAME `localhost`: the link must say `127.0.0.1:9119` literally. The control key reached all of them. |
+| `permitlisten="127.0.0.1:1"` | `port-forwarding` also puts REMOTE forwarding (`ssh -R`) back; the manual has no "none" form, so a port that cannot be bound stands in for it | A remote forward to any other port was refused outright. A remote forward to port 1 is refused only because an account without privileges cannot bind it, and that depends on the kernel setting `net.ipv4.ip_unprivileged_port_start`: at `0` the listener on `127.0.0.1:1` opened; at `1024`, a host's default, sshd logged `bind [127.0.0.1]:1: Permission denied`. **This one limit rests on that setting**, which review item D1.7 reads at every review. |
+| `command="/bin/false"` | `restrict` does not stop `ssh host <command>`; a forced command does. The link uses `ssh -N`, which asks for no command, so it is unaffected | A command, `sftp` and `scp` (both protocols, both directions) were refused, and sshd logged the forced command each time. The control key ran all of them. |
+
+Read on the box itself on 2026-10-08, read-only (the operator's look; `VPS look` below is its
+main block): OpenSSH `9.6p1 Ubuntu-3ubuntu13.19`, the release the rehearsals used; the eight sshd
+settings listed under `VPS look`; the kernel setting, `1024`. Not measured: the box's `Match`
+blocks (counted at the review, "A security review" step 2) and its fail2ban jail, IPv6 and `-D`
+forwards, and the refusals with the key the Desktop app's login item will use. LAPTOP 3a and
+LAPTOP 3b below are where those refusals are first seen on the real box.
+
+The order rule: **the box runs fail2ban, so a refused login may count against the laptop's address;
+nothing that retries by itself is switched to the new key before the hand tests pass.** Whether the
+box accepts the new key at all is the first thing tested, by ONE login that is run alone (LAPTOP 3a,
+the gate). Nothing else runs until that one login prints the expected line. On a stand-in server
+with Ubuntu 24.04's own fail2ban (1.0.2, its packaged settings except `maxretry`, which was raised
+to 100 for the rehearsal so that no ban could interfere) one refused key did not raise fail2ban's
+count, and a login as a user that does not exist did. The real box's jail was not measured, so this
+step treats every refused login as counted. Two of the tests (T5b and T7)
+were added after the first rehearsal: T5b because the port-1 limit depends on the kernel setting in
+the table, T7 because the first file-transfer test had been written with the wrong port option for
+`sftp`, so it failed whatever the key allowed and tested nothing.
+
+How the blocks below were rehearsed (the evaluation's sections 1.8, 1.9 and 1.10 have every run):
+`VPS look` is the one block of this step that has already been run on the box itself (by the
+operator, as written, on 2026-10-08); it and the other box blocks (`VPS root key`, VPS 0, VPS 1)
+ran in an interactive bash on a stand-in server; LAPTOP 1, 2, 3a, 3b and 6 in an interactive zsh
+on a stand-in laptop (Linux) against that server; LAPTOP 1b, 4a, 5a and 5b in zsh on this Mac, with
+the home directory pointed at a scratch directory. The `ssh-add` lines of LAPTOP 5c and LAPTOP 6b
+were run for real on this Mac (macOS 27.0.1, OpenSSH 10.3p1) against the login keychain, with a
+throwaway key and a private agent started for the test; they have not been run with the
+administrative key or with the agent macOS itself provides. **LAPTOP 4b and 4c could not be run
+for real** without changing the real login item: they ran only with `launchctl` replaced by a
+stand-in, so their `launchctl` lines run for the first time on this laptop. The same holds for the
+one-line stop command after LAPTOP 4c, which was not run at all. Each block says so where it
+stands.
+
+**Keep the administrative session on the box open from `VPS look` until the clean-up at the end of this
+step, after LAPTOP 6 and LAPTOP 6b have succeeded.** It is
+the way back in if anything goes wrong with a key. If that session is lost and `ssh hermes-box` no
+longer gets in, the provider's browser terminal still reaches the box without SSH (step 1d, item 5).
+
+`VPS look` (`hermesops@<host>`, the administrative session; run `sudo -v` alone first), read-only:
+the sshd settings the limited key depends on, and which accounts hold a key file. **This is the
+one block of this step already proven on the box**: the operator ran it there, as written, on
+2026-10-08. It was also rehearsed on the stand-in server.
+
+```bash
+sudo sh -c 'sshd -T | grep -E "^(authorizedkeysfile|authorizedkeyscommand|trustedusercakeys|authorizedprincipalsfile|allowtcpforwarding|allowstreamlocalforwarding|gatewayports|permittunnel) "; getent passwd | while IFS=: read -r u _ _ _ _ h _; do for f in "$h/.ssh/authorized_keys" "$h/.ssh/authorized_keys2"; do [ -e "$f" ] && echo "$u $(basename "$f") lines=$(grep -cvE "^\s*(#|$)" "$f") types=$(grep -vE "^\s*(#|$)" "$f" | grep -oE "(ssh|ecdsa|sk)-[a-z0-9@.-]+" | sort | uniq -c | tr -s " " | tr "\n" ";") options=$(grep -vE "^\s*(#|$)" "$f" | grep -cvE "^(ssh|ecdsa|sk)-")"; done; done'
+```
+
+Expected: ten lines, eight settings and two key files. The values are the ones the box gave on
+2026-10-08; the lines are written here as the stand-in server printed them, where the same block
+gave the same ten:
+
+- `gatewayports no`
+- `allowtcpforwarding yes`
+- `allowstreamlocalforwarding yes`
+- `trustedusercakeys none`
+- `authorizedprincipalsfile none`
+- `authorizedkeyscommand none`
+- `authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2`
+- `permittunnel no`
+- `root authorized_keys lines=1 types= 1 ssh-ed25519; options=0`
+- `hermesops authorized_keys lines=1 types= 1 ssh-ed25519; options=0`
+
+What the parts mean. `authorizedkeysfile` names the two files under each account's `.ssh` folder
+that sshd reads keys from. `authorizedkeyscommand none`, `trustedusercakeys none` and
+`authorizedprincipalsfile none` say that nothing else can supply an accepted key: no command, no
+certificate authority, no principals file. `allowtcpforwarding yes` is what the link needs.
+`allowstreamlocalforwarding yes` means sshd itself would allow a forward to a unix socket: the key's
+`permitopen` is what refuses it (test T6). `gatewayports no` keeps a forwarded port on the box's own
+loopback. `permittunnel no`: no network tunnel device. Each further line is one key file: the
+account, the file's name, `lines=` the number of key lines, `types=` how many keys of each type,
+`options=` how many of those lines begin with options instead of a key type.
+
+Every other output:
+
+- Fewer than eight setting lines, or a setting that differs from the eight above: stop, do not add
+  the key, and report which one.
+- A line for an account other than `hermesops`. On 2026-10-08 there was one, `root`: see
+  `VPS root key` below. A line for any other account: stop and report it.
+- No line for `hermesops`, or a line that says `authorized_keys2`: stop and report it.
+- `options=` above `0` before this step has added the limited key: a key line with options is
+  already there. Stop and report it. (After VPS 1 the `hermesops` line reads `lines=2 types= 2
+  ssh-ed25519; options=1`: rehearsed.)
+- `lines=` above `1` for `hermesops` before VPS 1: more than one key is accepted for the
+  administrative account. Stop and say whose each one is.
+- Anything after `types=` other than the expected text. Before this step adds a key, this box
+  prints exactly ` 1 ssh-ed25519;` after `types=` for each file (and ` 2 ssh-ed25519;` for
+  `hermesops` after VPS 1). If anything else stands after `types=` on a line, the block's pattern
+  has also caught a word of a key's comment when that word looks like a key type (rehearsed: a
+  key whose comment is `ecdsa-test` added ` 1 ecdsa-test;`), and a comment can be part of a name
+  or a host name. Do NOT paste that line anywhere; say only that the line had something else
+  after `types=`, and stop.
+- Nothing at all, or a message from `sudo`: run `sudo -v` alone, then the block again.
+
+Rehearsed on the stand-in server (Ubuntu 24.04, OpenSSH 9.6p1, `sudo` with a password typed at
+`sudo -v`): as built (the ten lines above); a second account holding a key in each of the two
+files (two more lines, one of them `… authorized_keys2 …`); the limited key's line present; a
+comment line, an empty line and a second plain key in the `hermesops` file (`lines=2`,
+`options=0`); no key file at all (the eight settings and nothing else).
+
+**A key on `root`.** As measured on 2026-10-08, `root` holds one key (`ssh-ed25519`, no options).
+Root login is off (`permitrootlogin no`, review item D1.3), so that key cannot be used to log in.
+But review item D1.7 fails a key file on an account other than `hermesops` unless the evidence
+says whose key it is and why it stays. There are two choices: remove it, with part (b) of the
+optional block below; or keep it, and state in every review's evidence whose it is and why it
+stays. **The choice is the operator's, and nothing is removed without it.** Part (a) only reads,
+and helps with either choice. `VPS root key` does not touch the `hermesops` file.
+
+`VPS root key`, part (a) (optional; `hermesops@<host>`, after `sudo -v` alone), read-only: is
+root's key the same key as the first key of `hermesops`? It prints one line and never a key.
+
+```bash
+sudo sh -c 'R=/root/.ssh/authorized_keys; H=$(getent passwd hermesops | cut -d: -f6)/.ssh/authorized_keys; body() { grep -vE "^\s*(#|$)" "$1" | awk "{for(i=1;i<NF;i++) if (\$i ~ /^(ssh|ecdsa|sk)-/) {print \$(i+1); next}}"; }; if [ ! -e "$R" ]; then echo "root key: root has no authorized_keys file"; elif [ ! -f "$H" ]; then echo "root key: NOT COMPARED: the hermesops file is missing -- stop"; else n=$(body "$R" | grep -c .); a=$(body "$R" | head -n 1); b=$(body "$H" | head -n 1); if [ "$n" != 1 ] || [ -z "$b" ]; then echo "root key: NOT COMPARED: root holds $n key(s), or the hermesops file holds none -- stop"; elif [ "$a" = "$b" ]; then echo "root key vs the first hermesops key: same"; else echo "root key vs the first hermesops key: different"; fi; fi'
+```
+
+Expected: one of two lines, and which one is not known before the block runs (it has not been run
+on the box):
+
+- `root key vs the first hermesops key: same`: root's file holds your own administrative key, the
+  one you log in with as `hermesops`. That answers "whose it is" for the evidence.
+- `root key vs the first hermesops key: different`: root holds a key that is not your
+  administrative key. It still gives no way in while root login is off, but nobody has said whose
+  it is: stop and report this line before choosing.
+
+What is compared is the key itself (the long word after the key type), not the options before it
+or the comment after it. Every other output:
+
+- `root key: root has no authorized_keys file`: there is nothing to compare. If `VPS look` printed
+  a `root` line all the same, stop and report both.
+- `root key: NOT COMPARED: …` (the `hermesops` file is missing; or root holds a number of keys
+  other than one, or the `hermesops` file holds none): stop and report the line.
+- Nothing at all, or a message from `sudo`: run `sudo -v` alone, then the block again.
+
+Rehearsed on the stand-in server: root holding the same key (`same`, twice in a row, both files
+byte for byte unchanged); another key (`different`); the same key written with options and under a
+comment line (`same`); the limited key with its options (`different`); the `hermesops` file
+holding the administrative key and then the limited one (`same`); no root file; an empty root
+file and two keys on root (`NOT COMPARED: root holds 0 key(s) …`, `… 2 key(s) …`); the
+`hermesops` file missing, or holding only a comment. No output held a key.
+
+`VPS root key`, part (b): **ONLY if the operator chose removal** (`hermesops@<host>`, after
+`sudo -v` alone). It moves root's key file aside under a name sshd does not read. It deletes
+nothing: the moved file is deleted in the clean-up at the end of this step.
+
+```bash
+sudo sh -c 'R=/root/.ssh/authorized_keys; M=$R.removed-by-step-7f; if [ -e "$M" ]; then echo "NOT MOVED: $M is already there (this block ran before) -- nothing changed now"; elif [ ! -f "$R" ] || [ -L "$R" ]; then echo "NOT MOVED: $R is missing or is a link -- nothing changed"; elif mv "$R" "$M" && [ ! -e "$R" ] && [ -f "$M" ]; then echo "MOVED: $R -> $M"; else echo "NOT MOVED: the move failed -- stop"; fi; for f in "$R" "${R}2"; do if [ -e "$f" ] || [ -L "$f" ]; then echo "root $(basename "$f"): STILL THERE, lines=$(grep -cvE "^\s*(#|$)" "$f")"; else echo "root $(basename "$f"): no file"; fi; done; [ -e "$M" ] && echo "kept aside: $M" || echo "kept aside: nothing"'
+```
+
+Expected, four lines: `MOVED: /root/.ssh/authorized_keys ->
+/root/.ssh/authorized_keys.removed-by-step-7f`; `root authorized_keys: no file`;
+`root authorized_keys2: no file`; `kept aside: /root/.ssh/authorized_keys.removed-by-step-7f`.
+The second and third lines are the proof: root has no file left under either of the two names
+`VPS look` showed sshd reading (`authorizedkeysfile`). Then run `VPS look` once more: it must
+print no `root` line (rehearsed). If it still prints a `root` line, stop and report it. Every other output:
+
+- `NOT MOVED: … is already there (this block ran before) -- nothing changed now`: fine after an
+  earlier run, if the next two lines both say `no file`.
+- `NOT MOVED: … is missing or is a link -- nothing changed`: stop and report all four lines.
+- `NOT MOVED: the move failed -- stop`, with a message from `mv` above it: nothing was changed.
+  Stop and report it. (Rehearsed with a folder made unchangeable: this line, then
+  `root authorized_keys: STILL THERE, lines=1`.)
+- `STILL THERE, lines=N` on the second or third line: root still has a key file that sshd reads.
+  Stop and report it. The block moves `authorized_keys` only; it does not touch an
+  `authorized_keys2`.
+
+Rehearsed on the stand-in server: the move (the moved file byte for byte the file from before,
+same owner and mode); the block again; no root file; a root file that is a link; an
+`authorized_keys2` next to it; a moved file and a new `authorized_keys` both present; the made
+failure. That sshd does not accept a key from the moved file was measured there too, with root
+login allowed for the test only: a login as `root` with that key got in while the file was in
+place, was refused after the move, and got in again after the way back. On the box root login is
+off, so this cannot be shown there by a login.
+
+The way back, until the clean-up has run (after `sudo -v` alone):
+
+```bash
+sudo sh -c 'R=/root/.ssh/authorized_keys; M=$R.removed-by-step-7f; if [ -e "$R" ] || [ -L "$R" ]; then echo "NOT PUT BACK: $R is there -- nothing changed"; elif [ ! -f "$M" ]; then echo "NOT PUT BACK: $M is missing -- nothing changed"; elif mv "$M" "$R" && [ -f "$R" ]; then echo "PUT BACK: $R, lines=$(grep -cvE "^\s*(#|$)" "$R"), mode $(stat -c %a "$R")"; else echo "NOT PUT BACK: the move failed -- stop"; fi'
+```
+
+Expected: `PUT BACK: /root/.ssh/authorized_keys, lines=1, mode 600`. A `NOT PUT BACK: …` line
+(the file is there already; the moved file is missing; the move failed): nothing was changed;
+stop and report it. Rehearsed: the way back after the move, the way back a second time (`… is
+there -- nothing changed`), and after the clean-up (`… is missing -- nothing changed`).
+
+If the key stays: write in the evidence file of every review whose key it is (part (a) says
+whether it is your administrative key) and why it stays.
+
+VPS 0 (`hermesops@<host>`, the administrative session), read-only: the kernel setting the table
+depends on.
+
+```bash
+cat /proc/sys/net/ipv4/ip_unprivileged_port_start
+```
+
+Expected: `1024` or more (read on the box on 2026-10-08: `1024`). A smaller number: stop, do not
+add the key, and report it.
+
+LAPTOP 1: make the key, and nothing else.
+
+```bash
+[ -e ~/.ssh/hermes-box-tunnel ] && echo "EXISTS: not overwritten (fine if you made it a moment ago)" || { ssh-keygen -q -t ed25519 -N "" -C hermes-box-tunnel -f ~/.ssh/hermes-box-tunnel && echo "KEY MADE"; }
+```
+
+Expected: `KEY MADE`. `EXISTS: not overwritten …` means the key file is already there: fine if you
+made it a moment ago with this block; if you did not, stop and say so. Any other message: stop.
+
+**VPS 1 and LAPTOP 1b, in this order.** Copying a block replaces the clipboard, so the line for the
+box cannot be copied first:
+
+1. Paste VPS 1 (below) into the administrative session on the box. It stops at `Paste the line:`
+   and waits. Leave it waiting.
+2. On the laptop run LAPTOP 1b. It puts the line for the box on the clipboard (the key's comment is
+   left out) and says how long the clipboard's content is.
+3. Go back to the waiting prompt on the box and paste. The line ends with a line break, so it is
+   taken at once.
+
+LAPTOP 1b (it can be run as often as needed):
+
+```bash
+printf '%s %s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:9119",permitlisten="127.0.0.1:1",command="/bin/false"' "$(cut -d' ' -f1,2 ~/.ssh/hermes-box-tunnel.pub)" | pbcopy && echo "line on the clipboard: $(pbpaste | wc -c | tr -d ' ') characters"
+```
+
+Expected: `line on the clipboard: 182 characters` (181 and a line break). Any other number: do not
+paste; the key's public file is missing or is not as LAPTOP 1 made it (rehearsed with the file
+missing: `102 characters`). VPS 1 is still waiting at `Paste the line:` on the box: press Return
+there, with nothing pasted. Expected: `REFUSED: not the expected line (other options, a cut key, or
+extra words) -- nothing written` after about a second, and the shell's prompt again (rehearsed on
+the stand-in server: that line, `authorized_keys` byte for byte unchanged, no backup made). Then
+stop and say so.
+
+VPS 1 (`hermesops@<host>`, alone; one function and its call):
+
+```bash
+tunnel_key_add() {
+  local L X N=0 F="$HOME/.ssh/authorized_keys" O='restrict,port-forwarding,permitopen="127.0.0.1:9119",permitlisten="127.0.0.1:1",command="/bin/false"'
+  read -r -p "Paste the line: " L
+  while read -r -t 1 X; do [ -z "$X" ] || N=1; done
+  L=${L%$'\r'}
+  [ "$N" = 0 ] || { echo "REFUSED: more than one line was pasted -- nothing written"; return; }
+  [ -f "$F" ] || { echo "REFUSED: $F is missing -- nothing written"; return; }
+  [ "$L" = "$O ssh-ed25519 ${L##* }" ] && [ ${#L} -eq $(( ${#O} + 81 )) ] || { echo "REFUSED: not the expected line (other options, a cut key, or extra words) -- nothing written"; return; }
+  case "${L##* }" in *[!A-Za-z0-9+/]*) echo "REFUSED: the key holds a character that is not base64 -- nothing written"; return;; esac
+  grep -qxF "$L" "$F" && { echo "already present: nothing to do"; return; }
+  [ -e "$F.before-tunnel-key" ] || cp -p "$F" "$F.before-tunnel-key" || return
+  [ -z "$(tail -c1 "$F")" ] || echo >> "$F"
+  printf '%s\n' "$L" >> "$F" && echo "ADDED: $(grep -cvE '^\s*(#|$)' "$F") key line(s), mode $(stat -c %a "$F")"
+}; tunnel_key_add; unset -f tunnel_key_add
+```
+
+Expected: `ADDED: 2 key line(s), mode 600`. `ADDED: 2 key line(s)` assumes the file held exactly one key before. The number to expect is the `lines=` number `VPS look` printed for `hermesops`, plus one (on 2026-10-08: 1, so `ADDED: 2 key line(s)`; D1.7 of a trial collection shows the same count, and "trial collection" is defined in "A security review", step 2); another number is not an error by itself, but stop and say so. `mode` must be `600`: sshd accepts other modes, but review item D1.7 fails them. A mode other than `600` in the `ADDED:` line is this case, not a "stop" case: the key was added. Run `chmod 600 ~/.ssh/authorized_keys; stat -c %a ~/.ssh/authorized_keys` in the administrative session. Expected: `600`. Say that you did it; if it prints anything else, stop and report it. (Rehearsed on the stand-in server with a file of mode 644: `ADDED: 2 key line(s), mode 644`, then `600`.) Every other output:
+
+- `REFUSED: …` (more than one line was pasted; the file is missing; not the expected line; a
+  character that is not base64): nothing was written. Run LAPTOP 1b again, paste VPS 1 again, and
+  paste the line at its prompt. `more than one line was pasted` is what you get when the clipboard
+  still held a block instead of the line: the function swallows the extra lines, so none of them
+  runs as a command. If the second try is refused too, stop and report the message.
+- `already present: nothing to do`: fine after an earlier successful run.
+- No `ADDED` line and none of the above (for example an error from `cp`): stop and report it; the
+  function ends before it writes when it cannot make its backup.
+
+The line must be the five options, `ssh-ed25519`, and a key body of exactly 68 base64 characters:
+a body cut by one character, a body with one character replaced, a bare key, a fourth word and
+other options were each refused in the rehearsal, with the file byte for byte unchanged. Before the
+first addition the function copies the file to `~/.ssh/authorized_keys.before-tunnel-key`; a later
+addition does not overwrite that copy. Then on the laptop: `pbcopy < /dev/null`.
+
+LAPTOP 2: the alias, with the address copied from the existing one and never printed.
+
+```bash
+A=$(ssh -G hermes-box | awk '$1=="hostname"{print $2}'); if grep -q '^Host hermes-box-tunnel$' ~/.ssh/config; then echo "alias exists"; elif [ -z "$A" ]; then echo "STOPPED: could not read the hermes-box alias -- nothing written"; elif [ "$A" = hermes-box ]; then echo "STOPPED: the hermes-box alias has no HostName of its own -- nothing written"; else printf '\nHost hermes-box-tunnel\n  HostName %s\n  User hermesops\n  IdentityFile ~/.ssh/hermes-box-tunnel\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  ServerAliveInterval 30\n  ServerAliveCountMax 3\n' "$A" >> ~/.ssh/config; fi; unset A
+ssh -G hermes-box-tunnel | grep -cE '^(identityfile .*/hermes-box-tunnel|identitiesonly yes|identityagent none)$'
+```
+
+Expected: `3` (alias exists: it prints `alias exists` first, then `3`). Measured on a stand-in
+laptop whose config held only the `hermes-box` block: `3`. A `Host *` block on the real laptop that
+sets `IdentityAgent` or `IdentitiesOnly` would change the count (reasoned, not measured). Every
+other output:
+
+- `STOPPED: could not read the hermes-box alias -- nothing written`, then `0`: `ssh` could not read
+  the `hermes-box` alias (its own message stands above the line; it names a file and a line number,
+  not the address). Nothing was written. Stop and report it.
+- `STOPPED: the hermes-box alias has no HostName of its own -- nothing written`, then `0`:
+  `~/.ssh/config` has no `Host hermes-box` block with a `HostName` line (or there is no such file).
+  For a name it has no block for, `ssh -G` answers with the name itself, so the new alias would
+  point at the word `hermes-box` and not at the box; the block refuses to write that. Stop and
+  report it.
+
+Both were rehearsed on the stand-in laptop: a config with no `hermes-box` block, a `hermes-box`
+block with no `HostName` line, no config file, and two configs `ssh` cannot read; each time the
+config was byte for byte unchanged and the count was `0`. The same on this Mac's own `ssh` with
+scratch configs (all but the missing file). The real `~/.ssh/config` was not read.
+
+A number other than `3` with no `STOPPED` line before it: stop, and do not run
+`ssh -G hermes-box-tunnel` by itself (its output holds the address).
+Run this instead, which prints only the three settings, and say which one differs from the block
+above; do not go on until the key, the agent setting and `IdentitiesOnly` are as that block writes
+them:
+
+```bash
+ssh -G hermes-box-tunnel | grep -E '^(identityfile|identitiesonly|identityagent) '
+```
+
+Expected from it: `identitiesonly yes`, `identityagent none` and `identityfile ~/.ssh/hermes-box-tunnel`.
+
+LAPTOP 3a, the gate: ONE login, alone. Nothing else may run until it prints the expected line.
+
+```bash
+ssh -n -o BatchMode=yes -o ConnectTimeout=10 hermes-box-tunnel 'echo MARK' 2>/dev/null; echo "gate rc=$?"
+```
+
+Expected: exactly `gate rc=1`. The box accepted the key and ran the forced command (`/bin/false`)
+instead of ours. Error text is discarded on purpose: it would print the address. Every other output:
+
+- `gate rc=255`: the box refused the key, or could not be reached. Count it as ONE failed attempt.
+  STOP: run nothing else, do not run it again, and report it. (Rehearsed with the key's line taken
+  off the stand-in server: `gate rc=255`, and one refused login in that server's log.)
+- A line `MARK`, or `gate rc=0`: the key is NOT limited. Stop, and take its line out in the
+  administrative session with `cp -p ~/.ssh/authorized_keys.before-tunnel-key ~/.ssh/authorized_keys`.
+  (Rehearsed with the key on the stand-in server without its options: `MARK`, `gate rc=0`.)
+- Any other number: stop and report it.
+
+LAPTOP 3b, the other tests, only after `gate rc=1` (one function and its call; it takes about half
+a minute):
+
+```bash
+tunnel_tests() {
+  local c
+  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N -L 29119:127.0.0.1:9119 hermes-box-tunnel 2>/dev/null & sleep 4
+  c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:29119/); kill $! 2>/dev/null; wait $! 2>/dev/null
+  echo "T1 forward to the dashboard -> $c"
+  [ "$c" = 302 ] || { echo "STOPPED after T1: the other tests were NOT run"; return; }
+  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N -L 29122:127.0.0.1:22 hermes-box-tunnel 2>/dev/null & sleep 4
+  echo "T4 forward to another port -> $(nc -w 3 127.0.0.1 29122 </dev/null | head -c 20 | wc -c | tr -d ' ') bytes, link $(kill -0 $! 2>/dev/null && echo up || echo DOWN)"; kill $! 2>/dev/null; wait $! 2>/dev/null
+  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N -R 127.0.0.1:29123:127.0.0.1:22 hermes-box-tunnel 2>/dev/null & sleep 5; if kill -0 $! 2>/dev/null; then kill $!; echo "T5a remote forward, another port -> OPENED (stop: this must be refused)"; else echo "T5a remote forward, another port -> refused"; fi; wait $! 2>/dev/null
+  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N -R 127.0.0.1:1:127.0.0.1:22 hermes-box-tunnel 2>/dev/null & sleep 5; if kill -0 $! 2>/dev/null; then kill $!; echo "T5b remote forward, port 1 -> OPENED (stop: this must be refused)"; else echo "T5b remote forward, port 1 -> refused"; fi; wait $! 2>/dev/null
+  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N -L 29124:/run/dbus/system_bus_socket hermes-box-tunnel 2>/dev/null & sleep 4
+  echo "T6 unix socket -> $(printf '\0AUTH\r\n' | nc -w 3 127.0.0.1 29124 | wc -c | tr -d ' ') bytes, link $(kill -0 $! 2>/dev/null && echo up || echo DOWN)"; kill $! 2>/dev/null; wait $! 2>/dev/null
+  echo "T7 file copy -> rc=$(scp -q -o BatchMode=yes ~/.ssh/hermes-box-tunnel.pub hermes-box-tunnel:/tmp/t7-must-not-arrive 2>/dev/null; echo $?)"
+}; tunnel_tests; unset -f tunnel_tests
+```
+
+Expected, in this order: `T1 forward to the dashboard -> 302`; `T4 forward to another port -> 0
+bytes, link up`; `T5a remote forward, another port -> refused`; `T5b remote forward, port 1 ->
+refused`; `T6 unix socket -> 0 bytes, link up`; `T7 file copy -> rc=255`. Lines such as `[2] 1234`,
+`[2]  + done ssh …`, `[2]  + terminated ssh …` and `[2]  + exit 255 ssh …` are zsh telling you
+about a background `ssh`; they are not results. The block stops a background `ssh` by its process
+number and hides the complaint when that `ssh` had already ended, so no `kill: … no such job` line
+appears; whether the `ssh` was still running is what `link up` says. Every other output:
+
+- `T1 … ->` anything but `302`, followed by `STOPPED after T1: the other tests were NOT run`: the
+  block stopped by itself after ONE login. `000` means the link did not come up: the login was
+  refused, the box was not reached, or port 29119 is in use on the laptop. Count it as one failed
+  attempt, do not run the block again, and report it. Another code means the dashboard answered
+  differently: report the code.
+- `link DOWN` on T4 or T6: that test's `ssh` was not running when the test looked, so its `0 bytes`
+  proves nothing. Stop and report it.
+- More than `0 bytes` on T4 or T6, or `OPENED` on T5a or T5b, or `rc=0` on T7: the key allows what
+  it must not. Stop, take its line out in the administrative session
+  (`cp -p ~/.ssh/authorized_keys.before-tunnel-key ~/.ssh/authorized_keys`), after `rc=0` also
+  delete the file that arrived (`rm -f /tmp/t7-must-not-arrive`, on the box), and report it.
+- `T7 file copy -> rc=` another number: stop and report it.
+
+`refused` on T5a and T5b and `rc=255` on T7 are also what a login that failed would print. They
+count as results because T1, T4 and T6 of the same run show the key logging in before and after
+them (`302`, `link up`, `link up`); if one of those three is not as expected, the other lines prove
+nothing. Rehearsed against the stand-in server, whose page answers `302` as the dashboard does:
+the six expected lines, six accepted logins and no refused one in that server's log. The same
+block with the administrative key gave `20 bytes, link up`, `OPENED`, `13 bytes, link up` and
+`rc=0`, so each test can tell allowed from refused; with the key's line taken off the server it
+printed `T1 … -> 000` and `STOPPED after T1`, and the server logged ONE refused login. macOS's own
+`nc`, `curl` and `ssh` against a real server were not rehearsed: pasted into zsh on this Mac the
+block ran only with `ssh`, `scp` and `curl` replaced by stand-ins.
+
+LAPTOP 4a: the login item's file, only after every line of LAPTOP 3b is as expected. It changes
+the file's tenth argument from `hermes-box` to `hermes-box-tunnel`, and changes nothing when the
+file is not the one the README describes (ten arguments, the last one `hermes-box`).
+
+```bash
+P=~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist; K=~/hermes-box-tunnel.plist.before-tunnel-key; B=/usr/libexec/PlistBuddy
+N=$($B -c 'Print :ProgramArguments' "$P" 2>/dev/null | grep -c .); A=$($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null)
+if [ "$N" = 12 ] && [ "$A" = hermes-box ]; then command cp -p "$P" "$K" && $B -c 'Set :ProgramArguments:9 hermes-box-tunnel' "$P" >/dev/null 2>&1; [ "$($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null)" = hermes-box-tunnel ] && echo "SWITCHED IN THE FILE" || echo "NOT SWITCHED: the change did not reach the file -- stop"; elif [ "$N" = 12 ] && [ "$A" = hermes-box-tunnel ]; then echo "ALREADY SWITCHED: nothing changed"; else echo "NOT SWITCHED: the file is not as expected -- stop"; fi
+A=$($B -c 'Print :ProgramArguments:9' "$P" 2>/dev/null); case "$A" in hermes-box-tunnel|hermes-box) echo "the alias the login item uses: $A";; *) echo "the alias the login item uses: something else (not shown)";; esac; unset P K B N A
+```
+
+Expected: `SWITCHED IN THE FILE`, then `the alias the login item uses: hermes-box-tunnel`. Every
+other output:
+
+- `ALREADY SWITCHED: nothing changed`, with `hermes-box-tunnel` on the second line: the block was
+  run before. Go on.
+- `NOT SWITCHED: the file is not as expected -- stop`: nothing was changed. The second line says
+  which of three things stands in the tenth place: `hermes-box-tunnel`, `hermes-box`, or
+  `something else (not shown)`. What it is, is not printed on purpose: a login item written with
+  `user@address` instead of an alias would print the address. Stop and report both lines.
+- `NOT SWITCHED: the change did not reach the file -- stop`: the file could not be written. Stop
+  and report it.
+- A second line that does not end in `hermes-box-tunnel`: stop. LAPTOP 4b and LAPTOP 5c refuse to
+  run in that state, and must not be made to.
+
+The file as it was is kept as `~/hermes-box-tunnel.plist.before-tunnel-key`, in the home directory
+and not next to the login item (whether macOS would read a second file in that folder was not
+measured). Rehearsed on scratch copies of a file built from the README's ten arguments: the good
+file (ten arguments before and after, the tenth changed, every other value equal; the tool writes
+the keys back in another order); a second run; a file with one more `-o` pair; no file; a file that
+could not be written (second line: `hermes-box`); a file whose tenth argument is written
+`user@host` (second line: `something else (not shown)`, as for the extra pair and for no file).
+`plutil -replace` is not used: on this macOS it inserted an eleventh argument
+instead of replacing the tenth (measured in the review of this runbook).
+
+LAPTOP 4b: reload the login item, only after LAPTOP 4a's second line reads `hermes-box-tunnel`.
+**First run on this laptop, not rehearsed**: the rehearsal replaced `launchctl` by a stand-in, so
+only the block's own check and its order were run.
+
+```bash
+P=~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist
+if [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:9' "$P" 2>/dev/null)" = hermes-box-tunnel ]; then launchctl bootout gui/$(id -u)/com.dentaledge.hermes-box-tunnel; sleep 3; launchctl bootstrap gui/$(id -u) "$P"; echo "RELOADED: bootstrap rc=$?"; else echo "NOT RELOADED: the file does not name hermes-box-tunnel -- stop"; fi; unset P
+```
+
+Expected: `RELOADED: bootstrap rc=0`. A message from `launchctl bootout` before it (the item was
+not loaded) is not a failure by itself. Every other output:
+
+- `NOT RELOADED: the file does not name hermes-box-tunnel -- stop`: LAPTOP 4a did not switch the
+  file. Nothing was touched. Do not go on to the next block.
+- `RELOADED: bootstrap rc=` another number (`rc=5`, for example): this is NOT a success, although
+  the line begins with `RELOADED`. Only `rc=0` is. One of two things is then true. Either the login
+  item is not loaded now: the link and the Desktop app are down and nothing is retrying. Or
+  `launchctl bootout` failed and the OLD definition is still loaded: the old item keeps running on
+  the administrative key, which still works. LAPTOP 4c's counts tell which (`ssh on the old alias:
+  1` is the second). The box is not affected in either case. Run LAPTOP 4b once more. If the number
+  is again not `0`, run LAPTOP 4c, then stop and report both outputs; do not go on to LAPTOP 5a.
+
+LAPTOP 4c: is the link up, and on which alias? Read-only; it can be run again. **First run on this
+laptop, not rehearsed for real**: its `launchctl print` ran only as a stand-in, and the other two
+lines ran with another port number against a scratch page and stand-in processes.
+
+```bash
+launchctl print gui/$(id -u)/com.dentaledge.hermes-box-tunnel | grep -E '^\s*state = '
+curl -s -o /dev/null -w 'dashboard through the link -> %{http_code}\n' --max-time 5 http://127.0.0.1:19119/
+echo "ssh on the new alias: $(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box-tunnel$' | wc -l | tr -d ' '); ssh on the old alias: $(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box$' | wc -l | tr -d ' ')"
+```
+
+Expected: `state = running`; `dashboard through the link -> 302`; `ssh on the new alias: 1; ssh on
+the old alias: 0`. Every other output:
+
+- No `state = ` line, or another state; or a code other than `302`; or `ssh on the new alias: 0`
+  (no forward is running on the new key): the login item starts its `ssh` at most once every two
+  minutes. Wait two minutes and run LAPTOP 4c again, ONCE. If any of the three is still not as
+  expected, do not go on to the next block, and FIRST stop the login item (below), then report.
+- `ssh on the old alias:` anything but `0`: a forward on the administrative key is still running.
+  After LAPTOP 5c the box would refuse its next login every two minutes. Stop and report it; do not
+  go on to the next block. (LAPTOP 5c counts these processes again and refuses to run while there
+  is one.)
+
+**To stop the login item, so that nothing retries by itself.** After LAPTOP 4b the item is loaded
+on the new key, and macOS starts its `ssh` again every two minutes for as long as it is loaded:
+each start is a login at the box. When the second run of LAPTOP 4c is still not as expected, run
+this before you report anything. **First run on this laptop, not rehearsed** (it is the stop
+command the README gives for the login item; what it prints was not seen):
+
+```bash
+launchctl bootout gui/$(id -u)/com.dentaledge.hermes-box-tunnel
+```
+
+Then run LAPTOP 4c once more and report its lines with the rest: both counts must now be `0`, and
+there must be no `state = running` line. What this leaves: the link and the Desktop app are down;
+nothing is retrying; the administrative key is untouched (its passphrase is still in the keychain,
+because LAPTOP 5b and 5c have not run), and `ssh hermes-box` works as before.
+
+To go back to the working state from before the laptop part of this step, two commands, in this
+order: `command cp -p ~/hermes-box-tunnel.plist.before-tunnel-key ~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`
+puts back the file as LAPTOP 4a found it (rehearsed on a scratch copy, with `cp` set up to ask: no
+question, the file byte for byte as before, its tenth argument `hermes-box`), and
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`
+starts the login item from it (the README's start command; **not rehearsed**). The old alias still
+works at this point, because nothing of LAPTOP 5b and 5c has run. Then LAPTOP 4c must print
+`state = running`, `302` and `ssh on the new alias: 0; ssh on the old alias: 1`. The new key's line
+stays on the box; it harms nothing there.
+
+LAPTOP 5a: a check of the passphrase, BEFORE anything is removed (alone: it asks). It makes no
+connection; it only opens the key file on the laptop.
+
+```bash
+ssh-keygen -y -f ~/.ssh/vps-hermes >/dev/null && echo "PASSPHRASE OK" || echo "NOT OK: stop, nothing was changed"
+```
+
+Expected: it ASKS (`Enter passphrase for "…/.ssh/vps-hermes":`), you type the administrative key's
+passphrase, and it prints `PASSPHRASE OK`. Every other output:
+
+- `NOT OK: stop, nothing was changed` (after `incorrect passphrase supplied`): the passphrase you
+  typed is not the key's. It asks once; run it again for a typing slip. Without `PASSPHRASE OK`
+  nothing further runs: taking the keychain's copy away would leave a key nobody can open.
+- `PASSPHRASE OK` WITHOUT having asked: stop. Either the key has no passphrase or something
+  answered for you, and the check proved nothing. (Rehearsed: a key with no passphrase prints
+  `PASSPHRASE OK` without asking.)
+- No line at all (you pressed Ctrl+C): nothing was proven. Run it again.
+
+Rehearsed on this Mac with a scratch key: the right passphrase, a wrong one, Return alone, Ctrl+C,
+a key with no passphrase, no key file. Not shown: whether the keychain can answer this prompt for
+the real key, which is why it must be seen to ask.
+
+LAPTOP 5b: the two settings leave the `hermes-box` alias. Without that, the next typed passphrase
+would be stored in the keychain again. The edited text goes to a new file first; `~/.ssh/config` is
+replaced only when every step before it worked, and the file as it was is kept as
+`~/.ssh/config.before-tunnel-key`.
+
+```bash
+C=~/.ssh/config
+if [ -e "$C.before-tunnel-key" ]; then echo "A BACKUP EXISTS: this block was run before -- nothing changed now"; elif [ ! -f "$C" ] || [ -L "$C" ]; then echo "NOT EDITED: ~/.ssh/config is missing or is a link -- stop"; elif awk '{k=tolower($1); sub(/=.*/,"",k)} k=="host"||k=="match"{inblk=(k=="host" && NF==2 && $2=="hermes-box")} !(inblk && (k=="usekeychain"||k=="addkeystoagent"))' "$C" >| "$C.new" && chmod 600 "$C.new" && cp -p "$C" "$C.before-tunnel-key" && mv -f "$C.new" "$C"; then echo "EDITED: $(( $(grep -c '' "$C.before-tunnel-key") - $(grep -c '' "$C") )) line(s) removed"; else echo "NOT EDITED: a command failed -- stop"; fi
+ssh -G hermes-box | grep -i '^addkeystoagent '; echo "UseKeychain lines left in the file: $(grep -ciE '^[[:space:]]*usekeychain([[:space:]=]|$)' "$C" 2>/dev/null)"; unset C
+```
+
+Expected: `EDITED: 2 line(s) removed`, `addkeystoagent false`, `UseKeychain lines left in the file: 0`.
+Every other output:
+
+- `EDITED: 1 line(s) removed` or `EDITED: 0 line(s) removed`: the `hermes-box` block held only one
+  of the two settings, or none, or it is not written `Host hermes-box` on a line of its own. The
+  two lines that follow decide.
+- `A BACKUP EXISTS: this block was run before -- nothing changed now`: nothing was changed this
+  time. The two lines that follow show the state: as expected, go on.
+- `NOT EDITED: ~/.ssh/config is missing or is a link -- stop`, or `NOT EDITED: a command failed --
+  stop`: `~/.ssh/config` is unchanged (rehearsed: byte for byte). Stop and report it.
+- `addkeystoagent` anything but `false`: another block that also applies to `hermes-box` (a
+  `Host *` block, for example) sets it. Stop and report it; do not go on to the next block.
+- `UseKeychain lines left in the file:` anything but `0`: a `UseKeychain` line stands somewhere
+  else in the file. macOS's `ssh -G` does not print this setting (measured on this Mac), so the
+  block cannot tell whether that line applies to `hermes-box`. Stop and report the number; do not
+  go on to the next block.
+
+To put the file back as it was: `command cp -p ~/.ssh/config.before-tunnel-key ~/.ssh/config`
+(written with `command` so that a `cp` set up to ask before it overwrites does not stop to ask).
+Rehearsed on scratch files with this Mac's own `awk` and zsh: a config where the block is followed
+by `HOST` and `MATCH` in capitals, an indented `Host`, a `Match`, `hermes-box-tunnel` and
+`hermes-box other` blocks (exactly two lines removed, every other line byte for byte); a second
+run; zsh's `noclobber`; `UseKeychain=yes` and a block written `Host=…`; `cp`, `mv` and `rm` set up
+to ask; a made failure; a config that is a link; no config.
+
+LAPTOP 5c: only now, the administrative key leaves the agent and the keychain (one function and
+its call). Run it only after LAPTOP 4c printed its three expected lines and LAPTOP 5a printed
+`PASSPHRASE OK` after asking. **Its three `ssh-add` lines were rehearsed for real on this Mac**
+(macOS 27.0.1, OpenSSH 10.3p1, the login keychain) **with a throwaway key and a private agent
+started for the test. They have NOT been run with the administrative key or with the agent macOS
+itself provides: for that key this is their first run.** What the rehearsal showed: the first
+line asked for the throwaway key's passphrase once and stored it (run again on an emptied agent,
+the same line added the key without asking); the second line took the key out of the agent, and
+the keychain no longer supplied it; the third line printed `keychain load rc=0` and `supplied by
+the keychain: 0`. Run BEFORE the removal, that third line printed `supplied by the keychain: 1`,
+so the last count can tell the two states apart. The function as a whole (its three refusals and
+the order of its lines) ran only with `ssh-add` replaced by a stand-in that drops the two
+`--apple-…` options and talks to a scratch agent. The line that counts `ssh` processes was run
+with another port number (`39119`) against stand-in processes, as in LAPTOP 4c.
+
+```bash
+keychain_out() {
+  local FP K="$HOME/.ssh/vps-hermes"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:9' "$HOME/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist" 2>/dev/null)" = hermes-box-tunnel ] || { echo "STOPPED: the login item's file does not name hermes-box-tunnel -- nothing removed"; return; }
+  [ "$(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box$' | wc -l | tr -d ' ')" = 0 ] || { echo "STOPPED: an ssh on the old alias (hermes-box) is still running -- nothing removed"; return; }
+  FP=$(ssh-keygen -lf "$K.pub" 2>/dev/null | awk '{print $2}')
+  [ -n "$FP" ] || { echo "STOPPED: could not read $K.pub -- nothing removed"; return; }
+  ssh-add --apple-use-keychain "$K"; echo "in the agent before: $(ssh-add -l | grep -cF "$FP")"
+  ssh-add --apple-use-keychain -d "$K"; echo "in the agent after: $(ssh-add -l | grep -cF "$FP")"
+  ssh-add --apple-load-keychain >/dev/null 2>&1; echo "keychain load rc=$?"; echo "supplied by the keychain: $(ssh-add -l | grep -cF "$FP")"
+}; keychain_out; unset -f keychain_out
+```
+
+Expected: `Identity added: …`, `in the agent before: 1`, `Identity removed: …`, `in the agent
+after: 0`, `keychain load rc=0`, `supplied by the keychain: 0`. If the first line asks for the
+passphrase (the keychain did not hold it, as on a second run), type it: that line stores it and the
+next line removes it again. Every other output:
+
+- `STOPPED: the login item's file does not name hermes-box-tunnel -- nothing removed`: LAPTOP 4a
+  was not done. Stop; with the key gone the login item would be refused every two minutes.
+- `STOPPED: an ssh on the old alias (hermes-box) is still running -- nothing removed`: the FILE
+  names the new alias, but macOS runs the definition it LOADED, and an `ssh` of the old one is
+  still there: LAPTOP 4b's reload did not take. Stop, run LAPTOP 4c, and report its lines.
+  (Rehearsed with a stand-in process: this line, and the stand-in for `ssh-add` received no call.
+  The count is also `0` when `pgrep` itself cannot run; LAPTOP 4c's `ssh on the new alias: 1`, just
+  before, is what shows that it can.)
+- `keychain load rc=` anything but `0`: the laptop could not ask the keychain, so the
+  `supplied by the keychain: 0` under it proves nothing. Stop and report both lines; do not go on
+  to LAPTOP 6. (Rehearsed with a stand-in that ends with `1`: `keychain load rc=1`, then `0`.
+  Measured for real on this Mac with the throwaway key: `rc=0` both while the keychain held that
+  key's passphrase and after it was removed; in every one of those runs the keychain still
+  supplied one other key. Not measured: what the real `ssh-add --apple-load-keychain` ends with
+  when the keychain holds no SSH passphrase at all, which is the state here if the administrative
+  key's was the only one stored. `rc=0` is what is expected of it; if the laptop prints another
+  number in that state, this stop is a false alarm, and it is still the right thing to report.) At this point the key has already left the agent and the keychain. You are not locked out: the first administrative session is still open, and LAPTOP 5a showed that you can type the passphrase. Report it before going on.
+- `STOPPED: could not read …/vps-hermes.pub -- nothing removed`: the key's public file is missing.
+  Stop and report it.
+- `in the agent before: 0`: the key could not be loaded, so the removal had nothing to act on.
+  Report it together with the last line.
+- `in the agent after:` anything but `0`: the key is still in the agent. Stop and report it.
+- `supplied by the keychain:` anything but `0`: the keychain still holds the passphrase, and the
+  key is in the agent again. Stop and report it; do not go on to LAPTOP 6.
+
+The last line asks the keychain for every passphrase it holds, so any other key whose passphrase is
+stored there is in the agent afterwards, as it is after a login (from the manual; in the rehearsal
+with the throwaway key, measured as a count only: an emptied private agent held one key that was
+not the throwaway key after this line).
+The key is counted by its fingerprint, which is read from the public file and never printed:
+`ssh-add -l` lists fingerprints and comments, not file names.
+
+LAPTOP 6: the proof that you still have a way in. Alone; it asks for the passphrase.
+
+```bash
+ssh hermes-box
+```
+
+Expected: it asks (`Enter passphrase for key '…/.ssh/vps-hermes':`), you type it, and you are at a
+prompt on the box. Type `exit` to come back. Every other output:
+
+- You are at the box's prompt WITHOUT having typed the passphrase: something still supplies it.
+  Type `exit`, run LAPTOP 6b, and report both.
+- `Permission denied`, or no prompt on the box: do NOT close the first administrative session.
+  Describe the message, do not paste it (it prints the address). Put the config back
+  (`command cp -p ~/.ssh/config.before-tunnel-key ~/.ssh/config`), put the passphrase back where it
+  was with `ssh-add --apple-use-keychain ~/.ssh/vps-hermes` (it asks for the passphrase; rehearsed
+  on this Mac with a throwaway key: it asked once, and afterwards the keychain supplied that
+  passphrase without asking; not run with the real key), and report it. Do not try more than once more: on the stand-in server three wrong
+  passphrases at this prompt reached the server as ONE closed connection.
+- If the first session is already gone and this does not get in: the provider's browser terminal
+  (step 1d, item 5) is the way back.
+
+Rehearsed on the stand-in laptop with a throwaway key that has a passphrase: the right passphrase
+(a prompt on the server), a wrong one three times, Ctrl+C. Not rehearsed: the same on macOS, where
+the keychain could answer.
+
+LAPTOP 6b: after `exit`, on the laptop: did that login put the key back (one function and its
+call)? **Its `ssh-add` lines were rehearsed for real on this Mac with a throwaway key and a
+private agent, as for LAPTOP 5c. They have NOT been run with the administrative key, with the
+agent macOS itself provides, or after a real login** (LAPTOP 6 has not been run on macOS); the
+function as a whole ran with stand-ins only.
+
+```bash
+keychain_check() {
+  local FP K="$HOME/.ssh/vps-hermes"
+  FP=$(ssh-keygen -lf "$K.pub" 2>/dev/null | awk '{print $2}')
+  [ -n "$FP" ] || { echo "STOPPED: could not read $K.pub"; return; }
+  echo "in the agent after the login: $(ssh-add -l | grep -cF "$FP")"
+  ssh-add --apple-load-keychain >/dev/null 2>&1; echo "keychain load rc=$?"; echo "supplied by the keychain after the login: $(ssh-add -l | grep -cF "$FP")"
+}; keychain_check; unset -f keychain_check
+```
+
+Expected: `in the agent after the login: 0`, `keychain load rc=0` and `supplied by the keychain
+after the login: 0`. These counts are only meaningful if `ssh-add -l` reached the agent: a line "Could not open a connection to your authentication agent" above them means it did not; stop and report. Every other output:
+
+- `STOPPED: could not read …/vps-hermes.pub`: report it.
+- `keychain load rc=` anything but `0`: the laptop could not ask the keychain, so the `0` under it
+  proves nothing. Stop and report both lines; the step is not complete, and the clean-up below
+  waits. (Rehearsed with a stand-in that ends with `1`. Measured for real with the throwaway key:
+  `rc=0` with that key's passphrase not in the keychain, while the keychain supplied one other
+  key. With no SSH passphrase at all in the keychain: not measured, as in LAPTOP 5c.)
+- `in the agent after the login:` anything but `0`: `AddKeysToAgent` still applies to `hermes-box`,
+  and the key stays in the agent until you log out of the laptop. Take it out with
+  `ssh-add -d ~/.ssh/vps-hermes` (not rehearsed) and report it.
+- `supplied by the keychain after the login:` anything but `0`: `UseKeychain` still applies to
+  `hermes-box`, and the passphrase is in the keychain again. The step is NOT complete. Report it;
+  do not run LAPTOP 5c again by yourself.
+
+ONLY when LAPTOP 6 got you to the box's prompt by typing the passphrase, AND LAPTOP 6b printed its
+three expected lines: remove the three backups, then close the first administrative session. On
+the box, in the FIRST administrative session (the one kept open since `VPS look`; the session LAPTOP 6
+opened was closed with `exit`): `rm -f ~/.ssh/authorized_keys.before-tunnel-key`. On the laptop:
+`rm -f ~/.ssh/config.before-tunnel-key ~/hermes-box-tunnel.plist.before-tunnel-key`. ONLY if part
+(b) of `VPS root key` was run (the operator chose removal): also delete the file it moved aside,
+on the box, in the first administrative session, after `sudo -v` alone:
+`sudo sh -c 'M=/root/.ssh/authorized_keys.removed-by-step-7f; rm -f "$M"; [ -e "$M" ] && echo "STILL THERE: $M -- stop" || echo "the moved file is gone"'`.
+Expected: `the moved file is gone` (rehearsed on the stand-in server, also a second time; it
+prints the same line when there was no such file, so run it only after part (b)). After it the
+way back of `VPS root key` no longer works. Then type `exit` in the first administrative session.
+
+After this step a review's D1.7 shows two keys for `hermesops`: one with no options and one with the five limited options. Put in the evidence file: whose each key is (the administrative key; the forward's key made in this step, with the date), and the `Match` count of "A security review" step 2. If root's key was kept, D1.7 also shows a row for `root`: the evidence says whose that key is and why it stays, at every review. If root's key was removed with `VPS root key`, say so in the evidence file, with the date: the review then shows one key file, `hermesops`'s. The first review after this step has no earlier header to compare the keys' short fingerprints with; from the next one on the report header carries them.
+
+For a work session with several connections, `ssh-add -t 1h ~/.ssh/vps-hermes` keeps the key in
+memory for an hour and stores nothing in the keychain. To replace the limited key later: make a new
+one, add its line, test, switch, then delete the old line; the next review's D1.7 shows a new
+`sha12`, and the evidence says so.
 
 ---
 

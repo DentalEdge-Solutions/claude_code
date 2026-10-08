@@ -4,6 +4,7 @@
   sudo python3 bin/collect-review-evidence.py                    > bundle-box.json
   sudo python3 bin/collect-review-evidence.py --fingerprint-only
   sudo python3 bin/collect-review-evidence.py --credentials-only
+  sudo python3 bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <64 hex> --last-pass-collected-at <UTC time>
 
 It observes and reports; it never judges — CHECKLIST.md says what each item should show,
 and the independent reviewer compares. It changes nothing a review looks at, but the full
@@ -17,7 +18,7 @@ probe. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys
+import argparse, ast, base64, calendar, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import app_lib as A
@@ -298,6 +299,206 @@ def _getent_group_members(host, group):
 def d1_6(host, ctx):
     members = _getent_group_members(host, "docker")
     return {"docker_group_members": members if members is not None else []}
+
+
+# D1.7: the sshd settings that say where a key, a certificate or a forward may come from.
+SSHD_KEY_SOURCES = ("authorizedkeysfile", "authorizedkeyscommand", "authorizedprincipalsfile",
+                    "trustedusercakeys", "allowtcpforwarding", "allowstreamlocalforwarding",
+                    "gatewayports", "permittunnel")
+# D1.7: the limited key's `permitlisten="127.0.0.1:1"` refuses a remote forward only while an
+# unprivileged account cannot bind port 1 (measured: with this setting at 0 the listener opens).
+UNPRIVILEGED_PORT_START = "/proc/sys/net/ipv4/ip_unprivileged_port_start"
+_KEY_TYPE_RE = re.compile(r"(ssh-(rsa|dss|ed25519)|ecdsa-sha2-nistp(256|384|521)"
+                          r"|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)(-cert-v01@openssh\.com)?")
+_KEY_BODY_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,3}")
+_OPTION_NAME_RE = re.compile(r"[A-Za-z0-9-]+")
+# The only option VALUES printed: a plain program path, and a loopback target. Any other value
+# (an address in from=, a command line with arguments, an environment assignment) is withheld.
+_SHOWN_OPTION_RES = {"command": re.compile(r"[A-Za-z0-9_./-]+"),
+                     "permitopen": re.compile(r"(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5}|\*)"),
+                     "permitlisten": re.compile(r"((127\.0\.0\.1|localhost|\[::1\]):)?([0-9]{1,5}|\*)")}
+
+
+def _split_unquoted(text, seps):
+    """(parts, unbalanced): `text` split on any character of `seps` outside double quotes, as
+    sshd's option scan reads a line: a backslash escapes only a double quote (the pair is kept
+    and never toggles quoting, inside or outside quotes); any other backslash is an ordinary
+    character. Empty parts are dropped. `unbalanced` is True when a quote is never closed."""
+    parts, cur, quoted, i = [], [], False, 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and text[i + 1:i + 2] == '"':
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if c == '"':
+            quoted = not quoted
+        if c in seps and not quoted:
+            if cur:
+                parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    if cur:
+        parts.append("".join(cur))
+    return parts, quoted
+
+
+def _shown_option(opt):
+    name, eq, value = opt.partition("=")
+    if not _OPTION_NAME_RE.fullmatch(name):
+        return WITHHELD
+    if not eq:
+        return name
+    inner = value[1:-1] if len(value) >= 2 and value[0] == value[-1] == '"' else value
+    rx = _SHOWN_OPTION_RES.get(name.lower())
+    return opt if rx and rx.fullmatch(inner) else f"{name}={WITHHELD}"
+
+
+def _key_row(line):
+    """One authorized_keys line as its key type, its options and a short fingerprint of the key
+    body, or None when it is not a key line. The body and the comment are never returned."""
+    tokens, unbalanced = _split_unquoted(line.strip(" \t"), " \t")      # sshd skips only spaces and tabs
+    if unbalanced:
+        return None
+    for i in (0, 1):                                    # the key type is first, or second after the options
+        if len(tokens) > i + 1 and _KEY_TYPE_RE.fullmatch(tokens[i]) and _KEY_BODY_RE.fullmatch(tokens[i + 1]):
+            try:
+                body = base64.b64decode(tokens[i + 1], validate=True)
+            except ValueError:
+                return None
+            options = _split_unquoted(tokens[0], ",")[0] if i == 1 else []
+            return {"type": tokens[i], "options": sorted(_shown_option(o) for o in options),
+                    "sha12": PK.sha256_bytes(body)[:12]}
+    return None
+
+
+def _authorized_keys_paths(pattern, user, home):
+    """The files sshd reads for one account, from its AuthorizedKeysFile value: `%h`, `%u` and `%%`
+    expanded, a relative name taken under the home directory. Another token is could-not-check:
+    a file this collector cannot name is a file it did not read."""
+    out = []
+    for pat in pattern.split():
+        if pat == "none":
+            continue
+        p = pat.replace("%%", "\0").replace("%h", home).replace("%u", user)
+        if "%" in p:
+            raise CouldNotCheck("authorizedkeysfile holds a token this collector does not expand")
+        p = p.replace("\0", "%")
+        out.append(os.path.normpath(p if p.startswith("/") else os.path.join(home, p)))
+    return out
+
+
+AUTHORIZED_KEYS_READ_LIMIT = 1 << 20      # bytes; a larger key file is could-not-check, never a partial list
+
+
+def _read_key_file(fd):
+    """The lines of the open key file, or None when it is larger than the limit. sshd ends a line
+    at a newline only (str.splitlines would also split on \\r, \\f and U+2028)."""
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(AUTHORIZED_KEYS_READ_LIMIT + 1)
+    if len(data) > AUTHORIZED_KEYS_READ_LIMIT:
+        return None
+    return data.decode("utf-8", errors="replace").split("\n")
+
+
+def _authorized_keys_row(host, p, users):
+    full = host.path(p)
+    row = {"path": p, "users": sorted(users)}
+    unread = {"keys": R.COULD_NOT_CHECK, "unparsed_lines": R.COULD_NOT_CHECK}
+    fd = None
+    try:                                    # one open, never through a link: what is read is what was examined
+        fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        st = os.fstat(fd)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        try:
+            st = os.lstat(full)             # a link, or a file that cannot be opened: describe it, read nothing
+        except OSError:
+            return {**row, "kind": R.COULD_NOT_CHECK, "owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK,
+                    "mode": R.COULD_NOT_CHECK, **unread}
+        fd = None
+    kind = "file" if stat.S_ISREG(st.st_mode) else "symlink" if stat.S_ISLNK(st.st_mode) else "not-a-file"
+    row.update(kind=kind, owner=_owner(st.st_uid), group=_group(st.st_gid), mode=oct(stat.S_IMODE(st.st_mode)))
+    if fd is not None and (kind != "file" or st.st_size > AUTHORIZED_KEYS_READ_LIMIT):
+        os.close(fd)
+        fd = None
+    if fd is None:
+        return {**row, **unread}
+    try:
+        lines = _read_key_file(fd)
+    except OSError:
+        return {**row, **unread}
+    if lines is None:
+        return {**row, **unread}
+    keys, unparsed = [], 0
+    for line in lines:
+        if not line.strip(" \t") or line.lstrip(" \t").startswith("#"):
+            continue
+        key = _key_row(line)
+        if key is None:
+            unparsed += 1
+        else:
+            keys.append(key)
+    return {**row, "keys": keys, "unparsed_lines": unparsed}
+
+
+def _unprivileged_port_start(host):
+    """The first port an account without privileges may bind, as the kernel states it (a host's
+    default is 1024). Read as bytes, a few at most: anything that is not one plain ASCII port
+    number, with at most one line break after it, is could-not-check."""
+    try:
+        with open(host.path(UNPRIVILEGED_PORT_START), "rb") as f:
+            raw = f.read(16)
+    except OSError:
+        return R.COULD_NOT_CHECK
+    m = re.fullmatch(rb"(0|[1-9][0-9]{0,4})\n?", raw)
+    if not m or int(m.group(1)) > 65535:
+        return R.COULD_NOT_CHECK
+    return int(m.group(1))
+
+
+def d1_7(host, ctx):
+    """Every SSH key the box accepts, for EVERY account in /etc/passwd: an account with no login
+    shell can still be used for a forward. Key types, options and short fingerprints only. The
+    sshd settings are the global ones (`sshd -T`): a `Match` block is not read here (the
+    fingerprint's entry_points component carries the whole of `sshd -T`). The kernel's
+    net.ipv4.ip_unprivileged_port_start setting is read because the limited key's permitlisten
+    depends on it."""
+    got = {}
+    for line in _ok(host, ["sshd", "-T"]).splitlines():
+        k, _, v = line.partition(" ")
+        if k in SSHD_KEY_SOURCES:
+            got[k] = v.strip()
+    if "authorizedkeysfile" not in got:
+        raise CouldNotCheck("sshd -T printed no authorizedkeysfile")
+    users_of, accounts = {}, 0
+    with open(host.path("/etc/passwd")) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split(":")
+            # Not measured (no container image here): whether the system's own account lookup
+            # accepts a short line. A line this collector cannot read as an account may still be
+            # one, and its key file would go unlisted, so the whole item is could-not-check.
+            if len(parts) != 7:
+                raise CouldNotCheck("an /etc/passwd line does not have seven fields")
+            accounts += 1
+            for p in _authorized_keys_paths(got["authorizedkeysfile"], parts[0], parts[5] or "/"):
+                try:
+                    os.lstat(host.path(p))
+                except (FileNotFoundError, NotADirectoryError):
+                    continue                # no such file: nothing accepts a key from it
+                except OSError:
+                    pass                    # cannot tell: keep the path, the row says so
+                users_of.setdefault(p, set()).add(parts[0])
+    return {"sshd": {k: got.get(k, R.COULD_NOT_CHECK) for k in SSHD_KEY_SOURCES},
+            "accounts_checked": accounts,
+            "unprivileged_port_start": _unprivileged_port_start(host),
+            "files": [_authorized_keys_row(host, p, users_of[p]) for p in sorted(users_of)]}
 
 
 # ---------------------------------------------------------------- D2 credential inventory
@@ -833,6 +1034,123 @@ def d4_5(host, ctx):
             **state}
 
 
+# D4.6: when each service started, and whether it runs older code than the box holds.
+LAST_PASS_COLLECTED_AT = None   # the last passing review's box-bundle collected_at, set by main()
+# Each long-running Hermes service: its unit file and the script its ExecStart runs (tested
+# against the repo's unit files). The files it loads are read from the script itself.
+SERVICE_FILES = {"hermes-docker-proxy": ("hermes-docker-proxy.service", "docker-create-proxy.py"),
+                 "hermes-broker": ("hermes-broker.service", "hermes-broker.py"),
+                 "hermes-app-broker@" + APP: ("hermes-app-broker@.service", "hermes-app-broker.py")}
+_ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_ISO_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_SYSTEMD_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2}) UTC")
+_DOCKER_TS_RE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?Z")
+_PY_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\.py")
+
+
+def _iso(epoch):
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime(_ISO_FORMAT)
+
+
+def _epoch(iso):
+    return calendar.timegm(time.strptime(iso, _ISO_FORMAT))
+
+
+def _unit_started_at(host, unit):
+    """The unit's ActiveEnterTimestamp as UTC, second precision. Empty (the unit never became
+    active), another time zone, or any other form is could-not-check: a time this collector
+    cannot place is never compared."""
+    rc, out, _ = host.run(["systemctl", "show", unit, "-p", "ActiveEnterTimestamp", "--value"])
+    m = _SYSTEMD_TS_RE.fullmatch(out.strip()) if rc == 0 else None
+    return f"{m.group(1)}T{m.group(2)}Z" if m else R.COULD_NOT_CHECK
+
+
+def _gateway_started_at(host):
+    rc, gw, _ = host.run(["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER])
+    if rc != 0 or len(gw.strip()) != 64:
+        return R.COULD_NOT_CHECK
+    rc, out, _ = host.run(["docker", "inspect", "--format", "{{.State.StartedAt}}", gw.strip()])
+    m = _DOCKER_TS_RE.fullmatch(out.strip()) if rc == 0 else None
+    return m.group(1) + "Z" if m else R.COULD_NOT_CHECK
+
+
+def _boot_at(host):
+    try:
+        with open(host.path("/proc/stat")) as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return _iso(int(line.split()[1]))
+    except (OSError, ValueError, IndexError):
+        pass
+    return R.COULD_NOT_CHECK
+
+
+def _loaded_files(bin_dir, script):
+    """The bin/ files `script` loads: itself, every bin module it imports at any depth (an
+    import inside a function included), and any bin file it names in a string ending `.py`
+    (loaded by path, as the collector loads the listener check). Read from the files as they
+    are now, so the list cannot fall behind the code. A module imported only on a rare path is
+    listed too: that errs towards a restart, never away from one."""
+    seen, todo = set(), [script]
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        with open(os.path.join(bin_dir, name), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] + ".py" for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module.split(".")[0] + ".py"]
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _PY_NAME_RE.fullmatch(node.value):
+                names = [node.value]
+            todo.extend(n for n in names if os.path.isfile(os.path.join(bin_dir, n)))
+    return sorted(seen)
+
+
+def _files_newer_than_start(host, unit, started_at):
+    """(names, count): the loaded files whose modification time is later than the service's
+    start, and how many files were looked at. `unit` stands for the unit file. The start has
+    second precision, so a file changed in that same second is not listed."""
+    if started_at == R.COULD_NOT_CHECK:
+        return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+    unit_file, script = SERVICE_FILES[unit]
+    bin_dir = host.path(AGENT_DIR + "/bin")
+    try:
+        paths = {"unit": host.path("/etc/systemd/system/" + unit_file)}
+        paths.update({n: os.path.join(bin_dir, n) for n in _loaded_files(bin_dir, script)})
+        start = _epoch(started_at)
+        return sorted(n for n, p in paths.items() if int(os.stat(p).st_mtime) > start), len(paths)
+    except (OSError, SyntaxError, ValueError, RecursionError):
+        return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+
+
+def d4_6(host, ctx):
+    """When the host, Docker, the three long-running Hermes services and the gateway container
+    last started, each compared with the last PASS's collection time (given with
+    --last-pass-collected-at), and which files each service loads that changed after it
+    started. D4.2's hash is the same string after any daemon-reload, so it cannot show a
+    restart (review #8); this item can. Timestamps, unit names and file names only."""
+    starts = {"boot": _boot_at(host), "docker": _unit_started_at(host, "docker"),
+              **{u: _unit_started_at(host, u) for u in SERVICE_FILES},
+              "gateway-container": _gateway_started_at(host)}
+    base = LAST_PASS_COLLECTED_AT
+
+    def after(ts):
+        if ts == R.COULD_NOT_CHECK:
+            return R.COULD_NOT_CHECK
+        return None if base is None else ts > base       # one fixed-width UTC format: text order is time order
+
+    files = {u: _files_newer_than_start(host, u, starts[u]) for u in SERVICE_FILES}
+    return {"last_pass_collected_at": base, "started_at": starts,
+            "started_after_last_pass": {k: after(v) for k, v in starts.items()},
+            "files_newer_than_start": {u: f[0] for u, f in files.items()},
+            "files_checked": {u: f[1] for u, f in files.items()}}
+
+
 # ---------------------------------------------------------------- D5 governance store
 def d5_1(host, ctx):
     rc, out, err = host.run(["runuser", "-u", "hermes-broker", "--", "python3",
@@ -1275,9 +1593,9 @@ def d10_8(host, ctx):
     return {"results": rows, "out_of_whitelist": bad}
 
 
-PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6,
+PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6, "D1.7": d1_7,
           "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3,
-          "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4, "D4.5": d4_5,
+          "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4, "D4.5": d4_5, "D4.6": d4_6,
           "D5.1": d5_1, "D5.2": d5_2, "D5.3": d5_3, "D5.4": d5_4,
           "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1,
           # D10.5 (the OpenRouter key limit and account privacy setting) is manual: no probe.
@@ -1398,6 +1716,16 @@ def collect(host, fp_key):
     return collect_with_secrets(host, fp_key)[0]
 
 
+def _valid_collected_at(value):
+    if not _ISO_RE.fullmatch(value):
+        return False
+    try:
+        _epoch(value)
+    except ValueError:
+        return False
+    return True
+
+
 def main(argv=None, host=None, read_key=_tty_key):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     g = ap.add_mutually_exclusive_group()
@@ -1405,19 +1733,26 @@ def main(argv=None, host=None, read_key=_tty_key):
     g.add_argument("--credentials-only", action="store_true")
     ap.add_argument("--fp-key-tty", action="store_true")
     ap.add_argument("--last-pass-execstart")
+    ap.add_argument("--last-pass-collected-at")
     a = ap.parse_args(argv)
-    if a.last_pass_execstart is None:
-        return _main(a, host, read_key)
-    if not re.fullmatch(r"[0-9a-f]{64}", a.last_pass_execstart):
+    if a.last_pass_execstart is not None and not re.fullmatch(r"[0-9a-f]{64}", a.last_pass_execstart):
         print("collect-review-evidence: --last-pass-execstart must be 64 lowercase hex characters",
               file=sys.stderr)
         return 2
-    global LAST_PASS_EXECSTART
-    prior, LAST_PASS_EXECSTART = LAST_PASS_EXECSTART, a.last_pass_execstart
+    if a.last_pass_collected_at is not None and not _valid_collected_at(a.last_pass_collected_at):
+        print("collect-review-evidence: --last-pass-collected-at must be the last PASS bundle's collected_at, "
+              "a UTC time such as 2026-10-07T16:21:22Z", file=sys.stderr)
+        return 2
+    global LAST_PASS_EXECSTART, LAST_PASS_COLLECTED_AT
+    prior = LAST_PASS_EXECSTART, LAST_PASS_COLLECTED_AT
+    if a.last_pass_execstart is not None:
+        LAST_PASS_EXECSTART = a.last_pass_execstart
+    if a.last_pass_collected_at is not None:
+        LAST_PASS_COLLECTED_AT = a.last_pass_collected_at
     try:
         return _main(a, host, read_key)
     finally:
-        LAST_PASS_EXECSTART = prior            # never leaks into a later call without the flag
+        LAST_PASS_EXECSTART, LAST_PASS_COLLECTED_AT = prior   # never leaks into a later call without the flag
 
 
 def _main(a, host, read_key):

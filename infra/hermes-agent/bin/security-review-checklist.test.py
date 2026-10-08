@@ -64,6 +64,34 @@ class TestChecklistSync(unittest.TestCase):
         for field in ce.d4_5(host, {}):
             self.assertIn(f"`{field}`", blocks["D4.5"], field)
 
+    def test_d1_7_and_d4_6_name_every_field_the_collector_reports(self):
+        ce = _load("ce", "collect-review-evidence.py")
+        blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
+        import tempfile
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "etc"))
+        with open(os.path.join(root, "etc/passwd"), "w") as f:
+            f.write("root:x:0:0:root:/root:/bin/bash\n")
+        os.makedirs(os.path.join(root, "root/.ssh"))
+        with open(os.path.join(root, "root/.ssh/authorized_keys"), "w") as f:
+            f.write("ssh-ed25519 " + "A" * 68 + "\n")
+        host = ce.Host(root, lambda argv, timeout=60: (0, "authorizedkeysfile .ssh/authorized_keys\n", ""))
+        d1_7 = ce.d1_7(host, {})
+        for field in [*d1_7, *d1_7["sshd"], *d1_7["files"][0], *d1_7["files"][0]["keys"][0]]:
+            self.assertIn(f"`{field}`", blocks["D1.7"], field)
+        d4_6 = ce.d4_6(host, {})
+        for field in [*d4_6, *d4_6["started_at"]]:
+            self.assertIn(f"`{field}`", blocks["D4.6"], field)
+
+    def test_d1_7_states_the_limited_keys_exact_options(self):
+        blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
+        for opt in ('command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',
+                    "port-forwarding", "restrict"):
+            self.assertIn(f"`{opt}`", blocks["D1.7"], opt)
+
+    def test_the_version_is_1_18(self):
+        self.assertRegex(items()[0], r"(?m)^version: 1\.18$")
+
     def test_d10_6_states_the_committed_mcp_block(self):
         """D10.6 judges the box's `mcp_servers:` block by `equals_repo`, `reason` and the sha256 of
         its canonical form, which the checklist states: it must be config.yaml.example's, as the

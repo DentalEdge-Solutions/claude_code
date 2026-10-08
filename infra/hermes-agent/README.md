@@ -177,34 +177,59 @@ app reports `connect ECONNREFUSED 127.0.0.1:19119`; that is the link, not the bo
 
 To keep the forward open without a terminal window (laptop only; nothing changes on the box):
 
-1. Give the box an alias in `~/.ssh/config`, so its address is written in one local file and nowhere
-   else:
+What follows describes the link once BRING-UP step 7f has been run. Until then the login item of
+step 3 still names the `hermes-box` alias and uses the administrative key, whose passphrase is in
+the macOS keychain (security review #8, finding F57); step 7f is what changes that.
+
+The ADMINISTRATIVE alias, `hermes-box`, stays in `~/.ssh/config`: BRING-UP's step 7f LAPTOP 2 copies
+the box's address from it. It is used for work on the box and asks for the key's passphrase once step
+7f has been run; before step 7f it also holds the two lines `AddKeysToAgent yes` and `UseKeychain yes`
+(step 7f removes them):
+```
+Host hermes-box
+  HostName <the box's address>
+  User hermesops
+  IdentityFile ~/.ssh/vps-hermes
+  IdentitiesOnly yes
+  ForwardAgent no
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+```
+
+1. Give the link an alias of its own in `~/.ssh/config`, so the box's address is written in one local
+   file and nowhere else. It uses a key made only for this forward (BRING-UP step 7f makes the key
+   and this alias; the block below is that step's alias, with the address copied from the
+   `hermes-box` alias):
    ```
-   Host hermes-box
+   Host hermes-box-tunnel
      HostName <the box's address>
      User hermesops
-     IdentityFile ~/.ssh/vps-hermes
+     IdentityFile ~/.ssh/hermes-box-tunnel
      IdentitiesOnly yes
+     IdentityAgent none
      ForwardAgent no
      ServerAliveInterval 30
      ServerAliveCountMax 3
-     AddKeysToAgent yes
-     UseKeychain yes
    ```
-2. Prove the key works with no prompt BEFORE anything retries by itself. If the key has a
-   passphrase, first store it in the macOS keychain once
-   (`ssh-add --apple-use-keychain ~/.ssh/vps-hermes`, then `ssh-add -l` lists it); from then on the
-   Mac's login and screen lock are what protect the key. Then, once:
-   `ssh -o BatchMode=yes hermes-box true && echo LINK_OK`. The box runs fail2ban: every refused
-   attempt counts, and a login item that retries with a key the box refuses can get the laptop's
-   address banned. Two failures seen on first set-up (2026-10-07), and what they mean:
+2. Prove the key works with no prompt BEFORE anything retries by itself: BRING-UP step 7f's gate
+   (LAPTOP 3a) is that proof, ONE login run alone, and nothing else runs until it prints
+   `gate rc=1`. Once step 7f has been run, the link uses a key of its own, limited on the box to
+   this one forward. It has no passphrase: the limits on the box are its protection. The
+   administrative key (`hermes-box`) is then no longer in the keychain and asks for its passphrase.
+   The forward's target must be written `127.0.0.1:9119`; the limited key refuses the name
+   `localhost`. The box runs fail2ban: treat every refused attempt as counted (the box's fail2ban
+   settings have not been read), and a login item that retries with a key the box refuses can get
+   the laptop's address banned. Two failures seen on first set-up (2026-10-07), and what they mean:
    - `Host key verification failed`: the address in `~/.ssh/config` is not the one in
      `~/.ssh/known_hosts`. It was a one-digit typo. SSH stops before it offers a key, so nothing
      reaches the box. Compare the two files; never answer by switching the host-key check off.
-   - `Permission denied (publickey)`: the key has a passphrase and no agent holds it. This one IS a
+   - `Permission denied (publickey)`: on the link, once step 7f has been run, this means the
+     limited key's line is missing on the box (or the alias names a different key). This one IS a
      failed login on the box, and the message prints the box's address: do not paste it anywhere.
 3. A LaunchAgent (`~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist`) runs
-   `/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -L 19119:127.0.0.1:9119 hermes-box`
+   `/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -L 19119:127.0.0.1:9119 hermes-box-tunnel`
+   (ten arguments; the last one is `hermes-box-tunnel` once step 7f's LAPTOP 4a has switched it,
+   and `hermes-box` before)
    with `RunAtLoad`, `KeepAlive` and `ThrottleInterval` 120 (at most one attempt every two minutes).
    Start it with `launchctl bootstrap gui/$(id -u) <the plist>`; stop it for good with
    `launchctl bootout gui/$(id -u)/com.dentaledge.hermes-box-tunnel` and delete the file.
