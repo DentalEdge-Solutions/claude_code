@@ -4,6 +4,7 @@
   sudo python3 bin/collect-review-evidence.py                    > bundle-box.json
   sudo python3 bin/collect-review-evidence.py --fingerprint-only
   sudo python3 bin/collect-review-evidence.py --credentials-only
+  sudo python3 bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <64 hex> --last-pass-collected-at <UTC time>
 
 It observes and reports; it never judges — CHECKLIST.md says what each item should show,
 and the independent reviewer compares. It changes nothing a review looks at, but the full
@@ -17,7 +18,7 @@ probe. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, base64, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys
+import argparse, ast, base64, calendar, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import app_lib as A
@@ -970,6 +971,123 @@ def d4_5(host, ctx):
             **state}
 
 
+# D4.6: when each service started, and whether it runs older code than the box holds.
+LAST_PASS_COLLECTED_AT = None   # the last passing review's box-bundle collected_at, set by main()
+# Each long-running Hermes service: its unit file and the script its ExecStart runs (tested
+# against the repo's unit files). The files it loads are read from the script itself.
+SERVICE_FILES = {"hermes-docker-proxy": ("hermes-docker-proxy.service", "docker-create-proxy.py"),
+                 "hermes-broker": ("hermes-broker.service", "hermes-broker.py"),
+                 "hermes-app-broker@" + APP: ("hermes-app-broker@.service", "hermes-app-broker.py")}
+_ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_ISO_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+_SYSTEMD_TS_RE = re.compile(r"[A-Z][a-z]{2} (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) UTC")
+_DOCKER_TS_RE = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z")
+_PY_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\.py")
+
+
+def _iso(epoch):
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime(_ISO_FORMAT)
+
+
+def _epoch(iso):
+    return calendar.timegm(time.strptime(iso, _ISO_FORMAT))
+
+
+def _unit_started_at(host, unit):
+    """The unit's ActiveEnterTimestamp as UTC, second precision. Empty (the unit never became
+    active), another time zone, or any other form is could-not-check: a time this collector
+    cannot place is never compared."""
+    rc, out, _ = host.run(["systemctl", "show", unit, "-p", "ActiveEnterTimestamp", "--value"])
+    m = _SYSTEMD_TS_RE.fullmatch(out.strip()) if rc == 0 else None
+    return f"{m.group(1)}T{m.group(2)}Z" if m else R.COULD_NOT_CHECK
+
+
+def _gateway_started_at(host):
+    rc, gw, _ = host.run(["docker", "ps", "-q", "--no-trunc", "--filter", GATEWAY_FILTER])
+    if rc != 0 or len(gw.strip()) != 64:
+        return R.COULD_NOT_CHECK
+    rc, out, _ = host.run(["docker", "inspect", "--format", "{{.State.StartedAt}}", gw.strip()])
+    m = _DOCKER_TS_RE.fullmatch(out.strip()) if rc == 0 else None
+    return m.group(1) + "Z" if m else R.COULD_NOT_CHECK
+
+
+def _boot_at(host):
+    try:
+        with open(host.path("/proc/stat")) as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return _iso(int(line.split()[1]))
+    except (OSError, ValueError, IndexError):
+        pass
+    return R.COULD_NOT_CHECK
+
+
+def _loaded_files(bin_dir, script):
+    """The bin/ files `script` loads: itself, every bin module it imports at any depth (an
+    import inside a function included), and any bin file it names in a string ending `.py`
+    (loaded by path, as the collector loads the listener check). Read from the files as they
+    are now, so the list cannot fall behind the code. A module imported only on a rare path is
+    listed too: that errs towards a restart, never away from one."""
+    seen, todo = set(), [script]
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        with open(os.path.join(bin_dir, name), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] + ".py" for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module.split(".")[0] + ".py"]
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _PY_NAME_RE.fullmatch(node.value):
+                names = [node.value]
+            todo.extend(n for n in names if os.path.isfile(os.path.join(bin_dir, n)))
+    return sorted(seen)
+
+
+def _files_newer_than_start(host, unit, started_at):
+    """(names, count): the loaded files whose modification time is later than the service's
+    start, and how many files were looked at. `unit` stands for the unit file. The start has
+    second precision, so a file changed in that same second is not listed."""
+    if started_at == R.COULD_NOT_CHECK:
+        return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+    unit_file, script = SERVICE_FILES[unit]
+    bin_dir = host.path(AGENT_DIR + "/bin")
+    try:
+        paths = {"unit": host.path("/etc/systemd/system/" + unit_file)}
+        paths.update({n: os.path.join(bin_dir, n) for n in _loaded_files(bin_dir, script)})
+        start = _epoch(started_at)
+        return sorted(n for n, p in paths.items() if int(os.stat(p).st_mtime) > start), len(paths)
+    except (OSError, SyntaxError, ValueError):
+        return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+
+
+def d4_6(host, ctx):
+    """When the host, Docker, the three long-running Hermes services and the gateway container
+    last started, each compared with the last PASS's collection time (given with
+    --last-pass-collected-at), and which files each service loads that changed after it
+    started. D4.2's hash is the same string after any daemon-reload, so it cannot show a
+    restart (review #8); this item can. Timestamps, unit names and file names only."""
+    starts = {"boot": _boot_at(host), "docker": _unit_started_at(host, "docker"),
+              **{u: _unit_started_at(host, u) for u in SERVICE_FILES},
+              "gateway-container": _gateway_started_at(host)}
+    base = LAST_PASS_COLLECTED_AT
+
+    def after(ts):
+        if ts == R.COULD_NOT_CHECK:
+            return R.COULD_NOT_CHECK
+        return None if base is None else ts > base       # one fixed-width UTC format: text order is time order
+
+    files = {u: _files_newer_than_start(host, u, starts[u]) for u in SERVICE_FILES}
+    return {"last_pass_collected_at": base, "started_at": starts,
+            "started_after_last_pass": {k: after(v) for k, v in starts.items()},
+            "files_newer_than_start": {u: f[0] for u, f in files.items()},
+            "files_checked": {u: f[1] for u, f in files.items()}}
+
+
 # ---------------------------------------------------------------- D5 governance store
 def d5_1(host, ctx):
     rc, out, err = host.run(["runuser", "-u", "hermes-broker", "--", "python3",
@@ -1535,6 +1653,16 @@ def collect(host, fp_key):
     return collect_with_secrets(host, fp_key)[0]
 
 
+def _valid_collected_at(value):
+    if not _ISO_RE.fullmatch(value):
+        return False
+    try:
+        _epoch(value)
+    except ValueError:
+        return False
+    return True
+
+
 def main(argv=None, host=None, read_key=_tty_key):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     g = ap.add_mutually_exclusive_group()
@@ -1542,19 +1670,26 @@ def main(argv=None, host=None, read_key=_tty_key):
     g.add_argument("--credentials-only", action="store_true")
     ap.add_argument("--fp-key-tty", action="store_true")
     ap.add_argument("--last-pass-execstart")
+    ap.add_argument("--last-pass-collected-at")
     a = ap.parse_args(argv)
-    if a.last_pass_execstart is None:
-        return _main(a, host, read_key)
-    if not re.fullmatch(r"[0-9a-f]{64}", a.last_pass_execstart):
+    if a.last_pass_execstart is not None and not re.fullmatch(r"[0-9a-f]{64}", a.last_pass_execstart):
         print("collect-review-evidence: --last-pass-execstart must be 64 lowercase hex characters",
               file=sys.stderr)
         return 2
-    global LAST_PASS_EXECSTART
-    prior, LAST_PASS_EXECSTART = LAST_PASS_EXECSTART, a.last_pass_execstart
+    if a.last_pass_collected_at is not None and not _valid_collected_at(a.last_pass_collected_at):
+        print("collect-review-evidence: --last-pass-collected-at must be the last PASS bundle's collected_at, "
+              "a UTC time such as 2026-10-07T16:21:22Z", file=sys.stderr)
+        return 2
+    global LAST_PASS_EXECSTART, LAST_PASS_COLLECTED_AT
+    prior = LAST_PASS_EXECSTART, LAST_PASS_COLLECTED_AT
+    if a.last_pass_execstart is not None:
+        LAST_PASS_EXECSTART = a.last_pass_execstart
+    if a.last_pass_collected_at is not None:
+        LAST_PASS_COLLECTED_AT = a.last_pass_collected_at
     try:
         return _main(a, host, read_key)
     finally:
-        LAST_PASS_EXECSTART = prior            # never leaks into a later call without the flag
+        LAST_PASS_EXECSTART, LAST_PASS_COLLECTED_AT = prior   # never leaks into a later call without the flag
 
 
 def _main(a, host, read_key):

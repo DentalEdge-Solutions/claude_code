@@ -2840,5 +2840,148 @@ class TestD17AcceptedKeys(Base):
         self.assertEqual(CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"], ["cert-authority"])
 
 
+class TestD46StartTimes(Base):
+    START = "Wed 2026-10-07 06:45:46 UTC"      # as `systemctl show -p ActiveEnterTimestamp --value` prints it
+    START_ISO = "2026-10-07T06:45:46Z"
+    BOOT = 1758448800                          # /proc/stat btime, seconds since the epoch
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, CE, "LAST_PASS_COLLECTED_AT", None)
+        CE.LAST_PASS_COLLECTED_AT = None
+        for unit in ("docker", *CE.SERVICE_FILES):
+            self._start(unit, self.START)
+        self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
+        self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = (0, "2026-10-07T15:39:12.123456789Z\n", "")
+        self._w("/proc/stat", f"cpu  1 2 3\nbtime {self.BOOT}\nprocesses 5\n")
+        self.t0 = CE._epoch(self.START_ISO)
+        for unit_file, script in CE.SERVICE_FILES.values():
+            self._file("/etc/systemd/system/" + unit_file, "[Unit]\n")
+            self._file(CE.AGENT_DIR + "/bin/" + script, "import os\n")
+
+    def _start(self, unit, text):
+        self.outputs[("systemctl", "show", unit, "-p", "ActiveEnterTimestamp", "--value")] = (0, text + "\n", "")
+
+    def _file(self, rel, body, age=-3600):
+        """A file whose modification time is `age` seconds after the services' start."""
+        p = self._w(rel, body)
+        os.utime(p, (self.t0 + age, self.t0 + age))
+        return p
+
+    APP = "hermes-app-broker@ads-audit"
+
+    def test_every_start_is_reported_in_utc(self):
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(sorted(d["started_at"]), sorted(["boot", "docker", "gateway-container", "hermes-broker",
+                                                          "hermes-docker-proxy", self.APP]))
+        for unit in ("docker", "hermes-broker", "hermes-docker-proxy", self.APP):
+            self.assertEqual(d["started_at"][unit], self.START_ISO)
+        self.assertEqual(d["started_at"]["gateway-container"], "2026-10-07T15:39:12Z")
+        self.assertEqual(d["started_at"]["boot"], CE._iso(self.BOOT))
+        self.assertRegex(d["started_at"]["boot"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_without_a_baseline_nothing_is_compared(self):
+        d = CE.d4_6(self.host(), {})
+        self.assertIsNone(d["last_pass_collected_at"])
+        self.assertEqual(set(d["started_after_last_pass"].values()), {None})
+
+    def test_a_start_after_the_last_pass_is_marked(self):
+        CE.LAST_PASS_COLLECTED_AT = "2026-10-07T10:00:00Z"
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["last_pass_collected_at"], "2026-10-07T10:00:00Z")
+        self.assertEqual(d["started_after_last_pass"],
+                         {"boot": False, "docker": False, "hermes-broker": False, "hermes-docker-proxy": False,
+                          self.APP: False, "gateway-container": True})
+        CE.LAST_PASS_COLLECTED_AT = self.START_ISO          # the same second is not "after"
+        self.assertFalse(CE.d4_6(self.host(), {})["started_after_last_pass"]["hermes-broker"])
+
+    def test_a_time_that_is_empty_or_not_utc_is_could_not_check(self):
+        CE.LAST_PASS_COLLECTED_AT = "2026-10-07T10:00:00Z"
+        for text in ("", "n/a", "Wed 2026-10-07 08:45:46 CEST", "2026-10-07 06:45:46", "Wed 2026-10-07 06:45:46 UTC extra"):
+            self._start("hermes-broker", text)
+            d = CE.d4_6(self.host(), {})
+            self.assertEqual(d["started_at"]["hermes-broker"], R.COULD_NOT_CHECK, text)
+            self.assertEqual(d["started_after_last_pass"]["hermes-broker"], R.COULD_NOT_CHECK, text)
+            self.assertEqual(d["files_newer_than_start"]["hermes-broker"], R.COULD_NOT_CHECK, text)
+            self.assertEqual(d["started_at"]["hermes-docker-proxy"], self.START_ISO)   # control: the others stand
+
+    def test_systemctl_failing_is_could_not_check(self):
+        self.outputs[("systemctl", "show", "docker", "-p", "ActiveEnterTimestamp", "--value")] = (1, self.START, "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["docker"], R.COULD_NOT_CHECK)
+
+    def test_no_gateway_or_an_odd_container_time_is_could_not_check(self):
+        self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = (0, "0001-01-01T00:00:00+02:00\n", "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["gateway-container"], R.COULD_NOT_CHECK)
+        self.outputs[("docker", "ps")] = (0, "", "")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["gateway-container"], R.COULD_NOT_CHECK)
+
+    def test_no_boot_time_is_could_not_check(self):
+        self._w("/proc/stat", "cpu  1 2 3\n")
+        self.assertEqual(CE.d4_6(self.host(), {})["started_at"]["boot"], R.COULD_NOT_CHECK)
+
+    def test_files_older_than_the_start_are_not_listed(self):
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"], {"hermes-broker": [], "hermes-docker-proxy": [], self.APP: []})
+        self.assertEqual(d["files_checked"], {"hermes-broker": 2, "hermes-docker-proxy": 2, self.APP: 2})
+
+    def test_a_script_or_a_unit_file_changed_after_the_start_is_listed(self):
+        self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "import os\n", age=60)
+        self._file("/etc/systemd/system/hermes-app-broker@.service", "[Unit]\n", age=60)
+        d = CE.d4_6(self.host(), {})["files_newer_than_start"]
+        self.assertEqual(d, {"hermes-broker": ["hermes-broker.py"], "hermes-docker-proxy": [], self.APP: ["unit"]})
+
+    def test_a_file_changed_in_the_same_second_as_the_start_is_not_listed(self):
+        self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "import os\n", age=0)
+        self.assertEqual(CE.d4_6(self.host(), {})["files_newer_than_start"]["hermes-broker"], [])
+
+    def test_an_import_inside_a_function_and_a_transitive_import_are_followed(self):
+        b = CE.AGENT_DIR + "/bin/"
+        self._file(b + "hermes-app-broker.py", "import os, app_lib as A\n\ndef f():\n    from lazy_lib import x\n")
+        self._file(b + "app_lib.py", "import vault_lib\n")
+        self._file(b + "vault_lib.py", "import json\n", age=60)
+        self._file(b + "lazy_lib.py", "x = 1\n", age=60)
+        self._file(b + "unrelated_lib.py", "y = 1\n", age=60)
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"][self.APP], ["lazy_lib.py", "vault_lib.py"])
+        self.assertEqual(d["files_checked"][self.APP], 5)       # the unit, the script and three modules
+
+    def test_a_file_loaded_by_its_name_is_followed(self):
+        b = CE.AGENT_DIR + "/bin/"
+        self._file(b + "hermes-broker.py", 'import os\nP = os.path.join(HERE, "side-loaded.py")\n')
+        self._file(b + "side-loaded.py", "z = 1\n", age=60)
+        self.assertEqual(CE.d4_6(self.host(), {})["files_newer_than_start"]["hermes-broker"], ["side-loaded.py"])
+
+    def test_a_missing_or_unparsable_script_costs_that_service_only(self):
+        os.remove(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "bin/hermes-broker.py"))
+        self._file(CE.AGENT_DIR + "/bin/docker-create-proxy.py", "def broken(:\n")
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["files_newer_than_start"], {"hermes-broker": R.COULD_NOT_CHECK,
+                                                       "hermes-docker-proxy": R.COULD_NOT_CHECK, self.APP: []})
+        self.assertEqual(d["files_checked"]["hermes-broker"], R.COULD_NOT_CHECK)
+
+    def test_each_service_is_paired_with_the_script_its_unit_runs(self):
+        deploy = os.path.join(os.path.dirname(HERE), "deploy")
+        for unit_file, script in CE.SERVICE_FILES.values():
+            with open(os.path.join(deploy, unit_file)) as f:
+                self.assertRegex(f.read(), r"(?m)^ExecStart=.*/opt/hermes-agent/bin/" + script.replace(".", r"\."), unit_file)
+
+    def test_the_repos_own_app_broker_loads_what_review_8_named(self):
+        loaded = CE._loaded_files(HERE, "hermes-app-broker.py")
+        for name in ("hermes-app-broker.py", "app_lib.py", "vault_lib.py", "governance_lib.py", "client_audit_lib.py"):
+            self.assertIn(name, loaded)
+        self.assertNotIn("collect-review-evidence.py", loaded)
+
+    def test_main_refuses_an_invalid_last_pass_collected_at(self):
+        for bad in ("2026-10-07", "2026-10-07T16:21:22", "2026-10-07T16:21:22+00:00", "2026-13-40T00:00:00Z",
+                    "2026-10-07T16:21:22Z\n", ""):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = CE.main(["--fp-key-tty", "--last-pass-collected-at", bad], host=self.host(),
+                             read_key=lambda: "11" * 32)
+            self.assertEqual((rc, out.getvalue()), (2, ""), repr(bad))
+            self.assertIn("--last-pass-collected-at", err.getvalue())
+            self.assertIsNone(CE.LAST_PASS_COLLECTED_AT)
+
+
 if __name__ == "__main__":
     unittest.main()
