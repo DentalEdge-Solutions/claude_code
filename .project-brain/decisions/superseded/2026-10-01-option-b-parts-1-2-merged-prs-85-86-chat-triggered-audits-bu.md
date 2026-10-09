@@ -5,7 +5,7 @@ description: Option B (spec 2026-09-30 hermes-chat-triggered-audits) parts 1 and
 tags: []
 timestamp: 2026-10-01T13:39:00
 sources: [sessions/daily/2026-10-01.md]
-status: active
+status: superseded
 promoted_at: 2026-10-01
 ---
 
