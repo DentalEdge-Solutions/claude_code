@@ -10,8 +10,11 @@ operator", "Rules that apply"); the corrections this round taught are below.
 
 - **Security review #9: PASS 37/37, checklist v1.18, signed 2026-10-09**
   (`docs/security-reviews/2026-10-09-review-9.md`, merged in PR #108).
-- **`main` is at `792451f`** (merge of PR #108). **The box is at checkout `df58e10`**; `main` is ahead of it
-  by documentation only, which the box fingerprint does not cover. Nothing is owed on the box.
+- **`main` is at the merge of PR #112 or later** (PRs #108 to #112 were merged on 2026-10-09). **The box is at
+  checkout `df58e10`.** `main` is ahead of it by documentation, the brain's content and the brain's lint script
+  (`scripts/brain/brain-lint.js`, PR #111). None of that is under the paths the box fingerprint covers
+  (`infra/hermes-agent/bin`, `deploy`, `registry`, `docker-compose.yml`, `Dockerfile`), so nothing is owed on
+  the box.
 - Box fingerprint at review #9: `660599e0…bb8a`. The report's header carries the baselines for review #10
   (the components, the box bundle's collection time `2026-10-09T14:01:23Z`, the credential set, both SSH
   keys' short fingerprints, D4.2's two hashes, D4.5's `alert_log`, D7.1 `records`).
@@ -54,7 +57,7 @@ items:**
 The three live refusal checks must be repeated within 7 days before every box collection. They need a real
 chat audit on the same UTC day (the quota check). Blocks that print only `status=… reason=…`, take the client
 at a hidden prompt, and leave the kill switch on if the broker does not answer were written and used on
-2026-10-09; they are in that session's conversation, not in BRING-UP. Put them in BRING-UP step 11 with the
+2026-10-09; they are in the appendix below, not yet in BRING-UP. Put them in BRING-UP step 11 with the
 next box change.
 
 ### 3. The operator's housekeeping
@@ -62,10 +65,26 @@ next box change.
 - Three key-shaped strings of unknown origin on the laptop (four files in the code editor's local edit
   history, one downloaded automation template). None is the box's key and none is a live key of the box's
   OpenRouter account. Identify or delete them.
-- As in the 2026-10-07 handoff, item 3 (brain candidates, untracked handoffs including this one and
-  2026-10-08's, merged local branches, the two modified `evals/` files).
+- Done on 2026-10-09, after the review: the weekly brain review (PR #110: review #9's PASS is an active
+  decision; D3.2 and "credential access levels are measured" are canon; seventeen items superseded or
+  retired), the handoffs committed (PRs #109, #112), the old user-scoped GitHub token confirmed gone and two
+  unused classic tokens deleted.
 - `.superpowers/sdd/2026-10-07-review-9-box-change/` can be deleted now that review #9 is signed.
-- No brain entry records review #9's PASS yet (`brain-capture`, then the weekly review).
+- Still as in the 2026-10-07 handoff, item 3: merged local branches, the two modified `evals/` files.
+
+### 4. Open, outside the box change
+
+- **GitHub Support was asked on 2026-10-09 to expunge commit `10f45a9`** (lesson 9). Check whether it is gone:
+  `gh api repos/DentalEdge-Solutions/claude_code/commits/10f45a9366a359079ec21045d6e98b5a95398185 -q .sha`
+  (an error means it is no longer served).
+- **`dentaledge-bot-pat`** (the organisation-scoped token of the bot account) expires on 2026-10-23: the
+  operator decides whether it is renewed or left to expire. The box holds no GitHub credential (D6.2).
+- **The brain's lint** (PR #111) no longer flags superseded or retired items and honours `reviewed_at`.
+  Not done: the `brain-weekly-review` skill does not write `reviewed_at`; and a canon file cannot carry it,
+  because only `brain-promote.js` writes to `canon/`. A "confirm this canon entry is still true" action is to
+  be designed on its own (operator's choice, 2026-10-09). One canon warning stands ("Second Brain v1
+  complete", confirmed still true by the operator on 2026-10-09); the charter's follows on 2026-10-15.
+- Two brain candidates await the next weekly review: the post-P6 backlog and "where credentials live".
 
 ## What this round taught about running a review
 
@@ -104,7 +123,97 @@ next box change.
 ## Dates that matter
 
 - **2026-10-12:** the `run`/`ok` result of 2026-10-05 expires on the box.
-- **2026-10-16:** the `run`/`ok` result and the three live refusals of 2026-10-09 leave the box's results and
-  its 7-day journal. A box bundle collected after that needs a fresh chat audit (D10.8) and the three live
-  checks (D10.7) first.
+- **About 2026-10-15 15:00 UTC:** the three live refusals of 2026-10-09 leave the box's journal, unless the
+  35-day retention is applied first. The journal is deleted a day-long file at a time, so an entry leaves up
+  to a day before it is 7 days old (on 2026-10-09 at 13:35 UTC the oldest entry was 6 days 22 hours old; one
+  observation). Read the three counts before relying on them. A box bundle collected after they are gone
+  needs the three live checks (D10.7) first.
+- **2026-10-16 13:39 UTC:** the `run`/`ok` result of 2026-10-09 leaves the box (the broker deletes a result 7
+  days after writing it). A box bundle collected after that needs a fresh chat audit (D10.8) first.
 - **2027-10-06:** the OpenRouter key is due for replacement.
+
+## Appendix: blocks used on 2026-10-09 that are in no runbook yet
+
+Each ran on the box or the laptop that day with the output shown. The request and journal commands are
+BRING-UP's own; the guards around them were written in the session. `<pin>` is the ads package commit in
+`registry/projects.yaml`.
+
+**VPS, the client at a hidden prompt (once per login):**
+
+```bash
+read -r -s -p "client (hidden): " C; echo; echo "length ${#C}"
+```
+
+**VPS, live check a, the kill switch** (expected `a: status=refused reason=disabled | switch off again: yes`;
+on anything else it deletes the request and leaves the switch ON):
+
+```bash
+sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED
+R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "%s", "op": "run", "request_id": "%s"}' "$C" "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6
+L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_]+')
+if [ "$L" = "status=refused reason=disabled" ]; then sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED; echo "a: $L | switch off again: $(sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED && echo NO-STILL-ON || echo yes)"; else sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "a: UNEXPECTED [$L] | test request deleted | switch LEFT ON: stop"; fi
+```
+
+**VPS, live check b, quota** (places a request only when the broker's counter says exactly 1; expected
+`HELD_RUNS=1`, `b: status=refused reason=quota`):
+
+```bash
+H=$(sudo python3 -c 'import sys; sys.path.insert(0, "/opt/hermes-agent/bin"); import app_lib as A; print(A.Ledger("/var/lib/hermes/app-state/ads-audit/state/ledger.jsonl").count(A.utcnow()[:10], "run", sys.argv[1]))' "$C"); echo "HELD_RUNS=$H"
+if [ "$H" = "1" ]; then R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "%s", "op": "run", "request_id": "%s"}' "$C" "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "b: NO ANSWER | test request deleted: stop"; else echo "b: $L"; fi; else echo "b: SKIPPED, nothing was placed"; fi
+```
+
+**VPS, live check c, a malformed request** (expected `c: status=refused reason=bad_request`):
+
+```bash
+R=$(cat /proc/sys/kernel/random/uuid); printf '{}' | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "c: NO ANSWER | test request deleted: stop"; else echo "c: $L"; fi
+```
+
+**VPS, afterwards** (expected three lines starting `1`, then `switch present: no | requests waiting: 0`):
+
+```bash
+sudo journalctl -u hermes-app-broker@ads-audit --since -30d -o cat --no-pager | grep -oE 'status=refused reason=(disabled|quota|bad_request)' | sort | uniq -c
+echo "switch present: $(sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED && echo YES || echo no) | requests waiting: $(sudo ls /var/lib/hermes/spool/apps/ads-audit/requests | wc -l)"; unset C
+```
+
+**VPS, the journal's reach** (read-only):
+
+```bash
+sudo journalctl --disk-usage
+echo "oldest entry, whole log: $(sudo journalctl -q -o short-iso --no-hostname | grep -m1 '^[0-9]' | cut -c1-24)"
+echo "oldest entry, audit broker: $(sudo journalctl -q -u hermes-app-broker@ads-audit -o short-iso --no-hostname | grep -m1 '^[0-9]' | cut -c1-24)"
+echo "settings: $(grep -hE '^(SystemMaxUse|SystemKeepFree|MaxRetentionSec|MaxFileSec|Storage)' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null | tr '\n' ' ')"
+```
+
+**Lines to add to the trial-collection summary of the 2026-10-07 handoff** (double quotes only: the script
+sits inside single quotes):
+
+```python
+s=it.get("D1.7",{}).get("data",{})
+print("D1.7 accounts", s.get("accounts_checked"), "port_start", s.get("unprivileged_port_start"), "sshd", s.get("sshd"))
+for r in s.get("files",[]): print("D1.7 file users", r.get("users"), r.get("kind"), r.get("owner"), r.get("group"), r.get("mode"), "unparsed", r.get("unparsed_lines"), "keys", [(k.get("type"), k.get("options")) for k in r["keys"]] if isinstance(r.get("keys"),list) else r.get("keys"))
+t=it.get("D4.6",{}).get("data",{})
+for k in ("last_pass_collected_at","started_at","started_after_last_pass","files_newer_than_start","files_checked"): print("D4.6", k, t.get(k,"MISSING"))
+print("D10.7 journal_counts", it.get("D10.7",{}).get("data",{}).get("journal_counts"))
+```
+
+**LAPTOP (zsh), the laptop collection** (asks for the dormant pilot's customer id, hidden; expected
+`laptop_rc=0`, then `ads repo back on: main, stashes left: 0`):
+
+```bash
+lap() {
+  local A="$HOME/Projects/claude-google-ads" H="$HOME/Projects/claude_code/infra/hermes-agent" P=<pin> CUST
+  read -rs "CUST?customer id (digits only, hidden): "; echo
+  git -C "$A" stash push -q .claude/settings.json || { echo "STASH FAILED, nothing changed"; return 1; }
+  git -C "$A" checkout -q --detach "$P" || { echo "CHECKOUT FAILED"; git -C "$A" stash pop -q; return 1; }
+  (cd "$H" && python3 bin/collect-review-evidence-laptop.py --customer "$CUST" --package-project claude_google_ads --package-repo "$A" --package-commit "$P" > security-reviews/review-10/bundle-laptop.json); echo "laptop_rc=$?"
+  git -C "$A" checkout -q main; git -C "$A" stash pop -q
+  echo "ads repo back on: $(git -C "$A" rev-parse --abbrev-ref HEAD), stashes left: $(git -C "$A" stash list | wc -l | tr -d ' ')"
+}
+lap
+```
+
+**LAPTOP, a name on `main`, hidden** (prints file names only):
+
+```bash
+cd ~/Projects/claude_code && read -rs "N?client name (hidden): " && echo && git grep -il -- "$N" HEAD -- . | sed 's/^HEAD://'; echo "search done"
+```
