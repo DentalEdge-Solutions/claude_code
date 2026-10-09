@@ -123,9 +123,13 @@ next box change.
 ## Dates that matter
 
 - **2026-10-12:** the `run`/`ok` result of 2026-10-05 expires on the box.
-- **2026-10-16:** the `run`/`ok` result and the three live refusals of 2026-10-09 leave the box's results and
-  its 7-day journal. A box bundle collected after that needs a fresh chat audit (D10.8) and the three live
-  checks (D10.7) first.
+- **About 2026-10-15 15:00 UTC:** the three live refusals of 2026-10-09 leave the box's journal, unless the
+  35-day retention is applied first. The journal is deleted a day-long file at a time, so an entry leaves up
+  to a day before it is 7 days old (on 2026-10-09 at 13:35 UTC the oldest entry was 6 days 22 hours old; one
+  observation). Read the three counts before relying on them. A box bundle collected after they are gone
+  needs the three live checks (D10.7) first.
+- **2026-10-16 13:39 UTC:** the `run`/`ok` result of 2026-10-09 leaves the box (the broker deletes a result 7
+  days after writing it). A box bundle collected after that needs a fresh chat audit (D10.8) first.
 - **2027-10-06:** the OpenRouter key is due for replacement.
 
 ## Appendix: blocks used on 2026-10-09 that are in no runbook yet
