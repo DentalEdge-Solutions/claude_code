@@ -2,6 +2,7 @@
 // scripts/brain/brain-lint.js — quality + safety gate over brain content.
 // Quality (frontmatter schema, stale timestamps, orphan [[links]]) → warnings,
 // exit 0 (fail open). Sensitive content anywhere → SECURITY findings, exit 3.
+// Stale: not superseded or retired, and neither timestamp nor reviewed_at within 90 days.
 // Usage: node scripts/brain/brain-lint.js [--target <dir>]
 'use strict';
 const fs = require('fs');
@@ -13,6 +14,7 @@ const {
 const REQUIRED_FIELDS = ['type', 'title', 'description', 'tags', 'timestamp', 'sources'];
 const GOVERNED_DIRS = ['decisions', 'lessons', 'canon', 'synthesis'];
 const STALE_DAYS = 90;
+const CLOSED_STATUSES = ['superseded', 'retired'];
 
 const target = resolveTarget(process.argv);
 const warnings = [];
@@ -32,9 +34,14 @@ for (const dir of GOVERNED_DIRS) {
       for (const f of REQUIRED_FIELDS) {
         if (!(f in fields)) warnings.push(`${rel}: missing frontmatter field '${f}'`);
       }
-      const ts = Date.parse(fields.timestamp);
-      if (!Number.isNaN(ts) && (Date.now() - ts) / 86400000 > STALE_DAYS) {
-        warnings.push(`${rel}: stale (timestamp older than ${STALE_DAYS} days — review or supersede)`);
+      // A superseded or retired item has had its review. Otherwise the 90 days run from
+      // the later of timestamp and reviewed_at (an unreadable or future date counts as absent).
+      const bare = v => String(v || '').trim().replace(/^["']|["']$/g, '');
+      const dates = [fields.timestamp, fields.reviewed_at].map(d => Date.parse(bare(d)))
+        .filter(d => !Number.isNaN(d) && d <= Date.now() + 86400000);
+      const closed = CLOSED_STATUSES.includes(bare(fields.status));
+      if (!closed && dates.length && (Date.now() - Math.max(...dates)) / 86400000 > STALE_DAYS) {
+        warnings.push(`${rel}: stale (timestamp and reviewed_at older than ${STALE_DAYS} days — review or supersede)`);
       }
     }
     for (const m of text.matchAll(/\[\[([^\]]+)\]\]/g)) {

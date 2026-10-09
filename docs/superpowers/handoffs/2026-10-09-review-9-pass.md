@@ -92,6 +92,14 @@ next box change.
 8. **Without the trial collection and the hand-run probes** the second collection went straight through
    (the checkout had not changed since a clean collection the day before). Keep the trial after any pull.
 
+9. **Before a file that was never committed goes into a public commit, read it in full, and stop on any scan
+   match.** After the review, a brain pull request (#110) moved old notes into
+   `decisions/superseded/`, twelve of which had never been committed; they were moved on their titles. One held a client's short name. A scan before the
+   commit reported the match, but the command went on to commit and push. The name was replaced and the branch
+   force-pushed within minutes, before the merge; it never reached `main`. GitHub Support was asked on
+   2026-10-09 to expunge the replaced commit (`10f45a9`). A scan belongs in its own step whose result is read
+   before the commit, and it only finds the names it is given: the operator searched `main` for other names.
+
 ## Dates that matter
 
 - **2026-10-12:** the `run`/`ok` result of 2026-10-05 expires on the box.
