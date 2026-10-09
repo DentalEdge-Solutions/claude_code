@@ -36,3 +36,6 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-10-05 promoted decisions/candidates/vercel-eve-fs-architecture-adoption.md → decisions/active/vercel-eve-fs-architecture-adoption.md
 - 2026-10-05 promoted lessons/memories/2026-10-03-verify-sources-before-important-decisions.md → canon/2026-10-03-verify-sources-before-important-decisions.md
 - 2026-10-05 promoted decisions/candidates/2026-10-03-hermes-v0-21-5-upgrade-evaluated-batch-it-with-the-pr-96-pul.md → canon/2026-10-03-hermes-v0-21-5-upgrade-evaluated-batch-it-with-the-pr-96-pul.md
+- 2026-10-09 promoted decisions/candidates/2026-10-09-security-review-9-pass-37-37-v1-18-f58-opened-the-box-s-jour.md → decisions/active/2026-10-09-security-review-9-pass-37-37-v1-18-f58-opened-the-box-s-jour.md
+- 2026-10-09 promoted decisions/candidates/2026-09-29-d3-2-decided-hermes-runs-read-only-no-write-credential.md → canon/2026-09-29-d3-2-decided-hermes-runs-read-only-no-write-credential.md
+- 2026-10-09 promoted decisions/candidates/2026-08-18-credential-access-levels-are-measured-never-asserted.md → canon/2026-08-18-credential-access-levels-are-measured-never-asserted.md
