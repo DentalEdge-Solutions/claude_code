@@ -37,11 +37,12 @@ operator", "Rules that apply"); the corrections this round taught are below.
 ### 1. The next box change, then review #10 (one change, one review)
 
 Build work: plan in `docs/superpowers/plans/`, measure on the laptop first, implementer, independent review,
-ask before pushing. Nothing is planned or built yet; the operator has not yet agreed a scope. Candidates:
+ask before pushing. Nothing is planned or built yet. **The operator agreed this scope on 2026-10-09, all six
+items:**
 
 | Item | Source | Notes |
 |---|---|---|
-| **Keep at least 30 days of journal** | F58 | A journald setting on the box (a drop-in under `/etc/systemd/journald.conf.d/`, or the provider's file changed): a reviewed box change. Check first where the 7 days are set (`systemd-analyze cat-config systemd/journald.conf`) and what disk 30 days needs (85.4M held 7 days on 2026-10-09; the disk was 13% used). |
+| **Keep at least 30 days of journal** | F58 | A reviewed box change. Read on the box on 2026-10-09 (`systemd-analyze cat-config systemd/journald.conf`): `SystemMaxUse=1G`, `MaxRetentionSec=7day` and `MaxFileSec=1day` are all set in the main file `/etc/systemd/journald.conf`; `/etc/systemd/journald.conf.d/` does not exist; the only drop-in is the distribution's `/usr/lib/systemd/journald.conf.d/syslog.conf`. So a drop-in of our own under `/etc/systemd/journald.conf.d/` can raise the retention and leave the server's file untouched (a drop-in is read after the main file: measure that on the laptop or a stand-in before the box). Size: 7 days took 85.4M (read with `sudo`; without it `journalctl --disk-usage` shows only the user's own 28.8M), so 30 days is roughly 370M, under the 1G cap, with the disk 13% used. The cap can still trim before 30 days if the log grows, which is why the next item matters. |
 | **The collector reports the journal window it read** | F58; review #9, entry 1 | The oldest entry's time for each journal D2.3 and D10.7 read, so a short window is visible in the bundle and the checklist can judge it. |
 | **The collector counts the sshd `Match` lines** | review #9, entry 5 | Today the count is the operator's paste and is in no bundle. |
 | **`REPORT-TEMPLATE.md`: lines for D4.2's hashes and D4.5's `alert_log`** | review #9, entry 9 | The reviewer added both to the header by hand. |
