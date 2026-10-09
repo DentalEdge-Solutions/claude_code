@@ -19,7 +19,7 @@ CommonJS, zero-dependency, deterministic, offline.
 | `brain-verify.js` | `--target <dir>` | structural integrity; exit 1 on any violation |
 | `brain-capture.js` | `--message "…" [--type note\|decision\|lesson] [--title "…"] [--target <dir>]` | append-only to `sessions/daily/YYYY-MM-DD.md`; exit 3 on sensitive content |
 | `brain-compile.js` | `[--date YYYY-MM-DD \| --all] [--force] [--target <dir>]` | extracts `[decision]`/`[lesson]` entries → candidates; skips entries already promoted (same file name in active/canon), even with `--force`; **never** writes active/canon |
-| `brain-lint.js` | `[--target <dir>]` | frontmatter/staleness/orphan warnings (exit 0); sensitive content → exit 3 |
+| `brain-lint.js` | `[--target <dir>]` | frontmatter/staleness/orphan warnings (exit 0); sensitive content → exit 3. Stale = not `superseded` or `retired`, and neither `timestamp` nor `reviewed_at` within 90 days |
 | `brain-promote.js` | `<capsule-rel-file> --approve [--to active\|canon] [--force] [--target <dir>]` | the ONLY writer to `canon/` and `decisions/active/`; exit 2 without `--approve` |
 | `brain-search.js` | `--query "…" [--limit N] [--json] [--dir sub] [--target <dir>]` | authority × keyword × recency ranking; exports `search()` |
 | `brain-context-pack.js` | `--intent "…" [--per-bucket N] [--target <dir>]` | §7.3 context object; fail-open on missing profile |
