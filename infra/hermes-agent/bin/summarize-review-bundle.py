@@ -57,7 +57,8 @@ KEY_TYPES = frozenset(_KEY_BASES) | {b + "-cert-v01@openssh.com" for b in _KEY_B
 # ---- closed sets the collector does not declare (systemctl(1)'s own words, and the expected values) ----
 ACTIVE_STATES = frozenset({"active", "inactive", "failed", "activating", "deactivating", "reloading",
                            "maintenance", "refreshing"})
-ENABLED_STATES = frozenset({"enabled", "enabled-runtime", "linked", "linked-runtime", "masked", "masked-runtime",
+# systemctl(1), `is-enabled`: its table of printed states, and "not-found" for a unit that does not exist.
+ENABLED_STATES = frozenset({"not-found", "enabled", "enabled-runtime", "linked", "linked-runtime", "masked", "masked-runtime",
                             "static", "indirect", "disabled", "generated", "transient", "alias", "bad"})
 SETTING_VALUES = frozenset({"35day", "7day", "1day", "1G", "500", "persistent", "auto", "volatile", "none"})
 STORAGE_OK = (None, "auto", "persistent")
@@ -218,7 +219,7 @@ def key_files(v):
 
 # ------------------------------------------------------------------ what is printed for each item
 _SETTING = fixed({"number": num, "set_by": ("file", set_by), "value": member(SETTING_VALUES)})
-_BROKER_RUNNER = fixed({"broker": when, "runner": when})
+_BROKER_RUNNER = fixed({k: when for k in sorted(JOURNAL_LABELS - {"journal"})})
 _LEAKS = fixed({"credential_text_lines": num, "customer_id_lines": num, "pattern_hits": num, "known_secret_hits": num})
 
 SCHEMA = {
@@ -227,7 +228,7 @@ SCHEMA = {
              "sshd_settings": ("sshd", count), "files": key_files},
     "D2.3": {"journal": fixed({"pattern_hits": num, "known_secret_hits": num}), "scanned_characters": num,
              "undecodable_characters": num, "oldest_entry_read": when},
-    "D2.4": {"oldest_entry": fixed({"journal": when, "broker": when, "runner": when}), "reach_days": num,
+    "D2.4": {"oldest_entry": fixed({k: when for k in sorted(JOURNAL_LABELS)}), "reach_days": num,
              "settings": keyed(SETTING_NAMES, _SETTING), "config_files": None,
              "drop_in": fixed({"equals_repo": flag, "owner_is_root": ("owner", is_root),
                                "group_is_root": ("group", is_root), "mode": mode, "other_files": count}),
@@ -245,7 +246,7 @@ SCHEMA = {
              "installed_equal_repo": keyed(LISTENER_UNITS, flag), "drop_in_paths": None, "state_dir": None,
              "max_age_seconds": None, "last": None, "last_age_seconds": num, "alert_present": flag, "alert": None,
              "history_counts": keyed(HISTORY_STATUSES, num),
-             "alert_log": fixed({"alert": num, "alert-cleared": num, "?": num, "first_ts": when, "last_ts": when})},
+             "alert_log": fixed({k: when if k.endswith("_ts") else num for k in sorted(ALERT_LOG_KEYS)})},
     "D4.6": {"last_pass_collected_at": when, "started_at": keyed(START_KEYS, when),
              "started_after_last_pass": keyed(START_KEYS, flag),
              "files_newer_than_start": keyed(SERVICES, count), "files_checked": keyed(SERVICES, num)},
@@ -369,7 +370,7 @@ def _reach(bundle, items):
     ok = _int(reach) and reach >= 30
     note = ""
     if not ok:
-        note = (f" (reach is {reach} days: the evidence needs the date the retention was raised)"
+        note = (f" (reach is {num(reach)} days: the evidence needs the date the retention was raised)"
                 if _int(reach) else " (not read)")
     return ok, "the journal reaches 30 days" + note
 
@@ -402,7 +403,7 @@ def _proxy(bundle, items):
 def _code(bundle, items):
     d = _data(items, "D4.6")
     newer, checked = d.get("files_newer_than_start"), d.get("files_checked")
-    ok = (isinstance(newer, dict) and isinstance(checked, dict)
+    ok = (isinstance(newer, dict) and isinstance(checked, dict) and set(newer) <= set(SERVICES)
           and all(newer.get(s) == [] and _int(checked.get(s)) and checked[s] > 0 for s in SERVICES))
     return ok, "no service runs older code than the box holds"
 
@@ -431,6 +432,9 @@ def summary(bundle):
     ids = sorted((i for i in items if _ID_RE.fullmatch(i)), key=_id_key)
     status = {i: _status(items[i]) for i in ids}
     not_observed = [i for i in ids if status[i] != "observed"]
+    unnamed = sum(1 for i, it in items.items() if not _ID_RE.fullmatch(i) and _status(it) != "observed")
+    if unnamed:
+        not_observed.append(f"{unnamed} other")
     lines = [f"collected_at {when(bundle.get('collected_at'))}",
              f"items {len(items)} | not observed: {', '.join(not_observed) or 'none'}",
              f"other items: {len(items) - len(ids)}", ""]

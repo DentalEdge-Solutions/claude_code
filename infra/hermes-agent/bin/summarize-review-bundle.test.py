@@ -235,6 +235,12 @@ class TestSetsMatchTheCollector(unittest.TestCase):
 
     def test_the_sshd_setting_names_are_only_counted(self):
         self.assertEqual(len(CE.SSHD_KEY_SOURCES), 8)
+        b = bundle()
+        b["items"]["D1.7"]["data"]["sshd"] = {name: "acmecorp" for name in CE.SSHD_KEY_SOURCES}
+        text = run(json.dumps(b))[1]
+        self.assertIn("sshd_settings: 8", text)
+        for gone in (*CE.SSHD_KEY_SOURCES, "acmecorp"):
+            self.assertNotIn(gone, text)
 
     def test_key_types_are_exactly_what_the_collector_accepts(self):
         for t in SB.KEY_TYPES:
@@ -258,7 +264,7 @@ class TestSetsMatchTheCollector(unittest.TestCase):
         # systemctl is-active / is-enabled print systemd's own words (systemctl(1)): no collector constant.
         self.assertEqual(SB.ACTIVE_STATES, frozenset({"active", "inactive", "failed", "activating", "deactivating",
                                                       "reloading", "maintenance", "refreshing"}))
-        self.assertEqual(SB.ENABLED_STATES, frozenset({"enabled", "enabled-runtime", "linked", "linked-runtime", "masked",
+        self.assertEqual(SB.ENABLED_STATES, frozenset({"not-found", "enabled", "enabled-runtime", "linked", "linked-runtime", "masked",
                                                        "masked-runtime", "static", "indirect", "disabled", "generated",
                                                        "transient", "alias", "bad"}))
         self.assertEqual(SB.SETTING_VALUES, frozenset({"35day", "7day", "1day", "1G", "500", "persistent", "auto",
@@ -318,6 +324,15 @@ class TestSummary(unittest.TestCase):
         self.assertRegex(text, r"(?m)^D2\.3 .*\n(.*\n)*  \+1 other keys$")
         for gone in ("acmecorp", "10.0.0.5", "ops@acme.com", "client-acme.json"):
             self.assertNotIn(gone, text)
+
+    def test_what_prints_for_a_dict_is_built_from_the_pinned_sets(self):
+        b = bundle()
+        b["items"]["D4.5"]["data"]["alert_log"]["zz"] = 1
+        b["items"]["D2.4"]["data"]["oldest_entry"]["zz"] = "2026-10-01T00:00:00Z"
+        b["items"]["D10.7"]["data"]["oldest_entry_read"]["zz"] = "2026-10-01T00:00:00Z"
+        text = run(json.dumps(b))[1]
+        self.assertNotIn("zz", text)
+        self.assertEqual(text.count("+1 other keys"), 3)
 
     def test_a_status_outside_the_two_words_is_other(self):
         b = bundle()
@@ -386,6 +401,7 @@ class TestSummary(unittest.TestCase):
     def test_each_closing_line_turns_to_look(self):
         def closing(change):
             b = bundle()
+            del b["items"]["D5.3"]                      # so that every case starts from thirteen ok
             change(b["items"])
             return closing_of(b)
         cases = (
@@ -475,6 +491,7 @@ class TestSummary(unittest.TestCase):
     def test_lines_that_read_other_parts_of_the_bundle_turn_to_look(self):
         def closing(change):
             b = bundle()
+            del b["items"]["D5.3"]                      # so that every case starts from thirteen ok
             change(b)
             return closing_of(b)
         cases = (
@@ -531,6 +548,103 @@ class TestSummary(unittest.TestCase):
             b = bundle()
             b["items"] = items
             self.assertRegex(closing_of(b), r"(?m)^LOOK  every item observed")
+
+    def test_credentials_as_the_dict_the_collector_produces_is_withheld_and_look(self):
+        b = bundle()
+        del b["items"]["D5.3"]
+        b["credentials"] = {"could-not-check": "OSError: /var/lib/hermes/acmecorp.json: denied"}
+        text = run(json.dumps(b))[1]
+        self.assertRegex(text, r"(?m)^credentials: <withheld>$")
+        self.assertRegex(text, r"(?m)^LOOK  nothing in the bundle is could-not-check \(1 places\) \(credentials is not a list\)$")
+        for gone in ("/var/lib", "acmecorp", "denied", "OSError"):
+            self.assertNotIn(gone, text)
+        b["credentials"] = {"role": "x"}                 # not a list, nothing could-not-check in it
+        text = run(json.dumps(b))[1]
+        self.assertRegex(text, r"(?m)^LOOK  nothing in the bundle is could-not-check \(credentials is not a list\)$")
+        self.assertRegex(run(json.dumps(bundle()))[1], r"(?m)^credentials: 2$")
+
+    def test_the_thresholds_are_exactly_thirty_days(self):
+        def closing(change):
+            b = bundle()
+            del b["items"]["D5.3"]
+            change(b["items"]["D2.4"]["data"])
+            return closing_of(b)
+        ret = lambda n: (lambda d: d["settings"]["MaxRetentionSec"].update(number=n))
+        for n in (604800, 30 * 86400 - 1, 29 * 86400, 0):
+            self.assertRegex(closing(ret(n)), r"(?m)^LOOK  retention at least 30 days", n)
+        self.assertRegex(closing(ret(30 * 86400)), r"(?m)^ok    retention at least 30 days")
+        self.assertRegex(closing(ret(30 * 86400 + 1)), r"(?m)^ok    retention at least 30 days")
+        reach = lambda n: (lambda d: d.update(reach_days=n))
+        for n in (0, 12, 13, 29):
+            self.assertRegex(closing(reach(n)), r"(?m)^LOOK  the journal reaches 30 days", n)
+        for n in (30, 31):
+            self.assertRegex(closing(reach(n)), r"(?m)^ok    the journal reaches 30 days", n)
+        age = lambda n: (lambda d: d["usage"].update(on_disk_age_seconds=n))
+        self.assertRegex(closing(age(600)), r"(?m)^ok    the journal is being written")
+        self.assertRegex(closing(age(601)), r"(?m)^LOOK  the journal is being written")
+
+    def test_the_reach_note_goes_through_the_number_formatter(self):
+        def note(n):
+            b = bundle()
+            b["items"]["D2.4"]["data"]["reach_days"] = n
+            return closing_of(b)
+        text = note(-(10 ** 4000))
+        self.assertIn("LOOK  the journal reaches 30 days", text)
+        self.assertNotRegex(text, r"[0-9]{16}")
+        self.assertIn("reach is <withheld> days", text)
+        self.assertIn("reach is 12 days", note(12))
+        self.assertIn("reach is -3 days", note(-3))
+
+    def test_each_refusal_is_needed_with_a_count_above_zero(self):
+        for key in ("refused/disabled", "refused/quota", "refused/bad_request"):
+            for change in (lambda c: c.pop(key), lambda c: c.update({key: 0}), lambda c: c.update({key: -1})):
+                b = bundle()
+                del b["items"]["D5.3"]
+                change(b["items"]["D10.7"]["data"]["journal_counts"])
+                self.assertRegex(closing_of(b), rf"(?m)^LOOK  the three live refusals are in the journal \(missing: {key}\)", key)
+
+    def test_journal_counts_need_both_parts_in_the_label_sets(self):
+        b = bundle()
+        counts = b["items"]["D10.7"]["data"]["journal_counts"]
+        counts.update({"acmecorp/quota": 4, "refused/acmecorp": 5, "10.0.0.5/-": 6})
+        text = run(json.dumps(b))[1]
+        self.assertIn("refused/quota: 1, +3 other keys}", text)
+        for gone in ("acmecorp", "10.0.0.5"):
+            self.assertNotIn(gone, text)
+
+    def test_an_unobserved_item_whose_id_is_not_a_d_id_is_counted_in_header_and_closing_line(self):
+        b = bundle()
+        del b["items"]["D5.3"]
+        b["items"]["acmecorp"] = {"status": "could-not-check"}
+        text = run(json.dumps(b))[1]
+        self.assertRegex(text, r"(?m)^items 13 \| not observed: 1 other$")
+        self.assertIn("LOOK  every item observed (13 items) (not observed: 1 other)", text)
+        self.assertNotIn("acmecorp", text)
+        b["items"]["D5.3"] = {"status": "could-not-check"}
+        self.assertRegex(run(json.dumps(b))[1], r"(?m)^items 14 \| not observed: D5\.3, 1 other$")
+
+    def test_the_limited_mark_needs_exactly_the_limited_options(self):
+        b = bundle()
+        keys = b["items"]["D1.7"]["data"]["files"][0]["keys"]
+        keys[1]["options"] = ["a", "b", "c", "d", "e"]
+        keys[0]["options"] = ["restrict"]
+        text = run(json.dumps(b))[1]
+        self.assertIn("keys: 2 (ssh-ed25519 options=1, ssh-ed25519 options=5)", text)
+        self.assertNotIn("limited_to_the_forward", text)
+
+    def test_the_could_not_check_walk_matches_the_exact_string_only(self):
+        self.assertEqual(SB.cnc_places({"a": "could-not-check: x", "could-not-check x": 1, "b": "x could-not-check"}), 0)
+        b = bundle()
+        del b["items"]["D5.3"]
+        b["items"]["D1.1"]["data"]["note"] = "could-not-check: x"
+        self.assertRegex(closing_of(b), r"(?m)^ok    nothing in the bundle is could-not-check$")
+
+    def test_a_key_outside_the_service_set_makes_the_code_line_look(self):
+        for extra in ({"acmecorp": ["app_lib.py"]}, {"acmecorp": []}):
+            b = bundle()
+            del b["items"]["D5.3"]
+            b["items"]["D4.6"]["data"]["files_newer_than_start"].update(extra)
+            self.assertRegex(closing_of(b), r"(?m)^LOOK  no service runs older code")
 
     def test_not_a_bundle_is_one_line_and_exit_2(self):
         for text in ("", "collect-review-evidence: refused\n", "[]", '{"kind": "laptop", "items": {}}',
