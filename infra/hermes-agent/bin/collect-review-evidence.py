@@ -1065,8 +1065,25 @@ def d2_2(host, ctx):
     return {"histories": out}
 
 
+# The whole journal in one call: 4.6 MB of text in 2 s on the box at 7 days (2026-10-10), so about
+# 23 MB and 10 s at 35. Ten times that, times five for growth, is 100 s; never under 300.
+JOURNAL_SCAN_TIMEOUT = 300
+
+
 def d2_3(host, ctx):
-    return {"journal": _count_cred_text(_ok(host, ["journalctl", "-o", "cat", "--no-pager"]), ctx.get("secrets", []))}
+    """The whole journal, as far back as it reaches (D2.4 judges how far). The oldest entry is
+    read AFTER the search: entries only ever leave, so the search reached at least that far.
+    An oldest entry that cannot be read is could-not-check; the counts of the search stay."""
+    text = _ok(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
+    return {"journal": _count_cred_text(text, ctx.get("secrets", [])), "scanned_characters": len(text),
+            "oldest_entry_read": _oldest_entry_or_unknown(host)}
+
+
+def _oldest_entry_or_unknown(host, selector=()):
+    try:
+        return _oldest_entry(host, selector)
+    except (OSError, ValueError):                   # the runner itself failed, or its output is not text
+        return R.COULD_NOT_CHECK
 
 
 # D2.4: the journal service's settings. `systemd-analyze cat-config --tldr systemd/journald.conf`
@@ -2182,6 +2199,8 @@ def d10_7(host, ctx):
     which is where run-client-audit's own output lands (its unit sets no StandardOutput)."""
     broker = _journal(host, f"hermes-app-broker@{APP}")
     runner = _journal(host, f"hermes-app-runner@{APP}")
+    oldest = {label: _oldest_entry_or_unknown(host, ("-u", unit, "--since", "-30d"))
+              for label, unit in JOURNAL_UNITS.items()}
     counts, notes, other = {}, {}, 0
     for line in broker.splitlines():
         if not line.strip():
@@ -2202,7 +2221,7 @@ def d10_7(host, ctx):
     return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
             "broker_journal": _journal_leaks(broker, secrets, ctx["redactor"]),
             "runner_journal": _journal_leaks(runner, secrets, ctx["redactor"]),
-            "known_secrets_checked": len(secrets)}
+            "known_secrets_checked": len(secrets), "oldest_entry_read": oldest}
 
 
 def d10_8(host, ctx):

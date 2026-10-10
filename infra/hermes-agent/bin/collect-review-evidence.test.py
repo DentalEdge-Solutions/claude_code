@@ -2291,6 +2291,11 @@ class TestRunReal(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.d, True)
         self.marker = os.path.join(self.d, "cleaned")
 
+    def test_a_35_day_journal_passes_through_the_real_runner_whole(self):
+        n = 5 * 4630823
+        rc, out, err = CE._run_real([sys.executable, "-c", f"import sys; sys.stdout.write('x' * {n})"], timeout=120)
+        self.assertEqual((rc, len(out), err), (0, n, ""))
+
     # What gives the child's interpreter time to install its handler before SIGTERM arrives.
     TIMEOUT = 5
 
@@ -3284,6 +3289,85 @@ def _entry(epoch):
     return json.dumps({"__CURSOR": "s=abc", "__REALTIME_TIMESTAMP": str(epoch * 1000000 + 123456),
                        "__MONOTONIC_TIMESTAMP": "1", "_BOOT_ID": "0" * 32,
                        "__SEQNUM": "1", "__SEQNUM_ID": "0" * 32}) + "\n"
+
+
+class TestJournalReach(Base):
+    SECRET = "sk-or-v1-" + "0123456789abcdef" * 4
+    M2_BYTES = 4630823                                  # the whole journal on the box, 2026-10-10 (7 days)
+
+    def test_d2_3_reports_the_size_searched_and_the_oldest_entry_read_after_the_search(self):
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n" * 3, "")
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        host = self.host()
+        d = CE.d2_3(host, {"secrets": []})
+        self.assertEqual(d, {"journal": {"pattern_hits": 0, "known_secret_hits": 0},
+                             "scanned_characters": 27, "oldest_entry_read": "2025-10-09T08:53:20Z"})
+        self.assertEqual([c[1] for c in host.calls], ["-o", "-q"])      # the search first, then the oldest entry
+
+    def test_d2_3_an_oldest_entry_that_cannot_be_read_is_could_not_check_and_the_search_still_counts(self):
+        CN = R.COULD_NOT_CHECK
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n", "")
+        for answer, want in (((1, "", "Failed"), CN), ((127, "", "not found"), CN), ((0, "not json\n", ""), CN),
+                             ((0, _entry(1760000000) * 2, ""), CN), ((0, "", ""), None)):
+            with self.subTest(answer=answer):
+                self.outputs[_oldest_key()] = answer
+                d = CE.d2_3(self.host(), {"secrets": []})
+                self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (want, 9))
+        def run(argv, timeout=60):
+            if argv[1] == "-q":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return (0, "Started.\n", "")
+        d = CE.d2_3(CE.Host(self.root, run), {"secrets": []})
+        self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (CN, 9))
+
+    def test_d2_3_gives_the_journal_300_seconds(self):
+        seen = {}
+        def run(argv, timeout=60):
+            seen[tuple(argv[:2])] = timeout
+            return (0, "", "")
+        CE.d2_3(CE.Host(self.root, run), {"secrets": []})
+        self.assertEqual(seen[("journalctl", "-o")], 300)
+
+    def test_d2_3_finds_a_secret_and_a_pattern_at_the_far_end_of_35_days_of_journal(self):
+        line = "hermes-app-broker[ads-audit]: request=0 op=run client=x status=ok reason=-\n"
+        filler = line * (5 * self.M2_BYTES // len(line))
+        text = f"leak {self.SECRET}\n" + filler + f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n"
+        self.assertGreaterEqual(len(text), 5 * self.M2_BYTES - len(line))
+        self.outputs[("journalctl", "-o")] = (0, text, "")
+        t0 = time.monotonic()
+        d = CE.d2_3(self.host(), {"secrets": [self.SECRET]})
+        took = time.monotonic() - t0
+        print(f"\n[35-day-size search took {took:.2f} s]", file=sys.stderr)
+        self.assertEqual(d["journal"], {"pattern_hits": 1, "known_secret_hits": 1})
+        self.assertEqual(d["scanned_characters"], len(text))
+        self.assertLess(took, 60, "the search of a 35-day journal must end far inside the 300 s limit")
+
+    def test_d10_7_reports_the_oldest_entry_read_for_each_unit_inside_its_30_days(self):
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, "", "")
+        self.outputs[("journalctl", "-u")] = (0, "", "")
+        host = self.host()
+        d = CE.d10_7(host, CE.context(host, self.KEY))
+        self.assertEqual(d["oldest_entry_read"], {"broker": "2025-10-09T08:53:20Z", "runner": None})
+        oldest = [c for c in host.calls if c[1] == "-q"]
+        self.assertEqual(len(oldest), 2)
+        self.assertTrue(all(c[-2:] == ["--since", "-30d"] for c in oldest), oldest)
+
+    def test_d10_7_an_oldest_entry_that_cannot_be_read_is_could_not_check_for_that_unit_alone(self):
+        CN = R.COULD_NOT_CHECK
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (1, "", "Failed")
+        self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[("journalctl", "-u")] = (0, "", "")
+        host = self.host()
+        d = CE.d10_7(host, CE.context(host, self.KEY))
+        self.assertEqual(d["oldest_entry_read"], {"broker": CN, "runner": "2025-10-09T08:53:20Z"})
+        def run(argv, timeout=60):
+            if argv[1] == "-q":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return (0, "", "")
+        host = CE.Host(self.root, run)
+        d = CE.d10_7(host, CE.context(host, self.KEY))
+        self.assertEqual(d["oldest_entry_read"], {"broker": CN, "runner": CN})
 
 
 class TestJournalHelpers(Base):
