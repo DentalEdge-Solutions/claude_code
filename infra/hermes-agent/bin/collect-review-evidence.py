@@ -356,22 +356,50 @@ def _shown_option(opt):
     return opt if rx and rx.fullmatch(inner) else f"{name}={WITHHELD}"
 
 
+# What sshd's base64 reader skips inside a key body besides the space and tab that end it
+# (measured against sshd 9.6p1: docs/evaluations/2026-10-10-journal-retention-35-days.md).
+_KEY_BODY_SKIPPED = str.maketrans("", "", "\r\n\x0b\x0c")
+
+
+def _key_fields(text):
+    """(type, body bytes) when `text` starts with a key type and a key body, as sshd's key reader
+    takes them: two fields, each ended by a space or a tab. Whatever follows is the comment; it
+    is never looked at (a quote in it means nothing to sshd). None otherwise."""
+    parts = re.split(r"[ \t]+", text, maxsplit=2)
+    if len(parts) < 2 or not _KEY_TYPE_RE.fullmatch(parts[0]):
+        return None
+    body = parts[1].translate(_KEY_BODY_SKIPPED)
+    if not _KEY_BODY_RE.fullmatch(body):
+        return None
+    try:
+        return parts[0], base64.b64decode(body, validate=True)
+    except ValueError:
+        return None
+
+
 def _key_row(line):
     """One authorized_keys line as its key type, its options and a short fingerprint of the key
-    body, or None when it is not a key line. The body and the comment are never returned."""
-    tokens, unbalanced = _split_unquoted(line.strip(" \t"), " \t")      # sshd skips only spaces and tabs
-    if unbalanced:
-        return None
-    for i in (0, 1):                                    # the key type is first, or second after the options
-        if len(tokens) > i + 1 and _KEY_TYPE_RE.fullmatch(tokens[i]) and _KEY_BODY_RE.fullmatch(tokens[i + 1]):
-            try:
-                body = base64.b64decode(tokens[i + 1], validate=True)
-            except ValueError:
-                return None
-            options = _split_unquoted(tokens[0], ",")[0] if i == 1 else []
-            return {"type": tokens[i], "options": sorted(_shown_option(o) for o in options),
-                    "sha12": PK.sha256_bytes(body)[:12]}
-    return None
+    body, or None when it is not a key line. Read as sshd reads it: a key first, or the options
+    (up to the first space or tab outside double quotes) and then a key. The body and the comment
+    are never returned."""
+    text = line.strip(" \t")
+    got, options = _key_fields(text), []
+    if got is None:
+        i, quoted = 0, False
+        while i < len(text) and (quoted or text[i] not in " \t"):
+            if text[i] == "\\" and text[i + 1:i + 2] == '"':
+                i += 1                                  # sshd skips both characters
+            elif text[i] == '"':
+                quoted = not quoted
+            i += 1
+        if quoted:                                      # the options never end: sshd finds no key
+            return None
+        got = _key_fields(text[i:].lstrip(" \t"))
+        if got is None:
+            return None
+        options = _split_unquoted(text[:i], ",")[0]
+    return {"type": got[0], "options": sorted(_shown_option(o) for o in options),
+            "sha12": PK.sha256_bytes(got[1])[:12]}
 
 
 def _authorized_keys_paths(pattern, user, home):
@@ -435,7 +463,7 @@ def _authorized_keys_row(host, p, users):
         return {**row, **unread}
     keys, unparsed = [], 0
     for line in lines:
-        if not line.strip(" \t") or line.lstrip(" \t").startswith("#"):
+        if not line.strip(" \t\r") or line.lstrip(" \t").startswith("#"):
             continue
         key = _key_row(line)
         if key is None:

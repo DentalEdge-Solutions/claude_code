@@ -2978,6 +2978,36 @@ class TestD17AcceptedKeys(Base):
             row = CE.d1_7(self.host(), {})["files"][0]
         self.assertEqual((row["keys"], row["unparsed_lines"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
 
+    def test_a_quote_in_a_keys_comment_does_not_hide_the_key(self):
+        self._keys("/home/hermesops", f'ssh-ed25519 {_keybody(1)} com"ment\n'
+                                      f'no-pty ssh-ed25519 {_keybody(2)} com"ment\n')
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual(([k["options"] for k in row["keys"]], row["unparsed_lines"]), ([[], ["no-pty"]], 0))
+        self.assertNotIn("ment", json.dumps(row))
+
+    def test_a_carriage_return_after_the_key_body_does_not_hide_the_key(self):
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\r\n{TUNNEL_OPTS} ssh-ed25519 {_keybody(2)}\r\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((len(row["keys"]), row["unparsed_lines"]), (2, 0))
+        self.assertEqual(row["keys"][0]["sha12"], hashlib.sha256(base64.b64decode(_keybody(1))).hexdigest()[:12])
+
+    def test_an_unclosed_quote_in_the_options_is_still_not_a_key(self):
+        self._keys("/home/hermesops", f'command="unbalanced ssh-ed25519 {_keybody(1)}\n')
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["keys"], row["unparsed_lines"]), ([], 1))
+
+    def test_the_rows_of_ordinary_lines_are_what_they_were(self):
+        self._two()
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual([k["options"] for k in row["keys"]],
+                         [[], ['command="/bin/false"', 'permitlisten="127.0.0.1:1"',
+                               'permitopen="127.0.0.1:9119"', "port-forwarding", "restrict"]])
+
+    def test_an_empty_line_in_a_file_with_cr_lf_endings_is_blank(self):
+        self._keys("/home/hermesops", f"# two keys\r\n\r\nssh-ed25519 {_keybody(1)} one\r\n   \r\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((len(row["keys"]), row["unparsed_lines"]), (1, 0))
+
     def test_a_path_that_cannot_be_examined_is_reported_not_skipped(self):
         p = self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
         real_lstat, real_open = os.lstat, os.open
