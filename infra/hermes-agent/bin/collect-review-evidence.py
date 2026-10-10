@@ -152,9 +152,9 @@ _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=.*? ; "))
 
 
-def _run_real(argv, timeout=60):
+def _run_real(argv, timeout=60, errors="strict"):
     try:
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors=errors)
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: not found"
     with p:                                     # on every path: pipes closed (unread), child reaped
@@ -177,13 +177,19 @@ def _run_real(argv, timeout=60):
 class Host:
     """Everything a probe touches, injectable for tests: the file root and the runner."""
     def __init__(self, root="/", run=None):
-        self.root, self._run = root, run or _run_real
+        self.root, self._run, self._real = root, run or _run_real, run is None
 
     def path(self, p):
         return os.path.join(self.root, p.lstrip("/"))
 
     def run(self, argv, timeout=60):
         return self._run(argv, timeout)
+
+    def run_lossy(self, argv, timeout=60):
+        """The same single command and limit as run(), for a read whose bytes need not be valid
+        text (the journal): a byte that is not UTF-8 becomes U+FFFD instead of ending the read. A
+        host built with a fake runner calls it unchanged."""
+        return _run_real(argv, timeout, errors="replace") if self._real else self._run(argv, timeout)
 
 
 class CouldNotCheck(Exception):
@@ -1074,10 +1080,13 @@ def _journal_read(host, argv, timeout=60):
     """The text of a journal read, or CouldNotCheck. A read that ends with anything on stderr is
     not a whole read even at rc 0 (record R14: a truncated archived file is skipped with a
     warning and rc 0; without rights journalctl prints a notice): what it covered is unknown.
-    The reason is in fixed words, never the stderr text (it can hold paths)."""
-    rc, out, err = host.run(argv, timeout)
+    The reason is in fixed words, never the stderr text (it can hold a path with the machine id).
+    The text is decoded with replacement: a replaced byte cannot turn text that is not a credential
+    into one, and a credential is ASCII, so it is still found beside a replaced byte; what could be
+    lost is a credential WITH an invalid byte inside it, which is not that credential."""
+    rc, out, err = host.run_lossy(argv, timeout)
     if rc != 0:
-        raise CouldNotCheck(f"{argv[0]} exited {rc}: {(err or out).strip()[:200]}")
+        raise CouldNotCheck(f"{argv[0]} exited {rc}")
     if err.strip():
         raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
     return out
@@ -1089,7 +1098,7 @@ def d2_3(host, ctx):
     An oldest entry that cannot be read is could-not-check; the counts of the search stay."""
     text = _journal_read(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
     return {"journal": _count_cred_text(text, ctx.get("secrets", [])), "scanned_characters": len(text),
-            "oldest_entry_read": _oldest_entry_or_unknown(host)}
+            "undecodable_characters": text.count("\ufffd"), "oldest_entry_read": _oldest_entry_or_unknown(host)}
 
 
 def _oldest_entry_or_unknown(host, selector=()):

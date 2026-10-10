@@ -3301,7 +3301,7 @@ class TestJournalReach(Base):
         host = self.host()
         d = CE.d2_3(host, {"secrets": []})
         self.assertEqual(d, {"journal": {"pattern_hits": 0, "known_secret_hits": 0},
-                             "scanned_characters": 27, "oldest_entry_read": "2025-10-09T08:53:20Z"})
+                             "scanned_characters": 27, "undecodable_characters": 0, "oldest_entry_read": "2025-10-09T08:53:20Z"})
         self.assertEqual([c[1] for c in host.calls], ["-o", "-q"])      # the search first, then the oldest entry
 
     def test_d2_3_an_oldest_entry_that_cannot_be_read_is_could_not_check_and_the_search_still_counts(self):
@@ -3340,6 +3340,56 @@ class TestJournalReach(Base):
                 self.assertEqual(it["status"], R.COULD_NOT_CHECK)
                 self.assertNotIn("truncated", it["reason"])               # the warning's text is not carried
                 self.assertNotIn("/var/log/journal", it["reason"])
+
+    BAD_BYTE_CHILD = ["-c", "import sys; sys.stdout.buffer.write(b'ok\\n\\xff GOOGLE_ADS_REFRESH_TOKEN=" + TOKEN + "\\n')"]
+
+    def test_the_strict_runner_raises_on_a_byte_that_is_not_text_and_the_lossy_one_replaces_it(self):
+        argv = [sys.executable, *self.BAD_BYTE_CHILD]
+        with self.assertRaises(UnicodeDecodeError):
+            CE._run_real(argv)
+        rc, out, err = CE._run_real(argv, errors="replace")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(out, "ok\n\ufffd GOOGLE_ADS_REFRESH_TOKEN=" + TOKEN + "\n")
+
+    def test_d2_3_searches_past_a_byte_that_is_not_text_and_says_how_many_were_replaced(self):
+        argv = [sys.executable, *self.BAD_BYTE_CHILD]
+        # the real runner is reached through Host(root) with no fake: patch only the program that is started
+        real = CE._run_real
+        with mock.patch.object(CE, "_run_real", lambda a, timeout=60, errors="strict": real(argv, timeout, errors=errors)):
+            host = CE.Host(self.root)
+            d = CE.d2_3(host, {"secrets": []})
+        self.assertEqual(d["journal"]["pattern_hits"], 1)
+        self.assertEqual(d["undecodable_characters"], 1)
+
+    def test_a_known_secret_beside_a_replaced_byte_is_still_counted(self):
+        self.outputs[("journalctl", "-o")] = (0, "x \ufffd " + self.SECRET + "\n", "")
+        self.outputs[_oldest_key()] = (0, "", "")
+        d = CE.d2_3(self.host(), {"secrets": [self.SECRET]})
+        self.assertEqual((d["journal"]["known_secret_hits"], d["undecodable_characters"]), (1, 1))
+
+    def test_a_fake_run_host_works_with_run_lossy_unchanged(self):
+        seen = []
+        def run(argv, timeout=60):
+            seen.append((argv, timeout))
+            return (0, "t", "")
+        self.assertEqual(CE.Host(self.root, run).run_lossy(["x"], 7), (0, "t", ""))
+        self.assertEqual(seen, [(["x"], 7)])
+
+    def test_the_reason_of_a_failed_journal_read_holds_no_journalctl_words_nor_path_nor_machine_id(self):
+        mid = "0123456789abcdef0123456789abcdef"
+        said = f"Journal file /var/log/journal/{mid}/system@x.journal is truncated, ignoring file.\n"
+        for answer in ((0, "x\n", said), (1, "", said), (1, said, "")):
+            with self.subTest(answer=answer[0]):
+                self.outputs[("journalctl", "-o")] = answer
+                it = CE.collect(self.host(), self.KEY)["items"]["D2.3"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                for bad in (mid, "/var/log/journal", "truncated", "system@x"):
+                    self.assertNotIn(bad, it["reason"])
+                self.outputs[("journalctl", "-u")] = answer
+                it = CE.collect(self.host(), self.KEY)["items"]["D10.7"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                for bad in (mid, "/var/log/journal", "truncated"):
+                    self.assertNotIn(bad, it["reason"])
 
     def test_d2_3_empty_stderr_at_rc_0_reads_as_before(self):
         self.outputs[("journalctl", "-o")] = (0, "Started.\n", "  \n")
