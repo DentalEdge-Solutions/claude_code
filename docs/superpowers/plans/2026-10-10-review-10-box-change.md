@@ -10,11 +10,18 @@
 > `infra/hermes-agent/deploy/BRING-UP.md` once Task 11 has rehearsed them. (The review #9 plan's drafts were
 > replaced after rehearsal; do not paste from a plan.)
 >
-> **The code in Tasks 4 to 9 was tried before this plan was shown** (2026-10-10, on a scratch copy of `bin/`,
-> on the laptop): the collector's suite ran 304 tests with every new test passing and one older test needing
-> the change Task 4 names; the summary tool's 9 tests pass. That is a check of the plan, not the build: the
-> implementer still writes each test first and watches it fail. What the laptop cannot show (systemd's real
-> output) is measured in Tasks 0, 1, 2 and 7.
+> **The plan's code and wording were tried before the build** (2026-10-10, on a scratch copy of the tracked
+> `infra/hermes-agent/` tree, on the laptop, each text taken from this file by a script). With the code of
+> Tasks 3 to 9, the checklist wording of Tasks 4, 7 and 8 and the one-line test change Task 4 names: all 56
+> suites of `run-bin-tests.sh` pass (the collector's 304 tests, the checklist suite with its two new tests,
+> the summary tool's 9), `provision.test.py` passes, and `units.test.py` passes its new test (its two
+> failures there are the scratch copy having no git). The summary tool was run on review #9's real box
+> bundle and its output examined by a script that prints counts only: 30 items, all observed; no path, no
+> hexadecimal run, no address, no word the repository does not already contain; the closing list as Task 9
+> expects. That is a check of the plan, not the build: the implementer still writes each test first and
+> watches it fail. Not run on the scratch copy: `check-checklist-version.py` and `node
+> scripts/run-all-tests.js` (both need the repository). What the laptop cannot show (systemd's real output)
+> is measured in Tasks 0, 1, 2 and 7.
 
 **Goal:** Close finding F58 (the box kept 7 days of journal while the checklist assumed 30) and review #9's
 follow-ups in one box change, so that security review #10 can judge it on checklist v1.19.
@@ -96,15 +103,16 @@ settings printout.
 
 ```bash
 sudo sh -c 'M=$(cat /etc/machine-id); for d in /var/log/journal/*/; do n=$(basename "$d"); echo "journal dir: own=$([ "$n" = "$M" ] && echo yes || echo no) files=$(ls "$d" | wc -l) dates=$(ls -l --time-style=+%F "$d" | awk "NR>1{print \$6}" | sort | sed -n "1p;\$p" | tr "\n" " ")"; done
-echo "oldest, whole: $(journalctl -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1 | grep -oE "\"__REALTIME_TIMESTAMP\":\"[0-9]+\"")"
-echo "oldest, broker 30d: $(journalctl -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1 -u hermes-app-broker@ads-audit --since -30d | grep -oE "\"__REALTIME_TIMESTAMP\":\"[0-9]+\"")"
+echo "oldest, whole: $(journalctl -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1 | grep -oE "__REALTIME_TIMESTAMP\"[ ]*:[ ]*\"[0-9]+")"
+echo "oldest, broker 30d: $(journalctl -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1 -u hermes-app-broker@ads-audit --since -30d | grep -oE "__REALTIME_TIMESTAMP\"[ ]*:[ ]*\"[0-9]+")"
 echo "oldest, no such unit: [$(journalctl -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1 -u hermes-no-such-unit; echo rc=$?)]"
 systemd-analyze cat-config systemd/journald.conf | grep -nE "^# /|^\[|^[A-Za-z]+[[:space:]]*="
 echo "journal service started: $(systemctl show systemd-journald -p ActiveEnterTimestamp --value)"'; date -u
 ```
 
 Expected: one or two `journal dir:` lines (one `own=yes` with about 21 files; possibly one `own=no` with one
-file dated `2026-09-05`); two lines each holding `"__REALTIME_TIMESTAMP":"<16 digits>"`; `[rc=0]` or
+file dated `2026-09-05`); two lines each holding `__REALTIME_TIMESTAMP":"<16 digits>` (microseconds since 1970; the pattern also
+accepts blanks around the colon, as older `journalctl` releases print them); `[rc=0]` or
 `[rc=1]` with nothing before `rc`; the settings printout's file headers (`# /etc/systemd/journald.conf`,
 `# /usr/lib/systemd/journald.conf.d/syslog.conf`), `[Journal]` and the `Name=value` lines; a start time
 ending `UTC`; the date.
@@ -116,6 +124,11 @@ ending `UTC`; the date.
     credential on the box, and deleting it is one more change to explain), or delete it in Task 13.
   - No `own=no` line, and `own=yes` shows a date of `2026-09-05`: the old file is in the machine's own
     directory. Record it; D2.4's `usage.files` then counts it, which is correct (the service counts it too).
+  - Convert the `oldest, whole` number to a UTC time (`date -u -r $((N/1000000))` on the laptop). It is
+    expected 6 to 8 days before the block's own `date -u` line (7 days kept, a day's file at a time). **If
+    it is more than 9 days before, stop** and report it: the journal then holds an old stretch and a recent one with a gap
+    between them, `reach_days` would read 30 or more while the leak checks cover far less, and D2.4's rule
+    (4) must be settled with the operator before Task 7 writes it.
   - Either `oldest` line empty, or an error: **stop.** Task 6's command does not work on the box as the
     manual says. Report it to the operator before Task 6; do not build around it.
   - A header line that is not `# ` followed by a path under `/etc/systemd`, `/run/systemd`,
@@ -134,6 +147,9 @@ ending `UTC`; the date.
   measured answers R1 to R6, which Tasks 6, 7 and 11 quote.
 
 `$SCRATCH` is the session's scratchpad directory, `$REPO` the repository root.
+
+**Order:** Steps 1, 2 and 4 need nothing from the build. Steps 3 and 5 install the settings file, so **do
+Task 3 first** (it creates that file and its one test, nothing else) and then Steps 3 and 5.
 
 - [ ] **Step 1: Build and start a container that runs systemd and its journal service.**
 
@@ -163,9 +179,8 @@ docker exec jr systemd-analyze cat-config systemd/journald.conf
 Record the whole output. Expected first line `# /etc/systemd/journald.conf`, then the file; any further file
 after an empty line and its own `# /path` line.
 
-- [ ] **Step 3: R3, R4 — install our file, read the settings, restart, compare.** (Run after Task 3 has
-  created the file; until then use `printf '[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n'` in its
-  place and say so in the record.)
+- [ ] **Step 3: R3, R4 — install our file, read the settings, restart, compare.** (After Task 3: the file
+  must exist in the repository.)
 
 ```bash
 docker exec jr sh -c '
@@ -253,12 +268,12 @@ reading `sshd`'s source during the review #9 build; it was never measured. Measu
 - Produces: for each of four lines, `accepted` or `refused`. Task 5 repairs only an `accepted` case.
 
 - [ ] **Step 1: A throwaway server with the box's OpenSSH release** (`OpenSSH_9.6p1`, as `ubuntu:24.04`
-  ships; confirmed for the box on 2026-10-08).
+  ships; confirmed for the box on 2026-10-08). The wait loop ends when the account exists: it is made last.
 
 ```bash
 cd "$SCRATCH" && mkdir -p sshd-cases && cd sshd-cases && for k in a b c d; do ssh-keygen -q -t ed25519 -N '' -C '' -f k$k; done
 docker run -d --name sshd-cases -p 127.0.0.1:2222:22 ubuntu:24.04 sh -c 'apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null 2>&1 && mkdir -p /run/sshd /home/u/.ssh && useradd -d /home/u -s /bin/bash u && sleep infinity'
-until docker exec sshd-cases test -x /usr/sbin/sshd; do sleep 3; done
+until docker exec sshd-cases id u >/dev/null 2>&1; do sleep 3; done
 B() { cut -d' ' -f2 "k$1.pub"; }
 { printf 'ssh-ed25519 %s com"ment\n' "$(B a)"; printf 'no-pty ssh-ed25519 %s com"ment\n' "$(B b)"; printf 'ssh-ed25519 %s\r\n' "$(B c)"; printf 'ssh-ed25519 %s plain\n' "$(B d)"; } > authorized_keys
 docker cp authorized_keys sshd-cases:/home/u/.ssh/authorized_keys
@@ -1947,8 +1962,8 @@ time: step 11 is run again before review #10.
 - [ ] **Step 1 (VPS):** `cd /opt/projects/claude_code && sudo git pull --ff-only && git log --oneline -1`.
   Expected: the merge commit of this change.
 - [ ] **Step 2 (VPS, ALONE, with a throwaway key):** the trial collection through the summary tool
-  (BRING-UP "A security review", step 2). Expected: 31 items; `LOOK` for the D2.4 lines (the file is not
-  installed yet) and `ok` for the rest; D4.6 `files_newer_than_start` empty for every service (the changed
+  (BRING-UP "A security review", step 2). Expected: 31 items; `LOOK` for two lines, the retention and the
+  reach (the file is not installed yet), and `ok` for the rest; D4.6 `files_newer_than_start` empty for every service (the changed
   files are the collector, the summary tool and the settings file, which no running service loads). If a
   service is named: restart it, as in the review #9 rollout, and say so in the evidence.
 - [ ] **Step 3 (VPS):** "The journal's retention", VPS 1, then VPS 2, then VPS 3, each on its own, each
