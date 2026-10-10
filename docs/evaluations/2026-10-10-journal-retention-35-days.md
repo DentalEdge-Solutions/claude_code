@@ -171,6 +171,39 @@ treated shows `MaxRetentionSec=3min` from the main file and then `MaxRetentionSe
 3 minutes applied), the treated container kept it (our file's 35 days overrode it), so the experiment is valid.
 Both containers were removed afterwards.
 
+## 3b · The key reader's two cases
+
+Measured 2026-10-10 on the laptop (Docker 29, linux/aarch64 container, `ubuntu:24.04`), against a throwaway `sshd` on
+127.0.0.1 port 2222 with four throwaway ed25519 keys (no key body is kept here). Server version line:
+`OpenSSH_9.6p1 Ubuntu-3ubuntu13.19` (the box's release, 9.6p1).
+
+The file had four lines: `a` a key first, its comment holding one double quote; `b` an option (`no-pty`) first, the
+same comment; `c` a key with no comment and a carriage return before the line break; `d` a plain line with a
+comment (control); and `x` a key that is not in the file (control).
+
+Result lines, exactly as printed:
+
+```
+a: accepted
+b: accepted
+c: accepted
+d: accepted
+x: refused
+```
+
+Both controls held (`d` accepted, `x` refused), so the measurement is valid.
+
+- The server really received line `c` ending in carriage return plus line feed: the last three bytes of that line, read
+  inside the container with `od -c`, are `n \r \n`; the file has 4 lines, with 3, 4, 2 and 3 whitespace-separated
+  fields (so `c` has only the type and the key).
+- Set-up changes: none that the result depends on. The account `u` was made with a locked password (`!`); a check with
+  it locked and then set to `*` gave `d` accepted both ways. A first run of the loop printed `refused` for all five
+  lines; that was the laptop shell's handling of an options variable (it passed the options as one word), not the
+  server; with the options written out as in the brief, the result above came. The four test lines were never changed.
+- What it means for the reader: `sshd` 9.6p1 accepts all of the quote-in-comment case, the option-first case with that
+  comment, and the carriage-return case, so the D1.7 reader is counting as unreadable three lines (cases a, b and c)
+  that the server accepts. The next task decides what to do with it.
+
 ## 4 · What is not measured
 
 - 35 real days of journal: the rehearsal shows the setting in force and the deletion mechanism at 3 minutes, not a
