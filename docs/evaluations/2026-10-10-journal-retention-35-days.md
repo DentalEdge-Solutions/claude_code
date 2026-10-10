@@ -455,6 +455,272 @@ it was dropped. That is why the collector recognises the standard glob only in a
 one pair of quotes, after the bare keyword, absolute or `sshd_config.d/*.conf`) and counts every other spelling as
 reaching elsewhere.
 
+### How the running sshd was started
+
+Measured 2026-10-10 in a throwaway `ubuntu:24.04` container with `openssh-server` and `procps` (`OpenSSH_9.6p1`),
+account `u` and a throwaway ed25519 key made by the script; the container was removed afterwards (`--rm`). Command as run
+(the script is under the scratchpad of this session; its text follows):
+
+```
+docker run --rm --name t5b -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure4.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+```
+
+```bash
+#!/bin/bash
+# runs inside ubuntu:24.04
+apt-get update -qq && apt-get install -y -qq openssh-server procps >/dev/null 2>&1
+mkdir -p /run/sshd
+ssh -V 2>&1 | cut -d, -f1
+useradd -m -s /bin/bash u; passwd -u u >/dev/null 2>&1; usermod -p '*' u
+ssh-keygen -q -t ed25519 -N '' -f /root/k
+mkdir -p /home/u/.ssh; cp /root/k.pub /home/u/.ssh/authorized_keys; chown -R u:u /home/u/.ssh; chmod 700 /home/u/.ssh; chmod 600 /home/u/.ssh/authorized_keys
+cp /etc/ssh/sshd_config /tmp/alt.conf
+SSH() { ssh -p 22 -i /root/k -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR u@127.0.0.1 "$@"; }
+show() { # label
+  echo "--- $1"
+  echo "ps -C sshd -o args=:"
+  ps -C sshd -o args= | cat -v | sed 's/^/    /'
+  echo "/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:"
+  for p in $(pgrep -x sshd); do printf '    <cut> %s\n' "$(tr '\0' '|' < /proc/$p/cmdline | cat -v)"; done
+  echo "(count of pgrep -x sshd: $(pgrep -x sshd | wc -l))"
+}
+stop() { pkill -x sshd; sleep 1; }
+echo "=== state 5 (before any start): no sshd"
+show "no sshd"; echo "ps rc: $(ps -C sshd -o args= >/dev/null; echo $?)"
+echo "=== state 1: /usr/sbin/sshd"
+/usr/sbin/sshd; sleep 1; show "plain"; stop
+echo "=== state 2: /usr/sbin/sshd -D &"
+/usr/sbin/sshd -D & sleep 1; show "-D"; stop
+echo "=== state 3a: -f /tmp/alt.conf -o X11Forwarding=yes"
+/usr/sbin/sshd -f /tmp/alt.conf -o X11Forwarding=yes; sleep 1; show "-f -o split"; stop
+echo "=== state 3b: -f/tmp/alt.conf -oX11Forwarding=yes"
+/usr/sbin/sshd -f/tmp/alt.conf -oX11Forwarding=yes; sleep 1; show "-f -o joined"; stop
+echo "=== state 3c: -D -f /tmp/alt.conf -o X11Forwarding=yes -o Port=22 &"
+/usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes -o Port=22 & sleep 1; show "-D with options"; stop
+echo "=== state 4: -D & with one login session (sleep 20) and one half-open connection"
+/usr/sbin/sshd -D & sleep 1
+SSH sleep 20 & sleep 3
+exec 3<>/dev/tcp/127.0.0.1/22; sleep 1
+show "listener + session children + pre-auth connection"
+exec 3>&-; wait %2 2>/dev/null; stop
+echo "=== state 4b: same, listener started with -f and -o"
+/usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes & sleep 1
+SSH sleep 20 & sleep 3
+show "listener with options + session children"
+stop
+echo "=== state 4c: account named -f / -o (hand-made passwd line), session open"
+printf -- '-f:x:1500:1500::/home/u:/bin/bash\n-o:x:1501:1501::/home/u:/bin/bash\n' >> /etc/passwd
+printf -- '-f:x:1500:\n-o:x:1501:\n' >> /etc/group
+/usr/sbin/sshd -D & sleep 1
+for n in -f -o; do ssh -p 22 -i /root/k -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -- "$n@127.0.0.1" true; echo "login as $n rc=$?"; done
+ssh -p 22 -i /root/k -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -l -f 127.0.0.1 sleep 20 &
+sleep 3; show "session of an account named -f"
+stop
+```
+
+Output, unedited except that no process id appears in it (the script prints `<cut>` for it); in the `/proc` lines a NUL
+byte is shown as `|`. The last block (an account named `-f`) did not reach the daemon: the `ssh` client refused the
+user name before connecting (`remote username contains invalid characters`), so the listener there is the only process:
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+=== state 5 (before any start): no sshd
+--- no sshd
+ps -C sshd -o args=:
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+(count of pgrep -x sshd: 0)
+ps rc: 1
+=== state 1: /usr/sbin/sshd
+--- plain
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd [listener] 0 of 10-100 startups
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd [listener] 0 of 10-100 startups|
+(count of pgrep -x sshd: 1)
+=== state 2: /usr/sbin/sshd -D &
+--- -D
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups|
+(count of pgrep -x sshd: 1)
+=== state 3a: -f /tmp/alt.conf -o X11Forwarding=yes
+--- -f -o split
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -f /tmp/alt.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd -f /tmp/alt.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups|
+(count of pgrep -x sshd: 1)
+=== state 3b: -f/tmp/alt.conf -oX11Forwarding=yes
+--- -f -o joined
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -f/tmp/alt.conf -oX11Forwarding=yes [listener] 0 of 10-100 startups
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd -f/tmp/alt.conf -oX11Forwarding=yes [listener] 0 of 10-100 startups|
+(count of pgrep -x sshd: 1)
+=== state 3c: -D -f /tmp/alt.conf -o X11Forwarding=yes -o Port=22 &
+--- -D with options
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes -o Port=22 [listener] 0 of 10-100 startups
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes -o Port=22 [listener] 0 of 10-100 startups|
+(count of pgrep -x sshd: 1)
+=== state 4: -D & with one login session (sleep 20) and one half-open connection
+--- listener + session children + pre-auth connection
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D [listener] 1 of 10-100 startups
+    sshd: u [priv]
+    sshd: u@notty
+    sshd: [accepted]
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd -D [listener] 1 of 10-100 startups|
+    <cut> sshd: u [priv]|||||||
+    <cut> sshd: u@notty||||||||
+    <cut> sshd: [accepted]|||||
+(count of pgrep -x sshd: 4)
+Connection to 127.0.0.1 closed by remote host.
+=== state 4b: same, listener started with -f and -o
+--- listener with options + session children
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups
+    sshd: u [priv]
+    sshd: u@notty
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups|
+    <cut> sshd: u [priv]|||||||||||||||||||||||||||||||||||||||||||||
+    <cut> sshd: u@notty||||||||||||||||||||||||||||||||||||||||||||||
+(count of pgrep -x sshd: 3)
+Connection to 127.0.0.1 closed by remote host.
+=== state 4c: account named -f / -o (hand-made passwd line), session open
+remote username contains invalid characters
+login as -f rc=255
+remote username contains invalid characters
+login as -o rc=255
+remote username contains invalid characters
+--- session of an account named -f
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+/proc/PID/cmdline of each pgrep -x sshd (NUL shown as |), PID cut:
+    <cut> sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups|
+(count of pgrep -x sshd: 1)
+```
+
+A second script, for what `ps` returns when nothing matches and when it fails:
+
+```
+docker run --rm --name t5b2 -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure5.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+```
+
+```bash
+#!/bin/bash
+apt-get update -qq && apt-get install -y -qq procps >/dev/null 2>&1
+ps -C sshd -o args= >/tmp/o 2>/tmp/e; echo "no sshd: rc=$? stdout_bytes=$(wc -c </tmp/o) stderr_bytes=$(wc -c </tmp/e)"
+ps -C sshd -o nosuchcol= >/tmp/o 2>/tmp/e; echo "bad column: rc=$? stdout_bytes=$(wc -c </tmp/o) stderr_first_line=$(head -1 /tmp/e)"
+```
+
+```
+no sshd: rc=1 stdout_bytes=0 stderr_bytes=0
+bad column: rc=1 stdout_bytes=0 stderr_first_line=error: unknown user-defined format specifier "nosuchcol"
+```
+
+What it shows, only from the output: the listener's title is `sshd: ` then the original command line (program path and
+every option, in the split and the joined form) then `[listener] N of M-K startups`; `ps -C sshd -o args=` and
+`/proc/PID/cmdline` give the same text (the `/proc` one padded with NULs for the children), so `ps` is enough. Every
+child (`sshd: u [priv]`, `sshd: u@notty`, `sshd: [accepted]`) lacks the `[listener]` mark and shows the user name, never
+the options; the listener count read from the mark was 1 in every state with a daemon and 0 with none (`ps` rc 1, no output,
+no error text), and `ps` failing on a bad column also gave rc 1 but with an error text.
+
+Values with a blank, and option clusters (a review note asked whether the original argument vector survives). Same
+container recipe, script `measure6.sh`:
+
+```
+docker run --rm --name t5b3 -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure6.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+```
+
+```bash
+#!/bin/bash
+# runs inside ubuntu:24.04
+apt-get update -qq && apt-get install -y -qq openssh-server procps >/dev/null 2>&1
+mkdir -p /run/sshd
+ssh -V 2>&1 | cut -d, -f1
+cp /etc/ssh/sshd_config "/tmp/a b.conf"; cp /etc/ssh/sshd_config /tmp/alt.conf
+run() { # label, then the sshd arguments (sshd -D stays in the foreground, so each is started with &)
+  l="$1"; shift
+  /usr/sbin/sshd "$@" >/dev/null 2>&1 &
+  sleep 1
+  echo "--- $l"
+  echo "ps -C sshd -o args=:"
+  ps -C sshd -o args= | cat -v | sed 's/^/    /'
+  for p in $(pgrep -x sshd); do printf '    /proc <cut> %s\n' "$(tr '\0' '|' < /proc/$p/cmdline | cat -v)"; done
+  echo "    processes named sshd: $(pgrep -x sshd | wc -l)"
+  pkill -x sshd; sleep 1
+}
+run '-D -o "AllowUsers u v" -o X11Forwarding=yes' -D -o "AllowUsers u v" -o X11Forwarding=yes
+run '-D -f "/tmp/a b.conf" -o X11Forwarding=yes' -D -f "/tmp/a b.conf" -o X11Forwarding=yes
+run '-D -e -f /tmp/alt.conf' -D -e -f /tmp/alt.conf
+run '-De -f /tmp/alt.conf' -De -f /tmp/alt.conf
+run '-Def/tmp/alt.conf' -Def/tmp/alt.conf
+run '-Def /tmp/alt.conf' -Def /tmp/alt.conf
+run '-Deo X11Forwarding=yes' -Deo X11Forwarding=yes
+run '-D -f /tmp/alt.conf -f /tmp/alt.conf' -D -f /tmp/alt.conf -f /tmp/alt.conf
+```
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+--- -D -o "AllowUsers u v" -o X11Forwarding=yes
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D -o AllowUsers u v -o X11Forwarding=yes [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -D -o AllowUsers u v -o X11Forwarding=yes [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+--- -D -f "/tmp/a b.conf" -o X11Forwarding=yes
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D -f /tmp/a b.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -D -f /tmp/a b.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+--- -D -e -f /tmp/alt.conf
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D -e -f /tmp/alt.conf [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -D -e -f /tmp/alt.conf [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+--- -De -f /tmp/alt.conf
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -De -f /tmp/alt.conf [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -De -f /tmp/alt.conf [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+--- -Def/tmp/alt.conf
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -Def/tmp/alt.conf [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -Def/tmp/alt.conf [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+--- -Def /tmp/alt.conf
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -Def /tmp/alt.conf [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -Def /tmp/alt.conf [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+--- -Deo X11Forwarding=yes
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -Deo X11Forwarding=yes [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -Deo X11Forwarding=yes [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+--- -D -f /tmp/alt.conf -f /tmp/alt.conf
+ps -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -f /tmp/alt.conf [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -f /tmp/alt.conf [listener] 0 of 10-100 startups|
+    processes named sshd: 1
+```
+
+What it shows: `/proc/PID/cmdline` of the listener is the rewritten title as ONE string (a single NUL at its end), not the
+original NUL-separated vector, so a value with a blank (`-o "AllowUsers u v"`, `-f "/tmp/a b.conf"`) cannot be told from
+extra words in either source; the clusters `-De -f`, `-Def/path`, `-Def path` and `-Deo X=Y` appear as typed. The collector
+therefore reads every word starting with `-` as an option cluster and skips (never stops at) a word that does not.
+(`-o "Banner /tmp/a b"` was refused by sshd itself, `keyword Banner extra arguments at end of line`, in an earlier run of
+this script, so `AllowUsers` stands in for a blank-holding value.)
+
+Not measured: the box's own unit (a socket-activated start, `sshd.socket`, which would show another title or none), a
+title so long that the kernel cuts it (the mark would be lost and the count would fall to 0, which the checklist judges
+as CANNOT-VERIFY), a user name containing the text `[listener]` (the client refuses odd names; `useradd` refuses blanks),
+any other sshd version, and a `ps` other than procps 4.
+
 ## 4 · What is not measured
 
 - 35 real days of journal: the rehearsal shows the setting in force and the deletion mechanism at 3 minutes, not a

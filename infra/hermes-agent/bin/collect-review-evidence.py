@@ -555,6 +555,50 @@ def _sshd_match_lines(host):
     return matches, elsewhere
 
 
+# The title sshd 9.6p1 gives its listener process: "sshd: " + the command line it was started with +
+# " [listener] N of M-K startups" (measured, docs/evaluations/2026-10-10-journal-retention-35-days.md,
+# "How the running sshd was started"). Its per-connection children are titled "sshd: NAME [priv]",
+# "sshd: NAME@notty" or "sshd: [accepted]": never with the mark, never with the daemon's options.
+_SSHD_LISTENER_TITLE_RE = re.compile(r"sshd: (?P<args>\S.*) \[listener\] [0-9]+ of [0-9]+-[0-9]+ startups")
+_SSHD_OPTIONS_WITH_ARGUMENT = "CEbcfghkopu"          # sshd's getopt string: `C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrt`
+
+
+def _sshd_daemon_options(host):
+    """{"listeners", "config_file_options", "setting_options"}: how many sshd listener processes
+    run and how many `-f` and `-o` options their command lines hold, read from `ps -C sshd -o
+    args=` (counts only: no path, option value or process id leaves here). A listener is a process
+    whose title is the listener title above, which a child's never is. Options are read as getopt
+    does (`-f path`, `-fpath`, `-Df path`). The title joins the arguments with blanks and
+    /proc/PID/cmdline holds that same one string (measured), so the original argument vector is not
+    available: every word that starts with `-` is read as an option cluster and a word that does not
+    (an option's value, a value holding a blank as two words) is skipped, never a reason to stop.
+    A value that itself starts with `-` reads as an option: the counts can only be too high. Not
+    seen: a daemon started by a socket-activated unit (another title, or none), and a title cut
+    short by the kernel (it loses the mark, so the count falls and the checklist judges it).
+    `ps` finding no sshd (rc 1, nothing on stderr) is 0 listeners; any other failure is
+    could-not-check, never a healthy-looking value."""
+    rc, out, err = host.run(["ps", "-C", "sshd", "-o", "args="])
+    if rc == 1 and not out.strip() and not err.strip():
+        return {"listeners": 0, "config_file_options": 0, "setting_options": 0}
+    if rc != 0:
+        return {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+    listeners = config_files = settings = 0
+    for line in out.split("\n"):
+        m = _SSHD_LISTENER_TITLE_RE.fullmatch(line)
+        if not m:
+            continue
+        listeners += 1
+        for word in m.group("args").split()[1:]:      # the first word is the program
+            if len(word) < 2 or word[0] != "-":
+                continue                                # not an option word (a value, perhaps with a blank)
+            for letter in word[1:]:                     # a cluster: letters up to the first that takes an argument
+                if letter in _SSHD_OPTIONS_WITH_ARGUMENT:
+                    config_files += letter == "f"
+                    settings += letter == "o"
+                    break
+    return {"listeners": listeners, "config_file_options": config_files, "setting_options": settings}
+
+
 def d1_7(host, ctx):
     """Every SSH key the box accepts, for EVERY account in /etc/passwd: an account with no login
     shell can still be used for a forward. Key types, options and short fingerprints only. The
@@ -562,7 +606,8 @@ def d1_7(host, ctx):
     read here, only counted (`match_lines`); the fingerprint's entry_points component carries
     the whole of `sshd -T`. The kernel's
     net.ipv4.ip_unprivileged_port_start setting is read because the limited key's permitlisten
-    depends on it."""
+    depends on it. `sshd -T`, `match_lines` and `include_elsewhere` all read the default configuration;
+    `daemon_options` says whether the running daemon uses it."""
     got = {}
     for line in _ok(host, ["sshd", "-T"]).splitlines():
         k, _, v = line.partition(" ")
@@ -592,10 +637,12 @@ def d1_7(host, ctx):
                     pass                    # cannot tell: keep the path, the row says so
                 users_of.setdefault(p, set()).add(parts[0])
     match_lines, include_elsewhere = _sshd_match_lines(host)
+    daemon_options = _sshd_daemon_options(host)
     return {"sshd": {k: got.get(k, R.COULD_NOT_CHECK) for k in SSHD_KEY_SOURCES},
             "accounts_checked": accounts,
             "unprivileged_port_start": _unprivileged_port_start(host),
             "match_lines": match_lines, "include_elsewhere": include_elsewhere,
+            "daemon_options": daemon_options,
             "files": [_authorized_keys_row(host, p, users_of[p]) for p in sorted(users_of)]}
 
 

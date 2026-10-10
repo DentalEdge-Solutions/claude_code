@@ -2801,7 +2801,8 @@ class TestD17AcceptedKeys(Base):
 
     def test_the_result_has_exactly_these_top_level_fields(self):
         self.assertEqual(sorted(CE.d1_7(self.host(), {})),
-                         ["accounts_checked", "files", "include_elsewhere", "match_lines", "sshd", "unprivileged_port_start"])
+                         ["accounts_checked", "daemon_options", "files", "include_elsewhere", "match_lines", "sshd",
+                          "unprivileged_port_start"])
 
     def _sshd_config(self, main, **drop_ins):
         self._w("/etc/ssh/sshd_config", main)
@@ -2892,6 +2893,82 @@ class TestD17AcceptedKeys(Base):
                      "Include ~/../" + g, "Include /etc/ssh/sshd_ config.d/*.conf", "Include", f"Include {g}x",
                      f"Include /{g}", f'Include "{g}""', f"=Include {g}", f"Include\t{g}\x0c"):
             self.assertEqual(self._include_elsewhere(line), 1, repr(line))
+
+    # The process lists below are what `ps -C sshd -o args=` printed on sshd 9.6p1 (the evaluation record,
+    # "How the running sshd was started"), one line per process.
+    LISTENER = "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups\n"
+    CHILDREN = "sshd: u [priv]\nsshd: u@notty\nsshd: [accepted]\n"
+
+    def _ps(self, out, rc=0, err=""):
+        self.outputs[("ps", "-C", "sshd", "-o", "args=")] = (rc, out, err)
+        return CE.d1_7(self.host(), {})["daemon_options"]
+
+    def _opts(self, listeners, f, o):
+        return {"listeners": listeners, "config_file_options": f, "setting_options": o}
+
+    def test_a_plain_listener_has_no_options(self):
+        for out in ("sshd: /usr/sbin/sshd [listener] 0 of 10-100 startups\n", self.LISTENER):
+            self.assertEqual(self._ps(out), self._opts(1, 0, 0), repr(out))
+
+    def test_children_of_the_listener_are_not_counted(self):
+        self.assertEqual(self._ps("sshd: /usr/sbin/sshd -D [listener] 1 of 10-100 startups\n" + self.CHILDREN),
+                         self._opts(1, 0, 0))
+        self.assertEqual(self._ps("sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes "
+                                  "[listener] 0 of 10-100 startups\nsshd: u [priv]\nsshd: u@notty\n"),
+                         self._opts(1, 1, 1))
+
+    def test_config_file_and_setting_options_are_counted_in_every_spelling(self):
+        for args, f, o in (("-f /tmp/alt.conf -o X11Forwarding=yes", 1, 1),
+                           ("-f/tmp/alt.conf -oX11Forwarding=yes", 1, 1),
+                           ("-D -f /tmp/alt.conf -o X11Forwarding=yes -o Port=22", 1, 2),
+                           ("-o A=1 -oB=2 -o C=3", 0, 3), ("-f /a -f /b", 2, 0),
+                           ("-Df /tmp/alt.conf", 1, 0), ("-Dfpath", 1, 0), ("-Do X=1", 0, 1),
+                           ("-p 2222 -4", 0, 0), ("-o -f", 1, 1), ("-o X=1 -- -f", 1, 1),
+                           ("-D -o AllowUsers u v -o X11Forwarding=yes", 0, 2),
+                           ("-f /tmp/a b.conf -o X11Forwarding=yes", 1, 1),
+                           ("-o Banner /etc/x y -f /tmp/alt.conf", 1, 1), ("-D -e -f /tmp/alt.conf", 1, 0),
+                           ("-De -f /tmp/alt.conf", 1, 0), ("-Def/tmp/alt.conf", 1, 0),
+                           ("-Def /tmp/alt.conf", 1, 0), ("-Deo X11Forwarding=yes", 0, 1),
+                           ("-Dof X11Forwarding=yes", 0, 1), ("-f /tmp/alt.conf -f /tmp/alt.conf", 2, 0),
+                           ("-4 -6 -D -d -e -i -q -t", 0, 0)):
+            out = f"sshd: /usr/sbin/sshd {args} [listener] 0 of 10-100 startups\n"
+            self.assertEqual(self._ps(out), self._opts(1, f, o), repr(args))
+
+    def test_a_child_whose_title_looks_like_an_option_is_not_a_listener(self):
+        """A child's title is `sshd: NAME [priv]` or `sshd: NAME@notty`: it never ends in the listener
+        mark, whatever the name holds (the measurement shows names, never the daemon's options)."""
+        out = ("sshd: -f [priv]\nsshd: -f@notty\nsshd: -o X=1 [priv]\nsshd: u -f /x -o Y=2 [priv]\n"
+               "sshd: [accepted]\n")
+        self.assertEqual(self._ps(out), self._opts(0, 0, 0))
+        self.assertEqual(self._ps(out + self.LISTENER), self._opts(1, 0, 0))
+
+    def test_two_listeners_and_a_title_that_is_not_one_are_told_apart(self):
+        self.assertEqual(self._ps(self.LISTENER * 2), self._opts(2, 0, 0))
+        for out in ("sshd: /usr/sbin/sshd -D [listener]\n", "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups x\n",
+                    "/usr/sbin/sshd -D\n", "sshd: [listener] 0 of 10-100 startups\n",
+                    "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startupsX\n"):
+            self.assertEqual(self._ps(out), self._opts(0, 0, 0), repr(out))
+
+    def test_no_listener_is_zero_and_the_checklist_judges_it(self):
+        self.assertEqual(self._ps("", rc=1), self._opts(0, 0, 0))
+
+    def test_a_failing_process_list_is_could_not_check(self):
+        cnc = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+        self.assertEqual(self._ps("", rc=1, err='error: unknown user-defined format specifier "x"\n'), cnc)
+        self.assertEqual(self._ps("", rc=127, err="not found"), cnc)
+        self.assertEqual(self._ps(self.LISTENER, rc=2), cnc)
+
+    def test_a_process_list_that_cannot_be_run_is_could_not_check(self):
+        """No `ps` answer in the fake at all (it reports 127)."""
+        self.assertEqual(CE.d1_7(self.host(), {})["daemon_options"],
+                         {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")})
+
+    def test_the_daemon_options_hold_no_path_and_no_value(self):
+        out = json.dumps(self._ps(
+            "sshd: /usr/sbin/sshd -f /tmp/alt.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups\n"))
+        self.assertIn('"config_file_options": 1', out)                # control: the line was read
+        for gone in ("/tmp/alt.conf", "X11Forwarding", "alt.conf", "yes", "/usr/sbin/sshd"):
+            self.assertNotIn(gone, out)
 
     def test_a_nul_byte_in_a_configuration_file_is_could_not_check(self):
         """sshd 9.6p1 honoured `Ma<NUL>` newline `tch User u` as a Match block: a NUL may join lines."""
