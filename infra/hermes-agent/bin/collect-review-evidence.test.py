@@ -2829,6 +2829,20 @@ class TestD17AcceptedKeys(Base):
         d = CE.d1_7(self.host(), {})
         self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 2))
 
+    def test_a_keyword_in_double_quotes_is_the_keyword_sshd_reads(self):
+        """Measured against sshd 9.6p1: "Port" 2200, "Match" User u and "Include" file are all honoured."""
+        self._two()
+        self._sshd_config('"Match" User x\n  "Matchmaker" yes\n"Include" /etc/ssh/extra.conf\n'
+                          '"Include" /etc/ssh/sshd_config.d/*.conf\n')
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (1, 1))
+
+    def test_a_configuration_file_over_the_read_limit_is_could_not_check(self):
+        self._two()
+        self._sshd_config("Port 22\n" + "#" * CE.AUTHORIZED_KEYS_READ_LIMIT + "\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
     def test_a_configuration_that_cannot_be_read_is_could_not_check_and_the_keys_are_still_listed(self):
         self._two()                                             # no /etc/ssh/sshd_config in the fake root
         d = CE.d1_7(self.host(), {})

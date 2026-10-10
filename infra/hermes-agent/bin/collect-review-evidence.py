@@ -491,7 +491,9 @@ def _unprivileged_port_start(host):
 SSHD_CONFIG = "/etc/ssh/sshd_config"
 SSHD_CONFIG_DIR = "/etc/ssh/sshd_config.d"
 # A keyword and its arguments, as sshd_config(5) allows them: blanks, or blanks around one `=`.
-_SSHD_LINE_RE = re.compile(r"[ \t]*([A-Za-z]+)(?:[ \t]*=[ \t]*|[ \t]+|$)(.*)")
+# sshd's tokenizer also honours a keyword in double quotes (measured, sshd 9.6p1: "Match" opens a
+# block, "Include" brings a file in); the closing quote ends the word, so no blank need follow it.
+_SSHD_LINE_RE = re.compile(r'[ \t]*(?:"([A-Za-z]+)"[ \t]*=?[ \t]*|([A-Za-z]+)(?:[ \t]*=[ \t]*|[ \t]+|$))(.*)')
 
 
 def _sshd_match_lines(host):
@@ -519,11 +521,11 @@ def _sshd_match_lines(host):
             m = _SSHD_LINE_RE.match(line)
             if not m:
                 continue
-            keyword = m.group(1).lower()
+            keyword = (m.group(1) or m.group(2)).lower()
             if keyword == "match":
                 matches += 1
             elif keyword == "include":
-                args = [a.strip('"') for a in _split_unquoted(m.group(2).strip(" \t\r"), " \t")[0]]
+                args = [a.strip('"') for a in _split_unquoted(m.group(3).strip(" \t\r"), " \t")[0]]
                 full = [os.path.normpath(a if a.startswith("/") else "/etc/ssh/" + a) for a in args]
                 elsewhere += any(a != SSHD_CONFIG_DIR + "/*.conf" for a in full) or not full
     return matches, elsewhere

@@ -215,6 +215,34 @@ Both controls held (`d` accepted, `x` refused), so the measurement is valid.
   comment, and the carriage-return line, so the D1.7 reader counts as unreadable lines (a, b and c) that the server
   accepts. The next task decides what to do with it.
 
+### A configuration keyword in double quotes
+
+Measured 2026-10-10 in a throwaway `ubuntu:24.04` container (`openssh-server`, `OpenSSH_9.6p1`), a user `u` made,
+`sshd -T` run with and without `-C user=u,host=h,addr=127.0.0.1`. File `q.conf` has the keywords in double quotes
+(`"Port" 2200`, `"Match" User u`, then `  X11Forwarding yes`); file `c.conf` is the same without the quotes
+(control). A third file held `"Include" /tmp/inc.conf`, and `inc.conf` held `Port 2300`.
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+== q
+syntax rc: 0
+port 2200
+x11forwarding no
+--- as user u:
+x11forwarding yes
+== c
+syntax rc: 0
+port 2200
+x11forwarding no
+--- as user u:
+x11forwarding yes
+(third run, the quoted Include)  port 2300
+```
+
+What it shows: `sshd` 9.6p1 reads a keyword
+written in double quotes exactly as it reads it bare, `"Match"` opens a block and `"Include"` brings the file in, so
+the D1.7 line reader counts such a line.
+
 ## 4 · What is not measured
 
 - 35 real days of journal: the rehearsal shows the setting in force and the deletion mechanism at 3 minutes, not a
