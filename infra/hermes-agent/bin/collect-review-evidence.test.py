@@ -3348,19 +3348,120 @@ class TestJournalHelpers(Base):
                 self._raises(later)
 
     def test_a_broken_section_line_that_the_printout_shows_cleanly_is_could_not_check(self):
-        # Record R9 (N1): systemd stops reading at `[Broken`, so a later file's value never applies. The
-        # printout (as the oldest builds print it, or with the section line absent) looks clean; the file does not.
+        # Record R9 (N1): systemd stops reading at `[Broken`, so a later file's value never applies. Each printout
+        # here is clean and AGREES with what a reader that skipped the broken line would find in the files, so
+        # only the file reader's refusal of that line can raise.
         ours = FILES[OURS]
         for broken in ("[Broken\n[Journal]\nCompress=yes\n", "[Broken\n", "[Journal]\nX=1\n[Broken\n[Journal]\nMaxRetentionSec=35day\n"):
             with self.subTest(broken=broken):
                 self._disk({MAIN: FILES[MAIN], "/etc/systemd/journald.conf.d/10-x.conf": broken, OURS: ours})
-                printed = ("# " + MAIN + "\n[Journal]\nMaxRetentionSec=7day\n\n# /etc/systemd/journald.conf.d/10-x.conf\n"
-                           "[Journal]\nCompress=yes\n\n# " + OURS + "\n[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n")
+                printed = ("# " + MAIN + "\n" + FILES[MAIN] + "\n# /etc/systemd/journald.conf.d/10-x.conf\n"
+                           "[Journal]\nCompress=yes\n\n# " + OURS + "\n" + ours)
+                CE._journald_printout_settings(printed)                    # the printout alone is accepted
                 with self.assertRaises(CE.CouldNotCheck):
                     CE._journald_settings(self.host(), printed)
-        # our own file ending in a broken section line, after a [Journal] block
+        os.remove(self.host().path("/etc/systemd/journald.conf.d/10-x.conf"))
+        # our own file with a broken section line after a [Journal] block; the printout does not show that line
+        self._disk({MAIN: FILES[MAIN], OURS: "[Journal]\nX=1\n[Broken\n[Journal]\nMaxRetentionSec=35day\n"})
+        printed = "# " + MAIN + "\n" + FILES[MAIN] + "\n# " + OURS + "\n[Journal]\nX=1\nMaxRetentionSec=35day\n"
+        CE._journald_printout_settings(printed)
         with self.assertRaises(CE.CouldNotCheck):
-            self._read({MAIN: FILES[MAIN], OURS: "[Journal]\nX=1\n[Broken\n[Journal]\nMaxRetentionSec=35day\n"})
+            CE._journald_settings(self.host(), printed)
+
+    def test_the_file_reader_alone_refuses_each_line_it_does_not_model(self):
+        # The line is in the FILE only; the printout is clean and agrees with what a reader that trimmed
+        # blanks, joined or skipped the line would find. So the file reader (step b) is what raises.
+        local = "/etc/systemd/journald.conf.d/99-local.conf"
+        clean = "[Journal]\nMaxRetentionSec=40day\n"
+        head = "# " + MAIN + "\n" + FILES[MAIN] + "\n# " + OURS + "\n" + FILES[OURS] + "\n# " + local + "\n"
+        for name, body, shown in (
+                ("a blank before a key", "[Journal]\n MaxRetentionSec=40day\n", clean),
+                ("a tab before a key", "[Journal]\n\tMaxRetentionSec=40day\n", clean),
+                ("blanks around the equals sign", "[Journal]\nMaxRetentionSec = 40day\n", clean),
+                ("a trailing blank", "[Journal]\nMaxRetentionSec=40day \n", clean),
+                ("a line ending in a backslash", "[Journal]\nMaxRetentionSec=40day\\\n", clean),
+                ("a continued line", "[Journal]\nCompress=yes\\\nMaxRetentionSec=40day\n", "[Journal]\nMaxRetentionSec=40day\n"),
+                ("a section line with a trailing blank", "[Journal] \nMaxRetentionSec=40day\n", clean),
+                ("a broken section line after a blank", "[Journal]\nMaxRetentionSec=40day\n [Broken\n", clean)):
+            with self.subTest(name=name):
+                self._disk({**{k: FILES[k] for k in (MAIN, OURS)}, local: body})
+                files = CE._journald_printout_settings(head + shown)[1]    # the printout alone is accepted
+                self.assertEqual(files, [MAIN, OURS, local])
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_file_settings(self.host(), files)
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_settings(self.host(), head + shown)
+        # the control: the clean body in the file reads, so the cases above fail for their one line
+        self._disk({local: clean})
+        self.assertEqual(CE._journald_settings(self.host(), head + clean)[0]["MaxRetentionSec"],
+                         {"value": "40day", "file": local})
+
+    def test_a_main_file_ending_in_a_broken_section_line_is_refused_by_the_file_reader(self):
+        self._disk({**FILES, MAIN: FILES[MAIN] + "[Broken\n"})
+        self.assertEqual(CE._journald_printout_settings(CAT_CONFIG)[1], [MAIN, OURS, SYSLOG])
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_file_settings(self.host(), [MAIN, OURS, SYSLOG])
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_an_oddly_named_settings_file_in_any_drop_in_directory_is_could_not_check(self):
+        # Record R9 (N2): systemd lists a `.conf` file whose NAME holds newlines, and the printout then shows
+        # header and content lines that stand in no file. The printout here is the healthy one.
+        for d in CE.JOURNALD_DROP_IN_DIRS:
+            for name in ("50-hermes-retention.conf\n[Journal]\nMaxRetentionSec=35day\nX=.conf", "my file.conf",
+                         "a;b.conf", "café.conf", ".conf"):
+                with self.subTest(d=d, name=name):
+                    self._disk(FILES)
+                    odd = self._w(d + "/" + name, "[Journal]\n")
+                    with self.assertRaises(CE.CouldNotCheck):
+                        CE._journald_settings(self.host(), CAT_CONFIG)
+                    os.remove(odd)
+                    self.assertEqual(CE._journald_settings(self.host(), CAT_CONFIG)[1], [MAIN, OURS, SYSLOG])
+
+    def test_the_four_drop_in_directories_are_the_ones_journald_reads(self):
+        self.assertEqual(CE.JOURNALD_DROP_IN_DIRS, ("/etc/systemd/journald.conf.d", "/run/systemd/journald.conf.d",
+                                                    "/usr/local/lib/systemd/journald.conf.d",
+                                                    "/usr/lib/systemd/journald.conf.d"))
+
+    def test_an_odd_name_that_is_not_a_settings_file_is_ignored(self):
+        self._disk(FILES)
+        self._w("/usr/lib/systemd/journald.conf.d/odd name;\n.bak", "x")
+        self._w("/etc/systemd/journald.conf.d/README", "x")
+        self._w("/etc/systemd/journald.conf.d/x.conf\n", "x")              # does not END in .conf
+        self.assertEqual(CE._journald_settings(self.host(), CAT_CONFIG)[1], [MAIN, OURS, SYSLOG])
+
+    def test_a_drop_in_directory_that_cannot_be_listed_is_could_not_check(self):
+        self._disk(FILES)
+        self._w("/run/systemd/journald.conf.d", "a file where a directory belongs")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        os.remove(self.host().path("/run/systemd/journald.conf.d"))
+        with mock.patch.object(CE.os, "listdir", side_effect=PermissionError("no")):
+            with self.assertRaises(CE.CouldNotCheck):
+                CE._journald_settings(self.host(), CAT_CONFIG)
+        CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_a_listed_file_is_opened_without_following_a_link_and_judged_by_what_was_opened(self):
+        self._disk(FILES)
+        real = self.host().path(OURS)
+        opened = []
+        real_open = os.open
+        with mock.patch.object(CE.os, "open", lambda p, flags, *a, **k: opened.append((p, flags)) or real_open(p, flags, *a, **k)), \
+                mock.patch.object(CE.os, "lstat", side_effect=AssertionError("judged by path, not by the open file")):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        self.assertEqual([p for p, _ in opened], [self.host().path(p) for p in (MAIN, OURS, SYSLOG)])
+        for _, flags in opened:
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            self.assertTrue(flags & os.O_NONBLOCK)
+        os.remove(real)
+        os.mkfifo(real)                                # a FIFO: opening it must not wait for a writer
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(5):                             # the refused file's descriptor is closed
+            with self.assertRaises(CE.CouldNotCheck):
+                CE._journald_settings(self.host(), CAT_CONFIG)
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
 
     def test_a_header_forged_through_a_file_name_is_could_not_check(self):
         # Record R9 (N2): the printout shows our header and 35day; no file of our name exists on disk.

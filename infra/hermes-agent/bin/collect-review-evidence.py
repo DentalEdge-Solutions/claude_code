@@ -1080,6 +1080,11 @@ _JOURNALD_MAIN = "/etc/systemd/journald.conf"      # journald 255 reads the main
 _JOURNALD_FILE_RE = re.compile(r"/etc/systemd/journald\.conf|"
                                r"/(?:etc|run|usr/lib|usr/local/lib)/systemd/journald\.conf\.d/[A-Za-z0-9._@-]+\.conf")
 _JOURNALD_FILE_LIMIT = 64 * 1024
+# The directories journald 255 reads drop-ins from (journald.conf(5)), and the only names of a
+# settings file in them that this reader accepts.
+JOURNALD_DROP_IN_DIRS = ("/etc/systemd/journald.conf.d", "/run/systemd/journald.conf.d",
+                         "/usr/local/lib/systemd/journald.conf.d", "/usr/lib/systemd/journald.conf.d")
+_JOURNALD_DROP_IN_NAME_RE = re.compile(r"[A-Za-z0-9._@-]+\.conf")
 _JOURNALD_ASSIGN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*)=([\x21-\x5b\x5d-\x7e]*)")
 # systemd.time(7) units of one second or more, as integers (src/basic/time-util.c, v255).
 _SPAN_UNITS = {"": 1, "seconds": 1, "second": 1, "sec": 1, "s": 1, "minutes": 60, "minute": 60, "min": 60, "m": 60,
@@ -1166,17 +1171,24 @@ def _journald_file_settings(host, files):
     `[Journal]` is read as in the printout, anything else raises. A line ending in a backslash
     or holding a carriage return raises (a continuation or a line end this reader does not model).
     Each listed path must be a regular file (not a link, not a directory, not missing: a missing
-    file is a forged header), at most 64 kB, ASCII, without a NUL byte."""
+    file is a forged header), at most 64 kB, ASCII, without a NUL byte. The path is opened once,
+    without following a link in its last part and without waiting on a FIFO, and "regular file"
+    is decided on the open file, so what is judged is what is read."""
     last = {k: {"value": None, "file": None} for k in JOURNALD_SETTINGS}
     for path in files:
         try:
-            st = os.lstat(host.path(path))
-            if not stat.S_ISREG(st.st_mode):
+            fd = os.open(host.path(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            raise CouldNotCheck("a settings file cat-config lists cannot be opened, or is a link")
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise CouldNotCheck("a settings file cat-config lists is not a regular file")
-            with open(host.path(path), "rb") as f:
+            with os.fdopen(os.dup(fd), "rb") as f:
                 raw = f.read(_JOURNALD_FILE_LIMIT + 1)
         except OSError:
             raise CouldNotCheck("a settings file cat-config lists cannot be read")
+        finally:
+            os.close(fd)
         if len(raw) > _JOURNALD_FILE_LIMIT or b"\0" in raw:
             raise CouldNotCheck("a settings file is too large or holds a NUL byte")
         try:
@@ -1203,6 +1215,22 @@ def _journald_file_settings(host, files):
     return last
 
 
+def _journald_refuse_odd_names(host):
+    """Raises CouldNotCheck when a drop-in directory holds a `.conf` entry whose name is not a
+    plain one, or cannot be listed. systemd lists such a file, and a name holding newlines makes
+    the printout show header and content lines that stand in no file (record R9). A directory
+    that does not exist is fine; a name that does not end in `.conf` is not a settings file."""
+    for d in JOURNALD_DROP_IN_DIRS:
+        try:
+            names = os.listdir(host.path(d))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise CouldNotCheck("a journald drop-in directory cannot be listed")
+        if any(n.endswith(".conf") and not _JOURNALD_DROP_IN_NAME_RE.fullmatch(n) for n in names):
+            raise CouldNotCheck("a journald drop-in directory holds an oddly named settings file")
+
+
 def _journald_settings(host, text):
     """(settings, files): for each name in JOURNALD_SETTINGS the value written LAST under
     [Journal] and the file it stands in (both None when no file sets it), and the files listed,
@@ -1211,7 +1239,9 @@ def _journald_settings(host, text):
     systemd rejects as they are (a broken section line in an earlier file makes systemd stop
     reading, so a later value never applies) and a file name holding newlines forges a header;
     only the files show every line systemd parses. Any line either reading does not model, a
-    listed file that is not a regular file on disk, or a disagreement raises CouldNotCheck."""
+    listed file that is not a regular file on disk, an oddly named settings file in a drop-in
+    directory, or a disagreement raises CouldNotCheck."""
+    _journald_refuse_odd_names(host)
     printed, files = _journald_printout_settings(text)
     read = _journald_file_settings(host, files)
     if printed != read:

@@ -220,8 +220,10 @@ N1, a broken line in an earlier drop-in. `/etc/systemd/journald.conf.d/10-x.conf
 Which value applied: main file set to `MaxRetentionSec=3min`, our file (35day) present after the broken one; a mark
 logged and the journal rotated every 60 s. Marks left: 1 at start, 1 after round 1, 1 after round 2, 0 after rounds 3 to 6.
 The mark was deleted although our 35-day file was present: journald stopped reading at the broken file and kept the
-main file's 3 minutes (the same control as R6: with our file read, the mark would have stayed). So the printout
-alone can show our `35day` under our header while journald applies something else; the files must be read too.
+main file's 3 minutes (the same control as R6: with our file read, the mark would have stayed). What this measured:
+journald stops at the broken header and does not apply our value. The printout did NOT hide it: it printed
+`[Broken` as it stands in the file, and the collector's printout reader refuses that line. No printout that withholds
+a section line was observed.
 
 N2, a header forged through a file name. Our file moved aside; a file named
 `50-hermes-retention.conf\n[Journal]\nMaxRetentionSec=35day\nX=.conf` (newlines in the name) holding `[Journal]`,
@@ -238,6 +240,13 @@ Compress=yes$
 
 The tool lists that file and prints the raw name, so it shows our header and `MaxRetentionSec=35day` while no
 file with our name exists. Looking the listed path up on disk (it does not exist) catches it.
+
+Why the collector reads the files as well as the printout. Two reasons, and N1 is not one of them: (i) N2, measured
+above: a file whose name holds newlines is listed with lines that stand in no file, so the collector also lists the
+four drop-in directories and refuses any `.conf` name outside `[A-Za-z0-9._@-]+\.conf`; (ii) the printout is produced
+by `systemd-analyze`, a different program than `systemd-journald`, which is the one that applies the settings, so the
+collector parses each listed file by the closed grammar itself (opened without following a link) and requires the
+two readings to agree. Reason (ii) is a design choice, not a measurement.
 
 ## 3b · The key reader's two cases
 
