@@ -455,6 +455,57 @@ it was dropped. That is why the collector recognises the standard glob only in a
 one pair of quotes, after the bare keyword, absolute or `sshd_config.d/*.conf`) and counts every other spelling as
 reaching elsewhere.
 
+The accepted spellings, measured one by one (same set-up, 2026-10-10, `ubuntu:24.04`, `OpenSSH_9.6p1`; `GLOB` as above;
+`\r` is a carriage return, `\t` a tab). Each is a whole-line spelling the collector does NOT count as reaching elsewhere;
+the question was whether `sshd` reads exactly the standard glob and nothing else. Command as run:
+
+```
+docker run --rm --name t5b4 -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure7.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+```
+
+```bash
+#!/bin/bash
+apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null 2>&1
+mkdir -p /run/sshd /etc/ssh/sshd_config.d
+printf 'Port 22\n' > /etc/ssh/sshd_config.d/a.conf
+ssh -V 2>&1 | cut -d, -f1
+G=/etc/ssh/sshd_config.d/*.conf
+i() { # label, printf format of the whole line
+  printf "$2\n" > /tmp/f.conf
+  rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
+  printf 'INCLUDE [%s] rc=%s\n' "$1" "$rc"
+  /usr/sbin/sshd -T -ddd -f /tmp/f.conf 2>&1 | grep -a 'new include' | cat -v | sed 's/^/    /'
+}
+i 'Include GLOB\r' "Include $G\r"
+i 'Include GLOB \r' "Include $G \r"
+i '\tinclude\tGLOB' "\tinclude\t$G"
+i ' iNcLuDe  "GLOB" \r' " iNcLuDe  \"$G\" \r"
+i 'Include sshd_config.d/*.conf' "Include sshd_config.d/*.conf"
+i 'Include "sshd_config.d/*.conf"' "Include \"sshd_config.d/*.conf\""
+```
+
+Output, unedited (`^M` is the carriage return `sshd -ddd` itself prints at the end of each debug line):
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+INCLUDE [Include GLOB\r] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include GLOB \r] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [\tinclude\tGLOB] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [ iNcLuDe  "GLOB" \r] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include sshd_config.d/*.conf] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include "sshd_config.d/*.conf"] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+```
+
+What it shows: each of the six accepted spellings gave one `new include /etc/ssh/sshd_config.d/*.conf` and no other path
+(the relative ones are read against `/etc/ssh/`), `sshd -t` rc 0. Not run: any other spelling of the keyword's letters
+or any other sshd version.
+
 ### How the running sshd was started
 
 Measured 2026-10-10 in a throwaway `ubuntu:24.04` container with `openssh-server` and `procps` (`OpenSSH_9.6p1`),

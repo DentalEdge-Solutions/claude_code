@@ -495,7 +495,8 @@ SSHD_CONFIG_DIR = "/etc/ssh/sshd_config.d"
 # an `=`, a quoted blank, a control character or a second argument around it makes sshd read another
 # path or pattern as well).
 _SSHD_STANDARD_INCLUDE_RE = re.compile(
-    r'[ \t]*(?i:include)[ \t]+(")?(?:/etc/ssh/sshd_config\.d/\*\.conf|sshd_config\.d/\*\.conf)(?(1)")[ \t\r]*')
+    r'[ \t]*(?i:include)[ \t]+(")?(?:/etc/ssh/sshd_config\.d/\*\.conf|sshd_config\.d/\*\.conf)(?(1)")[ \t\r]*',
+    re.ASCII)                                       # the keyword folds ASCII letters only, as sshd's does
 
 
 def _sshd_skipped(c):
@@ -524,8 +525,9 @@ def _sshd_match_lines(host):
     inside a keyword (measured on sshd 9.6p1, docs/evaluations/2026-10-10-journal-retention-35-days.md);
     a head starting `match` is a Match line (sshd refuses a keyword it does not know, so counting
     `Matchmaker` falls only on a file it refuses). Include: the same head says it is an Include line,
-    and it is "not elsewhere" only when the whole line is one of four literal spellings (the standard
-    glob, absolute or relative, bare or in one pair of quotes, after the bare keyword); every other
+    and it is "not elsewhere" only when the whole line is the standard glob in four forms (absolute
+    or relative, bare or in one pair of double quotes) after the bare keyword in any ASCII letter case,
+    with spaces or tabs before and between, and spaces, tabs or carriage returns after; every other
     spelling counts as elsewhere, an over-count. A place that cannot be read, is
     over the limit or holds a NUL byte (which may join two lines for sshd) makes both could-not-check:
     a count of 0 must mean 0 was found."""

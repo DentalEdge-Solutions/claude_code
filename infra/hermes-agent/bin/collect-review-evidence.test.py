@@ -2891,8 +2891,15 @@ class TestD17AcceptedKeys(Base):
                      f"Include {g} # c", f'Include "{g}', f'Include {g}"', f"Include {g}\r/opt/x.conf",
                      f"Include {g} /opt/x.conf", "Include /etc/ssh/x/../sshd_config.d/*.conf",
                      "Include ~/../" + g, "Include /etc/ssh/sshd_ config.d/*.conf", "Include", f"Include {g}x",
-                     f"Include /{g}", f'Include "{g}""', f"=Include {g}", f"Include\t{g}\x0c"):
+                     f"Include /{g}", f'Include "{g}""', f"=Include {g}", f"Include\t{g}\x0c",
+                     f"Include=={g}", f"Include \x0b{g}", f'Include /etc/ssh/sshd_config.d/"*.conf'):
             self.assertEqual(self._include_elsewhere(line), 1, repr(line))
+
+    def test_the_keyword_case_folding_is_ascii_only(self):
+        """Python folds U+0130 and U+0131 onto `i` in a str pattern; sshd does not (ASCII letters only)."""
+        for line in (f"\u0130nclude {self.GLOB}", f"\u0131nclude {self.GLOB}"):
+            self.assertIsNone(CE._SSHD_STANDARD_INCLUDE_RE.fullmatch(line), repr(line))
+        self.assertIsNotNone(CE._SSHD_STANDARD_INCLUDE_RE.fullmatch(f"iNcLuDe {self.GLOB}"))   # control
 
     # The process lists below are what `ps -C sshd -o args=` printed on sshd 9.6p1 (the evaluation record,
     # "How the running sshd was started"), one line per process.
