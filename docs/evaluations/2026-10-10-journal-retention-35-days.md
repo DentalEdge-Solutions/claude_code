@@ -16,10 +16,11 @@ All at tag `v255` on github.com/systemd/systemd (`https://github.com/systemd/sys
 | `man/journald.conf.xml` | primary | The settings, their defaults and units: `MaxRetentionSec=` defaults to 0 (off) and takes the units year, month, week, day, h and m (the man page; `min` is from `time-util.c`); `SystemMaxFiles=` defaults to 100; drop-in directories under `/etc/systemd`, `/run/systemd`, `/usr/lib/systemd`. | 2026-10-09 |
 | `man/systemd-analyze.xml` | primary | `cat-config` copies a config file and its drop-ins to standard output "using the usual systemd set of directories and rules for precedence". | 2026-10-10 |
 | `man/journalctl.xml` | primary | `--lines=`: with a `+` prefix "the oldest journal events are used instead". `--output-fields=`: for the json mode, `__CURSOR`, `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP` and `_BOOT_ID` are always printed. (R5 measured that `__SEQNUM` and `__SEQNUM_ID` are printed too.) | 2026-10-10 |
-| `src/libsystemd/sd-journal/journal-vacuum.c` | primary | An archived file is deleted when the time in its name is older than the retention; `patch_realtime()` lowers that time to the earliest of the file's own times (ctime, atime, mtime) when one of them is earlier; the file and size limits are counted in one directory. | 2026-10-10 |
+| `src/libsystemd/sd-journal/journal-vacuum.c` | primary | An archived file is deleted when the time in its name is older than the retention; `patch_realtime()` lowers that time to the earliest of the file's own times (ctime, atime, mtime), and also the file's creation time where the file system gives one (`fd_getcrtime_at`), when one of them is earlier; the file and size limits are counted in one directory. | 2026-10-10 |
 | `src/shared/pretty-print.c` | primary | `cat-config` prints a `# <path>` header, with an empty line before every file but the first. | 2026-10-10 |
 | `src/basic/time-util.c` | primary | The time units (`day`, `min`); `min` is here, not in the man page's list. | 2026-10-10 |
 | The rehearsal (section 3) | measurement | R1 to R6. | 2026-10-10 |
+| The key-case measurement (section 3b) | measurement | What `sshd` 9.6p1 does with four key lines. | 2026-10-10 |
 
 ## 2 · The box, read-only
 
@@ -173,13 +174,19 @@ Both containers were removed afterwards.
 
 ## 3b · The key reader's two cases
 
-Measured 2026-10-10 on the laptop (Docker 29, linux/aarch64 container, `ubuntu:24.04`), against a throwaway `sshd` on
-127.0.0.1 port 2222 with four throwaway ed25519 keys (no key body is kept here). Server version line:
-`OpenSSH_9.6p1 Ubuntu-3ubuntu13.19` (the box's release, 9.6p1).
+Measured 2026-10-10 on the laptop (macOS, shell zsh; Docker 29, linux/aarch64 container, `ubuntu:24.04`), against a
+throwaway `sshd` on 127.0.0.1 port 2222, with five throwaway ed25519 keys (no key body is kept here): four in the
+server's `authorized_keys` (`a` to `d`) and a fifth, `x`, that is NOT in the file. Server version line:
+`OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`; the box's release is 9.6p1 as the plan states, confirmed on the box on
+2026-10-08 (not re-checked here).
+
+How each line was tested: one real `ssh` public-key login per key to 127.0.0.1 port 2222 as user `u`, offering that
+key only (`IdentitiesOnly=yes`, `IdentityAgent=none`, `BatchMode=yes`), running `true`. Exit status 0 is "accepted",
+anything else "refused".
 
 The file had four lines: `a` a key first, its comment holding one double quote; `b` an option (`no-pty`) first, the
 same comment; `c` a key with no comment and a carriage return before the line break; `d` a plain line with a
-comment (control); and `x` a key that is not in the file (control).
+comment (control, must be accepted). `x` is the control that must be refused.
 
 Result lines, exactly as printed:
 
@@ -196,13 +203,17 @@ Both controls held (`d` accepted, `x` refused), so the measurement is valid.
 - The server really received line `c` ending in carriage return plus line feed: the last three bytes of that line, read
   inside the container with `od -c`, are `n \r \n`; the file has 4 lines, with 3, 4, 2 and 3 whitespace-separated
   fields (so `c` has only the type and the key).
-- Set-up changes: none that the result depends on. The account `u` was made with a locked password (`!`); a check with
-  it locked and then set to `*` gave `d` accepted both ways. A first run of the loop printed `refused` for all five
-  lines; that was the laptop shell's handling of an options variable (it passed the options as one word), not the
-  server; with the options written out as in the brief, the result above came. The four test lines were never changed.
-- What it means for the reader: `sshd` 9.6p1 accepts all of the quote-in-comment case, the option-first case with that
-  comment, and the carriage-return case, so the D1.7 reader is counting as unreadable three lines (cases a, b and c)
-  that the server accepts. The next task decides what to do with it.
+- One change to the measuring loop, none to the server or the file. The first run printed `refused` for all five
+  lines, control `d` included, which is how the fault was seen. The ssh options had been held in one shell variable,
+  which zsh passes as a single word, so every login failed before reaching the key. The server's debug log, read after
+  that faulty run, showed the key of `d` accepted. The options were then written out literally, as in the plan, and
+  the result above is from that run. The four lines in the file were never changed.
+- After that final run, a separate check: with the account `u` locked (`!` password, as it was made) `d` was accepted;
+  with the password set to `*`, all five lines gave the results above. (An earlier `usermod -p '*'` and a restart of
+  `sshd` were made while looking for the fault, before the final run; the account is unlocked in the final run.)
+- What it means for the reader: `sshd` 9.6p1 accepts the quote-in-comment line, the option-first line with that
+  comment, and the carriage-return line, so the D1.7 reader counts as unreadable lines (a, b and c) that the server
+  accepts. The next task decides what to do with it.
 
 ## 4 · What is not measured
 
