@@ -376,11 +376,84 @@ What it shows, only from the output: the two controls gave yes / no and no / no.
 all the forms of the first round and `=Match`, `= Match`, `="Match"`. Ignored without error (yes / yes, rc 0):
 `==Match User u`, `""=Match User u`, `"" ""Match User u`. Refused (rc 255): `"Match User" u`, `"Match"=User u`,
 `Matchmaker yes`, and `Include "/tmp/inc.conf` with an unterminated quote. A file holding a NUL byte between `Ma`
-and a newline, then `tch User u`, opened a block for `u`. Every `Include` form run, among them a trailing
+and a newline, then `tch User u`, opened a block for `u`. Every `Include` form run except the unterminated quote (rc 255), among them a trailing
 ` # c` and `/tmp/sub/../inc.conf`, brought the file in. Not run: other characters between or after the letters of
 the keyword, a `Match` or `Include` in a drop-in file, and any other sshd version. The collector counts a line as a
 Match or Include line from the first letters it finds once it has skipped every blank or control character, double
 quote and `=`, which includes all the honoured forms above and over-counts the ignored and refused ones.
+
+#### The standard glob with something around it
+
+Same set-up (`ubuntu:24.04`, `OpenSSH_9.6p1`), 2026-10-10, with `/etc/ssh/sshd_config.d/a.conf` holding `Port 22` so the
+glob matches a file. `GLOB` is `/etc/ssh/sshd_config.d/*.conf`. Command as run:
+
+```
+docker run --rm -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure3.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh
+```
+
+```sh
+#!/bin/sh
+apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null 2>&1
+mkdir -p /run/sshd /etc/ssh/sshd_config.d
+printf 'Port 22\n' > /etc/ssh/sshd_config.d/a.conf
+ssh -V 2>&1 | cut -d, -f1
+G=/etc/ssh/sshd_config.d/*.conf
+i() { # label, printf format of the whole line
+  printf "$2\n" > /tmp/f.conf
+  rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
+  printf 'INCLUDE [%s] rc=%s\n' "$1" "$rc"
+  /usr/sbin/sshd -T -ddd -f /tmp/f.conf 2>&1 | grep -a 'new include' | cat -v | sed 's/^/    /'
+}
+i 'control: Include GLOB' "Include $G"
+i 'control: Include "GLOB"' "Include \"$G\""
+i 'Include = = GLOB' "Include = = $G"
+i 'Include "=" GLOB' "Include \"=\" $G"
+i 'Include " " GLOB' "Include \" \" $G"
+i 'Include ==GLOB' "Include ==$G"
+i 'Include \x01GLOB' "Include \001$G"
+i 'Include GLOB\x01' "Include $G\001"
+i 'Include GLOB\x0b' "Include $G\013"
+i 'Include GLOB\x7f' "Include $G\177"
+i 'Include GLOB\x0c' "Include $G\014"
+```
+
+Output, unedited except that `cat -v` shows non-printing bytes escaped (`^M` is the carriage return that
+`sshd -ddd` itself prints at the end of each debug line; `\001`, `\013`, `\177` are bytes of the path):
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+INCLUDE [control: Include GLOB] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [control: Include "GLOB"] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include = = GLOB] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/=^M
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include "=" GLOB] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/=^M
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include " " GLOB] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/ ^M
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include ==GLOB] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/=/etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include \x01GLOB] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/\001/etc/ssh/sshd_config.d/*.conf^M
+INCLUDE [Include GLOB\x01] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf\001^M
+INCLUDE [Include GLOB\x0b] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf\013^M
+INCLUDE [Include GLOB\x7f] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf\177^M
+INCLUDE [Include GLOB\x0c] rc=0
+    debug2: /tmp/f.conf line 1: new include /etc/ssh/sshd_config.d/*.conf^M
+```
+
+What it shows: with `= =`, a quoted `=`, a quoted blank, `==`, or a control byte before or after the glob, `sshd`
+9.6p1 includes another path or a pattern with the byte in it as well as, or instead of, the glob; a form feed after
+it was dropped. That is why the collector recognises the standard glob only in a closed set of spellings (bare or in
+one pair of quotes, after the bare keyword, absolute or `sshd_config.d/*.conf`) and counts every other spelling as
+reaching elsewhere.
 
 ## 4 · What is not measured
 

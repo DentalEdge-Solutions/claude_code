@@ -2858,27 +2858,40 @@ class TestD17AcceptedKeys(Base):
         self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 0))
 
     def test_every_include_form_sshd_honoured_is_read(self):
+        """An outside path counts in every spelling sshd honoured (9.6p1, see the evaluation record)."""
         self._two()
         forms = ['Include {}', '"Include" {}', 'In"clude" {}', 'Include\r{}', 'Include "{}"', 'Include={}',
                  '=Include {}', '""Include {}', '"Include"{}', 'Include\t{}', 'Include = {}']
         for form in forms:
-            for target, expected in (("/opt/extra.conf", 1), ("/etc/ssh/sshd_config.d/*.conf", 0),
-                                     ("sshd_config.d/*.conf", 0)):
-                self._sshd_config(form.format(target) + "\n")
-                d = CE.d1_7(self.host(), {})
-                self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, expected), repr((form, target)))
-
-    def test_the_standard_glob_with_anything_added_is_elsewhere(self):
-        """(An Include with only an opening or only a closing quote around the glob is refused by sshd,
-        rc 255 in the record, and the rule strips it: not counting it there is harmless.)"""
-        self._two()
-        glob = "/etc/ssh/sshd_config.d/*.conf"
-        for tail in (glob + "\r/opt/x.conf", glob + " /opt/x.conf", "/etc/ssh/x/../sshd_config.d/*.conf",
-                     "~/../" + glob, glob + " # c", "/etc/ssh/sshd_config.d/\"*.conf", "/etc/ssh/sshd_ config.d/*.conf", "",
-                     glob + "x", "/" + glob, '"' + glob + '""'):
-            self._sshd_config("Include " + tail + "\n")
+            self._sshd_config(form.format("/opt/extra.conf") + "\n")
             d = CE.d1_7(self.host(), {})
-            self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 1), repr(tail))
+            self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 1), repr(form))
+
+    GLOB = "/etc/ssh/sshd_config.d/*.conf"
+
+    def _include_elsewhere(self, line):
+        self._sshd_config(line + "\n")
+        return CE.d1_7(self.host(), {})["include_elsewhere"]
+
+    def test_the_standard_glob_is_recognised_only_in_a_closed_set_of_spellings(self):
+        self._two()
+        for line in (f"Include {self.GLOB}", f"  include\t{self.GLOB}", f'INCLUDE "{self.GLOB}"',
+                     f"Include {self.GLOB} \r", "Include sshd_config.d/*.conf", 'Include "sshd_config.d/*.conf"'):
+            self.assertEqual(self._include_elsewhere(line), 0, repr(line))
+
+    def test_anything_else_around_the_standard_glob_is_elsewhere(self):
+        """Measured on sshd 9.6p1 (-ddd 'new include'): `= =`, a quoted `=` or blank, `==`, a control
+        character before or after the glob each make sshd read another path or pattern as well."""
+        self._two()
+        g = self.GLOB
+        for line in (f"Include = = {g}", f'Include "=" {g}', f'Include " " {g}', f"Include =={g}",
+                     f"Include \x01{g}", f"Include {g}\x01", f"Include {g}\x0b", f"Include {g}\x7f",
+                     f"Include {g}\x0c", f'"Include" {g}', f"Include={g}", f"Include = {g}", f"Include\r{g}",
+                     f"Include {g} # c", f'Include "{g}', f'Include {g}"', f"Include {g}\r/opt/x.conf",
+                     f"Include {g} /opt/x.conf", "Include /etc/ssh/x/../sshd_config.d/*.conf",
+                     "Include ~/../" + g, "Include /etc/ssh/sshd_ config.d/*.conf", "Include", f"Include {g}x",
+                     f"Include /{g}", f'Include "{g}""', f"=Include {g}", f"Include\t{g}\x0c"):
+            self.assertEqual(self._include_elsewhere(line), 1, repr(line))
 
     def test_a_nul_byte_in_a_configuration_file_is_could_not_check(self):
         """sshd 9.6p1 honoured `Ma<NUL>` newline `tch User u` as a Match block: a NUL may join lines."""

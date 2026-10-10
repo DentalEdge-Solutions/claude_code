@@ -490,10 +490,12 @@ def _unprivileged_port_start(host):
 
 SSHD_CONFIG = "/etc/ssh/sshd_config"
 SSHD_CONFIG_DIR = "/etc/ssh/sshd_config.d"
-_SSHD_STANDARD_INCLUDES = (SSHD_CONFIG_DIR + "/*.conf", "sshd_config.d/*.conf")
-
-
-_SSHD_CONTROL = "".join(chr(c) for c in range(0x21)) + "\x7f"
+# The only spellings of the standard Include that are not counted as reaching elsewhere: the glob
+# bare or in one pair of double quotes, after the bare keyword and blanks (measured on sshd 9.6p1:
+# an `=`, a quoted blank, a control character or a second argument around it makes sshd read another
+# path or pattern as well).
+_SSHD_STANDARD_INCLUDE_RE = re.compile(
+    r'[ \t]*(?i:include)[ \t]+(")?(?:/etc/ssh/sshd_config\.d/\*\.conf|sshd_config\.d/\*\.conf)(?(1)")[ \t\r]*')
 
 
 def _sshd_skipped(c):
@@ -517,13 +519,14 @@ def _sshd_match_lines(host):
     (the main file and sshd_config.d/*.conf), and the `Include` lines there that name anything
     else than the standard glob. A `Match` block's settings are not read: its presence is what a
     reviewer must hear of. A file brought in from elsewhere is not read either, which is why it is
-    counted. The count is a superset by construction: a line is read by skipping every blank or
-    control character, double quote and `=`, which is more than sshd's tokenizer drops before and
-    inside a keyword (measured on sshd 9.6p1, docs/evaluations/2026-10-10-journal-retention-35-days.md),
-    and a head starting `match` is a Match line, a head `include` an Include line. sshd refuses a file
-    with a keyword it does not know (measured: `Matchmaker yes`, rc 255), so an over-count can only
-    fall on a line sshd refuses or on an unusual spelling; the standard glob is recognised only when
-    written literally, so any other spelling counts as elsewhere. A place that cannot be read, is
+    counted. The count is a superset by construction. Match: a line is read by skipping every blank
+    or control character, double quote and `=`, which is more than sshd's tokenizer drops before and
+    inside a keyword (measured on sshd 9.6p1, docs/evaluations/2026-10-10-journal-retention-35-days.md);
+    a head starting `match` is a Match line (sshd refuses a keyword it does not know, so counting
+    `Matchmaker` falls only on a file it refuses). Include: the same head says it is an Include line,
+    and it is "not elsewhere" only when the whole line is one of four literal spellings (the standard
+    glob, absolute or relative, bare or in one pair of quotes, after the bare keyword); every other
+    spelling counts as elsewhere, an over-count. A place that cannot be read, is
     over the limit or holds a NUL byte (which may join two lines for sshd) makes both could-not-check:
     a count of 0 must mean 0 was found."""
     try:
@@ -548,12 +551,7 @@ def _sshd_match_lines(host):
             if head.startswith("match"):
                 matches += 1
             elif head == "include":
-                rest = line[end:]
-                while rest and _sshd_skipped(rest[0]):
-                    rest = rest[1:]
-                rest = rest.rstrip(_SSHD_CONTROL)
-                rest = rest[:-1] if rest.endswith('"') else rest
-                elsewhere += rest not in _SSHD_STANDARD_INCLUDES
+                elsewhere += not _SSHD_STANDARD_INCLUDE_RE.fullmatch(line)
     return matches, elsewhere
 
 
