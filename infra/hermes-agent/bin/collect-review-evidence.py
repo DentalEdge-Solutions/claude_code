@@ -1065,16 +1065,29 @@ def d2_2(host, ctx):
     return {"histories": out}
 
 
-# The whole journal in one call: 4.6 MB of text in 2 s on the box at 7 days (2026-10-10), so about
-# 23 MB and 10 s at 35. Ten times that, times five for growth, is 100 s; never under 300.
+# The search of the whole journal measured 2 s at 7 days on the box (2026-10-10). Times 5 for 35 days,
+# times 10 for margin is 100 s; the limit is never under 300 s.
 JOURNAL_SCAN_TIMEOUT = 300
+
+
+def _journal_read(host, argv, timeout=60):
+    """The text of a journal read, or CouldNotCheck. A read that ends with anything on stderr is
+    not a whole read even at rc 0 (record R14: a truncated archived file is skipped with a
+    warning and rc 0; without rights journalctl prints a notice): what it covered is unknown.
+    The reason is in fixed words, never the stderr text (it can hold paths)."""
+    rc, out, err = host.run(argv, timeout)
+    if rc != 0:
+        raise CouldNotCheck(f"{argv[0]} exited {rc}: {(err or out).strip()[:200]}")
+    if err.strip():
+        raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
+    return out
 
 
 def d2_3(host, ctx):
     """The whole journal, as far back as it reaches (D2.4 judges how far). The oldest entry is
     read AFTER the search: entries only ever leave, so the search reached at least that far.
     An oldest entry that cannot be read is could-not-check; the counts of the search stay."""
-    text = _ok(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
+    text = _journal_read(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
     return {"journal": _count_cred_text(text, ctx.get("secrets", [])), "scanned_characters": len(text),
             "oldest_entry_read": _oldest_entry_or_unknown(host)}
 
@@ -2180,7 +2193,7 @@ def _label(value, allowed):
 
 
 def _journal(host, unit):
-    return _ok(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
+    return _journal_read(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
 
 
 def _journal_leaks(text, secrets, redactor):

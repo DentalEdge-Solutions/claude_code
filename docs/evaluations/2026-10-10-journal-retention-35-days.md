@@ -1768,3 +1768,140 @@ item CANNOT-VERIFY, never a pass.
   systemd 255 only.
 - `hermes-broker` and `hermes-docker-proxy` logging after the restart (only the audit broker has a safe trigger);
   the rehearsal's long-running stand-in is the `ticker` unit.
+## R14 · what the journal search can miss
+
+Measured 2026-10-10 in a fresh container `jr6` (image `journald-rehearsal`), removed afterwards. The scripts ran in the order: items 1, 2, 4, 5, 6 (first try), 3 (it damages the journal, so it ran last of that script); item 4's strict-decode check and item 6's unit-file form were run afterwards. Output is unedited except that the machine id is cut (`<machine id>`) and the scratch path is `<scratchpad>`.
+
+### The script (scratch file \`<scratchpad>/m.sh\`), and its output
+
+```
+echo '--- 1a'; journalctl -o cat --no-pager >/dev/null; echo rc=$?
+echo '--- 1b'; journalctl -u ticker --since -30d -o cat --no-pager >/dev/null; echo rc=$?
+echo '--- 2'; runuser -u nobody -- journalctl -o cat --no-pager | wc -c; echo rc=${PIPESTATUS[0]}
+echo '--- 4'
+printf 'bad \377 byte MARK-AFTER-BYTE\n' | systemd-cat -t t8; sleep 1
+echo '[plain]'; journalctl -t t8 -o cat --no-pager | od -c | tail -5
+echo '[--all]'; journalctl -t t8 -o cat --no-pager --all | od -c | tail -5
+echo '[strict decode, plain]'; journalctl -o cat --no-pager | python3 -c "import sys; sys.stdin.read(); print('decoded ok')"; echo rc=${PIPESTATUS[1]}
+echo '--- 5'
+python3 -c "print('x'*100000+'MARK-AT-END')" | systemd-cat -t t8long; sleep 1
+echo -n 'plain: '; journalctl -t t8long -o cat --no-pager | grep -c MARK-AT-END
+echo -n 'all: '; journalctl -t t8long -o cat --no-pager --all | grep -c MARK-AT-END
+echo -n 'plain chars: '; journalctl -t t8long -o cat --no-pager | wc -c
+echo -n 'all chars: '; journalctl -t t8long -o cat --no-pager --all | wc -c
+echo '--- 6'
+systemd-run --unit t8cmd --wait /bin/sh -c 'echo hello-from-t8cmd' TOKEN-IN-ARGV-123 2>&1 | tail -2; sleep 1
+echo -n 'cat: '; journalctl -u t8cmd -o cat --no-pager | grep -c TOKEN-IN-ARGV-123
+echo -n 'json: '; journalctl -u t8cmd -o json --no-pager | grep -c TOKEN-IN-ARGV-123
+journalctl -u t8cmd -o json --no-pager | grep -o '"_CMDLINE":"[^"]*"' | head -2
+echo '--- 3'
+journalctl --rotate; f=$(ls /var/log/journal/$(cat /etc/machine-id)/system@*.journal | head -1); truncate -s 4096 "$f"
+journalctl -o cat --no-pager >/dev/null; echo rc=$?
+echo '[oldest]'; journalctl -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1; echo rc=$?
+echo '[wc after]'; journalctl -o cat --no-pager 2>/dev/null | wc -c
+```
+
+```
+--- 1a
+rc=0
+--- 1b
+rc=0
+--- 2
+No journal files were opened due to insufficient permissions.
+0
+rc=1
+--- 4
+[plain]
+0000000   b   a   d     377       b   y   t   e       M   A   R   K   -
+0000020   A   F   T   E   R   -   B   Y   T   E  \n
+0000033
+[--all]
+0000000   b   a   d     377       b   y   t   e       M   A   R   K   -
+0000020   A   F   T   E   R   -   B   Y   T   E  \n
+0000033
+[strict decode, plain]
+decoded ok
+rc=0
+--- 5
+plain: 1
+all: 1
+plain chars: 100014
+all chars: 100014
+--- 6
+Failed to connect to bus: No such file or directory
+cat: 0
+json: 0
+--- 3
+Journal file /var/log/journal/<machine id>/system@<machine id>-0000000000000440-00065d8277b0fc05.journal is truncated, ignoring file.
+rc=0
+[oldest]
+Journal file /var/log/journal/<machine id>/system@<machine id>-0000000000000440-00065d8277b0fc05.journal is truncated, ignoring file.
+{"__REALTIME_TIMESTAMP":"1791664815876897","__SEQNUM":"2257","__MONOTONIC_TIMESTAMP":"10721451533","__SEQNUM_ID":"<machine id>","__CURSOR":"s=<machine id>;i=8d1;b=<machine id>;m=27f0c5e0d;t=65d8278e82b21;x=27538f0207472e85","_BOOT_ID":"<machine id>"}
+rc=0
+[wc after]
+255
+```
+
+### Item 4, strict decode (the collector reads with \`text=True\`, i.e. a strict UTF-8 decode)
+
+```
+printf 'bad \377 byte MARK-AFTER-BYTE\n' | systemd-cat -t t8b; sleep 1
+journalctl -t t8b -o cat --no-pager > /tmp/t8b.out; wc -c < /tmp/t8b.out
+python3 -c "import sys; d=open('/tmp/t8b.out','rb').read().decode('utf-8'); print('decoded', len(d))"; echo rc=$?
+---
+54
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 4: invalid start byte
+rc=1
+```
+
+### Item 6, in a unit file (\`systemd-run\` failed above: no bus in the container)
+
+```
+echo '--- 6'
+cat > /etc/systemd/system/t8cmd.service <<'U'
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo hello-from-t8cmd; sleep 3' TOKEN-IN-ARGV-123
+U
+systemctl daemon-reload; systemctl start t8cmd; echo start-rc=$?; sleep 1
+echo -n 'cat: '; journalctl -u t8cmd -o cat --no-pager | grep -c TOKEN-IN-ARGV-123
+echo -n 'json: '; journalctl -u t8cmd -o json --no-pager | grep -c TOKEN-IN-ARGV-123
+journalctl -u t8cmd -o json --no-pager | grep -o '"_CMDLINE":"[^"]*"' | sort -u
+journalctl -u t8cmd -o cat --no-pager
+---
+--- 6
+start-rc=0
+cat: 0
+json: 2
+"_CMDLINE":"/bin/sh -c \"
+"_CMDLINE":"/sbin/init"
+Starting t8cmd.service...
+hello-from-t8cmd
+t8cmd.service: Deactivated successfully.
+Finished t8cmd.service.
+Starting t8cmd.service...
+hello-from-t8cmd
+t8cmd.service: Deactivated successfully.
+Finished t8cmd.service.
+Starting t8cmd.service...
+hello-from-t8cmd
+t8cmd.service: Deactivated successfully.
+Finished t8cmd.service.
+Starting t8cmd.service...
+hello-from-t8cmd
+t8cmd.service: Deactivated successfully.
+Finished t8cmd.service.
+```
+
+The unit was started again each time the script was repeated while preparing this record, so the message repeats; the `json` count is the number of lines holding the token.
+
+### What it showed
+
+1. A healthy root run: rc 0 and nothing on stderr, for the whole journal and for the D10.7 form (`-u ticker --since -30d`).
+2. No rights (`nobody`): rc **1**, 0 characters, and `No journal files were opened due to insufficient permissions.` on stderr. A caller with a journal of its own but no right to the system journal (journalctl's "Hint: You are currently not seeing messages from other users and the system" case) was **not produced** here: its rc and stderr are not measured.
+3. A truncated archived file: **rc 0**, stdout continues, and stderr says `Journal file …/system@….journal is truncated, ignoring file.`, for the search and for the oldest-entry call alike. The oldest-entry call still printed an entry (of the files that remained). The text searched shrank from about 100 kB to 255 characters.
+4. A message with a byte that is not UTF-8: plain `-o cat` prints it whole (the byte as `377`, `MARK-AFTER-BYTE` after it); `--all` prints the same. No placeholder. But a strict UTF-8 decode of that output raises `UnicodeDecodeError`, and the collector reads with `text=True`: the probe ends `could-not-check` (it fails safe, and stays so while such a message is in the journal).
+5. A message of 100011 characters: plain `-o cat` and `--all` both print it whole (`MARK-AT-END` found once in each, 100014 characters).
+6. A token in a command line: stored in `_CMDLINE` of the `-o json` output (count above 0), absent from `-o cat` (count 0). D2.3 does not search it. (A line logged by a process that had already exited carried no `_CMDLINE` at all.)

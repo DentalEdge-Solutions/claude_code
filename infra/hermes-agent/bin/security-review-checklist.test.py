@@ -84,11 +84,22 @@ class TestChecklistSync(unittest.TestCase):
             self.assertIn(f"`{field}`", blocks["D4.6"], field)
 
     def test_d2_3_and_d10_7_name_the_reach_fields(self):
+        ce = _load("ce", "collect-review-evidence.py")
         blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
-        for field in ("journal", "scanned_characters", "oldest_entry_read"):
+        import tempfile
+        root = tempfile.mkdtemp()
+        reg = root + ce.GOV + "/registry/clients.json"
+        os.makedirs(os.path.dirname(reg))
+        with open(reg, "w") as f:
+            f.write('{"clients": {}}')
+        host = ce.Host(root, lambda argv, timeout=60: (0, "", ""))
+        d23 = ce.d2_3(host, {})
+        d107 = ce.d10_7(host, ce.context(host, b"\x11" * 32))
+        for field in (*d23, ):
             self.assertIn(f"`{field}`", blocks["D2.3"], field)
-        for field in ("oldest_entry_read", "broker", "runner"):
+        for field in ("oldest_entry_read", *d107["oldest_entry_read"]):
             self.assertIn(f"`{field}`", blocks["D10.7"], field)
+        self.assertEqual(sorted(d107["oldest_entry_read"]), ["broker", "runner"])
 
     def test_d2_4_names_every_field_the_collector_reports(self):
         ce = _load("ce", "collect-review-evidence.py")

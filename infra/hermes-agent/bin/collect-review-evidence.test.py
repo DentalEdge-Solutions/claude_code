@@ -3320,6 +3320,46 @@ class TestJournalReach(Base):
         d = CE.d2_3(CE.Host(self.root, run), {"secrets": []})
         self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (CN, 9))
 
+    # Measured (record R14, systemd 255): a truncated archived file is skipped with this on stderr and rc 0;
+    # without rights journalctl says the second line, with rc 1 and nothing on stdout.
+    TRUNCATED = "Journal file /var/log/journal/" + "0" * 32 + "/system@" + "0" * 32 + "-1-2.journal is truncated, ignoring file.\n"
+    NO_RIGHTS = "No journal files were opened due to insufficient permissions.\n"
+
+    def test_d2_3_a_read_that_ends_with_a_warning_is_could_not_check_never_a_healthy_count(self):
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        for what, answer in (("truncated file, rc 0", (0, "Started.\n", self.TRUNCATED)),
+                             ("no rights, rc 0", (0, "", self.NO_RIGHTS)),
+                             ("no rights, rc 1", (1, "", self.NO_RIGHTS)),
+                             ("time-out", (124, "", "journalctl: timed out")),
+                             ("rc 1 without a word", (1, "", ""))):
+            with self.subTest(what=what):
+                self.outputs[("journalctl", "-o")] = answer
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE.d2_3(self.host(), {"secrets": []})
+                it = CE.collect(self.host(), self.KEY)["items"]["D2.3"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                self.assertNotIn("truncated", it["reason"])               # the warning's text is not carried
+                self.assertNotIn("/var/log/journal", it["reason"])
+
+    def test_d2_3_empty_stderr_at_rc_0_reads_as_before(self):
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n", "  \n")
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 9)
+
+    def test_d10_7_a_journal_read_that_ends_with_a_warning_is_could_not_check(self):
+        for unit in ("broker", "runner"):
+            for what, answer in (("truncated file, rc 0", (0, "x\n", self.TRUNCATED)),
+                                 ("no rights, rc 0", (0, "", self.NO_RIGHTS)),
+                                 ("time-out", (124, "", "journalctl: timed out"))):
+                with self.subTest(unit=unit, what=what):
+                    host = self.host()
+                    ok = (0, "", "")
+                    def run(argv, timeout=60):
+                        return answer if argv[:3] == ["journalctl", "-u", f"hermes-app-{unit}@ads-audit"] and "-q" not in argv else ok
+                    host = CE.Host(self.root, run)
+                    with self.assertRaises(CE.CouldNotCheck):
+                        CE.d10_7(host, CE.context(host, self.KEY))
+
     def test_d2_3_gives_the_journal_300_seconds(self):
         seen = {}
         def run(argv, timeout=60):
@@ -3337,7 +3377,6 @@ class TestJournalReach(Base):
         t0 = time.monotonic()
         d = CE.d2_3(self.host(), {"secrets": [self.SECRET]})
         took = time.monotonic() - t0
-        print(f"\n[35-day-size search took {took:.2f} s]", file=sys.stderr)
         self.assertEqual(d["journal"], {"pattern_hits": 1, "known_secret_hits": 1})
         self.assertEqual(d["scanned_characters"], len(text))
         self.assertLess(took, 60, "the search of a 35-day journal must end far inside the 300 s limit")
