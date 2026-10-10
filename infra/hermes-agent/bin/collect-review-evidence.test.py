@@ -2829,13 +2829,30 @@ class TestD17AcceptedKeys(Base):
         d = CE.d1_7(self.host(), {})
         self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 2))
 
-    def test_a_keyword_in_double_quotes_is_the_keyword_sshd_reads(self):
-        """Measured against sshd 9.6p1: "Port" 2200, "Match" User u and "Include" file are all honoured."""
+    def test_every_match_form_sshd_honoured_counts(self):
+        """Each form opened a Match block for the user in sshd 9.6p1 (docs/evaluations/2026-10-10-journal-retention-35-days.md)."""
+        forms = ['Match User u', '"Match" User u', 'Ma"tch" User u', 'Match"" User u', '""Match User u',
+                 '"" "Match" User u', '"Match"User u', 'Match\rUser u', '\rMatch User u', 'Match=User u',
+                 'Match\tUser u', '"Match"=User u', '"Match User" u']      # the last two: sshd refuses the file
         self._two()
-        self._sshd_config('"Match" User x\n  "Matchmaker" yes\n"Include" /etc/ssh/extra.conf\n'
-                          '"Include" /etc/ssh/sshd_config.d/*.conf\n')
+        for form in forms:
+            self._sshd_config(form + "\n  X11Forwarding yes\n")
+            d = CE.d1_7(self.host(), {})
+            self.assertEqual((d["match_lines"], d["include_elsewhere"]), (1, 0), repr(form))
+
+    def test_lines_that_are_not_a_match_or_an_include_do_not_count(self):
+        self._two()
+        self._sshd_config('"Matchmaker" yes\n# Match User x\nMatchmaker yes\n"Match User\n=Match\n\r\n"" "" \n')
         d = CE.d1_7(self.host(), {})
-        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (1, 1))
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 0))
+
+    def test_every_include_form_sshd_honoured_is_read(self):
+        self._two()
+        for form in ['Include {}', '"Include" {}', 'In"clude" {}', 'Include\r{}', 'Include "{}"', 'Include={}']:
+            for target, expected in (("/etc/ssh/extra.conf", 1), ("/etc/ssh/sshd_config.d/*.conf", 0)):
+                self._sshd_config(form.format(target) + "\n")
+                d = CE.d1_7(self.host(), {})
+                self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, expected), repr((form, target)))
 
     def test_a_configuration_file_over_the_read_limit_is_could_not_check(self):
         self._two()

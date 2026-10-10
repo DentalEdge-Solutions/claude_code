@@ -215,33 +215,111 @@ Both controls held (`d` accepted, `x` refused), so the measurement is valid.
   comment, and the carriage-return line, so the D1.7 reader counts as unreadable lines (a, b and c) that the server
   accepts. The next task decides what to do with it.
 
-### A configuration keyword in double quotes
+### A configuration keyword in double quotes, and a carriage return
 
-Measured 2026-10-10 in a throwaway `ubuntu:24.04` container (`openssh-server`, `OpenSSH_9.6p1`), a user `u` made,
-`sshd -T` run with and without `-C user=u,host=h,addr=127.0.0.1`. File `q.conf` has the keywords in double quotes
-(`"Port" 2200`, `"Match" User u`, then `  X11Forwarding yes`); file `c.conf` is the same without the quotes
-(control). A third file held `"Include" /tmp/inc.conf`, and `inc.conf` held `Port 2300`.
+Measured 2026-10-10 in a throwaway `ubuntu:24.04` container with `openssh-server` (`OpenSSH_9.6p1`), account `u`
+made. Each form is one line followed by `  X11Forwarding yes` (Match forms, read with
+`sshd -T -f FILE -C user=u,host=h,addr=127.0.0.1`: `yes` means the line opened a Match block for `u`, `no` that it
+did not) or, for Include, a file `/tmp/inc.conf` holding `X11Forwarding yes` at global level, read with
+`sshd -T -f FILE`. The script, run as
+`docker run --rm -v measure.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh`:
+
+```sh
+#!/bin/sh
+# runs inside ubuntu:24.04 with openssh-server; u is an existing account
+apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null 2>&1
+mkdir -p /run/sshd; useradd u
+ssh -V 2>&1 | cut -d, -f1
+m() { # label printf-format
+  printf "$2  X11Forwarding yes\n" > /tmp/f.conf
+  rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
+  v=$(/usr/sbin/sshd -T -f /tmp/f.conf -C user=u,host=h,addr=127.0.0.1 2>&1 | grep -i '^x11forwarding ')
+  printf "MATCH   [%s] rc=%s %s\n" "$1" "$rc" "${v:-<none>}"
+}
+printf 'X11Forwarding yes\n' > /tmp/inc.conf
+i() {
+  printf "$2\n" > /tmp/f.conf
+  rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
+  v=$(/usr/sbin/sshd -T -f /tmp/f.conf 2>&1 | grep -i '^x11forwarding ')
+  printf "INCLUDE [%s] rc=%s %s\n" "$1" "$rc" "${v:-<none>}"
+}
+m 'control+ Match User u' 'Match User u\n'
+printf 'Port 22\n' > /tmp/f.conf; rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
+echo "MATCH   [control- no Match line] rc=$rc $(/usr/sbin/sshd -T -f /tmp/f.conf -C user=u,host=h,addr=127.0.0.1 2>&1 | grep -i '^x11forwarding ')"
+m '"Match" User u' '"Match" User u\n'
+m 'Ma"tch" User u' 'Ma"tch" User u\n'
+m 'Match"" User u' 'Match"" User u\n'
+m '""Match User u' '""Match User u\n'
+m '"" "Match" User u' '"" "Match" User u\n'
+m '"Match"User u' '"Match"User u\n'
+m '"Match User" u' '"Match User" u\n'
+m 'Match\rUser u' 'Match\rUser u\n'
+m '\rMatch User u' '\rMatch User u\n'
+m 'Match=User u' 'Match=User u\n'
+m '"Match"=User u' '"Match"=User u\n'
+m 'Match\tUser u' 'Match\tUser u\n'
+i 'control+ Include /tmp/inc.conf' 'Include /tmp/inc.conf'
+i '"Include" /tmp/inc.conf' '"Include" /tmp/inc.conf'
+i 'In"clude" /tmp/inc.conf' 'In"clude" /tmp/inc.conf'
+i 'Include\r/tmp/inc.conf' 'Include\r/tmp/inc.conf'
+i 'Include "/tmp/inc.conf"' 'Include "/tmp/inc.conf"'
+i 'Include=/tmp/inc.conf' 'Include=/tmp/inc.conf'
+```
+
+Output, unedited (the `\r` and `\t` in the labels are the escapes written in the script):
 
 ```
 OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
-== q
-syntax rc: 0
-port 2200
-x11forwarding no
---- as user u:
-x11forwarding yes
-== c
-syntax rc: 0
-port 2200
-x11forwarding no
---- as user u:
-x11forwarding yes
-(third run, the quoted Include)  port 2300
+MATCH   [control+ Match User u] rc=0 x11forwarding yes
+MATCH   [control- no Match line] rc=0 x11forwarding no
+MATCH   ["Match" User u] rc=0 x11forwarding yes
+MATCH   [Ma"tch" User u] rc=0 x11forwarding yes
+MATCH   [Match"" User u] rc=0 x11forwarding yes
+MATCH   [""Match User u] rc=0 x11forwarding yes
+MATCH   ["" "Match" User u] rc=0 x11forwarding yes
+MATCH   ["Match"User u] rc=0 x11forwarding yes
+MATCH   ["Match User" u] rc=255 <none>
+MATCH   [Match\rUser u] rc=0 x11forwarding yes
+MATCH   [\rMatch User u] rc=0 x11forwarding yes
+MATCH   [Match=User u] rc=0 x11forwarding yes
+MATCH   ["Match"=User u] rc=255 <none>
+MATCH   [Match\tUser u] rc=0 x11forwarding yes
+INCLUDE [control+ Include /tmp/inc.conf] rc=0 x11forwarding yes
+INCLUDE ["Include" /tmp/inc.conf] rc=0 x11forwarding yes
+INCLUDE [In"clude" /tmp/inc.conf] rc=0 x11forwarding yes
+INCLUDE [Include\r/tmp/inc.conf] rc=0 x11forwarding yes
+INCLUDE [Include "/tmp/inc.conf"] rc=0 x11forwarding yes
+INCLUDE [Include=/tmp/inc.conf] rc=0 x11forwarding yes
 ```
 
-What it shows: `sshd` 9.6p1 reads a keyword
-written in double quotes exactly as it reads it bare, `"Match"` opens a block and `"Include"` brings the file in, so
-the D1.7 line reader counts such a line.
+| form | file read as | rc of `sshd -t` | `x11forwarding` | counted by the collector |
+|---|---|---|---|---|
+| `control+ Match User u` | Match for user u | 0 | yes | n/a (control) |
+| `control- no Match line` | Match for user u | 0 | no | no (no Match line) |
+| `"Match" User u` | Match for user u | 0 | yes | yes |
+| `Ma"tch" User u` | Match for user u | 0 | yes | yes |
+| `Match"" User u` | Match for user u | 0 | yes | yes |
+| `""Match User u` | Match for user u | 0 | yes | yes |
+| `"" "Match" User u` | Match for user u | 0 | yes | yes |
+| `"Match"User u` | Match for user u | 0 | yes | yes |
+| `"Match User" u` | Match for user u | 255 | (none printed) | yes |
+| `Match\rUser u` | Match for user u | 0 | yes | yes |
+| `\rMatch User u` | Match for user u | 0 | yes | yes |
+| `Match=User u` | Match for user u | 0 | yes | yes |
+| `"Match"=User u` | Match for user u | 255 | (none printed) | yes |
+| `Match\tUser u` | Match for user u | 0 | yes | yes |
+| `control+ Include /tmp/inc.conf` | Include, global | 0 | yes | n/a (control) |
+| `"Include" /tmp/inc.conf` | Include, global | 0 | yes | yes |
+| `In"clude" /tmp/inc.conf` | Include, global | 0 | yes | yes |
+| `Include\r/tmp/inc.conf` | Include, global | 0 | yes | yes |
+| `Include "/tmp/inc.conf"` | Include, global | 0 | yes | yes |
+| `Include=/tmp/inc.conf` | Include, global | 0 | yes | yes |
+
+What it shows: of the Match forms run, `sshd` 9.6p1 honoured every one except `"Match User" u` and `"Match"=User u`,
+for which it refused the whole file (rc 255); it honoured a quote inside the word, an empty `""` word before it,
+no blank after a closing quote, `=` in place of a blank, a carriage return or a tab as the blank, and the same
+for `Include`. The collector counts every form in the table (those two refused forms included, as over-counting is
+the safe direction). Not run: other characters after a quote, a quoted word that is not `Match` or `Include`.
 
 ## 4 · What is not measured
 
