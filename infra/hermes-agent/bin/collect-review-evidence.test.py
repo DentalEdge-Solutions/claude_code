@@ -2951,7 +2951,7 @@ class TestD17AcceptedKeys(Base):
     CNC = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
     # Every title below is one `ps -ww -C sshd -o args=` printed on sshd 9.6p1 during or after a login
     # (the evaluation record, "How the running sshd was started", fix round 1).
-    CHILD_TITLES = ("sshd: [accepted]\n", "sshd: [net]\n", "sshd: [rexeced]\n", "sshd: u\n", "sshd: u [net]\n",
+    CHILD_TITLES = ("sshd: [accepted]\n", "sshd: [net]\n", "sshd: [rexeced]\n", "sshd: hermesops\n", "sshd: u [net]\n",
                     "sshd: u [priv]\n", "sshd: u@notty\n", "sshd: u@pts/0\n", "sshd: unknown [net]\n",
                     "sshd: unknown [priv]\n", "/usr/sbin/sshd -D -R\n", "[sshd]\n", "[sshd] <defunct>\n")
 
@@ -2975,9 +2975,33 @@ class TestD17AcceptedKeys(Base):
                       "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups x\n",
                       "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startupsX\n", "sshd: [listener] 0 of 10-100 startups\n",
                       "sshd: u [pam]\n", "sshd: -f [priv]\n", "sshd: u [priv] \n", " sshd: u [priv]\n", "sshd: u [priv]\r\n",
-                      "sshd: u@notty \n", "sshd: u -f /x [priv]\n", "sshd:  u\n"):
+                      "sshd: u@notty \n", "sshd: u -f /x [priv]\n", "sshd:  u\n",
+                      # measured on 9.6p1 (record, fix round 1): the cut titles of a daemon started with an
+                      # empty environment, a title cut by COLUMNS=60, and a title cut after the program path
+                      "sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o Port=2222 -o AuthorizedKey x\n",
+                      "sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o 2\n",
+                      "sshd: /usr/sbin/sshd -D -f /tmp/a-rather-long-directory-name\n", "sshd: /usr/sbin/sshd\n",
+                      "sshd: s x\n", "s: s x\n"):
             self.assertEqual(self._ps(self.LISTENER + extra), self.CNC, repr(extra))
             self.assertEqual(self._ps(extra), self.CNC, repr(extra))               # alone, too
+
+    def test_a_bare_sshd_name_line_is_ignored_only_for_a_real_account(self):
+        """A daemon's own cut title can end as `sshd: x` (the last character of its last argument): the
+        bare form is a child only when NAME is an account in /etc/passwd. Only `unknown [net]` and
+        `unknown [priv]` were seen, never a bare `sshd: unknown`."""
+        for name in ("x", "unknown", "u", "Hermesops", "hermesop"):
+            self.assertEqual(self._ps(self.LISTENER + f"sshd: {name}\n"), self.CNC, name)
+        for name in ("hermesops", "hermes-broker", "root", "daemon"):
+            self.assertEqual(self._ps(self.LISTENER + f"sshd: {name}\n"), self._opts(1, 0, 0), name)
+        self.assertEqual(self._ps(self.LISTENER + "sshd: x [priv]\nsshd: x@notty\nsshd: x [net]\n"),
+                         self._opts(1, 0, 0))                      # a suffixed form needs no account
+
+    def test_a_bare_sshd_name_line_with_no_readable_account_list_is_could_not_check(self):
+        os.remove(os.path.join(self.root, "etc/passwd"))
+        self.outputs[self.PS] = (0, self.LISTENER + "sshd: hermesops\n", "")
+        self.assertEqual(CE._sshd_daemon_options(self.host()), self.CNC)
+        self.outputs[self.PS] = (0, self.LISTENER + "sshd: u [priv]\n", "")
+        self.assertEqual(CE._sshd_daemon_options(self.host()), self._opts(1, 0, 0))
 
     def test_the_process_list_is_not_cut_to_a_width(self):
         """`ps -ww`: without it procps applies COLUMNS even to a pipe (measured), cutting a long title."""

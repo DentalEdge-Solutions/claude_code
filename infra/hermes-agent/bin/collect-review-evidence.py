@@ -565,8 +565,18 @@ _SSHD_LISTENER_TITLE_RE = re.compile(r"sshd: (?P<args>\S.*) \[listener\] [0-9]+ 
 _SSHD_NAME = r"[A-Za-z0-9_][A-Za-z0-9_.$-]*"
 _SSHD_CHILD_TITLE_RE = re.compile(
     r"sshd: \[(?:accepted|net|rexeced)\]"
-    rf"|sshd: {_SSHD_NAME}(?: \[(?:net|priv)\]|@(?:notty|pts/[0-9]+))?"
+    rf"|sshd: {_SSHD_NAME}(?: \[(?:net|priv)\]|@(?:notty|pts/[0-9]+))"
     r"|/usr/sbin/sshd -D -R|\[sshd\]|\[sshd\] <defunct>", re.ASCII)
+_SSHD_BARE_NAME_RE = re.compile(rf"sshd: ({_SSHD_NAME})", re.ASCII)
+
+
+def _account_names(host):
+    """The account names in /etc/passwd, or None when the file cannot be read."""
+    try:
+        with open(host.path("/etc/passwd")) as f:
+            return {line.split(":", 1)[0] for line in f.read().split("\n") if line and not line.startswith("#")}
+    except (OSError, UnicodeDecodeError):
+        return None
 _SSHD_OPTIONS_WITH_ARGUMENT = "CEbcfghkopu"          # sshd's getopt string: `C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrt`
 
 
@@ -578,7 +588,9 @@ def _sshd_daemon_options(host):
     classified: a full-line listener title is counted; a full-line child title from the closed set
     above is ignored; ANY OTHER line (a title cut short, as a daemon started with a small
     environment gets, a process never retitled, a line a local account made, trailing blanks) makes
-    all three could-not-check, because it may be a second daemon with options. Options are read as
+    all three could-not-check, because it may be a second daemon with options. The bare form
+    `sshd: NAME` is ignored only when NAME is an account in /etc/passwd, because a daemon's own cut
+    title can end that way (its last argument's last character) while a suffixed form cannot. Options are read as
     getopt does (`-f path`, `-fpath`, `-Df path`). The title joins the arguments with blanks and
     /proc/PID/cmdline holds that same one string (measured), so the original argument vector is not
     available: every word that starts with `-` is read as an option cluster and a word that does not
@@ -602,6 +614,9 @@ def _sshd_daemon_options(host):
         m = _SSHD_LISTENER_TITLE_RE.fullmatch(line)
         if not m:
             if _SSHD_CHILD_TITLE_RE.fullmatch(line):
+                continue
+            bare = _SSHD_BARE_NAME_RE.fullmatch(line)
+            if bare and bare.group(1) in (_account_names(host) or ()):
                 continue
             return unknown
         listeners += 1

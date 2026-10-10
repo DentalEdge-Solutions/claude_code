@@ -767,6 +767,10 @@ therefore reads every word starting with `-` as an option cluster and skips (nev
 (`-o "Banner /tmp/a b"` is refused by sshd itself, so `AllowUsers` stands in for a blank-holding value. Re-run, script
 `measure10.sh`: `/usr/sbin/sshd -t -o "Banner /tmp/a b"`, output below.)
 
+```
+docker run --rm --name t5b7 -v <scratchpad>/measure10.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+```
+
 ```bash
 #!/bin/bash
 apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null 2>&1
@@ -924,6 +928,95 @@ listener line ends in a single line feed with no trailing blank. The title forms
 `/usr/sbin/sshd -D -R`, `[sshd]` and `[sshd] <defunct>`. The collector accepts exactly these as children; any other line
 (a cut title, an untitled process, trailing blanks, a form not seen such as `[pam]`, which did not appear) makes
 `daemon_options` `could-not-check`.
+
+#### Fix round 2: can a daemon's own cut title look like a child?
+
+A review derived from the two `env -i` lines that a daemon started with an empty environment and the arguments `s -rfx`
+could be cut to `sshd: x`, the bare child form. Measured with `python3 -c 'import os; os.execve("/usr/sbin/sshd",
+["s","-rfx"], {})'` (a real execve with an empty environment; `python3` installed in the container), from a directory
+holding a file `x` with `Port 2222`, beside a plain `-D` listener, and then the same with `argv[0]` = `sshd`:
+
+```
+docker run --rm --name t5b8 -v <scratchpad>/measure11.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+```
+
+```bash
+#!/bin/bash
+# runs inside ubuntu:24.04; python3 is installed to get a real execve with argv ["s","-rfx"] and an empty environment
+apt-get update -qq && apt-get install -y -qq openssh-server procps python3 >/dev/null 2>&1
+mkdir -p /run/sshd /tmp/d && cd /tmp/d
+ssh -V 2>&1 | cut -d, -f1
+printf 'Port 2222\n' > x
+/usr/sbin/sshd -D >/dev/null 2>&1 & sleep 1
+python3 -c 'import os; os.execve("/usr/sbin/sshd", ["s","-rfx"], {})' >/tmp/err 2>&1 &
+sleep 1
+echo "ps -ww -C sshd -o args= | od -c:"; ps -ww -C sshd -o args= | od -c | sed 's/^/    /'
+echo "ps -ww -C sshd -o args= | cat -v:"; ps -ww -C sshd -o args= | cat -v | sed 's/^/    /'
+for p in $(pgrep -x sshd); do echo "  /proc <cut> cmdline bytes:"; od -c < /proc/$p/cmdline | sed 's/^/    /'; done
+echo "processes named sshd: $(pgrep -x sshd | wc -l); output of the second start: $(cat /tmp/err)"
+echo "listening on 2222: $( (ss -ltn 2>/dev/null || true) | grep -c ':2222 ')"
+pkill -x sshd; sleep 1
+echo "=== the same with argv[0] = sshd"
+/usr/sbin/sshd -D >/dev/null 2>&1 & sleep 1
+python3 -c 'import os; os.execve("/usr/sbin/sshd", ["sshd","-rfx"], {})' >/tmp/err 2>&1 &
+sleep 1
+echo "ps -ww -C sshd -o args= | od -c:"; ps -ww -C sshd -o args= | od -c | sed 's/^/    /'
+echo "ps -ww -C sshd -o args= | cat -v:"; ps -ww -C sshd -o args= | cat -v | sed 's/^/    /'
+for p in $(pgrep -x sshd); do echo "  /proc <cut> cmdline bytes:"; od -c < /proc/$p/cmdline | sed 's/^/    /'; done
+pkill -x sshd
+```
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+ps -ww -C sshd -o args= | od -c:
+    0000000   s   s   h   d   :       /   u   s   r   /   s   b   i   n   /
+    0000020   s   s   h   d       -   D       [   l   i   s   t   e   n   e
+    0000040   r   ]       0       o   f       1   0   -   1   0   0       s
+    0000060   t   a   r   t   u   p   s  \n   s   :       s       x  \n
+    0000077
+ps -ww -C sshd -o args= | cat -v:
+    sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+    s: s x
+  /proc <cut> cmdline bytes:
+    0000000   s   s   h   d   :       /   u   s   r   /   s   b   i   n   /
+    0000020   s   s   h   d       -   D       [   l   i   s   t   e   n   e
+    0000040   r   ]       0       o   f       1   0   -   1   0   0       s
+    0000060   t   a   r   t   u   p   s  \0
+    0000070
+  /proc <cut> cmdline bytes:
+    0000000   s   :       s  \0   x  \0
+    0000007
+processes named sshd: 2; output of the second start: 
+listening on 2222: 0
+=== the same with argv[0] = sshd
+ps -ww -C sshd -o args= | od -c:
+    0000000   s   s   h   d   :       /   u   s   r   /   s   b   i   n   /
+    0000020   s   s   h   d       -   D       [   l   i   s   t   e   n   e
+    0000040   r   ]       0       o   f       1   0   -   1   0   0       s
+    0000060   t   a   r   t   u   p   s  \n   s   s   h   d   :       s    
+    0000100   x  \n
+    0000102
+ps -ww -C sshd -o args= | cat -v:
+    sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+    sshd: s x
+  /proc <cut> cmdline bytes:
+    0000000   s   s   h   d   :       /   u   s   r   /   s   b   i   n   /
+    0000020   s   s   h   d       -   D       [   l   i   s   t   e   n   e
+    0000040   r   ]       0       o   f       1   0   -   1   0   0       s
+    0000060   t   a   r   t   u   p   s  \0
+    0000070
+  /proc <cut> cmdline bytes:
+    0000000   s   s   h   d   :       s  \0   x  \0
+    0000012
+```
+
+What it shows: the process started that way is a process named `sshd` with a title of `s: s x` (argv[0] `s`) or
+`sshd: s x` (argv[0] `sshd`), in `/proc` `s: s|x|` / `sshd: s|x|`: two words, not the bare `sshd: x`, so the reviewer's
+exact form was not reproduced here; whether it listened on 2222 was not checked (the `ss` count printed 0, but whether `ss` exists in the image was not
+checked, so that 0 is not a measurement). The bare form can still not be excluded for another
+argument layout, so the collector accepts a bare `sshd: NAME` only when NAME is an account in `/etc/passwd`; the suffixed
+forms (`[priv]`, `[net]`, `@notty`, `@pts/N`) are accepted for any name, as a daemon's title cannot end in them. Only
+`unknown [net]` and `unknown [priv]` were seen, never a bare `sshd: unknown`, which therefore counts as unrecognised.
 
 Not measured: the box's own unit (a socket-activated start, `sshd.socket`, which would show another title or none), a
 user name containing the text `[listener]` (the client refuses odd names; `useradd` refuses blanks), a child title not
