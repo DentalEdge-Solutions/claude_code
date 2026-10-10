@@ -172,6 +172,33 @@ treated shows `MaxRetentionSec=3min` from the main file and then `MaxRetentionSe
 3 minutes applied), the treated container kept it (our file's 35 days overrode it), so the experiment is valid.
 Both containers were removed afterwards.
 
+### R8 · the settings printout with `--tldr`
+
+Measured 2026-10-10 in the running systemd 255 container `jr` (read-only), `systemd-analyze cat-config --tldr systemd/journald.conf | cat -A`:
+
+```
+# /etc/systemd/journald.conf$
+[Journal]$
+Storage=persistent$
+SystemMaxUse=1G$
+MaxRetentionSec=7day$
+MaxFileSec=1day$
+$
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf$
+[Journal]$
+MaxRetentionSec=35day$
+SystemMaxFiles=500$
+$
+# /usr/lib/systemd/journald.conf.d/syslog.conf$
+[Journal]$
+ForwardToSyslog=yes$
+```
+
+The same command without `--tldr` additionally prints every comment line of the file contents (the three-line
+Hermes header of our file, the upstream comment of `syslog.conf`) and an empty line inside a file's content. With
+`--tldr` a line starting with `#` is only a header the tool printed (`# <path>`), one empty line separates the files,
+and content lines keep their text unchanged (no leading blank was present in these files).
+
 ## 3b · The key reader's two cases
 
 Measured 2026-10-10 on the laptop (macOS, shell zsh; Docker 29, linux/aarch64 container, `ubuntu:24.04`), against a

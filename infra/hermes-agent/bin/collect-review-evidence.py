@@ -1069,79 +1069,90 @@ def d2_3(host, ctx):
     return {"journal": _count_cred_text(_ok(host, ["journalctl", "-o", "cat", "--no-pager"]), ctx.get("secrets", []))}
 
 
-# D2.4: the journal service's settings, as `systemd-analyze cat-config systemd/journald.conf`
-# prints the files (systemd 255: `# <path>` before each file, an empty line before every file
-# but the first; the last file to set a value is the one that counts).
+# D2.4: the journal service's settings, as `systemd-analyze cat-config --tldr systemd/journald.conf`
+# prints the files (systemd 255, measured: `# <path>` before each file, one empty line between
+# files, no comment and no content empty line; the last file to set a value is the one that counts).
+JOURNALD_CAT_CONFIG = ["systemd-analyze", "cat-config", "--tldr", "systemd/journald.conf"]
 JOURNALD_SETTINGS = ("MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec")
-_JOURNALD_FILE_RE = re.compile(r"# (/(?:etc|run|usr/lib|usr/local/lib)/systemd/journald\.conf"
-                               r"(?:\.d/[A-Za-z0-9._@-]+\.conf)?)")
-# systemd.time(7), as src/basic/time-util.c reads a time span at tag v255. A bare number is seconds.
-_SPAN_UNITS = {"": 1, "usec": 1e-6, "us": 1e-6, "μs": 1e-6, "µs": 1e-6, "msec": 1e-3, "ms": 1e-3,
-               "seconds": 1, "second": 1, "sec": 1, "s": 1, "minutes": 60, "minute": 60, "min": 60, "m": 60,
+_JOURNALD_FILE_RE = re.compile(r"/(?:etc|run|usr/lib|usr/local/lib)/systemd/journald\.conf"
+                               r"(?:\.d/[A-Za-z0-9._@-]+\.conf)?")
+_JOURNALD_ASSIGN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*)=([\x21-\x5b\x5d-\x7e]*)")
+# systemd.time(7) units of one second or more, as integers (src/basic/time-util.c, v255).
+_SPAN_UNITS = {"": 1, "seconds": 1, "second": 1, "sec": 1, "s": 1, "minutes": 60, "minute": 60, "min": 60, "m": 60,
                "hours": 3600, "hour": 3600, "hr": 3600, "h": 3600, "days": 86400, "day": 86400, "d": 86400,
                "weeks": 604800, "week": 604800, "w": 604800, "months": 2629800, "month": 2629800, "M": 2629800,
                "years": 31557600, "year": 31557600, "y": 31557600}
-_SPAN_PART_RE = re.compile(r"[ \t]*([0-9]+(?:\.[0-9]+)?)[ \t]*([A-Za-zμµ]*)")
+_SPAN_RE = re.compile(r"([0-9]{1,9})([A-Za-z\u03bc\u00b5]*)")
+_SIZE_RE = re.compile(r"([0-9]{1,12})([KMGTPE]?)")
 _SIZE_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40, "P": 1 << 50, "E": 1 << 60}
 # The oldest entry journalctl would show: its time and nothing else (no message, no host name).
 # The selector (a unit, a window) goes AFTER these, so the call never starts as a leak check's does.
 OLDEST_ENTRY_ARGS = ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "+1"]
+_TIMESTAMP_RE = re.compile(r"[0-9]{1,17}")
 
 
 def _span_seconds(value):
-    """A systemd time span as whole seconds, or could-not-check: a value this collector cannot
-    convert is never guessed at (`infinity`, a unit it does not know, an empty value)."""
-    text, pos, total = value.strip(" \t"), 0, 0.0
-    if not text:
+    """A systemd time span as whole seconds, or could-not-check. Closed grammar: up to nine digits
+    and one unit of a second or more, nothing else (no fraction, blank, sign, several parts), so
+    the integer result is exactly what systemd computes; anything else is never guessed at."""
+    m = _SPAN_RE.fullmatch(value)
+    if not m or m.group(2) not in _SPAN_UNITS:
         return R.COULD_NOT_CHECK
-    while pos < len(text):
-        m = _SPAN_PART_RE.match(text, pos)
-        if not m or m.group(2) not in _SPAN_UNITS:
-            return R.COULD_NOT_CHECK
-        total += float(m.group(1)) * _SPAN_UNITS[m.group(2)]
-        pos = m.end()
-    return int(total)
+    return int(m.group(1)) * _SPAN_UNITS[m.group(2)]
 
 
 def _size_bytes(value):
-    """A size as journald.conf writes it (a whole number and K, M, G, T, P or E, powers of 1024)."""
-    m = re.fullmatch(r"([0-9]+)([KMGTPE]?)", value.strip(" \t"))
-    return int(m.group(1)) * _SIZE_UNITS[m.group(2)] if m else R.COULD_NOT_CHECK
+    """A size as journald.conf writes it (up to twelve digits and K, M, G, T, P or E, powers of
+    1024), below 2**63; otherwise could-not-check."""
+    m = _SIZE_RE.fullmatch(value)
+    if not m:
+        return R.COULD_NOT_CHECK
+    n = int(m.group(1)) * _SIZE_UNITS[m.group(2)]
+    return n if n < 1 << 63 else R.COULD_NOT_CHECK
 
 
 def _journald_settings(text):
     """(settings, files): for each name in JOURNALD_SETTINGS the value written LAST under
     [Journal] and the file it stands in (both None when no file sets it), and the files printed,
-    in order. A file starts at a `# /path` line that is the first line or follows an empty one
-    and names a journald settings file; every other line starting with # or ; is a comment. A
-    file printed twice is could-not-check: cat-config prints each once, so a second header is a
-    comment made to look like one, and the file of a value below it cannot be told."""
-    lines = text.split("\n")
+    in order. A CLOSED grammar over the `--tldr` printout: an empty line, a `# <path>` header of a
+    journald settings file (each once), exactly `[Journal]`, and `Key=value` lines (a key of
+    letters and digits, a value of printable non-blank ASCII without a backslash) after the
+    section line of their file. Any other line raises CouldNotCheck, because a line this reader
+    does not model (a comment, a continuation, a BOM, another section, a header it does not know)
+    could change what systemd applies without the reader seeing it. The reason names the kind of
+    line, never its content."""
+    files, current, section = [], None, False
     last = {k: {"value": None, "file": None} for k in JOURNALD_SETTINGS}
-    files, current, section = [], None, None
-    for i, line in enumerate(lines):
-        m = _JOURNALD_FILE_RE.fullmatch(line)
-        if m and (i == 0 or lines[i - 1] == ""):
-            if m.group(1) in files:
+    for line in text.split("\n")[:-1] if text.endswith("\n") else text.split("\n"):
+        if line == "":
+            continue
+        if line[0] in "#;":
+            path = line[2:] if line.startswith("# ") else None
+            if path is None or not _JOURNALD_FILE_RE.fullmatch(path):
+                raise CouldNotCheck("cat-config shows a comment or a header this reader does not know")
+            if path in files:
                 raise CouldNotCheck("cat-config shows one settings file twice")
-            current, section = m.group(1), None
-            files.append(current)
-            continue
-        s = line.strip(" \t")
-        if not s or s[0] in "#;":
-            continue
-        if s[0] == "[" and s[-1] == "]":
-            section = s[1:-1]
-            continue
-        name, eq, val = s.partition("=")
-        if eq and current and section == "Journal" and name.strip(" \t") in last:
-            last[name.strip(" \t")] = {"value": val.strip(" \t"), "file": current}
+            current, section = path, False
+            files.append(path)
+        elif current is None:
+            raise CouldNotCheck("cat-config shows a line before the first file header")
+        elif line[0] == "[":
+            if line != "[Journal]":
+                raise CouldNotCheck("cat-config shows a section other than [Journal]")
+            section = True
+        else:
+            m = _JOURNALD_ASSIGN_RE.fullmatch(line)
+            if not m or not section:
+                raise CouldNotCheck("cat-config shows a line this reader does not model")
+            if m.group(1) in last:
+                last[m.group(1)] = {"value": m.group(2), "file": current}
     return last, files
 
 
 def _oldest_entry(host, selector=()):
     """The UTC time of the oldest entry journalctl shows for `selector`: None when it shows no
-    entry, could-not-check when the answer is not exactly one entry with a time."""
+    entry, could-not-check when the answer is not exactly one entry whose time is a string of one
+    to seventeen digits above zero."""
     rc, out, _ = host.run(["journalctl", *OLDEST_ENTRY_ARGS, *selector])
     if rc != 0:
         return R.COULD_NOT_CHECK
@@ -1151,7 +1162,10 @@ def _oldest_entry(host, selector=()):
     try:
         if len(lines) != 1:
             raise ValueError("more than one entry")
-        return _iso(int(json.loads(lines[0])["__REALTIME_TIMESTAMP"]) // 1000000)
+        stamp = json.loads(lines[0])["__REALTIME_TIMESTAMP"]
+        if not isinstance(stamp, str) or not _TIMESTAMP_RE.fullmatch(stamp) or int(stamp) <= 0:
+            raise ValueError("not a timestamp")
+        return _iso(int(stamp) // 1000000)
     except (ValueError, KeyError, TypeError, OverflowError, OSError):
         return R.COULD_NOT_CHECK
 
