@@ -3265,14 +3265,15 @@ class TestD17AcceptedKeys(Base):
         self.assertEqual(out, ["permitlisten=<withheld>", "permitopen=<withheld>"])
 
 
-# `systemd-analyze cat-config --tldr` layout, measured on systemd 255 (docs/evaluations/2026-10-10-journal-retention-35-days.md, R8):
-# a `# <path>` header per file, one empty line between files, no comment and no content empty line.
-CAT_CONFIG = ("# /etc/systemd/journald.conf\n[Journal]\nSystemMaxFileSize=100M\nCompress=yes\nSystemMaxUse=1G\n"
-              "MaxRetentionSec=7day\nMaxFileSec=1day\n\n"
-              "# /etc/systemd/journald.conf.d/50-hermes-retention.conf\n[Journal]\n"
-              "MaxRetentionSec=35day\nSystemMaxFiles=500\n\n"
-              "# /usr/lib/systemd/journald.conf.d/syslog.conf\n[Journal]\nForwardToSyslog=yes\n")
+# `systemd-analyze cat-config --tldr` layout, measured on systemd 255 (docs/evaluations/2026-10-10-journal-retention-35-days.md, R8, R9):
+# a `# <path>` header per file, one empty line between files, no comment lines of the contents.
+MAIN = "/etc/systemd/journald.conf"
+SYSLOG = "/usr/lib/systemd/journald.conf.d/syslog.conf"
 OURS = "/etc/systemd/journald.conf.d/50-hermes-retention.conf"
+FILES = {MAIN: "[Journal]\nSystemMaxFileSize=100M\nCompress=yes\nSystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n",
+         OURS: "[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n",
+         SYSLOG: "[Journal]\nForwardToSyslog=yes\n"}
+CAT_CONFIG = "\n".join(f"# {p}\n{c}" for p, c in FILES.items())
 
 
 def _oldest_key(*selector):
@@ -3286,32 +3287,49 @@ def _entry(epoch):
 
 
 class TestJournalHelpers(Base):
+    def _disk(self, files):
+        for path, content in files.items():
+            self._w(path, content)
+
+    def _read(self, files, text=None):
+        """Write `files` under the fake root and read them with the printout `text` (default: what --tldr prints)."""
+        self._disk(files)
+        return CE._journald_settings(self.host(), text if text is not None else
+                                     "\n".join(f"# {p}\n{c}" for p, c in files.items()))
+
     def test_the_last_file_that_sets_a_value_is_the_one_reported(self):
-        got, files = CE._journald_settings(CAT_CONFIG)
-        self.assertEqual(files, ["/etc/systemd/journald.conf", OURS, "/usr/lib/systemd/journald.conf.d/syslog.conf"])
+        got, files = self._read(FILES)
+        self.assertEqual(files, [MAIN, OURS, SYSLOG])
         self.assertEqual(got["MaxRetentionSec"], {"value": "35day", "file": OURS})
         self.assertEqual(got["SystemMaxFiles"], {"value": "500", "file": OURS})
-        self.assertEqual(got["SystemMaxUse"], {"value": "1G", "file": "/etc/systemd/journald.conf"})
-        self.assertEqual(got["MaxFileSec"], {"value": "1day", "file": "/etc/systemd/journald.conf"})
+        self.assertEqual(got["SystemMaxUse"], {"value": "1G", "file": MAIN})
+        self.assertEqual(got["MaxFileSec"], {"value": "1day", "file": MAIN})
 
     def test_last_wins_empty_value_and_unknown_or_lower_case_keys(self):
-        text = ("# /etc/systemd/journald.conf\n[Journal]\nMaxRetentionSec=7day\nmaxretentionsec=1day\nSystemMaxUse=\n"
-                "MaxRetentionSec=40day\nFoo=bar\n")
-        got, files = CE._journald_settings(text)
-        self.assertEqual(files, ["/etc/systemd/journald.conf"])
-        self.assertEqual(got["MaxRetentionSec"], {"value": "40day", "file": "/etc/systemd/journald.conf"})
-        self.assertEqual(got["SystemMaxUse"], {"value": "", "file": "/etc/systemd/journald.conf"})
+        got, files = self._read({MAIN: "[Journal]\nMaxRetentionSec=7day\nmaxretentionsec=1day\nSystemMaxUse=\n"
+                                       "MaxRetentionSec=40day\nFoo=bar\n"})
+        self.assertEqual(files, [MAIN])
+        self.assertEqual(got["MaxRetentionSec"], {"value": "40day", "file": MAIN})
+        self.assertEqual(got["SystemMaxUse"], {"value": "", "file": MAIN})
         self.assertEqual(got["SystemMaxFiles"], {"value": None, "file": None})
+
+    def test_comments_and_blank_lines_in_a_real_file_are_fine(self):
+        files = {**FILES, MAIN: "#  This file is part of systemd.\n\n  # indented\n; semi\n \t \n[Journal]\n#Storage=auto\n"
+                                "SystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n"}
+        # the printout has no comment lines: build it from the measured layout instead
+        printed = ("# " + MAIN + "\n[Journal]\nSystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n\n"
+                   "# " + OURS + "\n[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n\n"
+                   "# " + SYSLOG + "\n[Journal]\nForwardToSyslog=yes\n")
+        got, _ = self._read(files, printed)
+        self.assertEqual(got["MaxRetentionSec"]["value"], "35day")
+        self.assertEqual(got["SystemMaxUse"], {"value": "1G", "file": MAIN})
 
     def test_the_command_is_the_measured_one(self):
         self.assertEqual(CE.JOURNALD_CAT_CONFIG, ["systemd-analyze", "cat-config", "--tldr", "systemd/journald.conf"])
 
-    def _raises(self, later):
-        text = ("# /etc/systemd/journald.conf\n[Journal]\nMaxRetentionSec=7day\n\n"
-                "# " + OURS + "\n[Journal]\nMaxRetentionSec=35day\n\n"
-                "# /etc/systemd/journald.conf.d/99-local.conf\n" + later)
+    def _raises(self, later, path="/etc/systemd/journald.conf.d/99-local.conf"):
         with self.assertRaises(CE.CouldNotCheck):
-            CE._journald_settings(text)
+            self._read({**{k: FILES[k] for k in (MAIN, OURS)}, path: later})
 
     def test_lines_outside_the_closed_grammar_are_could_not_check(self):
         for later in ("[Journal]\n\n# /run/systemd/journald.conf.d/zz.conf\nMaxRetentionSec=1day\n",   # C1
@@ -3319,7 +3337,7 @@ class TestJournalHelpers(Base):
                       "\ufeff[Journal]\nMaxRetentionSec=1day\n",                                      # C3
                       "[Journal\nMaxRetentionSec=1day\n",                                              # I4
                       "[Journal]\n\n# /etc/systemd/journald.conf.d/99+local.conf\nMaxRetentionSec=40day\n",  # I5
-                      "[Journal]\n# a comment\n", "[Journal]\n; a comment\n",
+                      "[Journal]\n; a comment\n",    # the printout never shows a comment
                       "[Journal]\nMaxRetentionSec = 1day\n", "[Journal]\n MaxRetentionSec=1day\n",
                       "[Journal]\nMaxRetentionSec=1day \n", "[Journal]\nMaxRetentionSec=1day\\\n",
                       "[journal]\nMaxRetentionSec=1day\n", "[ Journal ]\nMaxRetentionSec=1day\n",
@@ -3329,26 +3347,80 @@ class TestJournalHelpers(Base):
             with self.subTest(later=later):
                 self._raises(later)
 
-    def test_headers_that_cannot_be_trusted_are_could_not_check(self):
-        # With --tldr no content comment survives, so a forged header of OUR file inside the main file's
-        # content cannot reach the reader as content; the nearest things it can see are tested here.
-        with self.assertRaises(CE.CouldNotCheck):      # our header twice
-            CE._journald_settings(CAT_CONFIG + "\n# " + OURS + "\n[Journal]\nMaxRetentionSec=1day\n")
-        with self.assertRaises(CE.CouldNotCheck):      # a header-shaped line that is not a known path
-            CE._journald_settings(CAT_CONFIG + "\n# /etc/systemd/journald.conf.d/x/y.conf\n[Journal]\n")
-        with self.assertRaises(CE.CouldNotCheck):      # the tool's "not found" note
-            CE._journald_settings("# Main configuration file systemd/journald.conf not found\n")
-        with self.assertRaises(CE.CouldNotCheck):      # content before any header
-            CE._journald_settings("[Journal]\nMaxRetentionSec=1day\n")
-
-    def test_a_comment_that_looks_like_a_header_of_a_file_already_printed_is_could_not_check(self):
+    def test_a_broken_section_line_that_the_printout_shows_cleanly_is_could_not_check(self):
+        # Record R9 (N1): systemd stops reading at `[Broken`, so a later file's value never applies. The
+        # printout (as the oldest builds print it, or with the section line absent) looks clean; the file does not.
+        ours = FILES[OURS]
+        for broken in ("[Broken\n[Journal]\nCompress=yes\n", "[Broken\n", "[Journal]\nX=1\n[Broken\n[Journal]\nMaxRetentionSec=35day\n"):
+            with self.subTest(broken=broken):
+                self._disk({MAIN: FILES[MAIN], "/etc/systemd/journald.conf.d/10-x.conf": broken, OURS: ours})
+                printed = ("# " + MAIN + "\n[Journal]\nMaxRetentionSec=7day\n\n# /etc/systemd/journald.conf.d/10-x.conf\n"
+                           "[Journal]\nCompress=yes\n\n# " + OURS + "\n[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n")
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_settings(self.host(), printed)
+        # our own file ending in a broken section line, after a [Journal] block
         with self.assertRaises(CE.CouldNotCheck):
-            CE._journald_settings(CAT_CONFIG + "\n# /etc/systemd/journald.conf\n[Journal]\nMaxRetentionSec=1day\n")
+            self._read({MAIN: FILES[MAIN], OURS: "[Journal]\nX=1\n[Broken\n[Journal]\nMaxRetentionSec=35day\n"})
+
+    def test_a_header_forged_through_a_file_name_is_could_not_check(self):
+        # Record R9 (N2): the printout shows our header and 35day; no file of our name exists on disk.
+        self._disk({MAIN: FILES[MAIN], SYSLOG: FILES[SYSLOG]})
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_a_listed_file_that_is_not_a_plain_small_ascii_file_is_could_not_check(self):
+        self._disk(FILES)
+        real = self.host().path(OURS)
+        elsewhere = self._w("/elsewhere.conf", FILES[OURS])
+        os.remove(real)
+        os.symlink(elsewhere, real)                                        # a symbolic link
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        os.remove(real)
+        os.mkdir(real)                                                     # a directory
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        os.rmdir(real)
+        for body in (FILES[OURS] + "#" + "x" * 70000 + "\n", FILES[OURS] + "# a\0b\n"):    # too large; a NUL
+            with open(real, "w") as f:
+                f.write(body)
+            with self.assertRaises(CE.CouldNotCheck):
+                CE._journald_settings(self.host(), CAT_CONFIG)
+        with open(real, "wb") as f:                                         # a non-ASCII byte
+            f.write(FILES[OURS].encode() + b"# \xc3\xa9\n")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        with open(real, "w", newline="") as f:                              # a carriage return
+            f.write(FILES[OURS].replace("\n", "\r\n"))
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_the_printout_and_the_files_must_agree(self):
+        self._disk({**FILES, OURS: "[Journal]\nMaxRetentionSec=1day\nSystemMaxFiles=500\n"})
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_headers_that_cannot_be_trusted_are_could_not_check(self):
+        self._disk(FILES)
+        host = self.host()
+        for text in (CAT_CONFIG + "\n# " + OURS + "\n[Journal]\nMaxRetentionSec=1day\n",           # our header twice
+                     CAT_CONFIG + "\n# /etc/systemd/journald.conf.d/x/y.conf\n[Journal]\n",           # not a known path
+                     "# Main configuration file systemd/journald.conf not found\n",                    # the tool's note
+                     "[Journal]\nMaxRetentionSec=1day\n",                                              # content before a header
+                     CAT_CONFIG + "\n# " + MAIN + "\n[Journal]\nMaxRetentionSec=1day\n",               # main header twice
+                     "", "\n", "\n\n"):                                                              # nothing at all
+            with self.subTest(text=text):
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_settings(host, text)
+        self._w("/usr/lib/systemd/journald.conf", FILES[MAIN])             # a main file only under /etc counts
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(host, "# /usr/lib/systemd/journald.conf\n" + FILES[MAIN])
 
     def test_spans_sizes_and_what_cannot_be_converted(self):
         CN = R.COULD_NOT_CHECK
         for text, want in (("35day", 3024000), ("7day", 604800), ("1month", 2629800), ("1w", 604800), ("90", 90),
-                           ("0", 0), ("0day", 0), ("1y", 31557600), ("300000000day", 25920000000000),
+                           ("0", 0), ("0day", 0), ("1y", 31557600), ("213503981day", 213503981 * 86400), ("213503982day", CN),
+                           ("584541y", 584541 * 31557600), ("584542y", CN), ("999999999y", CN),
                            ("2h 30min", CN), ("1.5h", CN), ("29.99999999999999999day", CN), ("3000000000day", CN),
                            ("99999999999999999999day", CN), ("0.99999999999999999999s", CN), ("1 fortnight", CN),
                            ("", CN), ("infinity", CN), ("day", CN), ("-1day", CN), ("+35day", CN), ("35 day", CN),

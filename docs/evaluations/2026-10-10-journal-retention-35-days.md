@@ -196,8 +196,48 @@ ForwardToSyslog=yes$
 
 The same command without `--tldr` additionally prints every comment line of the file contents (the three-line
 Hermes header of our file, the upstream comment of `syslog.conf`) and an empty line inside a file's content. With
-`--tldr` a line starting with `#` is only a header the tool printed (`# <path>`), one empty line separates the files,
-and content lines keep their text unchanged (no leading blank was present in these files).
+`--tldr` one empty line separates the files and the comment lines of the contents are gone. It is NOT a guarantee that a
+line starting with `#` is a header the tool printed (R9: a file name holding newlines prints as several lines), and
+it prints the section lines and assignments of the contents as they are, including lines systemd rejects (R9). Read
+as a list of which files systemd lists, and in what order; not as proof of what systemd parses.
+
+### R9 · what the `--tldr` printout does not show
+
+Measured 2026-10-10 in a fresh systemd 255 container `jr2` (image `journald-rehearsal`; removed afterwards), our real
+file installed as in R3.
+
+N1, a broken line in an earlier drop-in. `/etc/systemd/journald.conf.d/10-x.conf` holding `[Broken`, `[Journal]`,
+`Compress=yes`. `cat-config --tldr` printed it unchanged (`[Broken$`, `[Journal]$`, `Compress=yes$` under the
+`# .../10-x.conf$` header, before our file). A file holding only `[Broken` printed `[Broken$`; a file holding
+`[Journal]`, `X=1`, `[Broken`, `[Journal]`, `MaxRetentionSec=35day` printed all five lines. After
+`systemctl restart systemd-journald` the journal said:
+
+```
+/etc/systemd/journald.conf.d/10-x.conf:1: Invalid section header '[Broken'
+/etc/systemd/journald.conf.d/10-x.conf:1: Failed to parse file: Bad message
+```
+
+Which value applied: main file set to `MaxRetentionSec=3min`, our file (35day) present after the broken one; a mark
+logged and the journal rotated every 60 s. Marks left: 1 at start, 1 after round 1, 1 after round 2, 0 after rounds 3 to 6.
+The mark was deleted although our 35-day file was present: journald stopped reading at the broken file and kept the
+main file's 3 minutes (the same control as R6: with our file read, the mark would have stayed). So the printout
+alone can show our `35day` under our header while journald applies something else; the files must be read too.
+
+N2, a header forged through a file name. Our file moved aside; a file named
+`50-hermes-retention.conf\n[Journal]\nMaxRetentionSec=35day\nX=.conf` (newlines in the name) holding `[Journal]`,
+`Compress=yes`. `cat-config --tldr` printed:
+
+```
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf$
+[Journal]$
+MaxRetentionSec=35day$
+X=.conf$
+[Journal]$
+Compress=yes$
+```
+
+The tool lists that file and prints the raw name, so it shows our header and `MaxRetentionSec=35day` while no
+file with our name exists. Looking the listed path up on disk (it does not exist) catches it.
 
 ## 3b · The key reader's two cases
 

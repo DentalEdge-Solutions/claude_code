@@ -1069,20 +1069,24 @@ def d2_3(host, ctx):
     return {"journal": _count_cred_text(_ok(host, ["journalctl", "-o", "cat", "--no-pager"]), ctx.get("secrets", []))}
 
 
-# D2.4: the journal service's settings, as `systemd-analyze cat-config --tldr systemd/journald.conf`
-# prints the files (systemd 255, measured: `# <path>` before each file, one empty line between
-# files, no comment and no content empty line; the last file to set a value is the one that counts).
+# D2.4: the journal service's settings. `systemd-analyze cat-config --tldr systemd/journald.conf`
+# (systemd 255, measured, record R8/R9) lists the files in the order systemd reads them: a `# <path>`
+# header per file, one empty line between files, no comment lines of the contents. It prints lines
+# systemd rejects as they are, and a file name holding newlines prints as several lines, so the
+# printout decides WHICH files and in what order; the files themselves are read too.
 JOURNALD_CAT_CONFIG = ["systemd-analyze", "cat-config", "--tldr", "systemd/journald.conf"]
 JOURNALD_SETTINGS = ("MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec")
-_JOURNALD_FILE_RE = re.compile(r"/(?:etc|run|usr/lib|usr/local/lib)/systemd/journald\.conf"
-                               r"(?:\.d/[A-Za-z0-9._@-]+\.conf)?")
+_JOURNALD_MAIN = "/etc/systemd/journald.conf"      # journald 255 reads the main file only here
+_JOURNALD_FILE_RE = re.compile(r"/etc/systemd/journald\.conf|"
+                               r"/(?:etc|run|usr/lib|usr/local/lib)/systemd/journald\.conf\.d/[A-Za-z0-9._@-]+\.conf")
+_JOURNALD_FILE_LIMIT = 64 * 1024
 _JOURNALD_ASSIGN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*)=([\x21-\x5b\x5d-\x7e]*)")
 # systemd.time(7) units of one second or more, as integers (src/basic/time-util.c, v255).
 _SPAN_UNITS = {"": 1, "seconds": 1, "second": 1, "sec": 1, "s": 1, "minutes": 60, "minute": 60, "min": 60, "m": 60,
                "hours": 3600, "hour": 3600, "hr": 3600, "h": 3600, "days": 86400, "day": 86400, "d": 86400,
                "weeks": 604800, "week": 604800, "w": 604800, "months": 2629800, "month": 2629800, "M": 2629800,
                "years": 31557600, "year": 31557600, "y": 31557600}
-_SPAN_RE = re.compile(r"([0-9]{1,9})([A-Za-z\u03bc\u00b5]*)")
+_SPAN_RE = re.compile(r"([0-9]{1,9})([A-Za-z]*)")
 _SIZE_RE = re.compile(r"([0-9]{1,12})([KMGTPE]?)")
 _SIZE_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40, "P": 1 << 50, "E": 1 << 60}
 # The oldest entry journalctl would show: its time and nothing else (no message, no host name).
@@ -1093,12 +1097,17 @@ _TIMESTAMP_RE = re.compile(r"[0-9]{1,17}")
 
 def _span_seconds(value):
     """A systemd time span as whole seconds, or could-not-check. Closed grammar: up to nine digits
-    and one unit of a second or more, nothing else (no fraction, blank, sign, several parts), so
-    the integer result is exactly what systemd computes; anything else is never guessed at."""
+    and one unit of a second or more, nothing else (no fraction, blank, sign, several parts), and
+    the span must fit systemd's microsecond arithmetic (its parse_time fails when
+    digits >= (2**64 - 1) // (unit seconds * 10**6)), so a number returned is one systemd accepts
+    and computes the same; anything else is never guessed at."""
     m = _SPAN_RE.fullmatch(value)
     if not m or m.group(2) not in _SPAN_UNITS:
         return R.COULD_NOT_CHECK
-    return int(m.group(1)) * _SPAN_UNITS[m.group(2)]
+    unit = _SPAN_UNITS[m.group(2)]
+    if int(m.group(1)) >= (2 ** 64 - 1) // (unit * 10 ** 6):
+        return R.COULD_NOT_CHECK
+    return int(m.group(1)) * unit
 
 
 def _size_bytes(value):
@@ -1111,19 +1120,15 @@ def _size_bytes(value):
     return n if n < 1 << 63 else R.COULD_NOT_CHECK
 
 
-def _journald_settings(text):
-    """(settings, files): for each name in JOURNALD_SETTINGS the value written LAST under
-    [Journal] and the file it stands in (both None when no file sets it), and the files printed,
-    in order. A CLOSED grammar over the `--tldr` printout: an empty line, a `# <path>` header of a
-    journald settings file (each once), exactly `[Journal]`, and `Key=value` lines (a key of
-    letters and digits, a value of printable non-blank ASCII without a backslash) after the
-    section line of their file. Any other line raises CouldNotCheck, because a line this reader
-    does not model (a comment, a continuation, a BOM, another section, a header it does not know)
-    could change what systemd applies without the reader seeing it. The reason names the kind of
-    line, never its content."""
+def _journald_printout_settings(text):
+    """(settings, files) from the `--tldr` printout, by a CLOSED grammar over it: an empty line, a
+    `# <path>` header of a journald settings file (each once), exactly `[Journal]`, and `Key=value`
+    lines (a key of letters and digits, a value of printable non-blank ASCII without a backslash)
+    after the section line of their file. Any other line raises CouldNotCheck; the reason names
+    the kind of line, never its content."""
     files, current, section = [], None, False
     last = {k: {"value": None, "file": None} for k in JOURNALD_SETTINGS}
-    for line in text.split("\n")[:-1] if text.endswith("\n") else text.split("\n"):
+    for line in text.split("\n"):
         if line == "":
             continue
         if line[0] in "#;":
@@ -1146,7 +1151,72 @@ def _journald_settings(text):
                 raise CouldNotCheck("cat-config shows a line this reader does not model")
             if m.group(1) in last:
                 last[m.group(1)] = {"value": m.group(2), "file": current}
+    if not files:
+        raise CouldNotCheck("cat-config shows no settings file")
+    if files[0] != _JOURNALD_MAIN and _JOURNALD_MAIN in files:
+        raise CouldNotCheck("cat-config shows the main settings file after a drop-in")
     return last, files
+
+
+def _journald_file_settings(host, files):
+    """The same four settings read from the files themselves, in order, by the closed grammar
+    systemd's own parser makes safe to model: blank lines and lines whose first non-blank
+    character is # or ; are skipped, exactly `[Journal]` is the section, any other line starting
+    (after blanks) with `[` raises (systemd stops reading there: record R9), `Key=value` after
+    `[Journal]` is read as in the printout, anything else raises. A line ending in a backslash
+    or holding a carriage return raises (a continuation or a line end this reader does not model).
+    Each listed path must be a regular file (not a link, not a directory, not missing: a missing
+    file is a forged header), at most 64 kB, ASCII, without a NUL byte."""
+    last = {k: {"value": None, "file": None} for k in JOURNALD_SETTINGS}
+    for path in files:
+        try:
+            st = os.lstat(host.path(path))
+            if not stat.S_ISREG(st.st_mode):
+                raise CouldNotCheck("a settings file cat-config lists is not a regular file")
+            with open(host.path(path), "rb") as f:
+                raw = f.read(_JOURNALD_FILE_LIMIT + 1)
+        except OSError:
+            raise CouldNotCheck("a settings file cat-config lists cannot be read")
+        if len(raw) > _JOURNALD_FILE_LIMIT or b"\0" in raw:
+            raise CouldNotCheck("a settings file is too large or holds a NUL byte")
+        try:
+            body = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise CouldNotCheck("a settings file holds a byte outside ASCII")
+        section = False
+        for line in body.split("\n"):
+            if "\r" in line or line.endswith("\\"):
+                raise CouldNotCheck("a settings file holds a carriage return or a continuation line")
+            stripped = line.strip(" \t")
+            if not stripped or stripped[0] in "#;":
+                continue
+            if stripped[0] == "[":
+                if line != "[Journal]":
+                    raise CouldNotCheck("a settings file holds a section other than [Journal], or a broken one")
+                section = True
+                continue
+            m = _JOURNALD_ASSIGN_RE.fullmatch(line)
+            if not m or not section:
+                raise CouldNotCheck("a settings file holds a line this reader does not model")
+            if m.group(1) in last:
+                last[m.group(1)] = {"value": m.group(2), "file": path}
+    return last
+
+
+def _journald_settings(host, text):
+    """(settings, files): for each name in JOURNALD_SETTINGS the value written LAST under
+    [Journal] and the file it stands in (both None when no file sets it), and the files listed,
+    in order. Both the `--tldr` printout `text` and the listed files are read, and they must
+    agree: the printout decides WHICH files systemd lists and in what order, but it prints lines
+    systemd rejects as they are (a broken section line in an earlier file makes systemd stop
+    reading, so a later value never applies) and a file name holding newlines forges a header;
+    only the files show every line systemd parses. Any line either reading does not model, a
+    listed file that is not a regular file on disk, or a disagreement raises CouldNotCheck."""
+    printed, files = _journald_printout_settings(text)
+    read = _journald_file_settings(host, files)
+    if printed != read:
+        raise CouldNotCheck("the settings printed by cat-config and the settings read from the files differ")
+    return read, files
 
 
 def _oldest_entry(host, selector=()):
