@@ -97,6 +97,10 @@ class TestChecklistSync(unittest.TestCase):
         cat = "\n".join(f"# {p}\n{c}" for p, c in files.items())
         host = ce.Host(root, lambda argv, timeout=60: (0, cat if argv == ce.JOURNALD_CAT_CONFIG else "", ""))
         d = ce.d2_4(host, {})
+        self.assertEqual(sorted(d["service"]), ["active", "config_changed_after_start", "started_at"])
+        self.assertIn("Storage", d["settings"])
+        for word in ("auto", "persistent", "volatile", "none"):
+            self.assertIn(f"`{word}`", block, word)
         self.assertEqual(d["config_files"], list(files))                # the real dict, not could-not-check
         self.assertEqual(sorted(d["settings"]), sorted(ce.JOURNALD_SETTINGS))
         for part in ("oldest_entry", "drop_in", "service", "usage"):

@@ -3445,9 +3445,15 @@ class TestJournalHelpers(Base):
         self._disk(FILES)
         real = self.host().path(OURS)
         opened = []
-        real_open = os.open
+        real_open, real_lstat = os.open, os.lstat
+        listed = {self.host().path(p) for p in (MAIN, OURS, SYSLOG)}
+
+        def lstat(p, *a, **k):                         # the directories are looked at by path; a listed file never is
+            if p in listed:
+                raise AssertionError("judged by path, not by the open file")
+            return real_lstat(p, *a, **k)
         with mock.patch.object(CE.os, "open", lambda p, flags, *a, **k: opened.append((p, flags)) or real_open(p, flags, *a, **k)), \
-                mock.patch.object(CE.os, "lstat", side_effect=AssertionError("judged by path, not by the open file")):
+                mock.patch.object(CE.os, "lstat", lstat):
             CE._journald_settings(self.host(), CAT_CONFIG)
         self.assertEqual([p for p, _ in opened], [self.host().path(p) for p in (MAIN, OURS, SYSLOG)])
         for _, flags in opened:
@@ -3565,7 +3571,14 @@ class TestD24Journal(Base):
     MID = "0123456789abcdef0123456789abcdef"
     REPO_FILE = CE.CHECKOUT + "/infra/hermes-agent/deploy/journald-hermes-retention.conf"
     # as `systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp --value` prints it (record R7)
-    STARTED = "Sat 2026-10-10 12:00:00.500000 UTC\n"
+    # (record R7, R11): the three properties come back named, in systemd's order, not the order asked for
+    START_TEXT = "Sat 2026-10-10 12:00:00.500000 UTC"
+
+    @staticmethod
+    def _shown(started=START_TEXT, state="active", pid="146"):
+        return f"MainPID={pid}\nExecMainStartTimestamp={started}\nActiveState={state}\n"
+
+    STARTED = _shown.__func__()
     START_NS = CE._epoch("2026-10-10T12:00:00Z") * 10 ** 9 + 500 * 10 ** 6
     DIRS = ("/etc/systemd/journald.conf.d", "/usr/lib/systemd/journald.conf.d")
 
@@ -3630,7 +3643,10 @@ class TestD24Journal(Base):
         self.assertEqual(d["config_files"], [MAIN, OURS, SYSLOG])
         self.assertEqual((d["drop_in"]["equals_repo"], d["drop_in"]["mode"], d["drop_in"]["other_files"]),
                          (True, "0o644", []))
-        self.assertEqual(d["service"], {"started_at": "2026-10-10T12:00:00Z", "config_changed_after_start": False})
+        self.assertEqual(d["service"], {"active": True, "started_at": "2026-10-10T12:00:00Z",
+                                        "config_changed_after_start": False})
+        self.assertEqual(d["settings"]["Storage"], {"value": None, "file": None, "number": None})
+        self.assertEqual(list(d["settings"]), ["MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec", "Storage"])
         own = os.path.join(self.root, "var/log/journal", self.MID)
         blocks = sum(os.lstat(os.path.join(own, n)).st_blocks for n in os.listdir(own) if ".journal" in n)
         self.assertEqual((d["usage"]["files"], d["usage"]["bytes"], d["usage"]["other_directories"]),
@@ -3648,7 +3664,7 @@ class TestD24Journal(Base):
 
     def test_the_commands_are_the_measured_ones_and_each_unit_is_asked_for(self):
         self.assertEqual(CE.JOURNALD_STARTED, ["systemctl", "show", "systemd-journald", "--timestamp=us+utc",
-                                               "-p", "ExecMainStartTimestamp", "--value"])
+                                               "-p", "ExecMainStartTimestamp", "-p", "ActiveState", "-p", "MainPID"])
         host = self.host()
         CE.d2_4(host, {})
         self.assertIn(CE.JOURNALD_CAT_CONFIG, host.calls)
@@ -3694,17 +3710,17 @@ class TestD24Journal(Base):
                 self.assertIs(got["service"]["config_changed_after_start"], True)
                 self.assertEqual(got["config_files"], [MAIN, OURS, SYSLOG])
         self._all_older_than_the_start()                                    # and really, with the real clock:
-        self.outputs[self.start_key] = (0, time.strftime("%a %Y-%m-%d %H:%M:%S.000000 UTC\n", time.gmtime(time.time() + 3600)), "")
+        self.outputs[self.start_key] = (0, self._shown(time.strftime("%a %Y-%m-%d %H:%M:%S.000000 UTC", time.gmtime(time.time() + 3600))), "")
         self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], False)   # control: start in an hour
         os.utime(os.path.join(self.root, self.DIRS[1].lstrip("/")), None)
-        self.outputs[self.start_key] = (0, time.strftime("%a %Y-%m-%d %H:%M:%S.000000 UTC\n", time.gmtime(time.time() - 3600)), "")
+        self.outputs[self.start_key] = (0, self._shown(time.strftime("%a %Y-%m-%d %H:%M:%S.000000 UTC", time.gmtime(time.time() - 3600))), "")
         self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], True)
 
     def test_a_file_just_written_is_newer_than_an_old_start_without_any_patching(self):
         # the real clock: every file of this test was created just now, the service started long ago
-        self.outputs[self.start_key] = (0, "Thu 2020-01-02 00:00:00.000000 UTC\n", "")
+        self.outputs[self.start_key] = (0, self._shown("Thu 2020-01-02 00:00:00.000000 UTC"), "")
         d = CE.d2_4(self.host(), {})["service"]
-        self.assertEqual(d, {"started_at": "2020-01-02T00:00:00Z", "config_changed_after_start": True})
+        self.assertEqual(d, {"active": True, "started_at": "2020-01-02T00:00:00Z", "config_changed_after_start": True})
 
     def test_the_inode_change_time_counts_not_only_the_content_time(self):
         # a copy that keeps an old content time (cp -p, tar, touch -d) still changed the file just now
@@ -3715,25 +3731,165 @@ class TestD24Journal(Base):
         self.assertGreater(CE._changed_at_ns(self.host(), "/a-link"), before)
 
     def test_a_start_time_that_cannot_be_read_is_could_not_check_never_false(self):
-        for answer in ((0, "\n", ""), (0, "", ""), (1, self.STARTED, ""), (127, "", "not found"),
-                       (0, "Sat 2026-10-10 12:00:00 UTC\n", ""),                      # no microseconds
-                       (0, "Sat 2026-10-10 14:00:00.500000 CEST\n", ""),              # not UTC
-                       (0, "Sat 2026-13-45 12:00:00.500000 UTC\n", ""),               # not a date
-                       (0, "@1791654218\n", ""), (0, "n/a\n", ""),
-                       (0, self.STARTED + self.STARTED, "")):
+        CN = R.COULD_NOT_CHECK
+        for started in ("", "Sat 2026-10-10 12:00:00 UTC",                    # empty; no microseconds
+                        "Sat 2026-10-10 14:00:00.500000 CEST",                # not UTC
+                        "Sat 2026-13-45 12:00:00.500000 UTC",                 # not a date
+                        "@1791654218", "n/a"):
+            with self.subTest(started=started):
+                self.outputs[self.start_key] = (0, self._shown(started), "")
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self.assertEqual(d["service"], {"active": True, "started_at": CN, "config_changed_after_start": CN})
+
+    def test_a_service_that_is_not_running_is_never_reported_as_having_read_the_settings(self):
+        # Record R11: a stopped journal service keeps its ExecMainStartTimestamp (and shows MainPID=0, inactive).
+        CN = R.COULD_NOT_CHECK
+        for state, pid, active in (("inactive", "0", False), ("failed", "0", False), ("deactivating", "146", False),
+                                   ("activating", "146", False), ("reloading", "146", False), ("maintenance", "0", False),
+                                   ("active", "0", CN),                       # active without a process: not understood
+                                   ("active", "", CN), ("active", "-1", CN), ("active", "1e3", CN), ("active", "0146", CN),
+                                   ("Active", "146", CN), ("", "146", CN), ("active (running)", "146", CN)):
+            with self.subTest(state=state, pid=pid):
+                self.outputs[self.start_key] = (0, self._shown(state=state, pid=pid), "")
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self.assertEqual(d["service"], {"active": active, "started_at": CN, "config_changed_after_start": CN})
+                self.assertEqual(d["settings"]["MaxRetentionSec"]["number"], 3024000)     # the other parts are still read
+
+    def test_an_answer_about_the_service_that_is_not_the_three_properties_is_could_not_check(self):
+        CN = R.COULD_NOT_CHECK
+        good = self.STARTED
+        for answer in ((0, "\n", ""), (0, "", ""), (1, good, ""), (127, "", "not found"),
+                       (0, self.START_TEXT + "\n", ""),                               # the bare value
+                       (0, good + good, ""),                                          # each property twice
+                       (0, good + "SubState=running\n", ""),                          # one more
+                       (0, good.replace("ActiveState=active\n", ""), ""),             # one missing
+                       (0, good.replace("MainPID=146\n", "MainPID=146\nMainPID=147\n").replace("ActiveState=active\n", ""), ""),
+                       (0, good.replace("ActiveState=", "ActiveState "), ""),
+                       (0, good.replace("\n", "\r\n"), "")):
             with self.subTest(answer=answer):
                 self.outputs[self.start_key] = answer
                 with self._content_time_only():
                     d = CE.d2_4(self.host(), {})
-                self.assertEqual(d["service"], {"started_at": R.COULD_NOT_CHECK,
-                                                "config_changed_after_start": R.COULD_NOT_CHECK})
+                self.assertEqual(d["service"], {"active": CN, "started_at": CN, "config_changed_after_start": CN})
+        self.outputs[self.start_key] = (0, "ActiveState=active\nExecMainStartTimestamp=" + self.START_TEXT + "\nMainPID=7\n", "")
+        with self._content_time_only():                                               # any order of the three is read
+            self.assertEqual(CE.d2_4(self.host(), {})["service"],
+                             {"active": True, "started_at": "2026-10-10T12:00:00Z", "config_changed_after_start": False})
+
+    # ---- a settings directory that is not a real directory (review of Task 7, Critical 1)
+    def _link_a_directory(self, d):
+        """`d` becomes a symbolic link to a real directory holding what `d` held."""
+        real = os.path.join(self.root, d.lstrip("/"))
+        elsewhere = os.path.join(self.root, "elsewhere" + d.replace("/", "-"))
+        if os.path.isdir(real):
+            os.rename(real, elsewhere)
+        else:
+            os.makedirs(elsewhere)
+            os.makedirs(os.path.dirname(real), exist_ok=True)
+        os.symlink(elsewhere, real)
+        old = CE._epoch("2026-10-10T11:00:00Z")
+        os.utime(elsewhere, (old, old))
+        os.utime(real, (old, old), follow_symlinks=False)
+        return elsewhere
+
+    def _nothing_about_the_settings_is_claimed(self, d):
+        CN = R.COULD_NOT_CHECK
+        self.assertEqual((d["settings"], d["config_files"]), (CN, CN))
+        self.assertEqual(d["service"], {"active": True, "started_at": CN, "config_changed_after_start": CN})
+        self.assertEqual((d["usage"]["bytes_percent_of_max_use"], d["usage"]["files_percent_of_max_files"]), (CN, CN))
+
+    def test_a_drop_in_directory_that_is_a_link_is_could_not_check_never_false(self):
+        # The reviewer's case: the directory is a link, the service read a second file there (7 days) and that
+        # file was removed since. The link's own time did not change, and every file read through it looks healthy.
+        for d in CE.JOURNALD_DROP_IN_DIRS:
+            with self.subTest(d=d):
+                elsewhere = self._link_a_directory(d)
+                if d == CE.JOURNALD_DROP_IN_DIR:
+                    short = os.path.join(elsewhere, "99-short.conf")
+                    with open(short, "w") as f:
+                        f.write("[Journal]\nMaxRetentionSec=7day\n")
+                    os.remove(short)                                        # the real directory's time is now: after the start
+                with self._content_time_only():
+                    d24 = CE.d2_4(self.host(), {})
+                self._nothing_about_the_settings_is_claimed(d24)
+                os.remove(os.path.join(self.root, d.lstrip("/")))
+                os.rename(elsewhere, os.path.join(self.root, d.lstrip("/")))
+                self._all_older_than_the_start()
+                with self._content_time_only():                             # control: a real directory again
+                    self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], False)
+
+    def test_a_parent_of_a_settings_directory_reached_through_a_link_is_could_not_check(self):
+        for parent in ("/etc/systemd", "/etc", "/usr/lib/systemd", "/usr/lib", "/usr", "/usr/local", "/usr/local/lib",
+                       "/usr/local/lib/systemd", "/run", "/run/systemd"):
+            with self.subTest(parent=parent):
+                elsewhere = self._link_a_directory(parent)
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self._nothing_about_the_settings_is_claimed(d)
+                os.remove(os.path.join(self.root, parent.lstrip("/")))
+                os.rename(elsewhere, os.path.join(self.root, parent.lstrip("/")))
+                self._all_older_than_the_start()
+                with self._content_time_only():
+                    self.assertEqual(CE.d2_4(self.host(), {})["config_files"], [MAIN, OURS, SYSLOG])
+
+    def test_a_settings_directory_that_is_a_file_is_could_not_check(self):
+        self._w("/run/systemd/journald.conf.d", "a file where a directory belongs")
+        with self._content_time_only():
+            self._nothing_about_the_settings_is_claimed(CE.d2_4(self.host(), {}))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads through any permission")
+    def test_an_existing_directory_whose_time_cannot_be_read_is_could_not_check(self):
+        # Nothing is patched: the directory exists, and its parent does not let this user look at it.
+        os.makedirs(os.path.join(self.root, "usr/local/lib/systemd/journald.conf.d"))
+        parent = os.path.join(self.root, "usr/local/lib/systemd")
+        with self._content_time_only():
+            self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], True)    # the new directory
+        old = CE._epoch("2026-10-10T11:00:00Z")
+        os.utime(os.path.join(parent, "journald.conf.d"), (old, old))
+        with self._content_time_only():
+            self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], False)   # control
+        os.chmod(parent, 0)
+        self.addCleanup(os.chmod, parent, 0o755)
+        with self.assertRaises(PermissionError):
+            os.lstat(os.path.join(parent, "journald.conf.d"))
+        with self._content_time_only():
+            self._nothing_about_the_settings_is_claimed(CE.d2_4(self.host(), {}))
+        self._nothing_about_the_settings_is_claimed(CE.d2_4(self.host(), {}))              # and with the real function
+
+    def test_the_service_part_refuses_a_linked_directory_on_its_own(self):
+        # even handed a list of files (as if the settings reader had accepted them)
+        self._link_a_directory("/run/systemd/journald.conf.d")
+        with self._content_time_only():
+            got = CE._journald_service(self.host(), [MAIN, OURS, SYSLOG])
+        self.assertEqual(got, {"active": True, "started_at": R.COULD_NOT_CHECK, "config_changed_after_start": R.COULD_NOT_CHECK})
+
+    # ---- Storage= (record R10)
+    def test_storage_is_reported_as_written_by_the_file_that_sets_it_last(self):
+        for value in ("volatile", "none", "persistent", "auto", "Volatile", "", "disk"):
+            with self.subTest(value=value):
+                self._swap("[Journal]\nStorage=persistent\nSystemMaxUse=1G\nStorage=" + value + "\n")
+                d = CE.d2_4(self.host(), {})["settings"]
+                self.assertEqual(d["Storage"], {"value": value, "file": MAIN, "number": None})
+        local = "/etc/systemd/journald.conf.d/90-s.conf"                    # as measured: a later drop-in wins
+        self._w(MAIN, FILES[MAIN] + "Storage=persistent\n")
+        self._w(local, "[Journal]\nStorage=volatile\n")
+        self.outputs[self.cat_key] = (0, "\n".join(f"# {p}\n{c}" for p, c in (
+            (MAIN, FILES[MAIN] + "Storage=persistent\n"), (OURS, FILES[OURS]), (local, "[Journal]\nStorage=volatile\n"),
+            (SYSLOG, FILES[SYSLOG]))), "")
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual(d["settings"]["Storage"], {"value": "volatile", "file": local, "number": None})
+        self.assertEqual(d["settings"]["MaxRetentionSec"]["value"], "35day")
+        self._w(local, "[Journal]\n")                                      # the printout says volatile, no file does
+        self.assertEqual(CE.d2_4(self.host(), {})["settings"], R.COULD_NOT_CHECK)
 
     def test_a_listed_file_whose_time_cannot_be_read_is_could_not_check_and_the_start_is_still_shown(self):
         def gone(host, p):
             raise PermissionError(p)
         with mock.patch.object(CE, "_changed_at_ns", gone):
             d = CE.d2_4(self.host(), {})
-        self.assertEqual(d["service"], {"started_at": "2026-10-10T12:00:00Z",
+        self.assertEqual(d["service"], {"active": True, "started_at": "2026-10-10T12:00:00Z",
                                         "config_changed_after_start": R.COULD_NOT_CHECK})
 
     # ---- drop_in
@@ -3827,7 +3983,7 @@ class TestD24Journal(Base):
         self.assertEqual((d["settings"], d["config_files"]), (CN, CN))
         self.assertEqual(d["reach_days"], 31)
         self.assertRegex(d["oldest_entry"]["journal"], r"Z$")
-        self.assertEqual(d["service"], {"started_at": "2026-10-10T12:00:00Z", "config_changed_after_start": CN})
+        self.assertEqual(d["service"], {"active": True, "started_at": "2026-10-10T12:00:00Z", "config_changed_after_start": CN})
         self.assertEqual((d["usage"]["files"], d["usage"]["other_directories"]), (4, 0))
         self.assertIsInstance(d["usage"]["bytes"], int)
         self.assertIsInstance(d["usage"]["free_percent"], float)
@@ -3843,7 +3999,7 @@ class TestD24Journal(Base):
                 self.assertEqual((d["oldest_entry"], d["reach_days"]), ({"journal": CN, "broker": CN, "runner": CN}, CN))
                 self.assertEqual(d["config_files"], [MAIN, OURS, SYSLOG])
                 d = CE.d2_4(self._raising("systemctl", exc), {})
-                self.assertEqual(d["service"], {"started_at": CN, "config_changed_after_start": CN})
+                self.assertEqual(d["service"], {"active": CN, "started_at": CN, "config_changed_after_start": CN})
                 self.assertEqual(d["settings"]["MaxRetentionSec"]["number"], 3024000)
 
     def test_what_cannot_be_read_is_could_not_check_part_by_part(self):

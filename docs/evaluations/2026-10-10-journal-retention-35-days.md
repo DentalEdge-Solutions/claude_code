@@ -275,10 +275,11 @@ file, `1G`, the file equal to the repository's, `config_changed_after_start` `fa
 ```
 
 **Run 2, after `docker exec jr touch /etc/systemd/journald.conf`.** The output differs from run 1 in two lines only
-(`free_bytes` moved by 4096, the journal growing):
+(the second is the free space moving by 4096 bytes):
 
 ```
   "config_changed_after_start": true
+  "free_bytes": 915426820096,
 ```
 
 **Run 3, a broken drop-in** (`printf '[Broken\n[Journal]\nCompress=yes\n' > /etc/systemd/journald.conf.d/10-x.conf`;
@@ -407,6 +408,271 @@ four drop-in directories and refuses any `.conf` name outside `[A-Za-z0-9._@-]+\
 by `systemd-analyze`, a different program than `systemd-journald`, which is the one that applies the settings, so the
 collector parses each listed file by the closed grammar itself (opened without following a link) and requires the
 two readings to agree. Reason (ii) is a design choice, not a measurement.
+
+### R10 · `Storage=`
+
+Measured 2026-10-10 in a fresh systemd 255 container `jr3` (image `journald-rehearsal`, started as `jr` was, the
+repository mounted read-only; removed afterwards; `jr` was not used). The image's main file sets
+`Storage=persistent`; `90-s.conf` sorts after it and after our file. Commands and output as they ran (`sh -x`; the
+machine id cut):
+
+```
++ systemctl is-active systemd-journald
+active
++ install -D -o root -g root -m 0644 /opt/projects/claude_code/infra/hermes-agent/deploy/journald-hermes-retention.conf /etc/systemd/journald.conf.d/50-hermes-retention.conf
++ systemctl restart systemd-journald
++ sleep 2
++ logger mark-persist
++ journalctl --flush
++ journalctl -q -o cat
++ grep -c mark-persist
+1
++ ls /var/log/journal/<cut>/
+system.journal
++ ls /run/log/journal/*/
++ sed s/[0-9a-f]\{32\}/<cut>/g
+ls: cannot access '/run/log/journal/*/': No such file or directory
++ printf [Journal]\nStorage=volatile\n
++ systemd-analyze cat-config --tldr systemd/journald.conf
+# /etc/systemd/journald.conf
+[Journal]
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+[Journal]
+MaxRetentionSec=35day
+SystemMaxFiles=500
+
+# /etc/systemd/journald.conf.d/90-s.conf
+[Journal]
+Storage=volatile
+
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+[Journal]
+ForwardToSyslog=yes
++ systemctl restart systemd-journald
++ sleep 2
++ logger mark-vol
++ journalctl --flush
++ echo flush rc=0
++ sleep 1
+flush rc=0
++ + sed s/[0-9a-f]\{32\}/<cut>/g
+ls -la /var/log/journal/<cut>/
+total 8208
+drwxr-sr-x+ 2 root systemd-journal    4096 Oct 10 19:57 .
+drwxr-sr-x+ 1 root systemd-journal    4096 Oct 10 19:57 ..
+-rw-r-----+ 1 root systemd-journal 8388608 Oct 10 19:58 system.journal
++ ls -la /run/log/journal/<cut>/
++ sed s/[0-9a-f]\{32\}/<cut>/g
+total 8192
+drwxr-s--- 2 root systemd-journal      60 Oct 10 19:58 .
+drwxr-sr-x 3 root systemd-journal      60 Oct 10 19:58 ..
+-rw-r----- 1 root systemd-journal 8388608 Oct 10 19:58 system.journal
++ journalctl -q -o cat
++ grep -c mark-vol
+1
++ cat /etc/machine-id
++ grep -c mark-vol
++ journalctl -D /var/log/journal/<cut> -q -o cat
+0
++ + cat /etc/machine-id
+grep -c mark-vol
++ journalctl -D /run/log/journal/<cut> -q -o cat
+1
++ journalctl -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1
++ sed s/"__CURSOR":"[^"]*"/"__CURSOR":"<cut>"/; s/[0-9a-f]\{32\}/<cut>/g
+{"__SEQNUM_ID":"<cut>","__SEQNUM":"1007","__CURSOR":"<cut>","__MONOTONIC_TIMESTAMP":"8180457716","__REALTIME_TIMESTAMP":"1791662274871373","_BOOT_ID":"<cut>"}
++ cat /etc/machine-id
++ cut -c1-25
++ journalctl -D /var/log/journal/<cut> -q --no-pager -o short-iso -n 1
+2026-10-10T19:58:05+00:00
++ date -u
+Sat Oct 10 19:58:09 UTC 2026
+```
+
+What it shows: with `Storage=volatile` in force, `mark-vol` is in `/run/log/journal` only (1) and not in
+`/var/log/journal` (0), whose file stops at `19:58:05`, the moment before the restart; `journalctl` without `-D`
+reads both places, so its oldest entry and its count look as before; `journalctl --flush` exits 0 and moves nothing.
+The probe as committed in Task 7 (before this fix), run in that state:
+
+```
+{
+ "oldest_entry": {
+  "journal": "2026-10-10T19:57:54Z",
+  "broker": null,
+  "runner": null
+ },
+ "reach_days": 0,
+ "settings": {
+  "MaxRetentionSec": {
+   "value": "35day",
+   "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf",
+   "number": 3024000
+  },
+  "SystemMaxUse": {
+   "value": "1G",
+   "file": "/etc/systemd/journald.conf",
+   "number": 1073741824
+  },
+  "SystemMaxFiles": {
+   "value": "500",
+   "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf",
+   "number": 500
+  },
+  "MaxFileSec": {
+   "value": "1day",
+   "file": "/etc/systemd/journald.conf",
+   "number": 86400
+  }
+ },
+ "config_files": [
+  "/etc/systemd/journald.conf",
+  "/etc/systemd/journald.conf.d/50-hermes-retention.conf",
+  "/etc/systemd/journald.conf.d/90-s.conf",
+  "/usr/lib/systemd/journald.conf.d/syslog.conf"
+ ],
+ "drop_in": {
+  "equals_repo": true,
+  "owner": "root",
+  "group": "root",
+  "mode": "0o644",
+  "other_files": [
+   "90-s.conf"
+  ]
+ },
+ "service": {
+  "started_at": "2026-10-10T19:58:06Z",
+  "config_changed_after_start": false
+ },
+ "usage": {
+  "bytes": 8392704,
+  "files": 1,
+  "bytes_percent_of_max_use": 0.8,
+  "files_percent_of_max_files": 0.2,
+  "free_bytes": 915417976832,
+  "free_percent": 93.6,
+  "other_directories": 0
+ }
+}
+```
+
+Every value is the healthy one except `other_files` (this rehearsal put the setting in a drop-in of its own; in the
+server's own main file there would be no sign at all): `35day` from our file, `usage` from the stale file on disk.
+After the fix the same state reads `"Storage": {"value": "volatile", "file": "/etc/systemd/journald.conf.d/90-s.conf",
+"number": null}`, and the healthy container `"Storage": {"value": "persistent", "file":
+"/etc/systemd/journald.conf", "number": null}`; the checklist's rule (2) fails `volatile`. Not measured:
+`Storage=none`, and `Storage=auto` or no `Storage=` with `/var/log/journal` missing.
+
+### R11 · a stopped journal service
+
+Measured 2026-10-10 in `jr3`, after `90-s.conf` was removed and the service restarted. Commands and output as they ran:
+
+```
++ rm /etc/systemd/journald.conf.d/90-s.conf
++ systemctl restart systemd-journald
++ sleep 2
++ systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp -p ActiveState -p SubState -p MainPID -p ExecMainExitTimestamp
+MainPID=190
+ExecMainStartTimestamp=Sat 2026-10-10 19:58:25.588933 UTC
+ExecMainExitTimestamp=
+ActiveState=active
+SubState=running
++ systemctl stop systemd-journald.socket systemd-journald-dev-log.socket systemd-journald
++ echo stop rc=0
++ sleep 2
+stop rc=0
++ systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp -p ActiveState -p SubState -p MainPID -p ExecMainExitTimestamp
+MainPID=0
+ExecMainStartTimestamp=Sat 2026-10-10 19:58:25.588933 UTC
+ExecMainExitTimestamp=Sat 2026-10-10 19:58:27.643146 UTC
+ActiveState=inactive
+SubState=dead
++ systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp -p ActiveState -p MainPID --value
++ cat -A
+0$
+Sat 2026-10-10 19:58:25.588933 UTC$
+inactive$
++ systemctl is-active systemd-journald systemd-journald.socket systemd-journald-dev-log.socket
+inactive
+inactive
+inactive
++ date -u
+Sat Oct 10 19:58:29 UTC 2026
+```
+
+The finding holds: a stopped service keeps `ExecMainStartTimestamp`, with `MainPID=0` and `ActiveState=inactive`.
+Stopping it did not break the container. Also seen: with `--value` and several `-p`, systemd prints the values in
+its own order (`MainPID`, the time, `ActiveState`), not the order asked for, so the probe reads `Name=value` lines by
+name. The probe as committed in Task 7, run while the service was stopped, said (the other parts as in R7):
+
+```
+"service": {"started_at": "2026-10-10T19:58:25Z", "config_changed_after_start": false}
+```
+
+Then the service was started again; a unit that does not exist is shown for comparison:
+
+```
++ systemctl start systemd-journald
++ sleep 2
++ systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp -p ActiveState -p SubState -p MainPID
+MainPID=224
+ExecMainStartTimestamp=Sat 2026-10-10 19:58:29.903740 UTC
+ActiveState=active
+SubState=running
++ systemctl is-active systemd-journald systemd-journald.socket systemd-journald-dev-log.socket
+active
+active
+active
++ systemctl show no-such-unit-x --timestamp=us+utc -p ExecMainStartTimestamp -p ActiveState -p MainPID
+MainPID=0
+ExecMainStartTimestamp=
+ActiveState=inactive
+```
+
+After the fix, stopped: `"service": {"active": false, "started_at": "could-not-check",
+"config_changed_after_start": "could-not-check"}`; running: `{"active": true, "started_at": "2026-10-10T19:58:29Z",
+"config_changed_after_start": false}`.
+
+### R12 · a settings directory that is a symbolic link
+
+Measured 2026-10-10 in `jr3`, with the fixed probe. `/etc/systemd/journald.conf.d` moved to `/etc/systemd/real.d` and
+replaced by a link to it; a second file `99-short.conf` (`MaxRetentionSec=7day`) written there, the service
+restarted, the file removed:
+
+```
++ mv /etc/systemd/journald.conf.d /etc/systemd/real.d
++ ln -s real.d /etc/systemd/journald.conf.d
++ printf [Journal]\nMaxRetentionSec=7day\n
++ systemctl restart systemd-journald
++ sleep 2
++ rm /etc/systemd/real.d/99-short.conf
++ ls -la /etc/systemd/
++ grep -i journald
+-rw-r--r-- 1 root root   82 Oct 10 17:43 journald.conf
+lrwxrwxrwx 1 root root    6 Oct 10 20:01 journald.conf.d -> real.d
++ systemd-analyze cat-config --tldr systemd/journald.conf
++ grep -n ^#\|MaxRetention
+1:# /etc/systemd/journald.conf
+5:MaxRetentionSec=7day
+8:# /etc/systemd/real.d/50-hermes-retention.conf
+10:MaxRetentionSec=35day
+13:# /usr/lib/systemd/journald.conf.d/syslog.conf
+```
+
+The fixed probe: `settings` and `config_files` `could-not-check`, `service` `{"active": true, "started_at":
+"could-not-check", "config_changed_after_start": "could-not-check"}`, both percentages `could-not-check`; `drop_in`
+still `true`, `root`, `root`, `0o644`, `[]` (it reads our path through the link). One thing differs from the
+review's description of this case: systemd 255 printed the header with the link's TARGET
+(`/etc/systemd/real.d/…`), which the printout reader does not accept as a settings file, so with this link the
+Task 7 code would also have answered `could-not-check`. The review's result (`false`, `35day`) needs a printout
+that names the link's own path; whether systemd prints that for another kind of link (an absolute target, a
+target outside `/etc/systemd`) was not measured. The probe now refuses the link itself, whatever the printout
+says. With the directory restored and the service restarted the healthy output was back
+(`config_changed_after_start: false`). `jr3` was then removed.
 
 ## 3b · The key reader's two cases
 
@@ -1271,6 +1537,9 @@ item CANNOT-VERIFY, never a pass.
   than nine digits: `d2_4` gives `number` `could-not-check` for all of them instead of a count.
 - The length of the kernel's clock tick on the box, and a settings file changed within one tick of the journal
   service's start: `d2_4` counts a change stamped less than 10 ms before the start as after it (R7).
+- `Storage=none`; `Storage=auto` or no `Storage=` on a machine without `/var/log/journal` (R10 measured `volatile`).
+- What `systemd-analyze cat-config` prints for a settings directory linked to an absolute path or to a place
+  outside `/etc/systemd` (R12 measured a relative link beside it).
 - `d2_4` on the box itself: R7 is the container. The start-time command and its `us+utc` form are measured on
   systemd 255 only.
 - `hermes-broker` and `hermes-docker-proxy` logging after the restart (only the audit broker has a safe trigger);

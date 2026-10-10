@@ -1075,7 +1075,9 @@ def d2_3(host, ctx):
 # systemd rejects as they are, and a file name holding newlines prints as several lines, so the
 # printout decides WHICH files and in what order; the files themselves are read too.
 JOURNALD_CAT_CONFIG = ["systemd-analyze", "cat-config", "--tldr", "systemd/journald.conf"]
-JOURNALD_SETTINGS = ("MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec")
+# Storage= is read too (record R10): with `volatile` or `none` nothing new reaches the disk, while
+# the files already there, and our retention, still look healthy.
+JOURNALD_SETTINGS = ("MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec", "Storage")
 _JOURNALD_MAIN = "/etc/systemd/journald.conf"      # journald 255 reads the main file only here
 _JOURNALD_FILE_RE = re.compile(r"/etc/systemd/journald\.conf|"
                                r"/(?:etc|run|usr/lib|usr/local/lib)/systemd/journald\.conf\.d/[A-Za-z0-9._@-]+\.conf")
@@ -1215,11 +1217,34 @@ def _journald_file_settings(host, files):
     return last
 
 
+def _journald_refuse_linked_dirs(host):
+    """Raises CouldNotCheck unless every drop-in directory that exists is a real directory reached
+    through real directories only (each part of its path, by lstat; the main file's directory is
+    among them). Through a link the collector would read files, and compare times, that are not
+    those of the place it names: a link's own time does not change when a file is added to or
+    removed from the directory behind it. A part that does not exist ends the walk (nothing is
+    there); a part that cannot be looked at, or is not a directory, raises."""
+    for d in JOURNALD_DROP_IN_DIRS:
+        path = ""
+        for part in d.strip("/").split("/"):
+            path += "/" + part
+            try:
+                st = os.lstat(host.path(path))
+            except FileNotFoundError:
+                break
+            except OSError:
+                raise CouldNotCheck("a journald settings directory cannot be looked at")
+            if not stat.S_ISDIR(st.st_mode):
+                raise CouldNotCheck("a journald settings directory is a link, or not a directory")
+
+
 def _journald_refuse_odd_names(host):
     """Raises CouldNotCheck when a drop-in directory holds a `.conf` entry whose name is not a
-    plain one, or cannot be listed. systemd lists such a file, and a name holding newlines makes
-    the printout show header and content lines that stand in no file (record R9). A directory
-    that does not exist is fine; a name that does not end in `.conf` is not a settings file."""
+    plain one, or cannot be listed, or is not a real directory (see above). systemd lists such a
+    file, and a name holding newlines makes the printout show header and content lines that stand
+    in no file (record R9). A directory that does not exist is fine; a name that does not end in
+    `.conf` is not a settings file."""
+    _journald_refuse_linked_dirs(host)
     for d in JOURNALD_DROP_IN_DIRS:
         try:
             names = os.listdir(host.path(d))
@@ -1280,8 +1305,13 @@ JOURNAL_UNITS = {"broker": "hermes-app-broker@" + APP, "runner": "hermes-app-run
 # systemd 255, record R7). The process reads its settings after this moment, never before it.
 # Second precision is not enough: BRING-UP installs our file and restarts the service at once,
 # and in the rehearsal the two were 21 ms apart, inside one second.
+# With it, whether the service runs at all (record R11): a stopped service keeps this time, shows
+# `ActiveState=inactive` and `MainPID=0`. systemd prints the three as `Name=value` lines in its
+# own order, so they are read by name.
 JOURNALD_STARTED = ["systemctl", "show", "systemd-journald", "--timestamp=us+utc", "-p", "ExecMainStartTimestamp",
-                    "--value"]
+                    "-p", "ActiveState", "-p", "MainPID"]
+_UNIT_STATE_RE = re.compile(r"[a-z]+(?:-[a-z]+)*")
+_PID_RE = re.compile(r"[1-9][0-9]{0,9}")
 _SYSTEMD_US_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2})\.([0-9]{6}) UTC")
 # A file's times come from the kernel's coarse clock, which can be one tick behind the clock
 # systemd reads: 10 ms is the longest tick Linux is built with (HZ=100). A change stamped less
@@ -1291,7 +1321,8 @@ _CLOCK_TICK_NS = 10 * 10 ** 6
 # may read it as octal (not measured), and a number is never guessed at.
 _MAX_FILES_RE = re.compile(r"0|[1-9][0-9]{0,8}")
 _SETTING_NUMBER = {"MaxRetentionSec": _span_seconds, "MaxFileSec": _span_seconds, "SystemMaxUse": _size_bytes,
-                   "SystemMaxFiles": lambda v: int(v) if _MAX_FILES_RE.fullmatch(v) else R.COULD_NOT_CHECK}
+                   "SystemMaxFiles": lambda v: int(v) if _MAX_FILES_RE.fullmatch(v) else R.COULD_NOT_CHECK,
+                   "Storage": lambda v: None}   # a word, not a quantity: the checklist judges `value`
 
 
 def _percent(part, whole):
@@ -1308,26 +1339,52 @@ def _changed_at_ns(host, p):
 
 
 def _journald_started(host):
-    """(UTC time to the second, nanoseconds since the epoch) of JOURNALD_STARTED. Raises
-    CouldNotCheck for anything but one UTC time with microseconds: a time this collector cannot
-    place is never compared."""
+    """(active, started_at, start_ns) from JOURNALD_STARTED. `active` is True only when the unit's
+    state is `active` AND it has a main process; False when a state is read and is another one;
+    could-not-check when the answer is not exactly the three properties, or says `active` without
+    a process. The start (UTC to the second, and nanoseconds since the epoch) is given only for a
+    running service and only as one UTC time with microseconds: otherwise both are
+    could-not-check and None. A time this collector cannot place is never compared, and the start
+    of a process that is gone says nothing about what is in force."""
+    unknown = (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK, None)
     rc, out, _ = host.run(JOURNALD_STARTED)
-    m = _SYSTEMD_US_TS_RE.fullmatch(out.strip()) if rc == 0 else None
+    lines = out.split("\n")
+    if rc != 0 or lines[-1] != "" or len(lines) != 4:
+        return unknown
+    got = dict(line.partition("=")[::2] for line in lines[:3] if "=" in line)
+    if sorted(got) != ["ActiveState", "ExecMainStartTimestamp", "MainPID"]:
+        return unknown
+    if not _UNIT_STATE_RE.fullmatch(got["ActiveState"]):
+        return unknown
+    if got["ActiveState"] != "active":
+        return False, R.COULD_NOT_CHECK, None
+    if not _PID_RE.fullmatch(got["MainPID"]):
+        return unknown
+    m = _SYSTEMD_US_TS_RE.fullmatch(got["ExecMainStartTimestamp"])
     if not m:
-        raise CouldNotCheck("the journal service's start time cannot be read")
+        return True, R.COULD_NOT_CHECK, None
     iso = f"{m.group(1)}T{m.group(2)}Z"
-    return iso, _epoch(iso) * 10 ** 9 + int(m.group(3)) * 1000
+    try:
+        return True, iso, _epoch(iso) * 10 ** 9 + int(m.group(3)) * 1000
+    except ValueError:                              # digits that are not a date
+        return True, R.COULD_NOT_CHECK, None
 
 
 def _journald_service(host, files):
-    """When the journal service's process started, and whether the settings changed after that:
-    the service reads its settings when it starts, so a newer file is not yet in force. What is
-    compared: every listed file, and every drop-in directory that exists (its time changes when a
-    file in it is added, removed or renamed: a drop-in the service read and that was deleted since
-    is still in force and is in no list). Without the list of files nothing is compared."""
-    row = {"started_at": R.COULD_NOT_CHECK, "config_changed_after_start": R.COULD_NOT_CHECK}
+    """Whether the journal service runs, when its process started, and whether the settings
+    changed after that: the service reads its settings when it starts, so a newer file is not yet
+    in force. What is compared: every listed file, and every drop-in directory that exists (its
+    time changes when a file in it is added, removed or renamed: a drop-in the service read and
+    that was deleted since is still in force and is in no list). Nothing is compared without the
+    list of files; nothing is compared and no start is shown for a service that is not running,
+    or when a settings directory is not a real directory (its time would be a link's)."""
+    row = {"active": R.COULD_NOT_CHECK, "started_at": R.COULD_NOT_CHECK, "config_changed_after_start": R.COULD_NOT_CHECK}
     try:
-        row["started_at"], start_ns = _journald_started(host)
+        row["active"], started, start_ns = _journald_started(host)
+        if start_ns is None:
+            return row
+        _journald_refuse_linked_dirs(host)
+        row["started_at"] = started
         if isinstance(files, list) and files:
             times = [_changed_at_ns(host, p) for p in files]
             for d in JOURNALD_DROP_IN_DIRS:
