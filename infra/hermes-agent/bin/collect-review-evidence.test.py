@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64, contextlib, hashlib, importlib.util, io, json, os, shutil, stat, sys, tempfile, time, unittest
+import subprocess, base64, contextlib, hashlib, importlib.util, io, json, os, shutil, stat, sys, tempfile, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -3328,7 +3328,7 @@ class TestJournalReach(Base):
     def test_d2_3_a_read_that_ends_with_a_warning_is_could_not_check_never_a_healthy_count(self):
         self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
         for what, answer in (("truncated file, rc 0", (0, "Started.\n", self.TRUNCATED)),
-                             ("no rights, rc 0", (0, "", self.NO_RIGHTS)),
+                             ("no rights, rc 0 (NOT produced in the measurement: rc 1 was; kept as the case the stderr rule exists for)", (0, "", self.NO_RIGHTS)),
                              ("no rights, rc 1", (1, "", self.NO_RIGHTS)),
                              ("time-out", (124, "", "journalctl: timed out")),
                              ("rc 1 without a word", (1, "", ""))):
@@ -3355,7 +3355,8 @@ class TestJournalReach(Base):
         argv = [sys.executable, *self.BAD_BYTE_CHILD]
         # the real runner is reached through Host(root) with no fake: patch only the program that is started
         real = CE._run_real
-        with mock.patch.object(CE, "_run_real", lambda a, timeout=60, errors="strict": real(argv, timeout, errors=errors)):
+        with mock.patch.object(CE, "_run_real", lambda a, timeout=60, errors="strict": real(argv, timeout, errors=errors)), \
+                mock.patch.object(os, "geteuid", return_value=0):               # this host is the real one: root only
             host = CE.Host(self.root)
             d = CE.d2_3(host, {"secrets": []})
         self.assertEqual(d["journal"]["pattern_hits"], 1)
@@ -3391,6 +3392,60 @@ class TestJournalReach(Base):
                 for bad in (mid, "/var/log/journal", "truncated"):
                     self.assertNotIn(bad, it["reason"])
 
+    def _real_host(self):
+        """A host that counts as the real one (built with the real runner) but whose commands are the fake's."""
+        host = self.host()
+        host._real = True
+        fake = host._fake
+        return host, mock.patch.object(CE, "_run_real", lambda argv, timeout=60, errors="strict": fake(argv, timeout))
+
+    def test_the_journal_is_read_as_root_only_on_a_real_host(self):
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n", "")
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        self.outputs[("journalctl", "-u")] = (0, "", "")
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, _entry(1760000000), "")
+        for euid, ok in ((1000, False), (0, True)):
+            with self.subTest(euid=euid):
+                host, patch = self._real_host()
+                with patch, mock.patch.object(os, "geteuid", return_value=euid):
+                    if ok:
+                        self.assertEqual(CE.d2_3(host, {"secrets": []})["scanned_characters"], 9)
+                        self.assertEqual(CE.d10_7(host, CE.context(host, self.KEY))["oldest_entry_read"]["runner"], "2025-10-09T08:53:20Z")
+                    else:
+                        with self.assertRaises(CE.CouldNotCheck) as c:
+                            CE.d2_3(host, {"secrets": []})
+                        self.assertEqual(str(c.exception), "the journal is read as root only")
+                        with self.assertRaises(CE.CouldNotCheck):
+                            CE.d10_7(host, CE.context(host, self.KEY))
+                        self.assertEqual(CE._oldest_entry(host), R.COULD_NOT_CHECK)
+                        self.assertEqual([c for c in host.calls if c[0] == "journalctl"], [])    # nothing was run
+        with mock.patch.object(os, "geteuid", return_value=1000):                   # a test host is unaffected
+            self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 9)
+
+    def test_a_warning_on_stderr_at_rc_0_makes_an_oldest_entry_could_not_check(self):
+        for answer in ((0, _entry(1760000000), self.TRUNCATED), (0, "", self.TRUNCATED)):
+            with self.subTest(answer=answer[1][:1]):
+                self.outputs[_oldest_key()] = answer
+                self.outputs[("journalctl", "-o")] = (0, "Started.\n", "")
+                self.assertEqual(CE._oldest_entry(self.host()), R.COULD_NOT_CHECK)
+                self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["oldest_entry_read"], R.COULD_NOT_CHECK)
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), " \n")
+        self.assertEqual(CE._oldest_entry(self.host()), "2025-10-09T08:53:20Z")
+
+    def test_the_lossy_read_names_utf_8_and_the_strict_read_does_not(self):
+        seen = []
+        class P:
+            def __init__(self, argv, **kw):
+                seen.append(kw)
+                raise FileNotFoundError
+        with mock.patch.object(subprocess, "Popen", P):
+            CE._run_real(["x"], errors="replace")
+            CE._run_real(["x"])
+        self.assertEqual((seen[0]["encoding"], seen[0]["errors"]), ("utf-8", "replace"))
+        self.assertNotIn("encoding", seen[1])
+        self.assertEqual(seen[1]["errors"], "strict")
+
     def test_d2_3_empty_stderr_at_rc_0_reads_as_before(self):
         self.outputs[("journalctl", "-o")] = (0, "Started.\n", "  \n")
         self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
@@ -3399,7 +3454,7 @@ class TestJournalReach(Base):
     def test_d10_7_a_journal_read_that_ends_with_a_warning_is_could_not_check(self):
         for unit in ("broker", "runner"):
             for what, answer in (("truncated file, rc 0", (0, "x\n", self.TRUNCATED)),
-                                 ("no rights, rc 0", (0, "", self.NO_RIGHTS)),
+                                 ("no rights, rc 0 (NOT produced in the measurement: rc 1 was; kept as the case the stderr rule exists for)", (0, "", self.NO_RIGHTS)),
                                  ("time-out", (124, "", "journalctl: timed out"))):
                 with self.subTest(unit=unit, what=what):
                     host = self.host()
@@ -4200,6 +4255,31 @@ class TestD24Journal(Base):
             with self.subTest(age=age):
                 self.outputs[_oldest_key()] = (0, _entry(now - age), "")
                 self.assertEqual(CE.d2_4(self.host(), {})["reach_days"], want)
+
+    def test_d2_4_reads_no_journal_as_a_user_who_is_not_root_on_a_real_host(self):
+        CN = R.COULD_NOT_CHECK
+        with mock.patch.object(os, "geteuid", return_value=1000):
+            host = self.host()
+            host._real = True
+            d = CE.d2_4(host, {})
+            self.assertEqual(d["oldest_entry"], {"journal": CN, "broker": CN, "runner": CN})
+            self.assertEqual((d["reach_days"], d["usage"]["newest_entry_on_disk"], d["usage"]["on_disk_age_seconds"]), (CN, CN, CN))
+            self.assertEqual(d["usage"]["files"], 4)                                  # what is not a journal read is read
+            d = CE.d2_4(self.host(), {})
+            self.assertEqual(d["reach_days"], 31)                                     # a test host is unaffected
+        with mock.patch.object(os, "geteuid", return_value=0):
+            host = self.host()
+            host._real = True
+            self.assertEqual(CE.d2_4(host, {})["reach_days"], 31)
+
+    def test_a_warning_on_stderr_at_rc_0_makes_d2_4s_entry_times_could_not_check(self):
+        CN = R.COULD_NOT_CHECK
+        warn = "Journal file /var/log/journal/" + "0" * 32 + "/system@1-2.journal is truncated, ignoring file.\n"
+        self.outputs[_oldest_key()] = (0, _entry(int(time.time()) - 31 * 86400), warn)
+        self.outputs[self.disk_key] = (0, _entry(int(time.time()) - 7), warn)
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual((d["oldest_entry"]["journal"], d["reach_days"]), (CN, CN))
+        self.assertEqual((d["usage"]["newest_entry_on_disk"], d["usage"]["on_disk_age_seconds"]), (CN, CN))
 
     # ---- usage
     def test_another_machines_directory_is_counted_not_measured(self):

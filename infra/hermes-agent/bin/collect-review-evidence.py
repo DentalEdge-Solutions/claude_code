@@ -154,7 +154,10 @@ _ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=
 
 def _run_real(argv, timeout=60, errors="strict"):
     try:
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors=errors)
+        # The lossy read names UTF-8, so "one replacement character per run of invalid bytes" holds
+        # under any locale; the strict default keeps the locale's own encoding, as before.
+        decoding = {} if errors == "strict" else {"encoding": "utf-8"}
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors=errors, **decoding)
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: not found"
     with p:                                     # on every path: pipes closed (unread), child reaped
@@ -1076,6 +1079,13 @@ def d2_2(host, ctx):
 JOURNAL_SCAN_TIMEOUT = 300
 
 
+def _not_root_on_a_real_host(host):
+    """Run by anyone but root, journalctl shows only that user's own entries, with rc 0 and nothing
+    on stderr (record R14, item 7). The real host (built with the real runner) refuses; a host
+    built with a fake runner (tests) is not asked."""
+    return host._real and os.geteuid() != 0
+
+
 def _journal_read(host, argv, timeout=60):
     """The text of a journal read, or CouldNotCheck. A read that ends with anything on stderr is
     not a whole read even at rc 0 (record R14: a truncated archived file is skipped with a
@@ -1084,6 +1094,8 @@ def _journal_read(host, argv, timeout=60):
     The text is decoded with replacement: a replaced byte cannot turn text that is not a credential
     into one, and a credential is ASCII, so it is still found beside a replaced byte; what could be
     lost is a credential WITH an invalid byte inside it, which is not that credential."""
+    if _not_root_on_a_real_host(host):
+        raise CouldNotCheck("the journal is read as root only")
     rc, out, err = host.run_lossy(argv, timeout)
     if rc != 0:
         raise CouldNotCheck(f"{argv[0]} exited {rc}")
@@ -1093,7 +1105,7 @@ def _journal_read(host, argv, timeout=60):
 
 
 def d2_3(host, ctx):
-    """The whole journal, as far back as it reaches (D2.4 judges how far). The oldest entry is
+    """The message text of every entry journalctl shows, as far back as it reaches (D2.4 judges how far). The oldest entry is
     read AFTER the search: entries only ever leave, so the search reached at least that far.
     An oldest entry that cannot be read is could-not-check; the counts of the search stay."""
     text = _journal_read(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
@@ -1326,8 +1338,10 @@ def _oldest_entry(host, selector=()):
 def _entry_time(host, argv):
     """The UTC time of the one entry `argv` (a journalctl call for a single entry, its time only)
     prints: None for no entry, could-not-check for anything but exactly one entry with a time."""
-    rc, out, _ = host.run(argv)
-    if rc != 0:
+    if _not_root_on_a_real_host(host):
+        return R.COULD_NOT_CHECK
+    rc, out, err = host.run(argv)
+    if rc != 0 or err.strip():              # a warning at rc 0 (a skipped, damaged file): part of the journal was not read
         return R.COULD_NOT_CHECK
     lines = [l for l in out.split("\n") if l.strip()]
     if not lines:

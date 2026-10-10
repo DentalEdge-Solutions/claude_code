@@ -101,6 +101,13 @@ class TestChecklistSync(unittest.TestCase):
             self.assertIn(f"`{field}`", blocks["D10.7"], field)
         self.assertEqual(sorted(d107["oldest_entry_read"]), ["broker", "runner"])
 
+    def test_d2_3_says_how_many_days_it_covered_and_when_it_stands_for_30(self):
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.3"]
+        rule = next(l for l in block.split("\n") if l.startswith("- **pass rule:**"))
+        for words in ("`reach_days` of at least `30`", "states the days the search covered", "in either direction"):
+            self.assertIn(words, rule, words)
+        self.assertIn("read as root only", block)
+
     def test_d2_4_names_every_field_the_collector_reports(self):
         ce = _load("ce", "collect-review-evidence.py")
         block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.4"]
