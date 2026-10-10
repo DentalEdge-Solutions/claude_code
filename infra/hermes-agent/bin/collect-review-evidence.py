@@ -1423,12 +1423,15 @@ def _journal_usage(host, settings):
     percentages need the settings: without them, or without a number for the limit, they are
     could-not-check (the size limit has no default this collector assumes).
     Files on disk do not show that the service is writing them (record R13: after
-    `journalctl --relinquish-var`, or a /var it could not open, an active service with a healthy
-    Storage= writes to /run only, and journalctl merges both). So the newest entry of the on-disk
+    `journalctl --relinquish-var` an active service with a healthy Storage= writes to /run only,
+    and journalctl merges both; a /var it could not open is covered by the age rule and was not
+    measured). So the newest entry of the on-disk
     directory ALONE is read, and its age: the machine id goes into that command, never into the
     result. The age cannot show a journal that left the disk a moment ago (150 s in R13), so
-    systemd's flag is read too: True when it exists (by lstat), False when it does not,
-    could-not-check when it cannot be looked at."""
+    systemd's flag is read too: True when an ordinary file is there, False when
+    nothing is, could-not-check for anything else there (a link, a directory) or when it cannot be
+    looked at. The machine's directory and /var/log/journal, /var/log, /var must be real
+    directories (not links): otherwise all of usage is could-not-check."""
     keys = ("bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
             "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk")
     try:
@@ -1438,6 +1441,11 @@ def _journal_usage(host, settings):
             raise ValueError("machine-id")
         base = host.path(JOURNAL_DIR)
         own = os.path.join(base, mid)
+        # listdir, statvfs and `journalctl -D` all follow a link: a journal directory linked to a
+        # memory file system would read fully healthy. Each part of the path must be a real directory.
+        for part in (own, base, os.path.dirname(base), os.path.dirname(os.path.dirname(base))):
+            if not stat.S_ISDIR(os.lstat(part).st_mode):
+                raise ValueError("journal directory path")
         names = [n for n in os.listdir(own) if n.endswith((".journal", ".journal~"))]
         used = sum(os.lstat(os.path.join(own, n)).st_blocks * 512 for n in names)
         others = sum(1 for n in os.listdir(base) if n != mid and os.path.isdir(os.path.join(base, n)))
@@ -1454,8 +1462,9 @@ def _journal_usage(host, settings):
         if seconds >= -_CLOCK_STEP_MARGIN:
             age = max(0, seconds)
     try:
-        os.lstat(host.path(JOURNAL_FLUSHED_FLAG))
-        flushed = True
+        # systemd tests the path with access(), which follows links, so a dangling link is absent
+        # for it: only an ordinary file is True; a link, a directory or anything else cannot be judged.
+        flushed = True if stat.S_ISREG(os.lstat(host.path(JOURNAL_FLUSHED_FLAG)).st_mode) else R.COULD_NOT_CHECK
     except FileNotFoundError:
         flushed = False
     except OSError:

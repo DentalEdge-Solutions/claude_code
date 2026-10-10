@@ -213,7 +213,7 @@ microsecond. A change stamped less than 10 ms before the start counts as after
 it: a file's time comes from the kernel's coarse clock, which can be one tick behind (10 ms is the longest tick Linux
 is built with; the tick length of this kernel was not measured, and no such case was produced here).
 
-**Run 1, as found (healthy).** (This run predates `Storage`, `service.active`, `newest_entry_on_disk` and
+**Run 1, as found (healthy).** (This run predates `Storage`, `service.active`, `flushed_to_disk`, `newest_entry_on_disk` and
 `on_disk_age_seconds`, which later fixes added: R10, R11, R13 show them.) As expected: a time for the journal and `null` for the two units, `35day` from our
 file, `1G`, the file equal to the repository's, `config_changed_after_start` `false`, the usage in numbers.
 

@@ -4089,10 +4089,49 @@ class TestD24Journal(Base):
         shutil.rmtree(os.path.join(self.root, "run"))
         self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], False)
 
-    def test_the_flag_is_judged_by_lstat_so_a_dangling_link_there_still_counts_as_present(self):
-        os.remove(self.flag)
-        os.symlink("/nowhere", self.flag)
-        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], True)
+    def test_a_link_or_a_directory_where_the_flag_belongs_is_could_not_check(self):
+        # systemd tests the path with access(), which follows links: a dangling link is absent for it.
+        # Only an ordinary file is "true"; anything else there cannot be judged.
+        real = self._w("/run/systemd/journal/real-file", "")
+        for what in ("dangling link", "link to a real file", "directory"):
+            with self.subTest(what=what):
+                if os.path.lexists(self.flag):
+                    (shutil.rmtree if os.path.isdir(self.flag) and not os.path.islink(self.flag) else os.remove)(self.flag)
+                if what == "dangling link":
+                    os.symlink("/nowhere", self.flag)
+                elif what == "link to a real file":
+                    os.symlink(real, self.flag)
+                else:
+                    os.mkdir(self.flag)
+                d = CE.d2_4(self.host(), {})["usage"]
+                self.assertEqual(d["flushed_to_disk"], R.COULD_NOT_CHECK)
+                self.assertEqual(d["files"], 4)
+
+    def test_a_journal_directory_that_is_a_link_makes_all_of_usage_could_not_check(self):
+        keys = ("bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
+                "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk")
+        CN = {k: R.COULD_NOT_CHECK for k in keys}
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"]["files"], 4)                  # control: healthy stays healthy
+        elsewhere = os.path.join(self.root, "elsewhere")
+        for part in ("var/log/journal/" + self.MID, "var/log/journal", "var/log", "var"):
+            with self.subTest(part=part):
+                target = os.path.join(self.root, part)
+                moved = target + ".moved"
+                os.rename(target, moved)
+                try:
+                    os.symlink(moved, target)               # the link leads to a real, healthy-looking directory
+                    self.assertEqual(CE.d2_4(self.host(), {})["usage"], CN)
+                finally:
+                    os.remove(target)
+                    os.rename(moved, target)
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"]["files"], 4)
+
+    def test_a_journal_directory_that_is_a_file_makes_all_of_usage_could_not_check(self):
+        target = os.path.join(self.root, "var/log/journal", self.MID)
+        shutil.rmtree(target)
+        self._w("/var/log/journal/" + self.MID, "not a directory")
+        d = CE.d2_4(self.host(), {})["usage"]
+        self.assertEqual({v for v in d.values()}, {R.COULD_NOT_CHECK})
 
     @unittest.skipIf(os.geteuid() == 0, "root reads through any permission")
     def test_a_flag_that_cannot_be_looked_at_is_could_not_check_never_false(self):
