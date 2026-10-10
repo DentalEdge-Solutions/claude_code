@@ -107,6 +107,18 @@ class TestChecklistSync(unittest.TestCase):
         for words in ("`reach_days` of at least `30`", "states the days the search covered", "in either direction"):
             self.assertIn(words, rule, words)
         self.assertIn("read as root only", block)
+        for words in ("replacement characters", "namespaces", "300 thousand", "can be stored"):
+            self.assertIn(words, block, words)
+        self.assertNotIn("is can be", block)
+        self.assertIn("not run as root", rule)
+
+    def test_d10_7_says_what_the_report_states_when_the_journal_is_short(self):
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D10.7"]
+        rule = next(l for l in block.split("\n") if l.startswith("- **pass rule:**"))
+        claim = next(l for l in block.split("\n") if l.startswith("- **claim:**"))
+        self.assertIn("states the days", rule)
+        self.assertIn("up to 30 days back", claim)
+        self.assertNotIn("(30 days)", claim)
 
     def test_d2_4_names_every_field_the_collector_reports(self):
         ce = _load("ce", "collect-review-evidence.py")
