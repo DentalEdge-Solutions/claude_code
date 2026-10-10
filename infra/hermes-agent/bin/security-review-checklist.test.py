@@ -89,8 +89,8 @@ class TestChecklistSync(unittest.TestCase):
                     "port-forwarding", "restrict"):
             self.assertIn(f"`{opt}`", blocks["D1.7"], opt)
 
-    def test_the_version_is_1_18(self):
-        self.assertRegex(items()[0], r"(?m)^version: 1\.18$")
+    def test_the_version_is_1_19(self):
+        self.assertRegex(items()[0], r"(?m)^version: 1\.19$")
 
     def test_d10_6_states_the_committed_mcp_block(self):
         """D10.6 judges the box's `mcp_servers:` block by `equals_repo`, `reason` and the sha256 of

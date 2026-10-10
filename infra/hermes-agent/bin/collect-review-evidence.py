@@ -460,11 +460,53 @@ def _unprivileged_port_start(host):
     return int(m.group(1))
 
 
+SSHD_CONFIG = "/etc/ssh/sshd_config"
+SSHD_CONFIG_DIR = "/etc/ssh/sshd_config.d"
+# A keyword and its arguments, as sshd_config(5) allows them: blanks, or blanks around one `=`.
+_SSHD_LINE_RE = re.compile(r"[ \t]*([A-Za-z]+)(?:[ \t]*=[ \t]*|[ \t]+|$)(.*)")
+
+
+def _sshd_match_lines(host):
+    """(match_lines, include_elsewhere): the `Match` lines in the two places this collector reads
+    (the main file and sshd_config.d/*.conf), and the `Include` lines there that name anything
+    else. A `Match` block's settings are not read: its presence is what a reviewer must hear of.
+    A file brought in from elsewhere is not read either, which is why it is counted. A place
+    that cannot be read makes both could-not-check: a count of 0 must mean 0 was found."""
+    try:
+        names = sorted(n for n in os.listdir(host.path(SSHD_CONFIG_DIR)) if n.endswith(".conf"))
+    except FileNotFoundError:
+        names = []
+    except OSError:
+        return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+    matches = elsewhere = 0
+    for p in [SSHD_CONFIG] + [SSHD_CONFIG_DIR + "/" + n for n in names]:
+        try:
+            with open(host.path(p), "rb") as f:
+                data = f.read(AUTHORIZED_KEYS_READ_LIMIT + 1)
+        except OSError:
+            return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+        if len(data) > AUTHORIZED_KEYS_READ_LIMIT:
+            return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+        for line in data.decode("utf-8", errors="replace").split("\n"):
+            m = _SSHD_LINE_RE.match(line)
+            if not m:
+                continue
+            keyword = m.group(1).lower()
+            if keyword == "match":
+                matches += 1
+            elif keyword == "include":
+                args = [a.strip('"') for a in _split_unquoted(m.group(2).strip(" \t\r"), " \t")[0]]
+                full = [os.path.normpath(a if a.startswith("/") else "/etc/ssh/" + a) for a in args]
+                elsewhere += any(a != SSHD_CONFIG_DIR + "/*.conf" for a in full) or not full
+    return matches, elsewhere
+
+
 def d1_7(host, ctx):
     """Every SSH key the box accepts, for EVERY account in /etc/passwd: an account with no login
     shell can still be used for a forward. Key types, options and short fingerprints only. The
-    sshd settings are the global ones (`sshd -T`): a `Match` block is not read here (the
-    fingerprint's entry_points component carries the whole of `sshd -T`). The kernel's
+    sshd settings are the global ones (`sshd -T`): a `Match` block's settings are not
+    read here, only counted (`match_lines`); the fingerprint's entry_points component carries
+    the whole of `sshd -T`. The kernel's
     net.ipv4.ip_unprivileged_port_start setting is read because the limited key's permitlisten
     depends on it."""
     got = {}
@@ -495,9 +537,11 @@ def d1_7(host, ctx):
                 except OSError:
                     pass                    # cannot tell: keep the path, the row says so
                 users_of.setdefault(p, set()).add(parts[0])
+    match_lines, include_elsewhere = _sshd_match_lines(host)
     return {"sshd": {k: got.get(k, R.COULD_NOT_CHECK) for k in SSHD_KEY_SOURCES},
             "accounts_checked": accounts,
             "unprivileged_port_start": _unprivileged_port_start(host),
+            "match_lines": match_lines, "include_elsewhere": include_elsewhere,
             "files": [_authorized_keys_row(host, p, users_of[p]) for p in sorted(users_of)]}
 
 

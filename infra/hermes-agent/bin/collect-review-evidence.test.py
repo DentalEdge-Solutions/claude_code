@@ -2801,7 +2801,39 @@ class TestD17AcceptedKeys(Base):
 
     def test_the_result_has_exactly_these_top_level_fields(self):
         self.assertEqual(sorted(CE.d1_7(self.host(), {})),
-                         ["accounts_checked", "files", "sshd", "unprivileged_port_start"])
+                         ["accounts_checked", "files", "include_elsewhere", "match_lines", "sshd", "unprivileged_port_start"])
+
+    def _sshd_config(self, main, **drop_ins):
+        self._w("/etc/ssh/sshd_config", main)
+        for name, body in drop_ins.items():
+            self._w("/etc/ssh/sshd_config.d/" + name.replace("_", "."), body)
+
+    def test_match_lines_are_counted_in_the_main_file_and_the_conf_files(self):
+        self._two()
+        self._sshd_config("Include /etc/ssh/sshd_config.d/*.conf\nPort 22\n# Match User x\n"
+                          "Match User a\n  X11Forwarding no\n\tmatch=Group b\n",
+                          a_conf="MATCH all\nPermitRootLogin no\n", b_txt="Match User ignored\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (3, 0))
+
+    def test_no_match_line_is_zero_not_could_not_check(self):
+        self._two()
+        self._sshd_config("Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\nMatchmaker yes\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 0))
+
+    def test_an_include_that_reaches_elsewhere_is_counted_per_line(self):
+        self._two()
+        self._sshd_config('Include /etc/ssh/sshd_config.d/*.conf\ninclude /etc/ssh/extra/*.conf "/opt/x y.conf"\n'
+                          "Include sshd_config.d/*.conf\nInclude other.conf\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 2))
+
+    def test_a_configuration_that_cannot_be_read_is_could_not_check_and_the_keys_are_still_listed(self):
+        self._two()                                             # no /etc/ssh/sshd_config in the fake root
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+        self.assertEqual(len(d["files"][0]["keys"]), 2)
 
     def test_a_setting_sshd_did_not_print_is_could_not_check(self):
         self.outputs[("sshd", "-T")] = (0, self.SSHD.replace("trustedusercakeys none\n", ""), "")
