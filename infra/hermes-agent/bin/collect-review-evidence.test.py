@@ -3600,6 +3600,7 @@ class TestD24Journal(Base):
         self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, "", "")
         self.outputs[_oldest_key()] = (0, _entry(now - 31 * 86400 - 60), "")
         self.disk_key = ("journalctl", "-D", "/var/log/journal/" + self.MID)
+        self.flag = self._w("/run/systemd/journal/flushed", "")
         self.outputs[self.disk_key] = (0, _entry(now - 7), "")
 
     def _all_older_than_the_start(self):
@@ -4036,7 +4037,7 @@ class TestD24Journal(Base):
 
     def test_a_usage_that_cannot_be_counted_is_could_not_check_never_zero(self):
         keys = {"bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
-                "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds"}
+                "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk"}
         mid_path = os.path.join(self.root, "etc/machine-id")
         for body in ("uninitialized\n", "", self.MID.upper() + "\n", self.MID[:31] + "\n", "../../etc\n"):
             with self.subTest(body=body):
@@ -4057,7 +4058,7 @@ class TestD24Journal(Base):
         self.assertIn(d["on_disk_age_seconds"], (7, 8, 9))
         self.assertEqual(CE.NEWEST_ENTRY_ARGS, ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "1"])
         self.assertIn(["journalctl", "-D", "/var/log/journal/" + self.MID, *CE.NEWEST_ENTRY_ARGS], host.calls)
-        self.assertEqual(list(CE.d2_4(host, {})["usage"])[-2:], ["newest_entry_on_disk", "on_disk_age_seconds"])
+        self.assertEqual(list(CE.d2_4(host, {})["usage"])[-3:], ["newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk"])
 
     def test_a_relinquished_on_disk_journal_shows_its_age_while_everything_else_reads_healthy(self):
         # Record R13: after `journalctl --relinquish-var` (and after a restart of the service) the on-disk directory
@@ -4072,6 +4073,40 @@ class TestD24Journal(Base):
         self.assertIn(d["usage"]["on_disk_age_seconds"], (10800, 10801, 10802))
         self.assertEqual((d["reach_days"], d["settings"]["Storage"]["value"], d["service"]["active"],
                           d["service"]["config_changed_after_start"], d["usage"]["files"]), (31, None, True, False, 4))
+
+    def test_systemds_own_flag_says_whether_the_journal_is_on_disk(self):
+        # Record R13: /run/systemd/journal/flushed is there once the journal was moved to disk, gone after
+        # `journalctl --relinquish-var` (also after a restart of the service), back after `journalctl --flush`.
+        # The age alone read 150 s in the relinquished state: inside any limit that a quiet box needs.
+        self.assertEqual(CE.JOURNAL_FLUSHED_FLAG, "/run/systemd/journal/flushed")
+        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], True)
+        os.remove(self.flag)
+        d = CE.d2_4(self.host(), {})["usage"]
+        self.assertIs(d["flushed_to_disk"], False)
+        self.assertIn(d["on_disk_age_seconds"], (7, 8, 9))                   # the age is read on its own
+        shutil.rmtree(os.path.join(self.root, "run/systemd/journal"))
+        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], False)
+        shutil.rmtree(os.path.join(self.root, "run"))
+        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], False)
+
+    def test_the_flag_is_judged_by_lstat_so_a_dangling_link_there_still_counts_as_present(self):
+        os.remove(self.flag)
+        os.symlink("/nowhere", self.flag)
+        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], True)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads through any permission")
+    def test_a_flag_that_cannot_be_looked_at_is_could_not_check_never_false(self):
+        parent = os.path.dirname(self.flag)
+        os.chmod(parent, 0)
+        self.addCleanup(os.chmod, parent, 0o755)
+        d = CE.d2_4(self.host(), {})["usage"]
+        self.assertEqual(d["flushed_to_disk"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["files"], 4)
+        os.chmod(parent, 0o755)
+        os.remove(self.flag)
+        os.rmdir(parent)
+        self._w("/run/systemd/journal", "a file where a directory belongs")  # ENOTDIR: not "does not exist"
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], R.COULD_NOT_CHECK)
 
     def test_an_on_disk_journal_without_an_entry_or_that_cannot_be_read_has_no_age(self):
         CN = R.COULD_NOT_CHECK

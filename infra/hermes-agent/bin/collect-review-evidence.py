@@ -1305,6 +1305,10 @@ def _entry_time(host, argv):
 
 
 JOURNAL_DIR = "/var/log/journal"
+# systemd's own sign that the journal is on disk (measured, record R13): there once the journal
+# was moved to /var, gone after `journalctl --relinquish-var` and still gone after a restart of
+# the service, back after `journalctl --flush`.
+JOURNAL_FLUSHED_FLAG = "/run/systemd/journal/flushed"
 JOURNALD_DROP_IN_DIR = JOURNALD_DROP_IN_DIRS[0]
 JOURNALD_DROP_IN = JOURNALD_DROP_IN_DIR + "/50-hermes-retention.conf"
 JOURNALD_DROP_IN_REPO = CHECKOUT + "/infra/hermes-agent/deploy/journald-hermes-retention.conf"
@@ -1422,9 +1426,11 @@ def _journal_usage(host, settings):
     `journalctl --relinquish-var`, or a /var it could not open, an active service with a healthy
     Storage= writes to /run only, and journalctl merges both). So the newest entry of the on-disk
     directory ALONE is read, and its age: the machine id goes into that command, never into the
-    result."""
+    result. The age cannot show a journal that left the disk a moment ago (150 s in R13), so
+    systemd's flag is read too: True when it exists (by lstat), False when it does not,
+    could-not-check when it cannot be looked at."""
     keys = ("bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
-            "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds")
+            "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk")
     try:
         with open(host.path("/etc/machine-id")) as f:
             mid = f.read(64).strip()
@@ -1447,6 +1453,13 @@ def _journal_usage(host, settings):
         seconds = int(time.time()) - _epoch(newest)
         if seconds >= -_CLOCK_STEP_MARGIN:
             age = max(0, seconds)
+    try:
+        os.lstat(host.path(JOURNAL_FLUSHED_FLAG))
+        flushed = True
+    except FileNotFoundError:
+        flushed = False
+    except OSError:
+        flushed = R.COULD_NOT_CHECK
     max_use = max_files = R.COULD_NOT_CHECK
     if isinstance(settings, dict):
         max_use = settings["SystemMaxUse"]["number"]
@@ -1455,7 +1468,8 @@ def _journal_usage(host, settings):
     return {"bytes": used, "files": len(names), "bytes_percent_of_max_use": _percent(used, max_use),
             "files_percent_of_max_files": _percent(len(names), max_files),
             "free_bytes": vfs.f_bavail * vfs.f_frsize, "free_percent": _percent(vfs.f_bavail, vfs.f_blocks),
-            "other_directories": others, "newest_entry_on_disk": newest, "on_disk_age_seconds": age}
+            "other_directories": others, "newest_entry_on_disk": newest, "on_disk_age_seconds": age,
+            "flushed_to_disk": flushed}
 
 
 def _journald_drop_in(host):

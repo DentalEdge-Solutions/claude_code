@@ -98,7 +98,8 @@ class TestChecklistSync(unittest.TestCase):
         host = ce.Host(root, lambda argv, timeout=60: (0, cat if argv == ce.JOURNALD_CAT_CONFIG else "", ""))
         d = ce.d2_4(host, {})
         self.assertEqual(sorted(d["service"]), ["active", "config_changed_after_start", "started_at"])
-        self.assertEqual(list(d["usage"])[-2:], ["newest_entry_on_disk", "on_disk_age_seconds"])
+        self.assertEqual(list(d["usage"])[-3:], ["newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk"])
+        self.assertIn("`/run/systemd/journal/flushed`", block)
         self.assertIn("Storage", d["settings"])
         for word in ("auto", "persistent", "volatile", "none"):
             self.assertIn(f"`{word}`", block, word)
@@ -129,15 +130,17 @@ class TestChecklistSync(unittest.TestCase):
         self.assertEqual(parts, {"1": "Not read", "2": "The setting", "3": "In force", "4": "Written to disk",
                                  "5": "The reach", "6": "The limits", "7": "Other directories", "8": "No missing days"})
         text = dict(zip(parts.values(), re.split(r"\(\d\) \*\*[^*]+:\*\*", rule)[1:]))
-        for part, words in (("Not read", ("WHOLE item", "`usage.on_disk_age_seconds`", "`service.active`", "informational")),
+        for part, words in (("Not read", ("WHOLE item", "`usage.on_disk_age_seconds`", "`usage.flushed_to_disk`", "`service.active`", "informational")),
                             ("The setting", ("`volatile`, `none` or any other value is a FAIL", "`0`, which systemd reads as no limit")),
                             ("In force", ("`service.active` other than `true` is CANNOT-VERIFY",)),
-                            ("Written to disk", ("`usage.on_disk_age_seconds`", "at most `600`", "CANNOT-VERIFY")),
+                            ("Written to disk", ("`usage.flushed_to_disk` other than `true` is CANNOT-VERIFY", "`usage.on_disk_age_seconds` above `600`",
+                                                "either alone")),
                             ("The limits", ("no explanation replaces the measurement", "`reach_days` as measured is at least `30`")),
                             ("No missing days", ("`usage.files` lower than `reach_days`",))):
             for w in words:
                 self.assertIn(w, text[part], (part, w))
         self.assertNotIn("for its part", rule)
+        self.assertNotIn("less than 600 seconds before the collection", rule)
         self.assertNotIn("unless the operator explains it: at a limit", rule)
 
     def test_d1_7_states_the_limited_keys_exact_options(self):

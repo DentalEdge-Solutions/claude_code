@@ -862,8 +862,34 @@ copies what `/run` held). The probe after it:
 ```
 
 So `on_disk_age_seconds` was 1 in the healthy state and 150 in the relinquished state, where it grows by one a
-second. The checklist's limit is 600: a journal that left the disk less than ten minutes before the collection
-still passes that rule, which the checklist says.
+second. The checklist's limit for the age is 600, so the age alone would not have shown this state for its first
+ten minutes. The flag `/run/systemd/journal/flushed`, measured above (there, gone after `--relinquish-var`, still
+gone after the restart, back after `--flush`), shows it at once, and the probe now reads it as
+`usage.flushed_to_disk`. (The probe lines quoted earlier in R10 to R13 were taken before that key existed.)
+
+The probe with that key, in a further fresh container `jr5` (our file installed, the service restarted,
+`journalctl --flush`; removed afterwards), in three states; its own lines.
+
+Flushed (`ls /run/systemd/journal/flushed`: there):
+
+```
+"service": {"active": true, "started_at": "2026-10-10T20:21:20Z", "config_changed_after_start": false}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417980928, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:21:23Z", "on_disk_age_seconds": 0, "flushed_to_disk": true}
+```
+
+After `journalctl --relinquish-var` (rc 0; `ls`: `No such file or directory`), two seconds later:
+
+```
+"service": {"active": true, "started_at": "2026-10-10T20:21:20Z", "config_changed_after_start": false}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417980928, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:21:23Z", "on_disk_age_seconds": 2, "flushed_to_disk": false}
+```
+
+After `journalctl --flush` again (rc 0; `ls`: there):
+
+```
+"service": {"active": true, "started_at": "2026-10-10T20:21:20Z", "config_changed_after_start": false}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417980928, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:21:25Z", "on_disk_age_seconds": 1, "flushed_to_disk": true}
+```
 
 ## 3b · The key reader's two cases
 
@@ -1732,8 +1758,10 @@ item CANNOT-VERIFY, never a pass.
 - `Storage` unset with `/var/log/journal` present on a real boot: the rehearsal image sets `persistent`, the real
   server sets none. R13 (relinquish, restart, flush) was measured with `persistent` only.
 - `MaxLevelStore=`: it thins what is stored; D2.4 does not read it.
-- A `/var` the journal service could not open, or a flush that failed: R13 produced the state with
-  `journalctl --relinquish-var` only.
+- A `/var` the journal service could not open, or a flush unit that failed: R13 produced the state with
+  `journalctl --relinquish-var` only, so what `/run/systemd/journal/flushed` reads in those two cases is not known
+  (the age of the newest on-disk entry is what covers them, once it passes 600 seconds).
+- The flag `/run/systemd/journal/flushed` on the real server: the operator's trial collection shows it.
 - What `systemd-analyze cat-config` prints for a settings directory linked to an absolute path or to a place
   outside `/etc/systemd` (R12 measured a relative link beside it).
 - `d2_4` on the box itself: R7 is the container. The start-time command and its `us+utc` form are measured on
