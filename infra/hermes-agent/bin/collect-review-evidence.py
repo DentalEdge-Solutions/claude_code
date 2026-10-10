@@ -1270,6 +1270,159 @@ def _oldest_entry(host, selector=()):
         return R.COULD_NOT_CHECK
 
 
+JOURNAL_DIR = "/var/log/journal"
+JOURNALD_DROP_IN_DIR = JOURNALD_DROP_IN_DIRS[0]
+JOURNALD_DROP_IN = JOURNALD_DROP_IN_DIR + "/50-hermes-retention.conf"
+JOURNALD_DROP_IN_REPO = CHECKOUT + "/infra/hermes-agent/deploy/journald-hermes-retention.conf"
+JOURNALD_DEFAULT_MAX_FILES = 100                # journald.conf(5), systemd 255: SystemMaxFiles= defaults to 100
+JOURNAL_UNITS = {"broker": "hermes-app-broker@" + APP, "runner": "hermes-app-runner@" + APP}
+# When the journal service's process now running was started, in UTC to the microsecond (measured,
+# systemd 255, record R7). The process reads its settings after this moment, never before it.
+# Second precision is not enough: BRING-UP installs our file and restarts the service at once,
+# and in the rehearsal the two were 21 ms apart, inside one second.
+JOURNALD_STARTED = ["systemctl", "show", "systemd-journald", "--timestamp=us+utc", "-p", "ExecMainStartTimestamp",
+                    "--value"]
+_SYSTEMD_US_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2})\.([0-9]{6}) UTC")
+# A file's times come from the kernel's coarse clock, which can be one tick behind the clock
+# systemd reads: 10 ms is the longest tick Linux is built with (HZ=100). A change stamped less
+# than this before the start may really have happened after it.
+_CLOCK_TICK_NS = 10 * 10 ** 6
+# SystemMaxFiles as a plain decimal count. A leading zero is refused: systemd's integer parser
+# may read it as octal (not measured), and a number is never guessed at.
+_MAX_FILES_RE = re.compile(r"0|[1-9][0-9]{0,8}")
+_SETTING_NUMBER = {"MaxRetentionSec": _span_seconds, "MaxFileSec": _span_seconds, "SystemMaxUse": _size_bytes,
+                   "SystemMaxFiles": lambda v: int(v) if _MAX_FILES_RE.fullmatch(v) else R.COULD_NOT_CHECK}
+
+
+def _percent(part, whole):
+    ok = all(isinstance(x, int) and not isinstance(x, bool) for x in (part, whole)) and whole > 0
+    return round(100 * part / whole, 1) if ok else R.COULD_NOT_CHECK
+
+
+def _changed_at_ns(host, p):
+    """When a settings file or directory last changed, in nanoseconds: the later of its content
+    time and its inode time (a copy that keeps the old content time still shows here). Of the
+    path itself, never of a link's target."""
+    st = os.lstat(host.path(p))
+    return max(st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _journald_started(host):
+    """(UTC time to the second, nanoseconds since the epoch) of JOURNALD_STARTED. Raises
+    CouldNotCheck for anything but one UTC time with microseconds: a time this collector cannot
+    place is never compared."""
+    rc, out, _ = host.run(JOURNALD_STARTED)
+    m = _SYSTEMD_US_TS_RE.fullmatch(out.strip()) if rc == 0 else None
+    if not m:
+        raise CouldNotCheck("the journal service's start time cannot be read")
+    iso = f"{m.group(1)}T{m.group(2)}Z"
+    return iso, _epoch(iso) * 10 ** 9 + int(m.group(3)) * 1000
+
+
+def _journald_service(host, files):
+    """When the journal service's process started, and whether the settings changed after that:
+    the service reads its settings when it starts, so a newer file is not yet in force. What is
+    compared: every listed file, and every drop-in directory that exists (its time changes when a
+    file in it is added, removed or renamed: a drop-in the service read and that was deleted since
+    is still in force and is in no list). Without the list of files nothing is compared."""
+    row = {"started_at": R.COULD_NOT_CHECK, "config_changed_after_start": R.COULD_NOT_CHECK}
+    try:
+        row["started_at"], start_ns = _journald_started(host)
+        if isinstance(files, list) and files:
+            times = [_changed_at_ns(host, p) for p in files]
+            for d in JOURNALD_DROP_IN_DIRS:
+                try:
+                    times.append(_changed_at_ns(host, d))
+                except FileNotFoundError:
+                    pass
+            row["config_changed_after_start"] = any(t + _CLOCK_TICK_NS > start_ns for t in times)
+    except (CouldNotCheck, OSError, ValueError):
+        pass
+    return row
+
+
+def _journal_usage(host, settings):
+    """As the service counts it (journal-vacuum.c): the files of the machine's OWN directory,
+    512 bytes times each file's blocks. Other directories under /var/log/journal are counted,
+    not measured: the service does not trim them and journalctl does not read them. The two
+    percentages need the settings: without them, or without a number for the limit, they are
+    could-not-check (the size limit has no default this collector assumes)."""
+    keys = ("bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
+            "free_percent", "other_directories")
+    try:
+        with open(host.path("/etc/machine-id")) as f:
+            mid = f.read(64).strip()
+        if not re.fullmatch(r"[0-9a-f]{32}", mid):
+            raise ValueError("machine-id")
+        base = host.path(JOURNAL_DIR)
+        own = os.path.join(base, mid)
+        names = [n for n in os.listdir(own) if n.endswith((".journal", ".journal~"))]
+        used = sum(os.lstat(os.path.join(own, n)).st_blocks * 512 for n in names)
+        others = sum(1 for n in os.listdir(base) if n != mid and os.path.isdir(os.path.join(base, n)))
+        vfs = os.statvfs(own)
+    except (OSError, ValueError):
+        return {k: R.COULD_NOT_CHECK for k in keys}
+    max_use = max_files = R.COULD_NOT_CHECK
+    if isinstance(settings, dict):
+        max_use = settings["SystemMaxUse"]["number"]
+        max_files = (JOURNALD_DEFAULT_MAX_FILES if settings["SystemMaxFiles"]["value"] is None
+                     else settings["SystemMaxFiles"]["number"])
+    return {"bytes": used, "files": len(names), "bytes_percent_of_max_use": _percent(used, max_use),
+            "files_percent_of_max_files": _percent(len(names), max_files),
+            "free_bytes": vfs.f_bavail * vfs.f_frsize, "free_percent": _percent(vfs.f_bavail, vfs.f_blocks),
+            "other_directories": others}
+
+
+def _journald_drop_in(host):
+    try:
+        st = _stat(host, JOURNALD_DROP_IN)
+        row = {"owner": st["owner"], "group": st["group"], "mode": st["mode"]}
+    except OSError:
+        row = {"owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK, "mode": R.COULD_NOT_CHECK}
+    try:
+        others = sorted(n for n in os.listdir(host.path(JOURNALD_DROP_IN_DIR))
+                        if n != os.path.basename(JOURNALD_DROP_IN))
+        others = [n if re.fullmatch(r"[A-Za-z0-9._@-]+", n) else WITHHELD for n in others]
+    except FileNotFoundError:
+        others = []
+    except OSError:
+        others = R.COULD_NOT_CHECK
+    return {"equals_repo": _same_file(host, JOURNALD_DROP_IN, JOURNALD_DROP_IN_REPO), **row, "other_files": others}
+
+
+def d2_4(host, ctx):
+    """How far back the journal reaches and what decides it (F58: the box kept 7 days while the
+    leak checks assumed 30). Times, numbers, setting names and settings-file paths only: no
+    journal line, no machine id. Each part that cannot be read is could-not-check on its own."""
+    def oldest_entry(selector=()):
+        try:
+            return _oldest_entry(host, selector)
+        except (OSError, ValueError):               # the runner itself failed, or its output is not text
+            return R.COULD_NOT_CHECK
+
+    oldest = {"journal": oldest_entry()}
+    for label, unit in JOURNAL_UNITS.items():
+        oldest[label] = oldest_entry(("-u", unit))
+    reach = R.COULD_NOT_CHECK
+    if oldest["journal"] is None:
+        reach = None
+    elif oldest["journal"] != R.COULD_NOT_CHECK:
+        age = int(time.time()) - _epoch(oldest["journal"])
+        if age >= 0:                                # an entry later than this clock: nothing to measure with
+            reach = age // 86400
+    settings = files = R.COULD_NOT_CHECK
+    try:
+        got, listed = _journald_settings(host, _ok(host, JOURNALD_CAT_CONFIG))
+        settings = {k: {**v, "number": None if v["value"] is None else _SETTING_NUMBER[k](v["value"])}
+                    for k, v in got.items()}
+        files = listed
+    except (CouldNotCheck, OSError, UnicodeDecodeError):
+        settings = files = R.COULD_NOT_CHECK
+    return {"oldest_entry": oldest, "reach_days": reach, "settings": settings, "config_files": files,
+            "drop_in": _journald_drop_in(host), "service": _journald_service(host, files),
+            "usage": _journal_usage(host, settings)}
+
+
 # ---------------------------------------------------------------- D4 isolation boundaries
 def _listeners(host, gw):
     """(listeners, docker_dns_listeners) for D4.1. `listeners`: the sorted, distinct local ports
@@ -1972,7 +2125,7 @@ def d10_8(host, ctx):
 
 
 PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6, "D1.7": d1_7,
-          "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3,
+          "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3, "D2.4": d2_4,
           "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4, "D4.5": d4_5, "D4.6": d4_6,
           "D5.1": d5_1, "D5.2": d5_2, "D5.3": d5_3, "D5.4": d5_4,
           "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1,

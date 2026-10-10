@@ -83,6 +83,39 @@ class TestChecklistSync(unittest.TestCase):
         for field in [*d4_6, *d4_6["started_at"]]:
             self.assertIn(f"`{field}`", blocks["D4.6"], field)
 
+    def test_d2_4_names_every_field_the_collector_reports(self):
+        ce = _load("ce", "collect-review-evidence.py")
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.4"]
+        import tempfile
+        root = tempfile.mkdtemp()
+        files = {"/etc/systemd/journald.conf": "[Journal]\nSystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n",
+                 ce.JOURNALD_DROP_IN: "[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n"}
+        for path, body in files.items():
+            os.makedirs(os.path.dirname(root + path), exist_ok=True)
+            with open(root + path, "w") as f:
+                f.write(body)
+        cat = "\n".join(f"# {p}\n{c}" for p, c in files.items())
+        host = ce.Host(root, lambda argv, timeout=60: (0, cat if argv == ce.JOURNALD_CAT_CONFIG else "", ""))
+        d = ce.d2_4(host, {})
+        self.assertEqual(d["config_files"], list(files))                # the real dict, not could-not-check
+        self.assertEqual(sorted(d["settings"]), sorted(ce.JOURNALD_SETTINGS))
+        for part in ("oldest_entry", "drop_in", "service", "usage"):
+            self.assertIsInstance(d[part], dict, part)
+        fields = [*d, *d["oldest_entry"], *d["settings"], *d["settings"]["MaxRetentionSec"], *d["drop_in"],
+                  *d["service"], *d["usage"]]
+        for field in fields:
+            self.assertIn(f"`{field}`", block, field)
+        self.assertIn(f"`{ce.JOURNALD_DROP_IN}`", block)
+        self.assertIn("`/etc/systemd/journald.conf.d/50-hermes-retention.conf`", block)
+        self.assertIn("`2592000`", block)
+        self.assertIn("`" + " ".join(ce.JOURNALD_CAT_CONFIG) + "`", block)
+        for d_ in ce.JOURNALD_DROP_IN_DIRS:
+            self.assertIn(f"`{d_}`", block)
+        lines = [l for l in block.split("\n")[1:] if l and not l.startswith("## ")]
+        self.assertEqual([l.split("**")[1] for l in lines if l.startswith("- **")],     # four bullets, one line each
+                         ["source:", "claim:", "expected:", "pass rule:"])
+        self.assertEqual(len(lines), 4)
+
     def test_d1_7_states_the_limited_keys_exact_options(self):
         blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
         for opt in ('command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',

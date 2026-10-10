@@ -172,6 +172,166 @@ treated shows `MaxRetentionSec=3min` from the main file and then `MaxRetentionSe
 3 minutes applied), the treated container kept it (our file's 35 days overrode it), so the experiment is valid.
 Both containers were removed afterwards.
 
+### R7 · the probe `d2_4` against a real journal service
+
+Measured 2026-10-10 in the running systemd 255 container `jr` (our file installed and the service restarted in R3;
+the repository mounted read-only). The probe was called as the brief gives it, from a script at
+`<scratchpad>/probe.sh`:
+
+```
+docker exec jr python3 -c '
+import importlib.util, json
+s = importlib.util.spec_from_file_location("ce", "/opt/projects/claude_code/infra/hermes-agent/bin/collect-review-evidence.py")
+ce = importlib.util.module_from_spec(s); s.loader.exec_module(ce)
+print(json.dumps(ce.d2_4(ce.Host(), {}), indent=1))'
+```
+
+**Before the first run: how the start time must be read.** Read-only, in `jr`:
+
+```
+$ systemctl show systemd-journald -p ExecMainStartTimestamp -p InactiveExitTimestamp -p ActiveEnterTimestamp
+ExecMainStartTimestamp=Sat 2026-10-10 17:43:38 UTC
+InactiveExitTimestamp=Sat 2026-10-10 17:43:38 UTC
+ActiveEnterTimestamp=Sat 2026-10-10 17:43:38 UTC
+$ systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp -p InactiveExitTimestamp -p ActiveEnterTimestamp
+ExecMainStartTimestamp=Sat 2026-10-10 17:43:38.112198 UTC
+InactiveExitTimestamp=Sat 2026-10-10 17:43:38.112275 UTC
+ActiveEnterTimestamp=Sat 2026-10-10 17:43:38.123219 UTC
+$ stat -c "%n %y | %z" /etc/systemd/journald.conf.d /etc/systemd/journald.conf.d/50-hermes-retention.conf
+/etc/systemd/journald.conf.d 2026-10-10 17:43:38.089807001 +0000 | 2026-10-10 17:43:38.089807001 +0000
+/etc/systemd/journald.conf.d/50-hermes-retention.conf 2026-10-10 17:43:38.090807001 +0000 | 2026-10-10 17:43:38.090807001 +0000
+```
+
+`--timestamp=unix` printed `@1791654218` (seconds only); a unit that does not exist printed an empty line, rc 0.
+Our file was written 21 ms before the service's process started, inside the same second. So the plan's comparison
+(a file's time against `ActiveEnterTimestamp` at second precision, `17:43:38.090 > 17:43:38`) would have reported
+`config_changed_after_start: true` for this healthy container, and would do so on the box whenever BRING-UP's install
+and restart fall in one second. The probe therefore asks for `ExecMainStartTimestamp` with `--timestamp=us+utc` (the
+moment the process was started, which is before it can read anything; `ActiveEnterTimestamp` is 11 ms later, when
+the service has reported ready, and whether it has read its settings by then was not measured) and compares to the
+microsecond. A change stamped less than 10 ms before the start counts as after
+it: a file's time comes from the kernel's coarse clock, which can be one tick behind (10 ms is the longest tick Linux
+is built with; the tick length of this kernel was not measured, and no such case was produced here).
+
+**Run 1, as found (healthy).** As expected: a time for the journal and `null` for the two units, `35day` from our
+file, `1G`, the file equal to the repository's, `config_changed_after_start` `false`, the usage in numbers.
+
+```
+{
+ "oldest_entry": {
+  "journal": "2026-10-10T17:43:26Z",
+  "broker": null,
+  "runner": null
+ },
+ "reach_days": 0,
+ "settings": {
+  "MaxRetentionSec": {
+   "value": "35day",
+   "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf",
+   "number": 3024000
+  },
+  "SystemMaxUse": {
+   "value": "1G",
+   "file": "/etc/systemd/journald.conf",
+   "number": 1073741824
+  },
+  "SystemMaxFiles": {
+   "value": "500",
+   "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf",
+   "number": 500
+  },
+  "MaxFileSec": {
+   "value": "1day",
+   "file": "/etc/systemd/journald.conf",
+   "number": 86400
+  }
+ },
+ "config_files": [
+  "/etc/systemd/journald.conf",
+  "/etc/systemd/journald.conf.d/50-hermes-retention.conf",
+  "/usr/lib/systemd/journald.conf.d/syslog.conf"
+ ],
+ "drop_in": {
+  "equals_repo": true,
+  "owner": "root",
+  "group": "root",
+  "mode": "0o644",
+  "other_files": []
+ },
+ "service": {
+  "started_at": "2026-10-10T17:43:38Z",
+  "config_changed_after_start": false
+ },
+ "usage": {
+  "bytes": 8392704,
+  "files": 1,
+  "bytes_percent_of_max_use": 0.8,
+  "files_percent_of_max_files": 0.2,
+  "free_bytes": 915426824192,
+  "free_percent": 93.6,
+  "other_directories": 0
+ }
+}
+```
+
+**Run 2, after `docker exec jr touch /etc/systemd/journald.conf`.** The output differs from run 1 in two lines only
+(`free_bytes` moved by 4096, the journal growing):
+
+```
+  "config_changed_after_start": true
+```
+
+**Run 3, a broken drop-in** (`printf '[Broken\n[Journal]\nCompress=yes\n' > /etc/systemd/journald.conf.d/10-x.conf`;
+the journal service was NOT restarted). `settings` and `config_files` are `could-not-check`, and with them the two
+percentages and `config_changed_after_start`; the neighbour is named in `other_files`:
+
+```
+{
+ "oldest_entry": {
+  "journal": "2026-10-10T17:43:26Z",
+  "broker": null,
+  "runner": null
+ },
+ "reach_days": 0,
+ "settings": "could-not-check",
+ "config_files": "could-not-check",
+ "drop_in": {
+  "equals_repo": true,
+  "owner": "root",
+  "group": "root",
+  "mode": "0o644",
+  "other_files": [
+   "10-x.conf"
+  ]
+ },
+ "service": {
+  "started_at": "2026-10-10T17:43:38Z",
+  "config_changed_after_start": "could-not-check"
+ },
+ "usage": {
+  "bytes": 8392704,
+  "files": 1,
+  "bytes_percent_of_max_use": "could-not-check",
+  "files_percent_of_max_files": "could-not-check",
+  "free_bytes": 915426816000,
+  "free_percent": 93.6,
+  "other_directories": 0
+ }
+}
+```
+
+**Run 4, after `rm /etc/systemd/journald.conf.d/10-x.conf`.** Identical to run 2, byte for byte: the settings, the
+three files and `other_files: []` are back. `config_changed_after_start` stays `true`, as it must: the main file was
+touched in run 2, and the directory `/etc/systemd/journald.conf.d` changed when the file was added and removed (its
+time is now `19:45:15`, after the start), which is what would show a drop-in the service read and that was deleted
+since.
+
+**How `jr` was left.** Our file installed and equal to the repository's, no other file in the directory, the service
+active and never restarted (`ExecMainStartTimestamp` still `17:43:38.112198`). One thing differs from how it was
+found and cannot be undone without a restart: the main file's and the directory's times are after the service's
+start, so `d2_4` reports `config_changed_after_start: true` in `jr` until `systemctl restart systemd-journald` is
+run there.
+
 ### R8 · the settings printout with `--tldr`
 
 Measured 2026-10-10 in the running systemd 255 container `jr` (read-only), `systemd-analyze cat-config --tldr systemd/journald.conf | cat -A`:
@@ -1107,5 +1267,11 @@ item CANNOT-VERIFY, never a pass.
 - 35 real days of journal: the rehearsal shows the setting in force and the deletion mechanism at 3 minutes, not a
   35-day run.
 - The box's own restart of the journal service (Task 13 is the first).
+- How systemd reads `SystemMaxFiles=` with a leading zero (as octal, or as decimal), a hexadecimal form or more
+  than nine digits: `d2_4` gives `number` `could-not-check` for all of them instead of a count.
+- The length of the kernel's clock tick on the box, and a settings file changed within one tick of the journal
+  service's start: `d2_4` counts a change stamped less than 10 ms before the start as after it (R7).
+- `d2_4` on the box itself: R7 is the container. The start-time command and its `us+utc` form are measured on
+  systemd 255 only.
 - `hermes-broker` and `hermes-docker-proxy` logging after the restart (only the audit broker has a safe trigger);
   the rehearsal's long-running stand-in is the `ticker` unit.
