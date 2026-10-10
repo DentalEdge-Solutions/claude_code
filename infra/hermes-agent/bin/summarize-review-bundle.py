@@ -1,72 +1,268 @@
 #!/usr/bin/env python3
-"""Print a summary of a box review bundle that is safe to paste: every item with its status,
-and, for the items this tool knows, counts, booleans, times and short words only.
+"""Print a summary of a box review bundle that is safe to paste: every item with its status and,
+for the items this tool knows, a fixed set of fields.
 
     sudo python3 collect-review-evidence.py --fp-key-tty | python3 summarize-review-bundle.py
     python3 summarize-review-bundle.py bundle-box.json
 
 It is for the TRIAL collection (a throwaway key): it shows whether every item was observed and
-what to look at before the real collection. It judges nothing: the reviewer does. Anything that
-is not a number, a boolean, a UTC time or a short word prints as <withheld>: a path, a
-fingerprint, an option value, free text. An item this tool does not know prints its status alone.
+what to look at before the real collection. It judges nothing: the reviewer does.
+
+THE PRINT RULE. A string from the bundle is never printed because of what it looks like. The
+tool prints only: true, false, null; an integer of at most 15 digits; a finite float rounded to
+one decimal; a UTC time that is a real date; a string that is a member of the closed set declared
+for that exact field (any other string prints as <other>); a dict key that is a member of the
+closed key set declared for that dict (the others are only counted: "+N other keys"); and its own
+fixed words. Everything else prints as <withheld>. An account name, a path, a fingerprint, an
+option value, a reason and every unknown item or key are therefore never printed. The sets copied
+from the collector are checked against it by the test suite.
 """
+import datetime
 import json
+import math
 import re
 import sys
 
-WITHHELD = "<withheld>"
-MAX_ENTRIES = 40
-OUR_FILE = "/etc/systemd/journald.conf.d/50-hermes-retention.conf"
+CNC = "could-not-check"
+WITHHELD, OTHER = "<withheld>", "<other>"
+MAX_DIGITS = 15
+MAX_LISTED = 40                 # more list entries than this print as a count
+MAX_WALK_DEPTH = 16             # the could-not-check walk: deeper than this counts as one place
+TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_MODE_RE = re.compile(r"0o[0-7]{3,4}")
+_ID_RE = re.compile(r"D([0-9]{1,2})\.([0-9]{1,2})")
+
+# ---- closed sets copied from collect-review-evidence.py (tests compare them with it) ----
+OUR_FILE = "/etc/systemd/journald.conf.d/50-hermes-retention.conf"      # JOURNALD_DROP_IN
+SETTING_NAMES = frozenset({"MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec", "Storage"})
+SERVICES = ("hermes-docker-proxy", "hermes-broker", "hermes-app-broker@ads-audit")     # SERVICE_FILES
+START_KEYS = frozenset(SERVICES) | {"boot", "docker", "gateway-container"}
+JOURNAL_LABELS = frozenset({"journal", "broker", "runner"})                             # JOURNAL_UNITS + journal
+LISTENER_UNITS = frozenset({"hermes-listener-check.service", "hermes-listener-check.timer"})
+SECRET_LABELS = frozenset({"openrouter-key", "dashboard-password", "dashboard-password-hash",
+                           "dashboard-session-secret"})
+SECRET_STATES = frozenset({"matches-file", "differs-from-file", "unset"})
+JOURNAL_STATUSES = frozenset({"ok", "refused", "failed", "busy", "queued", "dropped", "-", "?"})
+JOURNAL_REASONS = frozenset({"bad_request", "duplicate", "inactive_client", "quota", "disabled", "timeout",
+                             "interrupted", "internal", "precheck", "busy", "collect", "snapshot", "read",
+                             "proxy", "draft", "isolation", "vault-write", "expired", "-", "?"})
+NOTE_WORDS = frozenset({"warning", "error"})
+HISTORY_STATUSES = frozenset({"ok", "alert", CNC, "?"})                                  # check-gateway-listeners.py
+ALERT_LOG_KEYS = frozenset({"alert", "alert-cleared", "?", "first_ts", "last_ts"})
+FILE_KINDS = frozenset({"file", "symlink", "not-a-file"})
+_KEY_BASES = ("ssh-rsa", "ssh-dss", "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+              "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
+KEY_TYPES = frozenset(_KEY_BASES) | {b + "-cert-v01@openssh.com" for b in _KEY_BASES}    # as _KEY_TYPE_RE reads them
+# ---- closed sets the collector does not declare (systemctl(1)'s own words, and the expected values) ----
+ACTIVE_STATES = frozenset({"active", "inactive", "failed", "activating", "deactivating", "reloading",
+                           "maintenance", "refreshing"})
+ENABLED_STATES = frozenset({"enabled", "enabled-runtime", "linked", "linked-runtime", "masked", "masked-runtime",
+                            "static", "indirect", "disabled", "generated", "transient", "alias", "bad"})
+SETTING_VALUES = frozenset({"35day", "7day", "1day", "1G", "500", "persistent", "auto", "volatile", "none"})
+STORAGE_OK = (None, "auto", "persistent")
+
 THIRTY_DAYS = 30 * 86400
 LIMITED_OPTIONS = ['command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',
                    "port-forwarding", "restrict"]
-DEFAULT_DAEMON = {"listeners": 1, "config_file_options": 0, "setting_options": 0}
 REFUSALS = ("refused/disabled", "refused/quota", "refused/bad_request")
-_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
-_WORD_RE = re.compile(r"[A-Za-z0-9?-][A-Za-z0-9_@.+-]{0,31}(/[A-Za-z0-9_?.-]{1,24})?")
-_HEX_RUN_RE = re.compile(r"[0-9A-Fa-f]{8,}")
+DEFAULT_DAEMON = {"listeners": 1, "config_file_options": 0, "setting_options": 0}
 
-# The fields printed for each item this tool knows, by their names in the item's data.
-FIELDS = {
-    "D1.7": ("accounts_checked", "unprivileged_port_start", "match_lines", "include_elsewhere", "daemon_options",
-             "sshd"),
-    "D2.3": ("journal", "scanned_characters", "undecodable_characters", "oldest_entry_read"),
-    "D2.4": ("oldest_entry", "reach_days", "settings", "drop_in", "service", "usage"),
-    "D4.1": ("listeners", "docker_dns_listeners", "secret_env"),
-    "D4.2": ("active", "matches_last_pass"),
-    "D4.5": ("timer_active", "timer_enabled", "installed_equal_repo", "last_age_seconds", "alert_present",
-             "history_counts", "alert_log"),
-    "D4.6": ("last_pass_collected_at", "started_at", "started_after_last_pass", "files_newer_than_start",
-             "files_checked"),
-    "D7.1": ("records",),
-    "D10.7": ("journal_counts", "note_counts", "other_lines", "broker_journal", "runner_journal",
-              "known_secrets_checked", "oldest_entry_read"),
-    "D10.8": ("out_of_whitelist",),
+
+# ------------------------------------------------------------------ the print rule
+def _word(v):
+    """The two words every field may print besides its own kind: null and could-not-check."""
+    if v is None:
+        return "null"
+    return CNC if isinstance(v, str) and v == CNC else None
+
+
+def is_time(v):
+    if not (isinstance(v, str) and _TIME_RE.fullmatch(v)):
+        return False
+    try:
+        datetime.datetime.strptime(v, TIME_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
+def num(v):
+    if _word(v):
+        return _word(v)
+    if isinstance(v, bool):
+        return WITHHELD
+    if isinstance(v, int):
+        return str(v) if len(str(abs(v))) <= MAX_DIGITS else WITHHELD
+    if isinstance(v, float) and math.isfinite(v) and abs(v) < 10 ** MAX_DIGITS:
+        return f"{v:.1f}"
+    return WITHHELD
+
+
+def flag(v):
+    return _word(v) or ("true" if v is True else "false" if v is False else WITHHELD)
+
+
+def when(v):
+    return _word(v) or (v if is_time(v) else WITHHELD)
+
+
+def count(v):
+    return _word(v) or (str(len(v)) if isinstance(v, (list, dict)) else WITHHELD)
+
+
+def member(allowed):
+    def fmt(v):
+        if _word(v):
+            return _word(v)
+        return (v if v in allowed else OTHER) if isinstance(v, str) else WITHHELD
+    return fmt
+
+
+def mode(v):
+    return _word(v) or ((v if _MODE_RE.fullmatch(v) else OTHER) if isinstance(v, str) else WITHHELD)
+
+
+def is_root(v):
+    return _word(v) or (("true" if v == "root" else "false") if isinstance(v, str) else WITHHELD)
+
+
+def set_by(v):
+    """Whose file set a journald setting; the path itself is never printed."""
+    if v is None:
+        return "none"
+    if isinstance(v, str):
+        return CNC if v == CNC else "ours" if v == OUR_FILE else "other"
+    return WITHHELD
+
+
+def _fields(v, spec):
+    """([(name, text)], other_key_count) for a dict read by `spec`: {name: formatter} or
+    {name: (source_key, formatter)}; a formatter of None is a known field that is never printed."""
+    pairs, known = [], set()
+    for name, entry in spec.items():
+        src, fmt = entry if isinstance(entry, tuple) else (name, entry)
+        known.add(src)
+        if fmt is not None and src in v:
+            pairs.append((name, fmt(v[src])))
+    return pairs, sum(1 for k in v if k not in known)
+
+
+def _braced(pairs, other):
+    parts = [f"{k}: {t}" for k, t in pairs] + ([f"+{other} other keys"] if other else [])
+    return "{" + ", ".join(parts) + "}"
+
+
+def fixed(spec):
+    def fmt(v):
+        if _word(v):
+            return _word(v)
+        return _braced(*_fields(v, spec)) if isinstance(v, dict) else WITHHELD
+    return fmt
+
+
+def keyed(keys, inner):
+    """A dict whose keys come from a closed set: those are printed, the others counted."""
+    def fmt(v):
+        if _word(v):
+            return _word(v)
+        if not isinstance(v, dict):
+            return WITHHELD
+        return _braced([(k, inner(v[k])) for k in sorted(v) if k in keys], sum(1 for k in v if k not in keys))
+    return fmt
+
+
+def journal_counts(v):
+    """Keys are `status/reason`; one is printed only when BOTH parts are in the collector's label sets."""
+    if _word(v):
+        return _word(v)
+    if not isinstance(v, dict):
+        return WITHHELD
+    shown = [k for k in sorted(v) if isinstance(k, str) and k.partition("/")[0] in JOURNAL_STATUSES
+             and k.partition("/")[2] in JOURNAL_REASONS]
+    return _braced([(k, num(v[k])) for k in shown], len(v) - len(shown))
+
+
+def key_list(v):
+    if _word(v):
+        return _word(v)
+    if not isinstance(v, list):
+        return WITHHELD
+    if len(v) > MAX_LISTED:
+        return f"{len(v)} (not listed)"
+    parts = []
+    for key in v:
+        if not isinstance(key, dict):
+            parts.append(WITHHELD)
+            continue
+        opts = key.get("options")
+        limited = " limited_to_the_forward=true" if opts == LIMITED_OPTIONS else ""
+        parts.append(f"{member(KEY_TYPES)(key.get('type'))} options={len(opts) if isinstance(opts, list) else '?'}{limited}")
+    return f"{len(v)} ({', '.join(parts)})"
+
+
+_KEY_FILE = fixed({"path": None, "users": count, "kind": member(FILE_KINDS), "owner_is_root": ("owner", is_root),
+                   "group_is_root": ("group", is_root), "mode": mode, "unparsed_lines": num, "keys": key_list})
+
+
+def key_files(v):
+    """The number of authorized_keys files, then one line for each."""
+    if _word(v):
+        return _word(v)
+    if not isinstance(v, list):
+        return WITHHELD
+    if len(v) > MAX_LISTED:
+        return f"{len(v)} (not listed)"
+    return str(len(v)) + "".join("\n    file: " + _KEY_FILE(row) for row in v)
+
+
+# ------------------------------------------------------------------ what is printed for each item
+_SETTING = fixed({"number": num, "set_by": ("file", set_by), "value": member(SETTING_VALUES)})
+_BROKER_RUNNER = fixed({"broker": when, "runner": when})
+_LEAKS = fixed({"credential_text_lines": num, "customer_id_lines": num, "pattern_hits": num, "known_secret_hits": num})
+
+SCHEMA = {
+    "D1.7": {"accounts_checked": num, "unprivileged_port_start": num, "match_lines": num, "include_elsewhere": num,
+             "daemon_options": fixed({"listeners": num, "config_file_options": num, "setting_options": num}),
+             "sshd_settings": ("sshd", count), "files": key_files},
+    "D2.3": {"journal": fixed({"pattern_hits": num, "known_secret_hits": num}), "scanned_characters": num,
+             "undecodable_characters": num, "oldest_entry_read": when},
+    "D2.4": {"oldest_entry": fixed({"journal": when, "broker": when, "runner": when}), "reach_days": num,
+             "settings": keyed(SETTING_NAMES, _SETTING), "config_files": None,
+             "drop_in": fixed({"equals_repo": flag, "owner_is_root": ("owner", is_root),
+                               "group_is_root": ("group", is_root), "mode": mode, "other_files": count}),
+             "service": fixed({"active": flag, "started_at": when, "config_changed_after_start": flag}),
+             "usage": fixed({"bytes": num, "files": num, "bytes_percent_of_max_use": num,
+                             "files_percent_of_max_files": num, "free_bytes": num, "free_percent": num,
+                             "other_directories": num, "newest_entry_on_disk": when,
+                             "on_disk_age_seconds": num, "flushed_to_disk": flag})},
+    "D4.1": {"paths": None, "listeners": count, "docker_dns_listeners": num,
+             "secret_env": keyed(SECRET_LABELS, member(SECRET_STATES)), "google_ads_env_names": None,
+             "anthropic_env_names": None, "openrouter_env_names": None},
+    "D4.2": {"active": member(ACTIVE_STATES), "matches_last_pass": flag, "execstart_sha256": None,
+             "last_pass_execstart_sha256": None, "execstart_argv_sha256": None, "drop_in_paths": None},
+    "D4.5": {"timer_active": member(ACTIVE_STATES), "timer_enabled": member(ENABLED_STATES),
+             "installed_equal_repo": keyed(LISTENER_UNITS, flag), "drop_in_paths": None, "state_dir": None,
+             "max_age_seconds": None, "last": None, "last_age_seconds": num, "alert_present": flag, "alert": None,
+             "history_counts": keyed(HISTORY_STATUSES, num),
+             "alert_log": fixed({"alert": num, "alert-cleared": num, "?": num, "first_ts": when, "last_ts": when})},
+    "D4.6": {"last_pass_collected_at": when, "started_at": keyed(START_KEYS, when),
+             "started_after_last_pass": keyed(START_KEYS, flag),
+             "files_newer_than_start": keyed(SERVICES, count), "files_checked": keyed(SERVICES, num)},
+    "D7.1": {"records": num, "vaults": None, "reports_rows": None, "draft_out_rows": None, "parents": None,
+             "old_data": None, "audit_data": None, "audit_logs": None, "root_backups": None},
+    "D10.7": {"journal_counts": journal_counts, "note_counts": keyed(NOTE_WORDS, num), "other_lines": num,
+              "broker_journal": _LEAKS, "runner_journal": _LEAKS, "known_secrets_checked": num,
+              "oldest_entry_read": _BROKER_RUNNER},
+    "D10.8": {"out_of_whitelist": num, "results": None},
 }
 
 
-def word(text):
-    if not isinstance(text, str):
-        return WITHHELD
-    if _TIME_RE.fullmatch(text):
-        return text
-    return text if _WORD_RE.fullmatch(text) and not _HEX_RUN_RE.search(text) else WITHHELD
-
-
-def show(value, depth=0):
-    """A value as text, by the rule in the module's first lines."""
-    if value is None or isinstance(value, (bool, int, float)):
-        return json.dumps(value)
-    if isinstance(value, str):
-        return word(value)
-    if depth >= 4 or not isinstance(value, (list, dict)):
-        return WITHHELD
-    if len(value) > MAX_ENTRIES:
-        return f"<{len(value)} entries>"
-    if isinstance(value, list):
-        return "[" + ", ".join(show(v, depth + 1) for v in value) + "]"
-    pairs = sorted(((word(k), v) for k, v in value.items()), key=lambda kv: kv[0])
-    return "{" + ", ".join(f"{k}: {show(v, depth + 1)}" for k, v in pairs) + "}"
+# ------------------------------------------------------------------ reading the bundle
+def _get(value, *path):
+    for key in path:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
 
 
 def _data(items, iid):
@@ -79,7 +275,6 @@ def _data(items, iid):
 
 
 def _int(value):
-    """An integer that is not a boolean."""
     return isinstance(value, int) and not isinstance(value, bool)
 
 
@@ -88,114 +283,173 @@ def _is(value, n):
     return _int(value) and value == n
 
 
-def _get(value, *path):
-    for key in path:
-        value = value.get(key) if isinstance(value, dict) else None
-    return value
-
-
-def _keys_line(data):
-    lines = []
-    for row in data.get("files") if isinstance(data.get("files"), list) else []:
-        if not isinstance(row, dict):
-            continue
-        head = "  file: " + ", ".join(f"{k}: {show(row.get(k))}" for k in ("users", "kind", "owner", "group", "mode", "unparsed_lines"))
-        keys = row.get("keys")
-        if not isinstance(keys, list):
-            lines += [head, f"  keys: {show(keys)}"]
-            continue
-        parts = []
-        for key in keys:
-            opts = key.get("options") if isinstance(key, dict) else None
-            n = len(opts) if isinstance(opts, list) else "?"
-            limited = " limited_to_the_forward=true" if opts == LIMITED_OPTIONS else ""
-            parts.append(f"{show(key.get('type') if isinstance(key, dict) else None)} options={n}{limited}")
-        lines += [head, f"  keys: {len(keys)} ({', '.join(parts)})"]
-    return lines
+def cnc_places(root):
+    """How many places in the bundle hold the string could-not-check, as a value or as a key, at any
+    depth; a structure deeper than MAX_WALK_DEPTH counts as one place (it was not read)."""
+    places, stack = 0, [(root, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, str):
+            places += value == CNC
+        elif isinstance(value, (dict, list)):
+            if depth >= MAX_WALK_DEPTH:
+                places += 1
+                continue
+            if isinstance(value, dict):
+                places += sum(1 for k in value if k == CNC)
+            stack.extend((x, depth + 1) for x in (value.values() if isinstance(value, dict) else value))
+    return places
 
 
 def _run_ok(data):
     rows = data.get("results")
     if not isinstance(rows, list):
         return None
-    return sum(1 for r in rows if isinstance(r, dict) and r.get("op") == "run" and r.get("status") == "ok")
+    return sum(1 for r in rows if isinstance(r, dict) and r.get("op") == "run" and r.get("status") == "ok"
+               and r.get("keys_ok") is True and r.get("values_ok") is True)
 
 
-def _checks(bundle, items, not_observed):
-    """(ok, text) pairs: what to look at before the real collection. Reminders, not verdicts."""
-    d24, d107 = _data(items, "D2.4"), _data(items, "D10.7")
-    counts = d107.get("journal_counts") if isinstance(d107.get("journal_counts"), dict) else {}
+# ------------------------------------------------------------------ the closing list: one function per line
+def _all_observed(bundle, items):
+    bad = sorted(((int(m.group(1)), int(m.group(2)), i) for i, it in items.items()
+                  if (not isinstance(it, dict) or it.get("status") != "observed") and (m := _ID_RE.fullmatch(i))))
+    unnamed = sum(1 for i, it in items.items() if (not isinstance(it, dict) or it.get("status") != "observed")
+                  and not _ID_RE.fullmatch(i))
+    text = f"every item observed ({len(items)} items)"
+    if bad or unnamed:
+        text += f" (not observed: {', '.join([b[2] for b in bad] + ([f'{unnamed} other'] if unnamed else []))})"
+    return bool(items) and not (bad or unnamed), text
+
+
+def _no_could_not_check(bundle, items):
+    places = cnc_places(bundle)
+    listed = isinstance(bundle.get("credentials"), list)
+    note = (f" ({places} places)" if places else "") + ("" if listed else " (credentials is not a list)")
+    return places == 0 and listed, "nothing in the bundle is could-not-check" + note
+
+
+def _sshd_default(bundle, items):
+    d = _data(items, "D1.7")
+    daemon = d.get("daemon_options")
+    ok = (_is(d.get("match_lines"), 0) and _is(d.get("include_elsewhere"), 0) and isinstance(daemon, dict)
+          and set(daemon) == set(DEFAULT_DAEMON) and all(_is(daemon[k], n) for k, n in DEFAULT_DAEMON.items()))
+    return ok, "sshd runs with its default settings file and no Match line"
+
+
+def _refusals(bundle, items):
+    counts = _data(items, "D10.7").get("journal_counts")
+    counts = counts if isinstance(counts, dict) else {}
     missing = [k for k in REFUSALS if not (_int(counts.get(k)) and counts.get(k) > 0)]
-    run_ok = _run_ok(_data(items, "D10.8"))
+    return not missing, "the three live refusals are in the journal" + (f" (missing: {', '.join(missing)})" if missing else "")
+
+
+def _run_ok_line(bundle, items):
+    n = _run_ok(_data(items, "D10.8"))
+    return _int(n) and n > 0, "at least one run/ok result"
+
+
+def _retention(bundle, items):
+    d24 = _data(items, "D2.4")
     retention = _get(d24, "settings", "MaxRetentionSec")
     retention = retention if isinstance(retention, dict) else {}
     number = retention.get("number")
     storage = _get(d24, "settings", "Storage")
-    storage_ok = isinstance(storage, dict) and "value" in storage and storage["value"] in (None, "auto", "persistent")
-    setting_ok = (_int(number) and number >= THIRTY_DAYS and retention.get("file") == OUR_FILE
-                  and _get(d24, "drop_in", "equals_repo") is True and _get(d24, "drop_in", "other_files") == []
-                  and storage_ok)
-    storage_note = ""
+    has_value = isinstance(storage, dict) and "value" in storage
+    storage_ok = has_value and storage["value"] in STORAGE_OK
+    ok = (_int(number) and number >= THIRTY_DAYS and retention.get("file") == OUR_FILE
+          and _get(d24, "drop_in", "equals_repo") is True and _get(d24, "drop_in", "other_files") == [] and storage_ok)
+    note = ""
     if not storage_ok:
-        storage_note = f" (Storage is {word(storage['value'])})" if isinstance(storage, dict) and "value" in storage else " (Storage not read)"
-    reach = d24.get("reach_days")
-    reach_ok = _int(reach) and reach >= 30
-    reach_note = ""
-    if not reach_ok:
-        reach_note = (f" (reach is {reach} days: the evidence needs the date the retention was raised)"
-                      if _int(reach) else " (not read)")
-    usage = d24.get("usage") if isinstance(d24.get("usage"), dict) else {}
+        note = f" (Storage is {member(SETTING_VALUES)(storage['value'])})" if has_value else " (Storage not read)"
+    return ok, "retention at least 30 days, set by our file, the file equal to the repository's, no other file" + note
+
+
+def _reach(bundle, items):
+    reach = _data(items, "D2.4").get("reach_days")
+    ok = _int(reach) and reach >= 30
+    note = ""
+    if not ok:
+        note = (f" (reach is {reach} days: the evidence needs the date the retention was raised)"
+                if _int(reach) else " (not read)")
+    return ok, "the journal reaches 30 days" + note
+
+
+def _search(bundle, items):
+    d = _data(items, "D2.3")
+    scanned = d.get("scanned_characters")
+    ok = _int(scanned) and scanned > 0 and _is(d.get("undecodable_characters"), 0) and is_time(d.get("oldest_entry_read"))
+    return ok, "the journal search read everything it was given"
+
+
+def _service(bundle, items):
+    d24 = _data(items, "D2.4")
+    ok = _get(d24, "service", "active") is True and _get(d24, "service", "config_changed_after_start") is False
+    return ok, "the running journal service has read its settings"
+
+
+def _on_disk(bundle, items):
+    usage = _get(_data(items, "D2.4"), "usage")
+    usage = usage if isinstance(usage, dict) else {}
     age = usage.get("on_disk_age_seconds")
-    disk_ok = usage.get("flushed_to_disk") is True and _int(age) and 0 <= age <= 600
-    service_ok = _get(d24, "service", "active") is True and _get(d24, "service", "config_changed_after_start") is False
-    d17, d23 = _data(items, "D1.7"), _data(items, "D2.3")
-    daemon = d17.get("daemon_options")
-    sshd_ok = (_is(d17.get("match_lines"), 0) and _is(d17.get("include_elsewhere"), 0) and isinstance(daemon, dict)
-               and set(daemon) == set(DEFAULT_DAEMON) and all(_is(daemon[k], n) for k, n in DEFAULT_DAEMON.items()))
-    scanned = d23.get("scanned_characters")
-    oldest_read = d23.get("oldest_entry_read")
-    search_ok = (_int(scanned) and scanned > 0 and _is(d23.get("undecodable_characters"), 0)
-                 and isinstance(oldest_read, str) and bool(_TIME_RE.fullmatch(oldest_read)))
-    newer = _get(_data(items, "D4.6"), "files_newer_than_start")
-    code_ok = isinstance(newer, dict) and bool(newer) and all(v == [] for v in newer.values())
-    return [
-        (bool(items) and not not_observed, "every item observed" + (f" (not observed: {', '.join(not_observed)})" if not_observed else "")),
-        (sshd_ok, "sshd runs with its default settings file and no Match line"),
-        (not missing, "the three live refusals are in the journal" + (f" (missing: {', '.join(missing)})" if missing else "")),
-        (isinstance(run_ok, int) and run_ok > 0, "at least one run/ok result"),
-        (setting_ok, "retention at least 30 days, set by our file, the file equal to the repository's, no other file"
-                     + storage_note),
-        (reach_ok, "the journal reaches 30 days" + reach_note),
-        (search_ok, "the journal search read everything it was given"),
-        (service_ok, "the running journal service has read its settings"),
-        (disk_ok, "the journal is being written to disk"),
-        (_get(_data(items, "D4.2"), "matches_last_pass") is True, "the proxy matches the last PASS"),
-        (code_ok, "no service runs older code than the box holds"),
-        (_get(bundle, "fingerprint", "complete") is True, "fingerprint complete"),
-    ]
+    return usage.get("flushed_to_disk") is True and _int(age) and 0 <= age <= 600, "the journal is being written to disk"
+
+
+def _proxy(bundle, items):
+    d = _data(items, "D4.2")
+    return d.get("matches_last_pass") is True and d.get("active") == "active", "the proxy matches the last PASS"
+
+
+def _code(bundle, items):
+    d = _data(items, "D4.6")
+    newer, checked = d.get("files_newer_than_start"), d.get("files_checked")
+    ok = (isinstance(newer, dict) and isinstance(checked, dict)
+          and all(newer.get(s) == [] and _int(checked.get(s)) and checked[s] > 0 for s in SERVICES))
+    return ok, "no service runs older code than the box holds"
+
+
+def _fingerprint(bundle, items):
+    return _get(bundle, "fingerprint", "complete") is True, "fingerprint complete"
+
+
+CHECKS = (_all_observed, _no_could_not_check, _sshd_default, _refusals, _run_ok_line, _retention, _reach, _search,
+          _service, _on_disk, _proxy, _code, _fingerprint)
+
+
+# ------------------------------------------------------------------ the summary
+def _id_key(iid):
+    m = _ID_RE.fullmatch(iid)
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _status(item):
+    got = item.get("status") if isinstance(item, dict) else None
+    return got if isinstance(got, str) and got in ("observed", CNC) else OTHER
 
 
 def summary(bundle):
     items = bundle["items"]
-    ids = sorted(items, key=lambda i: [int(n) if n.isdigit() else n for n in re.findall(r"[0-9]+|[^0-9]+", str(i))])
-    status = {i: word(items[i].get("status")) if isinstance(items[i], dict) else WITHHELD for i in ids}
-    not_observed = [word(i) for i in ids if status[i] != "observed"]
-    lines = [f"collected_at {show(bundle.get('collected_at'))}",
-             f"items {len(ids)} | not observed: {', '.join(not_observed) or 'none'}", ""]
+    ids = sorted((i for i in items if _ID_RE.fullmatch(i)), key=_id_key)
+    status = {i: _status(items[i]) for i in ids}
+    not_observed = [i for i in ids if status[i] != "observed"]
+    lines = [f"collected_at {when(bundle.get('collected_at'))}",
+             f"items {len(items)} | not observed: {', '.join(not_observed) or 'none'}",
+             f"other items: {len(items) - len(ids)}", ""]
     for iid in ids:
-        lines.append(f"{word(iid)}  {status[iid]}")
+        lines.append(f"{iid}  {status[iid]}")
         data = _data(items, iid)
-        for field in FIELDS.get(iid, ()):
-            if field in data:
-                lines.append(f"  {field}: {show(data[field])}")
-        if iid == "D1.7":
-            lines += _keys_line(data)
+        pairs, other = _fields(data, SCHEMA[iid]) if iid in SCHEMA else ([], 0)
+        lines += [f"  {name}: {text}" for name, text in pairs]
+        if other:
+            lines.append(f"  +{other} other keys")
         if iid == "D10.8":
-            lines.append(f"  run/ok results: {show(_run_ok(data))}")
+            run_ok = _run_ok(data)
+            lines.append(f"  run/ok results: {num(run_ok)}")
     creds = bundle.get("credentials")
-    lines += ["", f"credentials: {len(creds) if isinstance(creds, list) else show(creds)}", "",
+    lines += ["", f"credentials: {len(creds) if isinstance(creds, list) else WITHHELD}", "",
               "Before the real collection (ok = as expected, LOOK = look at it first):"]
-    lines += [f"{'ok  ' if ok else 'LOOK'}  {text}" for ok, text in _checks(bundle, items, not_observed)]
+    for check in CHECKS:
+        ok, text = check(bundle, items)
+        lines.append(f"{'ok  ' if ok else 'LOOK'}  {text}")
     lines.append("Reminders, not verdicts: the reviewer judges the real bundle against the checklist.")
     return lines
 
@@ -211,7 +465,7 @@ def main(argv=None, stdin=None, out=None):
             bundle = json.load(stdin or sys.stdin)
         if not (isinstance(bundle, dict) and bundle.get("kind") == "box" and isinstance(bundle.get("items"), dict)):
             raise ValueError("not a box bundle")
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         print("summarize-review-bundle: not a box bundle (did the collector stop? read its own message and its rc)", file=out)
         return 2
     print("\n".join(summary(bundle)), file=out)
