@@ -2818,7 +2818,7 @@ class TestD17AcceptedKeys(Base):
 
     def test_no_match_line_is_zero_not_could_not_check(self):
         self._two()
-        self._sshd_config("Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\nMatchmaker yes\n")
+        self._sshd_config("Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\nAllowUsers matchbox\n")
         d = CE.d1_7(self.host(), {})
         self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 0))
 
@@ -2830,29 +2830,64 @@ class TestD17AcceptedKeys(Base):
         self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 2))
 
     def test_every_match_form_sshd_honoured_counts(self):
-        """Each form opened a Match block for the user in sshd 9.6p1 (docs/evaluations/2026-10-10-journal-retention-35-days.md)."""
+        """Each form opened a Match block (or, marked below, was ignored or refused) in sshd 9.6p1:
+        docs/evaluations/2026-10-10-journal-retention-35-days.md. The count is a superset by construction."""
         forms = ['Match User u', '"Match" User u', 'Ma"tch" User u', 'Match"" User u', '""Match User u',
                  '"" "Match" User u', '"Match"User u', 'Match\rUser u', '\rMatch User u', 'Match=User u',
-                 'Match\tUser u', '"Match"=User u', '"Match User" u']      # the last two: sshd refuses the file
+                 'Match\tUser u', '=Match User u', '= Match User u', '="Match" User u',
+                 '==Match User u', '""=Match User u', '"" ""Match User u',      # these three: sshd ignored the line
+                 '"Match"=User u', '"Match User" u']                         # these two: sshd refuses the file
         self._two()
         for form in forms:
             self._sshd_config(form + "\n  X11Forwarding yes\n")
             d = CE.d1_7(self.host(), {})
             self.assertEqual((d["match_lines"], d["include_elsewhere"]), (1, 0), repr(form))
 
+    def test_matchmaker_counts_as_a_match_line(self):
+        """sshd 9.6p1 refuses a file with `Matchmaker yes` (rc 255): counting it is an over-count that can
+        only fall on a file sshd will not run, which is what a superset must do."""
+        self._two()
+        self._sshd_config('Matchmaker yes\n"Matchmaker" yes\n')
+        self.assertEqual(CE.d1_7(self.host(), {})["match_lines"], 2)
+
     def test_lines_that_are_not_a_match_or_an_include_do_not_count(self):
         self._two()
-        self._sshd_config('"Matchmaker" yes\n# Match User x\nMatchmaker yes\n"Match User\n=Match\n\r\n"" "" \n')
+        self._sshd_config('# Match User x\n # Include /opt/x\nPort 22\nPermitRootLogin no\nAllowUsers matchbox\n\n'
+                          '\r\n"" ""\n')
         d = CE.d1_7(self.host(), {})
         self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 0))
 
     def test_every_include_form_sshd_honoured_is_read(self):
         self._two()
-        for form in ['Include {}', '"Include" {}', 'In"clude" {}', 'Include\r{}', 'Include "{}"', 'Include={}']:
-            for target, expected in (("/etc/ssh/extra.conf", 1), ("/etc/ssh/sshd_config.d/*.conf", 0)):
+        forms = ['Include {}', '"Include" {}', 'In"clude" {}', 'Include\r{}', 'Include "{}"', 'Include={}',
+                 '=Include {}', '""Include {}', '"Include"{}', 'Include\t{}', 'Include = {}']
+        for form in forms:
+            for target, expected in (("/opt/extra.conf", 1), ("/etc/ssh/sshd_config.d/*.conf", 0),
+                                     ("sshd_config.d/*.conf", 0)):
                 self._sshd_config(form.format(target) + "\n")
                 d = CE.d1_7(self.host(), {})
                 self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, expected), repr((form, target)))
+
+    def test_the_standard_glob_with_anything_added_is_elsewhere(self):
+        """(An Include with only an opening or only a closing quote around the glob is refused by sshd,
+        rc 255 in the record, and the rule strips it: not counting it there is harmless.)"""
+        self._two()
+        glob = "/etc/ssh/sshd_config.d/*.conf"
+        for tail in (glob + "\r/opt/x.conf", glob + " /opt/x.conf", "/etc/ssh/x/../sshd_config.d/*.conf",
+                     "~/../" + glob, glob + " # c", "/etc/ssh/sshd_config.d/\"*.conf", "/etc/ssh/sshd_ config.d/*.conf", "",
+                     glob + "x", "/" + glob, '"' + glob + '""'):
+            self._sshd_config("Include " + tail + "\n")
+            d = CE.d1_7(self.host(), {})
+            self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 1), repr(tail))
+
+    def test_a_nul_byte_in_a_configuration_file_is_could_not_check(self):
+        """sshd 9.6p1 honoured `Ma<NUL>` newline `tch User u` as a Match block: a NUL may join lines."""
+        self._two()
+        self._sshd_config("Port 22\n", a_conf="Ma\x00\ntch User u\n")
+        self.assertEqual({k: CE.d1_7(self.host(), {})[k] for k in ("match_lines", "include_elsewhere")},
+                         {"match_lines": R.COULD_NOT_CHECK, "include_elsewhere": R.COULD_NOT_CHECK})
+        self._sshd_config("Po\x00rt 22\n")
+        self.assertEqual(CE.d1_7(self.host(), {})["match_lines"], R.COULD_NOT_CHECK)
 
     def test_a_configuration_file_over_the_read_limit_is_could_not_check(self):
         self._two()

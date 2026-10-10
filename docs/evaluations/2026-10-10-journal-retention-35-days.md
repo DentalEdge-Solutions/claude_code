@@ -215,37 +215,38 @@ Both controls held (`d` accepted, `x` refused), so the measurement is valid.
   comment, and the carriage-return line, so the D1.7 reader counts as unreadable lines (a, b and c) that the server
   accepts. The next task decides what to do with it.
 
-### A configuration keyword in double quotes, and a carriage return
+### A configuration keyword in double quotes, a leading `=`, a carriage return
 
-Measured 2026-10-10 in a throwaway `ubuntu:24.04` container with `openssh-server` (`OpenSSH_9.6p1`), account `u`
-made. Each form is one line followed by `  X11Forwarding yes` (Match forms, read with
-`sshd -T -f FILE -C user=u,host=h,addr=127.0.0.1`: `yes` means the line opened a Match block for `u`, `no` that it
-did not) or, for Include, a file `/tmp/inc.conf` holding `X11Forwarding yes` at global level, read with
-`sshd -T -f FILE`. The script, run as
-`docker run --rm -v measure.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh`:
+Measured 2026-10-10 in a throwaway `ubuntu:24.04` container with `openssh-server` (`OpenSSH_9.6p1`); accounts `u`
+and `other` made by the script. Command as run (the script is under the scratchpad of this session; its text
+follows):
+
+```
+docker run --rm -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure2.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh
+```
 
 ```sh
 #!/bin/sh
-# runs inside ubuntu:24.04 with openssh-server; u is an existing account
+# runs inside ubuntu:24.04; u and other are made here
 apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null 2>&1
-mkdir -p /run/sshd; useradd u
+mkdir -p /run/sshd /tmp/sub; useradd u; useradd other
 ssh -V 2>&1 | cut -d, -f1
-m() { # label printf-format
+x() { /usr/sbin/sshd -T -f /tmp/f.conf -C "user=$1,host=h,addr=127.0.0.1" 2>&1 | grep -i '^x11forwarding ' | cut -d' ' -f2; }
+m() { # label, printf format of the line(s) before "  X11Forwarding yes"
   printf "$2  X11Forwarding yes\n" > /tmp/f.conf
   rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
-  v=$(/usr/sbin/sshd -T -f /tmp/f.conf -C user=u,host=h,addr=127.0.0.1 2>&1 | grep -i '^x11forwarding ')
-  printf "MATCH   [%s] rc=%s %s\n" "$1" "$rc" "${v:-<none>}"
+  printf "MATCH   [%s] rc=%s as_u=%s as_other=%s\n" "$1" "$rc" "$(x u)" "$(x other)"
 }
 printf 'X11Forwarding yes\n' > /tmp/inc.conf
 i() {
   printf "$2\n" > /tmp/f.conf
   rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
-  v=$(/usr/sbin/sshd -T -f /tmp/f.conf 2>&1 | grep -i '^x11forwarding ')
-  printf "INCLUDE [%s] rc=%s %s\n" "$1" "$rc" "${v:-<none>}"
+  v=$(/usr/sbin/sshd -T -f /tmp/f.conf 2>&1 | grep -i '^x11forwarding ' | cut -d' ' -f2)
+  printf "INCLUDE [%s] rc=%s global=%s\n" "$1" "$rc" "${v:-<none>}"
 }
-m 'control+ Match User u' 'Match User u\n'
+m 'control Match User u' 'Match User u\n'
 printf 'Port 22\n' > /tmp/f.conf; rc=$(/usr/sbin/sshd -t -f /tmp/f.conf >/dev/null 2>&1; echo $?)
-echo "MATCH   [control- no Match line] rc=$rc $(/usr/sbin/sshd -T -f /tmp/f.conf -C user=u,host=h,addr=127.0.0.1 2>&1 | grep -i '^x11forwarding ')"
+printf "MATCH   [control no Match line (Port 22)] rc=%s as_u=%s as_other=%s\n" "$rc" "$(x u)" "$(x other)"
 m '"Match" User u' '"Match" User u\n'
 m 'Ma"tch" User u' 'Ma"tch" User u\n'
 m 'Match"" User u' 'Match"" User u\n'
@@ -258,68 +259,128 @@ m '\rMatch User u' '\rMatch User u\n'
 m 'Match=User u' 'Match=User u\n'
 m '"Match"=User u' '"Match"=User u\n'
 m 'Match\tUser u' 'Match\tUser u\n'
-i 'control+ Include /tmp/inc.conf' 'Include /tmp/inc.conf'
+m '=Match User u' '=Match User u\n'
+m '= Match User u' '= Match User u\n'
+m '="Match" User u' '="Match" User u\n'
+m '==Match User u' '==Match User u\n'
+m '""=Match User u' '""=Match User u\n'
+m '"" ""Match User u' '"" ""Match User u\n'
+m 'Matchmaker yes' 'Matchmaker yes\n'
+m 'NUL: Ma<NUL>\ntch User u' 'Ma\000\ntch User u\n'
+i 'control Include /tmp/inc.conf' 'Include /tmp/inc.conf'
 i '"Include" /tmp/inc.conf' '"Include" /tmp/inc.conf'
 i 'In"clude" /tmp/inc.conf' 'In"clude" /tmp/inc.conf'
 i 'Include\r/tmp/inc.conf' 'Include\r/tmp/inc.conf'
 i 'Include "/tmp/inc.conf"' 'Include "/tmp/inc.conf"'
 i 'Include=/tmp/inc.conf' 'Include=/tmp/inc.conf'
+i '=Include /tmp/inc.conf' '=Include /tmp/inc.conf'
+i '""Include /tmp/inc.conf' '""Include /tmp/inc.conf'
+i '"Include"/tmp/inc.conf' '"Include"/tmp/inc.conf'
+i 'Include\t/tmp/inc.conf' 'Include\t/tmp/inc.conf'
+i 'Include /tmp/inc.conf # c' 'Include /tmp/inc.conf # c'
+i 'Include /tmp/sub/../inc.conf' 'Include /tmp/sub/../inc.conf'
+i 'Include "/tmp/inc.conf (unterminated)' 'Include "/tmp/inc.conf'
 ```
 
-Output, unedited (the `\r` and `\t` in the labels are the escapes written in the script):
+Each Match form is one line followed by `  X11Forwarding yes`, read as `u` and as `other`
+(`sshd -T -f FILE -C user=...,host=h,addr=127.0.0.1`): `yes` / `no` means the line opened a Match block for `u`;
+`yes` / `yes` means the line was ignored (no block). Each Include form is one line, with `/tmp/inc.conf` holding
+`X11Forwarding yes`, read with `sshd -T -f FILE` (global). Output, unedited (`\r`, `\t` in the labels are the
+escapes written in the script):
 
 ```
 OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
-MATCH   [control+ Match User u] rc=0 x11forwarding yes
-MATCH   [control- no Match line] rc=0 x11forwarding no
-MATCH   ["Match" User u] rc=0 x11forwarding yes
-MATCH   [Ma"tch" User u] rc=0 x11forwarding yes
-MATCH   [Match"" User u] rc=0 x11forwarding yes
-MATCH   [""Match User u] rc=0 x11forwarding yes
-MATCH   ["" "Match" User u] rc=0 x11forwarding yes
-MATCH   ["Match"User u] rc=0 x11forwarding yes
-MATCH   ["Match User" u] rc=255 <none>
-MATCH   [Match\rUser u] rc=0 x11forwarding yes
-MATCH   [\rMatch User u] rc=0 x11forwarding yes
-MATCH   [Match=User u] rc=0 x11forwarding yes
-MATCH   ["Match"=User u] rc=255 <none>
-MATCH   [Match\tUser u] rc=0 x11forwarding yes
-INCLUDE [control+ Include /tmp/inc.conf] rc=0 x11forwarding yes
-INCLUDE ["Include" /tmp/inc.conf] rc=0 x11forwarding yes
-INCLUDE [In"clude" /tmp/inc.conf] rc=0 x11forwarding yes
-INCLUDE [Include\r/tmp/inc.conf] rc=0 x11forwarding yes
-INCLUDE [Include "/tmp/inc.conf"] rc=0 x11forwarding yes
-INCLUDE [Include=/tmp/inc.conf] rc=0 x11forwarding yes
+MATCH   [control Match User u] rc=0 as_u=yes as_other=no
+MATCH   [control no Match line (Port 22)] rc=0 as_u=no as_other=no
+MATCH   ["Match" User u] rc=0 as_u=yes as_other=no
+MATCH   [Ma"tch" User u] rc=0 as_u=yes as_other=no
+MATCH   [Match"" User u] rc=0 as_u=yes as_other=no
+MATCH   [""Match User u] rc=0 as_u=yes as_other=no
+MATCH   ["" "Match" User u] rc=0 as_u=yes as_other=no
+MATCH   ["Match"User u] rc=0 as_u=yes as_other=no
+MATCH   ["Match User" u] rc=255 as_u= as_other=
+MATCH   [Match\rUser u] rc=0 as_u=yes as_other=no
+MATCH   [\rMatch User u] rc=0 as_u=yes as_other=no
+MATCH   [Match=User u] rc=0 as_u=yes as_other=no
+MATCH   ["Match"=User u] rc=255 as_u= as_other=
+MATCH   [Match\tUser u] rc=0 as_u=yes as_other=no
+MATCH   [=Match User u] rc=0 as_u=yes as_other=no
+MATCH   [= Match User u] rc=0 as_u=yes as_other=no
+MATCH   [="Match" User u] rc=0 as_u=yes as_other=no
+MATCH   [==Match User u] rc=0 as_u=yes as_other=yes
+MATCH   [""=Match User u] rc=0 as_u=yes as_other=yes
+MATCH   ["" ""Match User u] rc=0 as_u=yes as_other=yes
+MATCH   [Matchmaker yes] rc=255 as_u= as_other=
+MATCH   [NUL: Ma<NUL>\ntch User u] rc=0 as_u=yes as_other=no
+INCLUDE [control Include /tmp/inc.conf] rc=0 global=yes
+INCLUDE ["Include" /tmp/inc.conf] rc=0 global=yes
+INCLUDE [In"clude" /tmp/inc.conf] rc=0 global=yes
+INCLUDE [Include\r/tmp/inc.conf] rc=0 global=yes
+INCLUDE [Include "/tmp/inc.conf"] rc=0 global=yes
+INCLUDE [Include=/tmp/inc.conf] rc=0 global=yes
+INCLUDE [=Include /tmp/inc.conf] rc=0 global=yes
+INCLUDE [""Include /tmp/inc.conf] rc=0 global=yes
+INCLUDE ["Include"/tmp/inc.conf] rc=0 global=yes
+INCLUDE [Include\t/tmp/inc.conf] rc=0 global=yes
+INCLUDE [Include /tmp/inc.conf # c] rc=0 global=yes
+INCLUDE [Include /tmp/sub/../inc.conf] rc=0 global=yes
+INCLUDE [Include "/tmp/inc.conf (unterminated)] rc=255 global=<none>
 ```
 
-| form | file read as | rc of `sshd -t` | `x11forwarding` | counted by the collector |
-|---|---|---|---|---|
-| `control+ Match User u` | Match for user u | 0 | yes | n/a (control) |
-| `control- no Match line` | Match for user u | 0 | no | no (no Match line) |
-| `"Match" User u` | Match for user u | 0 | yes | yes |
-| `Ma"tch" User u` | Match for user u | 0 | yes | yes |
-| `Match"" User u` | Match for user u | 0 | yes | yes |
-| `""Match User u` | Match for user u | 0 | yes | yes |
-| `"" "Match" User u` | Match for user u | 0 | yes | yes |
-| `"Match"User u` | Match for user u | 0 | yes | yes |
-| `"Match User" u` | Match for user u | 255 | (none printed) | yes |
-| `Match\rUser u` | Match for user u | 0 | yes | yes |
-| `\rMatch User u` | Match for user u | 0 | yes | yes |
-| `Match=User u` | Match for user u | 0 | yes | yes |
-| `"Match"=User u` | Match for user u | 255 | (none printed) | yes |
-| `Match\tUser u` | Match for user u | 0 | yes | yes |
-| `control+ Include /tmp/inc.conf` | Include, global | 0 | yes | n/a (control) |
-| `"Include" /tmp/inc.conf` | Include, global | 0 | yes | yes |
-| `In"clude" /tmp/inc.conf` | Include, global | 0 | yes | yes |
-| `Include\r/tmp/inc.conf` | Include, global | 0 | yes | yes |
-| `Include "/tmp/inc.conf"` | Include, global | 0 | yes | yes |
-| `Include=/tmp/inc.conf` | Include, global | 0 | yes | yes |
+Match forms ("counted" is the collector's rule, checked by its tests, not by this run):
 
-What it shows: of the Match forms run, `sshd` 9.6p1 honoured every one except `"Match User" u` and `"Match"=User u`,
-for which it refused the whole file (rc 255); it honoured a quote inside the word, an empty `""` word before it,
-no blank after a closing quote, `=` in place of a blank, a carriage return or a tab as the blank, and the same
-for `Include`. The collector counts every form in the table (those two refused forms included, as over-counting is
-the safe direction). Not run: other characters after a quote, a quoted word that is not `Match` or `Include`.
+| form | `sshd -t` rc | as `u` | as `other` | counted by the collector |
+|---|---|---|---|---|
+| `control Match User u` | 0 | yes | no | n/a (control) |
+| `control no Match line (Port 22)` | 0 | no | no | no (control, no Match line) |
+| `"Match" User u` | 0 | yes | no | yes |
+| `Ma"tch" User u` | 0 | yes | no | yes |
+| `Match"" User u` | 0 | yes | no | yes |
+| `""Match User u` | 0 | yes | no | yes |
+| `"" "Match" User u` | 0 | yes | no | yes |
+| `"Match"User u` | 0 | yes | no | yes |
+| `"Match User" u` | 255 | (none printed) | (none printed) | yes |
+| `Match\rUser u` | 0 | yes | no | yes |
+| `\rMatch User u` | 0 | yes | no | yes |
+| `Match=User u` | 0 | yes | no | yes |
+| `"Match"=User u` | 255 | (none printed) | (none printed) | yes |
+| `Match\tUser u` | 0 | yes | no | yes |
+| `=Match User u` | 0 | yes | no | yes |
+| `= Match User u` | 0 | yes | no | yes |
+| `="Match" User u` | 0 | yes | no | yes |
+| `==Match User u` | 0 | yes | yes | yes |
+| `""=Match User u` | 0 | yes | yes | yes |
+| `"" ""Match User u` | 0 | yes | yes | yes |
+| `Matchmaker yes` | 255 | (none printed) | (none printed) | yes |
+| `NUL: Ma<NUL>\ntch User u` | 0 | yes | no | yes (file has a NUL: could-not-check) |
+
+Include forms:
+
+| form | `sshd -t` rc | global `x11forwarding` | counted by the collector |
+|---|---|---|---|
+| `control Include /tmp/inc.conf` | 0 | yes | n/a (control) |
+| `"Include" /tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `In"clude" /tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `Include\r/tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `Include "/tmp/inc.conf"` | 0 | yes | yes (outside path) |
+| `Include=/tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `=Include /tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `""Include /tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `"Include"/tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `Include\t/tmp/inc.conf` | 0 | yes | yes (outside path) |
+| `Include /tmp/inc.conf # c` | 0 | yes | yes (outside path) |
+| `Include /tmp/sub/../inc.conf` | 0 | yes | yes (outside path) |
+| `Include "/tmp/inc.conf (unterminated)` | 255 | <none> | yes (outside path) |
+
+What it shows, only from the output: the two controls gave yes / no and no / no. Opened a block for `u` only (yes / no):
+all the forms of the first round and `=Match`, `= Match`, `="Match"`. Ignored without error (yes / yes, rc 0):
+`==Match User u`, `""=Match User u`, `"" ""Match User u`. Refused (rc 255): `"Match User" u`, `"Match"=User u`,
+`Matchmaker yes`, and `Include "/tmp/inc.conf` with an unterminated quote. A file holding a NUL byte between `Ma`
+and a newline, then `tch User u`, opened a block for `u`. Every `Include` form run, among them a trailing
+` # c` and `/tmp/sub/../inc.conf`, brought the file in. Not run: other characters between or after the letters of
+the keyword, a `Match` or `Include` in a drop-in file, and any other sshd version. The collector counts a line as a
+Match or Include line from the first letters it finds once it has skipped every blank or control character, double
+quote and `=`, which includes all the honoured forms above and over-counts the ignored and refused ones.
 
 ## 4 · What is not measured
 

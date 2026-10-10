@@ -490,51 +490,42 @@ def _unprivileged_port_start(host):
 
 SSHD_CONFIG = "/etc/ssh/sshd_config"
 SSHD_CONFIG_DIR = "/etc/ssh/sshd_config.d"
-_SSHD_BLANKS = " \t\r\n"
+_SSHD_STANDARD_INCLUDES = (SSHD_CONFIG_DIR + "/*.conf", "sshd_config.d/*.conf")
 
 
-def _sshd_keyword(line):
-    """(keyword lowercased, rest) of one configuration line, or None. Read as sshd's tokenizer
-    reads it, as far as measured on sshd 9.6p1 (docs/evaluations/2026-10-10-journal-retention-35-days.md):
-    blanks (space, tab, CR) are skipped; the word ends at a blank, an `=` or a double quote; a quote
-    takes the text up to the next quote into the word and ends it (`Ma"tch"`, `"Match"User`); an
-    empty word (`""`) is skipped once. After the word, blanks and one `=` are skipped, but not after
-    a quoted end. Where sshd refuses the whole file (`"Match"=User`) the line is counted all the
-    same: counting too much is the safe direction."""
-    n, i = len(line), 0
-    for _ in range(2):
-        while i < n and line[i] in _SSHD_BLANKS:
-            i += 1
-        word = ""
-        while i < n and line[i] not in _SSHD_BLANKS + '="':
-            word += line[i]
-            i += 1
-        quoted = i < n and line[i] == '"'
-        if quoted:
-            j = line.find('"', i + 1)
-            if j < 0:
-                return None
-            word += line[i + 1:j]
-            i = j + 1
-        if word:
-            break
-    else:
-        return None
-    while i < n and line[i] in _SSHD_BLANKS:
+_SSHD_CONTROL = "".join(chr(c) for c in range(0x21)) + "\x7f"
+
+
+def _sshd_skipped(c):
+    """A character the head scan skips: a blank or control character, a double quote or an `=`."""
+    return c <= " " or c == "\x7f" or c in '"='
+
+
+def _sshd_head(line):
+    """(head, index): the first 7 characters of `line` that are not skipped, lower-cased, and the
+    index just after the last one taken."""
+    taken, i = [], 0
+    while i < len(line) and len(taken) < 7:
+        if not _sshd_skipped(line[i]):
+            taken.append(line[i])
         i += 1
-    if not quoted and i < n and line[i] == "=":
-        i += 1
-        while i < n and line[i] in _SSHD_BLANKS:
-            i += 1
-    return word.lower(), line[i:]
+    return "".join(taken).lower(), i
 
 
 def _sshd_match_lines(host):
     """(match_lines, include_elsewhere): the `Match` lines in the two places this collector reads
     (the main file and sshd_config.d/*.conf), and the `Include` lines there that name anything
-    else. A `Match` block's settings are not read: its presence is what a reviewer must hear of.
-    A file brought in from elsewhere is not read either, which is why it is counted. A place
-    that cannot be read makes both could-not-check: a count of 0 must mean 0 was found."""
+    else than the standard glob. A `Match` block's settings are not read: its presence is what a
+    reviewer must hear of. A file brought in from elsewhere is not read either, which is why it is
+    counted. The count is a superset by construction: a line is read by skipping every blank or
+    control character, double quote and `=`, which is more than sshd's tokenizer drops before and
+    inside a keyword (measured on sshd 9.6p1, docs/evaluations/2026-10-10-journal-retention-35-days.md),
+    and a head starting `match` is a Match line, a head `include` an Include line. sshd refuses a file
+    with a keyword it does not know (measured: `Matchmaker yes`, rc 255), so an over-count can only
+    fall on a line sshd refuses or on an unusual spelling; the standard glob is recognised only when
+    written literally, so any other spelling counts as elsewhere. A place that cannot be read, is
+    over the limit or holds a NUL byte (which may join two lines for sshd) makes both could-not-check:
+    a count of 0 must mean 0 was found."""
     try:
         names = sorted(n for n in os.listdir(host.path(SSHD_CONFIG_DIR)) if n.endswith(".conf"))
     except FileNotFoundError:
@@ -550,18 +541,19 @@ def _sshd_match_lines(host):
             return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
         if len(data) > AUTHORIZED_KEYS_READ_LIMIT:
             return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+        if b"\x00" in data:
+            return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
         for line in data.decode("utf-8", errors="replace").split("\n"):
-            got = _sshd_keyword(line)
-            if got is None:
-                continue
-            words = got[0].split()                      # `"Match User" u`: sshd refuses it; counted anyway
-            keyword = words[0] if words else ""
-            if keyword == "match":
+            head, end = _sshd_head(line)
+            if head.startswith("match"):
                 matches += 1
-            elif keyword == "include":
-                args = [a.strip('"') for a in _split_unquoted(got[1].strip(" \t\r"), " \t\r")[0]]
-                full = [os.path.normpath(a if a.startswith("/") else "/etc/ssh/" + a) for a in args]
-                elsewhere += any(a != SSHD_CONFIG_DIR + "/*.conf" for a in full) or not full
+            elif head == "include":
+                rest = line[end:]
+                while rest and _sshd_skipped(rest[0]):
+                    rest = rest[1:]
+                rest = rest.rstrip(_SSHD_CONTROL)
+                rest = rest[:-1] if rest.endswith('"') else rest
+                elsewhere += rest not in _SSHD_STANDARD_INCLUDES
     return matches, elsewhere
 
 
