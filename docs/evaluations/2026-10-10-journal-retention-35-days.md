@@ -213,7 +213,8 @@ microsecond. A change stamped less than 10 ms before the start counts as after
 it: a file's time comes from the kernel's coarse clock, which can be one tick behind (10 ms is the longest tick Linux
 is built with; the tick length of this kernel was not measured, and no such case was produced here).
 
-**Run 1, as found (healthy).** As expected: a time for the journal and `null` for the two units, `35day` from our
+**Run 1, as found (healthy).** (This run predates `Storage`, `service.active`, `newest_entry_on_disk` and
+`on_disk_age_seconds`, which later fixes added: R10, R11, R13 show them.) As expected: a time for the journal and `null` for the two units, `35day` from our
 file, `1G`, the file equal to the repository's, `config_changed_after_start` `false`, the usage in numbers.
 
 ```
@@ -562,10 +563,19 @@ The probe as committed in Task 7 (before this fix), run in that state:
 
 Every value is the healthy one except `other_files` (this rehearsal put the setting in a drop-in of its own; in the
 server's own main file there would be no sign at all): `35day` from our file, `usage` from the stale file on disk.
-After the fix the same state reads `"Storage": {"value": "volatile", "file": "/etc/systemd/journald.conf.d/90-s.conf",
-"number": null}`, and the healthy container `"Storage": {"value": "persistent", "file":
-"/etc/systemd/journald.conf", "number": null}`; the checklist's rule (2) fails `volatile`. Not measured:
-`Storage=none`, and `Storage=auto` or no `Storage=` with `/var/log/journal` missing.
+After the fixes, the probe in the same state (re-run in the container `jr4` of R13, 12 s after the restart; the
+probe's own lines, the two other settings left out):
+
+```
+"settings": {"MaxRetentionSec": {"value": "35day", "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "number": 3024000}, "Storage": {"value": "volatile", "file": "/etc/systemd/journald.conf.d/90-s.conf", "number": null}, ...}
+"config_files": ["/etc/systemd/journald.conf", "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "/etc/systemd/journald.conf.d/90-s.conf", "/usr/lib/systemd/journald.conf.d/syslog.conf"]
+"drop_in": {"equals_repo": true, "owner": "root", "group": "root", "mode": "0o644", "other_files": ["90-s.conf"]}
+"service": {"active": true, "started_at": "2026-10-10T20:16:45Z", "config_changed_after_start": false}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417972736, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:16:45Z", "on_disk_age_seconds": 12}
+```
+
+The checklist's rule (2) fails `volatile`. `on_disk_age_seconds` is 12: the seconds since the restart, and growing.
+Not measured: `Storage=none`, and `Storage=auto` or no `Storage=` with `/var/log/journal` missing.
 
 ### R11 · a stopped journal service
 
@@ -633,9 +643,16 @@ ExecMainStartTimestamp=
 ActiveState=inactive
 ```
 
-After the fix, stopped: `"service": {"active": false, "started_at": "could-not-check",
-"config_changed_after_start": "could-not-check"}`; running: `{"active": true, "started_at": "2026-10-10T19:58:29Z",
-"config_changed_after_start": false}`.
+After the fixes, the probe with the service stopped (re-run in `jr4`, one second after the stop; the probe's own
+lines):
+
+```
+"settings": {"MaxRetentionSec": {"value": "35day", "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "number": 3024000}, "Storage": {"value": "persistent", "file": "/etc/systemd/journald.conf", "number": null}, ...}
+"config_files": ["/etc/systemd/journald.conf", "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "/usr/lib/systemd/journald.conf.d/syslog.conf"]
+"drop_in": {"equals_repo": true, "owner": "root", "group": "root", "mode": "0o644", "other_files": []}
+"service": {"active": false, "started_at": "could-not-check", "config_changed_after_start": "could-not-check"}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417976832, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:16:59Z", "on_disk_age_seconds": 1}
+```
 
 ### R12 · a settings directory that is a symbolic link
 
@@ -663,9 +680,17 @@ lrwxrwxrwx 1 root root    6 Oct 10 20:01 journald.conf.d -> real.d
 13:# /usr/lib/systemd/journald.conf.d/syslog.conf
 ```
 
-The fixed probe: `settings` and `config_files` `could-not-check`, `service` `{"active": true, "started_at":
-"could-not-check", "config_changed_after_start": "could-not-check"}`, both percentages `could-not-check`; `drop_in`
-still `true`, `root`, `root`, `0o644`, `[]` (it reads our path through the link). One thing differs from the
+The fixed probe (re-run the same way in `jr4`; the probe's own lines):
+
+```
+"settings": "could-not-check"
+"config_files": "could-not-check"
+"drop_in": {"equals_repo": true, "owner": "root", "group": "root", "mode": "0o644", "other_files": []}
+"service": {"active": true, "started_at": "could-not-check", "config_changed_after_start": "could-not-check"}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": "could-not-check", "files_percent_of_max_files": "could-not-check", "free_bytes": 915417976832, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:17:03Z", "on_disk_age_seconds": 2}
+```
+
+`drop_in` still reads our path through the link. One thing differs from the
 review's description of this case: systemd 255 printed the header with the link's TARGET
 (`/etc/systemd/real.d/…`), which the printout reader does not accept as a settings file, so with this link the
 Task 7 code would also have answered `could-not-check`. The review's result (`false`, `35day`) needs a printout
@@ -673,6 +698,172 @@ that names the link's own path; whether systemd prints that for another kind of 
 target outside `/etc/systemd`) was not measured. The probe now refuses the link itself, whatever the printout
 says. With the directory restored and the service restarted the healthy output was back
 (`config_changed_after_start: false`). `jr3` was then removed.
+
+### R13 · an on-disk journal that is not being written
+
+Measured 2026-10-10 in a fresh systemd 255 container `jr4` (as `jr3`; our file installed, the service restarted;
+removed afterwards; `jr` was not used). Commands and output as they ran (`sh -x`; machine id, boot id, cursor cut):
+
+```
++ cat /etc/machine-id
++ M=<cut>
++ journalctl --flush
++ logger mark-before
++ sleep 1
++ ls /run/systemd/journal/flushed
+/run/systemd/journal/flushed
++ journalctl -D /var/log/journal/<cut> -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n 1
+{"__REALTIME_TIMESTAMP":"1791663254486776","__MONOTONIC_TIMESTAMP":"9160068110","__SEQNUM_ID":"<cut>","_BOOT_ID":"<cut>","__CURSOR":"<cut>","__SEQNUM":"2152"}
++ echo rc=0
++ journalctl -D /var/log/journal/<cut> -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n +1
+rc=0
+{"__CURSOR":"<cut>","__REALTIME_TIMESTAMP":"1791663242354127","__SEQNUM_ID":"<cut>","__MONOTONIC_TIMESTAMP":"9147935677","_BOOT_ID":"<cut>","__SEQNUM":"1040"}
++ echo rc=0
++ date -u +%s
+rc=0
+1791663254
++ journalctl --relinquish-var
++ echo relinquish rc=0
++ logger mark-relq
+relinquish rc=0
++ sleep 1
++ journalctl -D /var/log/journal/<cut> -q -o cat
++ grep -c mark-relq
+0
++ journalctl -D /run/log/journal/<cut> -q -o cat
++ grep -c mark-relq
+1
++ journalctl -q -o cat
++ grep -c mark-relq
+1
++ ls /run/systemd/journal/flushed
+ls: cannot access '/run/systemd/journal/flushed': No such file or directory
++ systemctl show systemd-journald -p ActiveState -p MainPID
+MainPID=113
+ActiveState=active
++ ls -la /var/log/journal/<cut>/ /run/log/journal/<cut>/
+/run/log/journal/<cut>/:
+total 8192
+drwxr-s--- 2 root systemd-journal      60 Oct 10 20:14 .
+drwxr-sr-x 3 root systemd-journal      60 Oct 10 20:14 ..
+-rw-r----- 1 root systemd-journal 8388608 Oct 10 20:14 system.journal
+
+/var/log/journal/<cut>/:
+total 8208
+drwxr-sr-x+ 2 root systemd-journal    4096 Oct 10 20:14 .
+drwxr-sr-x+ 1 root systemd-journal    4096 Oct 10 20:14 ..
+-rw-r-----+ 1 root systemd-journal 8388608 Oct 10 20:14 system.journal
+```
+
+The probe as it was before this fix, run in that state, said (its own lines, from the saved output):
+
+```
+"service": {"active": true, "started_at": "2026-10-10T20:14:11Z", "config_changed_after_start": false}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417980928, "free_percent": 93.6, "other_directories": 0}
+```
+
+with `Storage` `persistent`, `35day` from our file and `oldest_entry.journal` `2026-10-10T20:14:02Z`: all healthy.
+Then the restart:
+
+```
++ cat /etc/machine-id
++ M=<cut>
++ journalctl -D /var/log/journal/<cut> -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n 1
+{"__MONOTONIC_TIMESTAMP":"9160068110","__SEQNUM":"2152","__SEQNUM_ID":"<cut>","__REALTIME_TIMESTAMP":"1791663254486776","__CURSOR":"<cut>","_BOOT_ID":"<cut>"}
++ echo rc=0
++ date -u +%s
+rc=0
+1791663265
++ systemctl restart systemd-journald
++ sleep 3
++ logger mark-after-restart
++ sleep 1
++ journalctl -D /var/log/journal/<cut> -q -o cat
++ grep -c mark-after-restart
+0
++ journalctl -D /run/log/journal/<cut> -q -o cat
++ grep -c mark-after-restart
+1
++ ls /run/systemd/journal/flushed
+ls: cannot access '/run/systemd/journal/flushed': No such file or directory
++ systemctl show systemd-journald -p ActiveState -p MainPID
+MainPID=177
+ActiveState=active
++ sleep 20
++ journalctl -D /var/log/journal/<cut> -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n 1
+{"__CURSOR":"<cut>","__SEQNUM":"2152","__SEQNUM_ID":"<cut>","_BOOT_ID":"<cut>","__REALTIME_TIMESTAMP":"1791663254486776","__MONOTONIC_TIMESTAMP":"9160068110"}
++ echo rc=0
++ date -u +%s
+rc=0
+1791663289
++ journalctl -D /nonexistent-dir -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n 1
+Failed to open /nonexistent-dir: No such file or directory
++ echo rc=1
++ mkdir /tmp/empty-j
+rc=1
++ journalctl -D /tmp/empty-j -q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP -n 1
++ echo rc=0
+rc=0
+```
+
+and the old probe again: `"service": {"active": true, "started_at": "2026-10-10T20:14:25Z",
+"config_changed_after_start": false}`, the same `usage`.
+
+What it shows. The reading of the source holds: after `journalctl --relinquish-var` (rc 0) the flag
+`/run/systemd/journal/flushed` is gone, the service stays `active`, and a new entry is in `/run/log/journal` (1) and
+not in `/var/log/journal` (0); after `systemctl restart systemd-journald` the flag is still absent and the next entry
+again goes to `/run` only (0 on disk, 1 in `/run`). `journalctl` without `-D` reads both. With `-D` on the on-disk
+directory, `-n 1` prints one object with rc 0, as `-n +1` does, and its time stays where it was
+(`1791663254486776` before the relinquish, 11 s after it, and 35 s after it); a directory without an entry prints
+nothing with rc 0; a missing directory gives rc 1.
+
+The probe with the fix, in the relinquished state, 150 s after the last entry reached the disk (its own lines):
+
+```
+"settings": {"MaxRetentionSec": {"value": "35day", "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "number": 3024000}, "Storage": {"value": "persistent", "file": "/etc/systemd/journald.conf", "number": null}, ...}
+"config_files": ["/etc/systemd/journald.conf", "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "/usr/lib/systemd/journald.conf.d/syslog.conf"]
+"drop_in": {"equals_repo": true, "owner": "root", "group": "root", "mode": "0o644", "other_files": []}
+"service": {"active": true, "started_at": "2026-10-10T20:14:25Z", "config_changed_after_start": false}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417976832, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:14:14Z", "on_disk_age_seconds": 150}
+```
+
+Then `journalctl --flush`:
+
+```
++ cat /etc/machine-id
++ M=<cut>
++ journalctl --flush
+flush rc=0
++ echo flush rc=0
++ logger mark-flushed
++ sleep 1
++ ls /run/systemd/journal/flushed
+/run/systemd/journal/flushed
++ journalctl -D /var/log/journal/<cut> -q -o cat
++ grep -c mark-flushed
+1
++ journalctl -D /var/log/journal/<cut> -q -o cat
++ grep -c mark-relq
+1
++ journalctl -D /var/log/journal/<cut> -q -o cat
++ grep -c mark-after-restart
+1
+```
+
+The flag is back, the new entry is on disk, and so are the two entries written while relinquished (the flush
+copies what `/run` held). The probe after it:
+
+```
+"settings": {"MaxRetentionSec": {"value": "35day", "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "number": 3024000}, "Storage": {"value": "persistent", "file": "/etc/systemd/journald.conf", "number": null}, ...}
+"config_files": ["/etc/systemd/journald.conf", "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "/usr/lib/systemd/journald.conf.d/syslog.conf"]
+"drop_in": {"equals_repo": true, "owner": "root", "group": "root", "mode": "0o644", "other_files": []}
+"service": {"active": true, "started_at": "2026-10-10T20:14:25Z", "config_changed_after_start": false}
+"usage": {"bytes": 8392704, "files": 1, "bytes_percent_of_max_use": 0.8, "files_percent_of_max_files": 0.2, "free_bytes": 915417976832, "free_percent": 93.6, "other_directories": 0, "newest_entry_on_disk": "2026-10-10T20:16:44Z", "on_disk_age_seconds": 1}
+```
+
+So `on_disk_age_seconds` was 1 in the healthy state and 150 in the relinquished state, where it grows by one a
+second. The checklist's limit is 600: a journal that left the disk less than ten minutes before the collection
+still passes that rule, which the checklist says.
 
 ## 3b · The key reader's two cases
 
@@ -1538,6 +1729,11 @@ item CANNOT-VERIFY, never a pass.
 - The length of the kernel's clock tick on the box, and a settings file changed within one tick of the journal
   service's start: `d2_4` counts a change stamped less than 10 ms before the start as after it (R7).
 - `Storage=none`; `Storage=auto` or no `Storage=` on a machine without `/var/log/journal` (R10 measured `volatile`).
+- `Storage` unset with `/var/log/journal` present on a real boot: the rehearsal image sets `persistent`, the real
+  server sets none. R13 (relinquish, restart, flush) was measured with `persistent` only.
+- `MaxLevelStore=`: it thins what is stored; D2.4 does not read it.
+- A `/var` the journal service could not open, or a flush that failed: R13 produced the state with
+  `journalctl --relinquish-var` only.
 - What `systemd-analyze cat-config` prints for a settings directory linked to an absolute path or to a place
   outside `/etc/systemd` (R12 measured a relative link beside it).
 - `d2_4` on the box itself: R7 is the container. The start-time command and its `us+utc` form are measured on

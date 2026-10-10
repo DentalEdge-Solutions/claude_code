@@ -3570,8 +3570,8 @@ class TestJournalHelpers(Base):
 class TestD24Journal(Base):
     MID = "0123456789abcdef0123456789abcdef"
     REPO_FILE = CE.CHECKOUT + "/infra/hermes-agent/deploy/journald-hermes-retention.conf"
-    # as `systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp --value` prints it (record R7)
-    # (record R7, R11): the three properties come back named, in systemd's order, not the order asked for
+    # as `systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp -p ActiveState -p MainPID`
+    # prints it (record R7, R11): the three properties come back named, in systemd's order, not the order asked for
     START_TEXT = "Sat 2026-10-10 12:00:00.500000 UTC"
 
     @staticmethod
@@ -3599,6 +3599,8 @@ class TestD24Journal(Base):
         self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(now - 3 * 86400), "")
         self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, "", "")
         self.outputs[_oldest_key()] = (0, _entry(now - 31 * 86400 - 60), "")
+        self.disk_key = ("journalctl", "-D", "/var/log/journal/" + self.MID)
+        self.outputs[self.disk_key] = (0, _entry(now - 7), "")
 
     def _all_older_than_the_start(self):
         old = CE._epoch("2026-10-10T11:00:00Z")
@@ -4034,7 +4036,7 @@ class TestD24Journal(Base):
 
     def test_a_usage_that_cannot_be_counted_is_could_not_check_never_zero(self):
         keys = {"bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
-                "free_percent", "other_directories"}
+                "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds"}
         mid_path = os.path.join(self.root, "etc/machine-id")
         for body in ("uninitialized\n", "", self.MID.upper() + "\n", self.MID[:31] + "\n", "../../etc\n"):
             with self.subTest(body=body):
@@ -4046,6 +4048,66 @@ class TestD24Journal(Base):
         self.assertEqual(CE.d2_4(self.host(), {})["usage"]["files"], 4)     # control
         shutil.rmtree(os.path.join(self.root, "var/log/journal", self.MID))  # e.g. a journal kept in memory only
         self.assertEqual(CE.d2_4(self.host(), {})["usage"], {k: R.COULD_NOT_CHECK for k in keys})
+
+    # ---- is the on-disk journal the one being written? (record R13)
+    def test_a_journal_being_written_to_disk_has_a_newest_entry_a_few_seconds_old(self):
+        host = self.host()
+        d = CE.d2_4(host, {})["usage"]
+        self.assertRegex(d["newest_entry_on_disk"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertIn(d["on_disk_age_seconds"], (7, 8, 9))
+        self.assertEqual(CE.NEWEST_ENTRY_ARGS, ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "1"])
+        self.assertIn(["journalctl", "-D", "/var/log/journal/" + self.MID, *CE.NEWEST_ENTRY_ARGS], host.calls)
+        self.assertEqual(list(CE.d2_4(host, {})["usage"])[-2:], ["newest_entry_on_disk", "on_disk_age_seconds"])
+
+    def test_a_relinquished_on_disk_journal_shows_its_age_while_everything_else_reads_healthy(self):
+        # Record R13: after `journalctl --relinquish-var` (and after a restart of the service) the on-disk directory
+        # answers with ONE object, rc 0, whose time stays where it was; the merged journal goes on growing.
+        now = int(time.time())
+        measured = ('{"__MONOTONIC_TIMESTAMP":"9160068110","__SEQNUM":"2152","__SEQNUM_ID":"' + "0" * 32 + '",'
+                    '"__REALTIME_TIMESTAMP":"' + str((now - 3 * 3600) * 1000000 + 486776) + '","__CURSOR":"s=abc","_BOOT_ID":"' + "0" * 32 + '"}\n')
+        self.outputs[self.disk_key] = (0, measured, "")
+        with self._content_time_only():
+            d = CE.d2_4(self.host(), {})
+        self.assertEqual(d["usage"]["newest_entry_on_disk"], CE._iso(now - 3 * 3600))
+        self.assertIn(d["usage"]["on_disk_age_seconds"], (10800, 10801, 10802))
+        self.assertEqual((d["reach_days"], d["settings"]["Storage"]["value"], d["service"]["active"],
+                          d["service"]["config_changed_after_start"], d["usage"]["files"]), (31, None, True, False, 4))
+
+    def test_an_on_disk_journal_without_an_entry_or_that_cannot_be_read_has_no_age(self):
+        CN = R.COULD_NOT_CHECK
+        for answer, newest in (((0, "", ""), None), ((0, "\n", ""), None),               # measured: an empty directory, rc 0
+                               ((1, "", "Failed to open"), CN), ((127, "", "not found"), CN),
+                               ((0, "not json\n", ""), CN), ((0, _entry(1760000000) * 2, ""), CN),
+                               ((0, '{"__REALTIME_TIMESTAMP": "0"}\n', ""), CN)):
+            with self.subTest(answer=answer):
+                self.outputs[self.disk_key] = answer
+                d = CE.d2_4(self.host(), {})["usage"]
+                self.assertEqual((d["newest_entry_on_disk"], d["on_disk_age_seconds"]), (newest, CN))
+                self.assertEqual(d["files"], 4)                                         # the counts are still read
+
+        def run(argv, timeout=60, fake=self.host()._run):
+            if argv[:2] == ["journalctl", "-D"]:
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return fake(argv, timeout)
+        d = CE.d2_4(CE.Host(self.root, run), {})["usage"]
+        self.assertEqual((d["newest_entry_on_disk"], d["on_disk_age_seconds"], d["files"]), (CN, CN, 4))
+
+    def test_an_on_disk_entry_later_than_the_clock_has_no_age(self):
+        now = int(time.time())
+        self.assertEqual(CE._CLOCK_STEP_MARGIN, 2)
+        for ahead, want in ((0, (0, 1)), (2, (0,)), (60, (R.COULD_NOT_CHECK,)), (86400, (R.COULD_NOT_CHECK,))):
+            with self.subTest(ahead=ahead):
+                self.outputs[self.disk_key] = (0, _entry(now + ahead), "")
+                d = CE.d2_4(self.host(), {})["usage"]
+                self.assertIn(d["on_disk_age_seconds"], want)
+                self.assertEqual(d["newest_entry_on_disk"], CE._iso(now + ahead))
+
+    def test_the_oldest_and_the_newest_entry_are_read_by_one_grammar(self):
+        seen = []
+        real = CE._entry_time
+        with mock.patch.object(CE, "_entry_time", lambda host, argv: seen.append(argv[1]) or real(host, argv)):
+            CE.d2_4(self.host(), {})
+        self.assertEqual(seen, ["-q", "-q", "-q", "-D"])
 
     def test_percent_is_only_ever_computed_from_two_counts(self):
         CN = R.COULD_NOT_CHECK
@@ -4062,6 +4124,7 @@ class TestD24Journal(Base):
         self.assertNotIn("s=abc", out)
         self.assertNotIn(self.root, out)
         self.assertNotIn("/var/log", out)
+        self.assertIn('"newest_entry_on_disk": "2', out)                     # read, and still no id in the item
 
     def test_it_is_in_the_bundle(self):
         self.assertEqual(CE.collect(self.host(), self.KEY)["items"]["D2.4"]["status"], R.OBSERVED)

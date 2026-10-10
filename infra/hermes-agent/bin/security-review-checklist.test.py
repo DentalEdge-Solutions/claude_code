@@ -98,6 +98,7 @@ class TestChecklistSync(unittest.TestCase):
         host = ce.Host(root, lambda argv, timeout=60: (0, cat if argv == ce.JOURNALD_CAT_CONFIG else "", ""))
         d = ce.d2_4(host, {})
         self.assertEqual(sorted(d["service"]), ["active", "config_changed_after_start", "started_at"])
+        self.assertEqual(list(d["usage"])[-2:], ["newest_entry_on_disk", "on_disk_age_seconds"])
         self.assertIn("Storage", d["settings"])
         for word in ("auto", "persistent", "volatile", "none"):
             self.assertIn(f"`{word}`", block, word)
@@ -119,6 +120,25 @@ class TestChecklistSync(unittest.TestCase):
         self.assertEqual([l.split("**")[1] for l in lines if l.startswith("- **")],     # four bullets, one line each
                          ["source:", "claim:", "expected:", "pass rule:"])
         self.assertEqual(len(lines), 4)
+
+    def test_d2_4_keeps_the_words_that_carry_its_rulings(self):
+        """Each of these was a ruling after a review found a route to a wrong PASS; an edit must not drop one quietly."""
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.4"]
+        rule = next(l for l in block.split("\n") if l.startswith("- **pass rule:**"))
+        parts = dict(re.findall(r"\((\d)\) \*\*([^*]+):\*\*", rule))
+        self.assertEqual(parts, {"1": "Not read", "2": "The setting", "3": "In force", "4": "Written to disk",
+                                 "5": "The reach", "6": "The limits", "7": "Other directories", "8": "No missing days"})
+        text = dict(zip(parts.values(), re.split(r"\(\d\) \*\*[^*]+:\*\*", rule)[1:]))
+        for part, words in (("Not read", ("WHOLE item", "`usage.on_disk_age_seconds`", "`service.active`", "informational")),
+                            ("The setting", ("`volatile`, `none` or any other value is a FAIL", "`0`, which systemd reads as no limit")),
+                            ("In force", ("`service.active` other than `true` is CANNOT-VERIFY",)),
+                            ("Written to disk", ("`usage.on_disk_age_seconds`", "at most `600`", "CANNOT-VERIFY")),
+                            ("The limits", ("no explanation replaces the measurement", "`reach_days` as measured is at least `30`")),
+                            ("No missing days", ("`usage.files` lower than `reach_days`",))):
+            for w in words:
+                self.assertIn(w, text[part], (part, w))
+        self.assertNotIn("for its part", rule)
+        self.assertNotIn("unless the operator explains it: at a limit", rule)
 
     def test_d1_7_states_the_limited_keys_exact_options(self):
         blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}

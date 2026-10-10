@@ -1099,6 +1099,9 @@ _SIZE_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40, "P
 # The oldest entry journalctl would show: its time and nothing else (no message, no host name).
 # The selector (a unit, a window) goes AFTER these, so the call never starts as a leak check's does.
 OLDEST_ENTRY_ARGS = ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "+1"]
+# The newest entry of ONE journal directory, after `-D <directory>` (measured, record R13: one
+# object and rc 0; nothing and rc 0 for a directory without an entry; rc 1 for a missing one).
+NEWEST_ENTRY_ARGS = ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "1"]
 _TIMESTAMP_RE = re.compile(r"[0-9]{1,17}")
 
 
@@ -1278,7 +1281,13 @@ def _oldest_entry(host, selector=()):
     """The UTC time of the oldest entry journalctl shows for `selector`: None when it shows no
     entry, could-not-check when the answer is not exactly one entry whose time is a string of one
     to seventeen digits above zero."""
-    rc, out, _ = host.run(["journalctl", *OLDEST_ENTRY_ARGS, *selector])
+    return _entry_time(host, ["journalctl", *OLDEST_ENTRY_ARGS, *selector])
+
+
+def _entry_time(host, argv):
+    """The UTC time of the one entry `argv` (a journalctl call for a single entry, its time only)
+    prints: None for no entry, could-not-check for anything but exactly one entry with a time."""
+    rc, out, _ = host.run(argv)
     if rc != 0:
         return R.COULD_NOT_CHECK
     lines = [l for l in out.split("\n") if l.strip()]
@@ -1317,6 +1326,11 @@ _SYSTEMD_US_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-
 # systemd reads: 10 ms is the longest tick Linux is built with (HZ=100). A change stamped less
 # than this before the start may really have happened after it.
 _CLOCK_TICK_NS = 10 * 10 ** 6
+# An entry's time and the collector's clock are the same clock, both cut to the second, and the
+# entry is read before the clock: an entry later than the clock means the clock went back. Up to
+# two seconds is ordinary time-keeping (a small correction between the write and the read) and
+# counts as an age of 0; beyond that there is nothing to measure an age with.
+_CLOCK_STEP_MARGIN = 2
 # SystemMaxFiles as a plain decimal count. A leading zero is refused: systemd's integer parser
 # may read it as octal (not measured), and a number is never guessed at.
 _MAX_FILES_RE = re.compile(r"0|[1-9][0-9]{0,8}")
@@ -1403,9 +1417,14 @@ def _journal_usage(host, settings):
     512 bytes times each file's blocks. Other directories under /var/log/journal are counted,
     not measured: the service does not trim them and journalctl does not read them. The two
     percentages need the settings: without them, or without a number for the limit, they are
-    could-not-check (the size limit has no default this collector assumes)."""
+    could-not-check (the size limit has no default this collector assumes).
+    Files on disk do not show that the service is writing them (record R13: after
+    `journalctl --relinquish-var`, or a /var it could not open, an active service with a healthy
+    Storage= writes to /run only, and journalctl merges both). So the newest entry of the on-disk
+    directory ALONE is read, and its age: the machine id goes into that command, never into the
+    result."""
     keys = ("bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
-            "free_percent", "other_directories")
+            "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds")
     try:
         with open(host.path("/etc/machine-id")) as f:
             mid = f.read(64).strip()
@@ -1419,6 +1438,15 @@ def _journal_usage(host, settings):
         vfs = os.statvfs(own)
     except (OSError, ValueError):
         return {k: R.COULD_NOT_CHECK for k in keys}
+    try:
+        newest = _entry_time(host, ["journalctl", "-D", JOURNAL_DIR + "/" + mid, *NEWEST_ENTRY_ARGS])
+    except (OSError, ValueError):                   # the runner itself failed, or its output is not text
+        newest = R.COULD_NOT_CHECK
+    age = R.COULD_NOT_CHECK
+    if newest is not None and newest != R.COULD_NOT_CHECK:
+        seconds = int(time.time()) - _epoch(newest)
+        if seconds >= -_CLOCK_STEP_MARGIN:
+            age = max(0, seconds)
     max_use = max_files = R.COULD_NOT_CHECK
     if isinstance(settings, dict):
         max_use = settings["SystemMaxUse"]["number"]
@@ -1427,7 +1455,7 @@ def _journal_usage(host, settings):
     return {"bytes": used, "files": len(names), "bytes_percent_of_max_use": _percent(used, max_use),
             "files_percent_of_max_files": _percent(len(names), max_files),
             "free_bytes": vfs.f_bavail * vfs.f_frsize, "free_percent": _percent(vfs.f_bavail, vfs.f_blocks),
-            "other_directories": others}
+            "other_directories": others, "newest_entry_on_disk": newest, "on_disk_age_seconds": age}
 
 
 def _journald_drop_in(host):
