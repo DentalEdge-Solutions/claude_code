@@ -218,11 +218,11 @@ Both controls held (`d` accepted, `x` refused), so the measurement is valid.
 ### A configuration keyword in double quotes, a leading `=`, a carriage return
 
 Measured 2026-10-10 in a throwaway `ubuntu:24.04` container with `openssh-server` (`OpenSSH_9.6p1`); accounts `u`
-and `other` made by the script. Command as run (the script is under the scratchpad of this session; its text
-follows):
+and `other` made by the script. Command as run (the script is under the scratchpad of this session, written `<scratchpad>`
+in every command of this record; its text follows):
 
 ```
-docker run --rm -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure2.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh
+docker run --rm -v <scratchpad>/measure2.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh
 ```
 
 ```sh
@@ -388,7 +388,7 @@ Same set-up (`ubuntu:24.04`, `OpenSSH_9.6p1`), 2026-10-10, with `/etc/ssh/sshd_c
 glob matches a file. `GLOB` is `/etc/ssh/sshd_config.d/*.conf`. Command as run:
 
 ```
-docker run --rm -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure3.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh
+docker run --rm -v <scratchpad>/measure3.sh:/measure.sh:ro ubuntu:24.04 sh /measure.sh
 ```
 
 ```sh
@@ -460,7 +460,7 @@ The accepted spellings, measured one by one (same set-up, 2026-10-10, `ubuntu:24
 the question was whether `sshd` reads exactly the standard glob and nothing else. Command as run:
 
 ```
-docker run --rm --name t5b4 -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure7.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+docker run --rm --name t5b4 -v <scratchpad>/measure7.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
 ```
 
 ```bash
@@ -510,10 +510,10 @@ or any other sshd version.
 
 Measured 2026-10-10 in a throwaway `ubuntu:24.04` container with `openssh-server` and `procps` (`OpenSSH_9.6p1`),
 account `u` and a throwaway ed25519 key made by the script; the container was removed afterwards (`--rm`). Command as run
-(the script is under the scratchpad of this session; its text follows):
+(the script is under the scratchpad of this session, written `<scratchpad>` below; its text follows):
 
 ```
-docker run --rm --name t5b -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure4.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+docker run --rm --name t5b -v <scratchpad>/measure4.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
 ```
 
 ```bash
@@ -659,7 +659,7 @@ ps -C sshd -o args=:
 A second script, for what `ps` returns when nothing matches and when it fails:
 
 ```
-docker run --rm --name t5b2 -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure5.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+docker run --rm --name t5b2 -v <scratchpad>/measure5.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
 ```
 
 ```bash
@@ -685,7 +685,7 @@ Values with a blank, and option clusters (a review note asked whether the origin
 container recipe, script `measure6.sh`:
 
 ```
-docker run --rm --name t5b3 -v /private/tmp/claude-501/-Users-ericksicard-Projects-claude-code/68ff4c88-af9d-49a8-bc8b-f8b4afe38fe0/scratchpad/measure6.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+docker run --rm --name t5b3 -v <scratchpad>/measure6.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
 ```
 
 ```bash
@@ -764,13 +764,174 @@ What it shows: `/proc/PID/cmdline` of the listener is the rewritten title as ONE
 original NUL-separated vector, so a value with a blank (`-o "AllowUsers u v"`, `-f "/tmp/a b.conf"`) cannot be told from
 extra words in either source; the clusters `-De -f`, `-Def/path`, `-Def path` and `-Deo X=Y` appear as typed. The collector
 therefore reads every word starting with `-` as an option cluster and skips (never stops at) a word that does not.
-(`-o "Banner /tmp/a b"` was refused by sshd itself, `keyword Banner extra arguments at end of line`, in an earlier run of
-this script, so `AllowUsers` stands in for a blank-holding value.)
+(`-o "Banner /tmp/a b"` is refused by sshd itself, so `AllowUsers` stands in for a blank-holding value. Re-run, script
+`measure10.sh`: `/usr/sbin/sshd -t -o "Banner /tmp/a b"`, output below.)
+
+```bash
+#!/bin/bash
+apt-get update -qq && apt-get install -y -qq openssh-server >/dev/null 2>&1
+mkdir -p /run/sshd
+/usr/sbin/sshd -t -o "Banner /tmp/a b"; echo "rc=$?"
+```
+
+```
+command-line line 0: keyword Banner extra arguments at end of line
+rc=1
+```
+
+#### Fix round 1: a title that is cut, a process never retitled, the full list of child titles
+
+A review found that dropping any line that is not a listener would let a second daemon with options read as healthy.
+Three more scripts, same container recipe (`ubuntu:24.04`, `openssh-server`, `procps`, `OpenSSH_9.6p1`), 2026-10-10.
+`measure8.sh` covers (a) `COLUMNS=60` with and without `-ww` against a long `-f` path, (b) a daemon started under
+`env -i` beside a plain one, and (c) a sampler running `ps -ww -C sshd -o args=` every 20 ms across successful logins
+(plain and `ssh -tt`), a refused user, a refused password and a bare TCP connection; the unique lines it saw are counted.
+(The "Permission denied" lines are the refused logins.)
+
+```
+docker run --rm --name t5b5 -v <scratchpad>/measure8.sh:/measure.sh:ro ubuntu:24.04 bash /measure.sh
+```
+
+```bash
+#!/bin/bash
+# runs inside ubuntu:24.04
+apt-get update -qq && apt-get install -y -qq openssh-server procps >/dev/null 2>&1
+mkdir -p /run/sshd
+ssh -V 2>&1 | cut -d, -f1
+useradd -m -s /bin/bash u; usermod -p '*' u
+ssh-keygen -q -t ed25519 -N '' -f /root/k
+mkdir -p /home/u/.ssh; cp /root/k.pub /home/u/.ssh/authorized_keys; chown -R u:u /home/u/.ssh; chmod 700 /home/u/.ssh; chmod 600 /home/u/.ssh/authorized_keys
+mkdir -p /tmp/a-rather-long-directory-name-for-the-alternative-configuration; cp /etc/ssh/sshd_config /tmp/a-rather-long-directory-name-for-the-alternative-configuration/sshd_config_alt.conf
+L=/tmp/a-rather-long-directory-name-for-the-alternative-configuration/sshd_config_alt.conf
+cp /etc/ssh/sshd_config /tmp/alt.conf
+proc() { for p in $(pgrep -x sshd); do printf '    /proc <cut> %s\n' "$(tr '\0' '|' < /proc/$p/cmdline | cat -v)"; done; }
+echo "=== (a) long -f path, listener started normally (-D -f LONG -o Port=22)"
+/usr/sbin/sshd -D -f $L -o Port=22 >/dev/null 2>&1 & sleep 1
+echo "COLUMNS=60 ps -C sshd -o args= | cat:"; COLUMNS=60 ps -C sshd -o args= | cat -v | sed 's/^/    /'
+echo "COLUMNS=60 ps -ww -C sshd -o args= | cat:"; COLUMNS=60 ps -ww -C sshd -o args= | cat -v | sed 's/^/    /'
+echo "ps -C sshd -o args= | cat (no COLUMNS):"; ps -C sshd -o args= | cat -v | sed 's/^/    /'
+proc; pkill -x sshd; sleep 1
+echo "=== (b) env -i listener with options next to a plain listener (second one on port 2222)"
+/usr/sbin/sshd -D >/dev/null 2>&1 & sleep 1
+env -i /usr/sbin/sshd -D -f /tmp/alt.conf -o Port=2222 -o AuthorizedKeysFile=/x >/dev/null 2>&1 & sleep 1
+echo "ps -ww -C sshd -o args=:"; ps -ww -C sshd -o args= | cat -v | sed 's/^/    /'
+proc; pkill -x sshd; sleep 1
+echo "=== (b2) env -i with a short -f, alone"
+env -i /usr/sbin/sshd -D -f /tmp/alt.conf -o Port=22 >/dev/null 2>&1 & sleep 1
+echo "ps -ww -C sshd -o args=:"; ps -ww -C sshd -o args= | cat -v | sed 's/^/    /'
+proc; pkill -x sshd; sleep 1
+echo "=== (c) child titles: sampler every 20 ms while logins run; unique lines seen"
+/usr/sbin/sshd -D >/dev/null 2>&1 & sleep 1
+( while :; do ps -ww -C sshd -o args= ; sleep 0.02; done ) > /tmp/samples 2>/dev/null &
+SP=$!
+O="-p 22 -i /root/k -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+for n in 1 2 3; do
+  ssh $O u@127.0.0.1 sleep 1
+  ssh -tt $O u@127.0.0.1 sleep 1 </dev/null >/dev/null
+  ssh $O nosuchuser@127.0.0.1 true
+  ssh -p 22 -o PreferredAuthentications=password -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR u@127.0.0.1 true
+  (exec 3<>/dev/tcp/127.0.0.1/22; sleep 0.5)
+done
+ssh $O u@127.0.0.1 sleep 3 & SS=$!; sleep 1.5
+echo "during an open session:"; ps -ww -C sshd -o args= | cat -v | sed 's/^/    /'
+wait $SS
+sleep 0.5; kill $SP
+echo "unique lines sampled:"; sort /tmp/samples | uniq -c | sed 's/^/    /'
+echo "after all sessions closed:"; ps -ww -C sshd -o args= | cat -v | sed 's/^/    /'
+pkill -x sshd
+```
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+=== (a) long -f path, listener started normally (-D -f LONG -o Port=22)
+COLUMNS=60 ps -C sshd -o args= | cat:
+    sshd: /usr/sbin/sshd -D -f /tmp/a-rather-long-directory-name
+COLUMNS=60 ps -ww -C sshd -o args= | cat:
+    sshd: /usr/sbin/sshd -D -f /tmp/a-rather-long-directory-name-for-the-alternative-configuration/sshd_config_alt.conf -o Port=22 [listener] 0 of 10-100 startups
+ps -C sshd -o args= | cat (no COLUMNS):
+    sshd: /usr/sbin/sshd -D -f /tmp/a-rather-long-directory-name-for-the-alternative-configuration/sshd_config_alt.conf -o Port=22 [listener] 0 of 10-100 startups
+    /proc <cut> sshd: /usr/sbin/sshd -D -f /tmp/a-rather-long-directory-name-for-the-alternative-configuration/sshd_config_alt.conf -o Port=22 [listener] 0 of 10-100 startups|
+=== (b) env -i listener with options next to a plain listener (second one on port 2222)
+ps -ww -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+    sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o Port=2222 -o AuthorizedKey x
+    /proc <cut> sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups|
+    /proc <cut> sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o Port=2222 -o AuthorizedKey|x|
+=== (b2) env -i with a short -f, alone
+ps -ww -C sshd -o args=:
+    sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o 2
+    /proc <cut> sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o|2|
+=== (c) child titles: sampler every 20 ms while logins run; unique lines seen
+nosuchuser@127.0.0.1: Permission denied (publickey,password).
+u@127.0.0.1: Permission denied (publickey,password).
+nosuchuser@127.0.0.1: Permission denied (publickey,password).
+u@127.0.0.1: Permission denied (publickey,password).
+nosuchuser@127.0.0.1: Permission denied (publickey,password).
+u@127.0.0.1: Permission denied (publickey,password).
+during an open session:
+    sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+    sshd: u [priv]
+    sshd: u@notty
+unique lines sampled:
+          1 /usr/sbin/sshd -D -R
+          2 [sshd]
+          2 [sshd] <defunct>
+        352 sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+        113 sshd: /usr/sbin/sshd -D [listener] 1 of 10-100 startups
+        103 sshd: [accepted]
+         50 sshd: [net]
+          1 sshd: [rexeced]
+         11 sshd: u
+          6 sshd: u [net]
+        335 sshd: u [priv]
+        209 sshd: u@notty
+        105 sshd: u@pts/0
+          1 sshd: unknown [net]
+          2 sshd: unknown [priv]
+after all sessions closed:
+    sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+```
+
+`measure9.sh` shows the exact bytes of `ps -ww` and its result with no sshd:
+
+```bash
+#!/bin/bash
+apt-get update -qq && apt-get install -y -qq openssh-server procps >/dev/null 2>&1
+mkdir -p /run/sshd
+ps -ww -C sshd -o args= >/tmp/o 2>/tmp/e; echo "no sshd, -ww: rc=$? stdout_bytes=$(wc -c </tmp/o) stderr_bytes=$(wc -c </tmp/e)"
+/usr/sbin/sshd -D >/dev/null 2>&1 & sleep 1
+echo "bytes of ps -ww -C sshd -o args= with one listener:"; ps -ww -C sshd -o args= | od -c | sed 's/^/    /'
+pkill -x sshd
+```
+
+```
+no sshd, -ww: rc=1 stdout_bytes=0 stderr_bytes=0
+bytes of ps -ww -C sshd -o args= with one listener:
+    0000000   s   s   h   d   :       /   u   s   r   /   s   b   i   n   /
+    0000020   s   s   h   d       -   D       [   l   i   s   t   e   n   e
+    0000040   r   ]       0       o   f       1   0   -   1   0   0       s
+    0000060   t   a   r   t   u   p   s  \n
+    0000070
+```
+
+What it shows, only from the output: (a) without `-ww`, `COLUMNS=60` cut the listener's title at 60 characters, with
+`-ww` it did not; (b) a daemon started under `env -i` (empty environment) had its title cut and mangled
+(`... -o Port=2222 -o AuthorizedKey x`, with no `[listener]` mark; in /proc a NUL replaced the cut) while the plain one
+kept its full title, so a cut title is a real state, not a theory; with no sshd, `ps -ww` gave rc 1 and no output, and the
+listener line ends in a single line feed with no trailing blank. The title forms seen across logins: `sshd: [accepted]`,
+`sshd: [net]`, `sshd: [rexeced]`, `sshd: u`, `sshd: u [net]`, `sshd: u [priv]`, `sshd: u@notty`, `sshd: u@pts/0`,
+`sshd: unknown [net]`, `sshd: unknown [priv]`, and, as processes of the name `sshd` before or after retitling,
+`/usr/sbin/sshd -D -R`, `[sshd]` and `[sshd] <defunct>`. The collector accepts exactly these as children; any other line
+(a cut title, an untitled process, trailing blanks, a form not seen such as `[pam]`, which did not appear) makes
+`daemon_options` `could-not-check`.
 
 Not measured: the box's own unit (a socket-activated start, `sshd.socket`, which would show another title or none), a
-title so long that the kernel cuts it (the mark would be lost and the count would fall to 0, which the checklist judges
-as CANNOT-VERIFY), a user name containing the text `[listener]` (the client refuses odd names; `useradd` refuses blanks),
-any other sshd version, and a `ps` other than procps 4.
+user name containing the text `[listener]` (the client refuses odd names; `useradd` refuses blanks), a child title not
+in the list above (for example `[pam]`), the title of a re-executed child of a daemon started with options (`-R` with the
+other options), any other sshd version, and a `ps` other than procps 4. Not seen by the method: `ps -C sshd` lists
+processes by command name, so an OpenSSH daemon run from a binary with another name is not listed (the listening-port
+items would show it); any local account can add a line that looks like a listener or an unrecognised one, which makes the
+item CANNOT-VERIFY, never a pass.
 
 ## 4 · What is not measured
 

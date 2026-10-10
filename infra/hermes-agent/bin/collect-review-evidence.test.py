@@ -2906,9 +2906,16 @@ class TestD17AcceptedKeys(Base):
     LISTENER = "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups\n"
     CHILDREN = "sshd: u [priv]\nsshd: u@notty\nsshd: [accepted]\n"
 
+    PS = ("ps", "-ww", "-C", "sshd", "-o", "args=")
+
     def _ps(self, out, rc=0, err=""):
-        self.outputs[("ps", "-C", "sshd", "-o", "args=")] = (rc, out, err)
+        self.outputs[self.PS] = (rc, out, err)
         return CE.d1_7(self.host(), {})["daemon_options"]
+
+    def host_calls_for(self, name):
+        host = self.host()
+        CE.d1_7(host, {})
+        return [c for c in host.calls if c[0] == name]
 
     def _opts(self, listeners, f, o):
         return {"listeners": listeners, "config_file_options": f, "setting_options": o}
@@ -2941,20 +2948,41 @@ class TestD17AcceptedKeys(Base):
             out = f"sshd: /usr/sbin/sshd {args} [listener] 0 of 10-100 startups\n"
             self.assertEqual(self._ps(out), self._opts(1, f, o), repr(args))
 
-    def test_a_child_whose_title_looks_like_an_option_is_not_a_listener(self):
-        """A child's title is `sshd: NAME [priv]` or `sshd: NAME@notty`: it never ends in the listener
-        mark, whatever the name holds (the measurement shows names, never the daemon's options)."""
-        out = ("sshd: -f [priv]\nsshd: -f@notty\nsshd: -o X=1 [priv]\nsshd: u -f /x -o Y=2 [priv]\n"
-               "sshd: [accepted]\n")
-        self.assertEqual(self._ps(out), self._opts(0, 0, 0))
-        self.assertEqual(self._ps(out + self.LISTENER), self._opts(1, 0, 0))
+    CNC = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+    # Every title below is one `ps -ww -C sshd -o args=` printed on sshd 9.6p1 during or after a login
+    # (the evaluation record, "How the running sshd was started", fix round 1).
+    CHILD_TITLES = ("sshd: [accepted]\n", "sshd: [net]\n", "sshd: [rexeced]\n", "sshd: u\n", "sshd: u [net]\n",
+                    "sshd: u [priv]\n", "sshd: u@notty\n", "sshd: u@pts/0\n", "sshd: unknown [net]\n",
+                    "sshd: unknown [priv]\n", "/usr/sbin/sshd -D -R\n", "[sshd]\n", "[sshd] <defunct>\n")
 
-    def test_two_listeners_and_a_title_that_is_not_one_are_told_apart(self):
+    def test_every_measured_child_title_beside_a_listener_is_ignored(self):
+        for child in self.CHILD_TITLES:
+            self.assertEqual(self._ps(self.LISTENER + child), self._opts(1, 0, 0), repr(child))
+        self.assertEqual(self._ps(self.LISTENER + "".join(self.CHILD_TITLES)), self._opts(1, 0, 0))
+
+    def test_two_full_listeners_one_with_an_option_are_both_counted(self):
+        self.assertEqual(self._ps(self.LISTENER + "sshd: /usr/sbin/sshd -D -f /x [listener] 0 of 10-100 startups\n"),
+                         self._opts(2, 1, 0))
         self.assertEqual(self._ps(self.LISTENER * 2), self._opts(2, 0, 0))
-        for out in ("sshd: /usr/sbin/sshd -D [listener]\n", "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups x\n",
-                    "/usr/sbin/sshd -D\n", "sshd: [listener] 0 of 10-100 startups\n",
-                    "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startupsX\n"):
-            self.assertEqual(self._ps(out), self._opts(0, 0, 0), repr(out))
+
+    def test_a_line_that_is_not_a_listener_or_a_measured_child_makes_the_item_could_not_check(self):
+        """Never a quiet skip: a second daemon whose title is cut short or was never retitled (measured:
+        a small environment cuts it, `... -o AuthorizedKey x`) would otherwise read as healthy. Any local
+        account can also make such a line, which gives CANNOT-VERIFY, not a pass."""
+        for extra in ("sshd: /usr/sbin/sshd -D -f /opt/alt/sshd_config -o Port=2222 -o AuthorizedKeysFile=/x [liste\n",
+                      "sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o AuthorizedKey x\n",
+                      "/usr/sbin/sshd -D -f /x -o A=b\n", "/usr/sbin/sshd -D\n", "sshd: /usr/sbin/sshd -D [listener]\n",
+                      "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups x\n",
+                      "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startupsX\n", "sshd: [listener] 0 of 10-100 startups\n",
+                      "sshd: u [pam]\n", "sshd: -f [priv]\n", "sshd: u [priv] \n", " sshd: u [priv]\n", "sshd: u [priv]\r\n",
+                      "sshd: u@notty \n", "sshd: u -f /x [priv]\n", "sshd:  u\n"):
+            self.assertEqual(self._ps(self.LISTENER + extra), self.CNC, repr(extra))
+            self.assertEqual(self._ps(extra), self.CNC, repr(extra))               # alone, too
+
+    def test_the_process_list_is_not_cut_to_a_width(self):
+        """`ps -ww`: without it procps applies COLUMNS even to a pipe (measured), cutting a long title."""
+        self._ps(self.LISTENER)
+        self.assertEqual(self.host_calls_for("ps"), [["ps", "-ww", "-C", "sshd", "-o", "args="]])
 
     def test_no_listener_is_zero_and_the_checklist_judges_it(self):
         self.assertEqual(self._ps("", rc=1), self._opts(0, 0, 0))
@@ -2964,6 +2992,7 @@ class TestD17AcceptedKeys(Base):
         self.assertEqual(self._ps("", rc=1, err='error: unknown user-defined format specifier "x"\n'), cnc)
         self.assertEqual(self._ps("", rc=127, err="not found"), cnc)
         self.assertEqual(self._ps(self.LISTENER, rc=2), cnc)
+        self.assertEqual(self._ps(self.LISTENER, rc=1), cnc)               # output on a non-zero rc
 
     def test_a_process_list_that_cannot_be_run_is_could_not_check(self):
         """No `ps` answer in the fake at all (it reports 127)."""

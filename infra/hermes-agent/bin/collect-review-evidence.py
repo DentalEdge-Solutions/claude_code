@@ -559,36 +559,51 @@ def _sshd_match_lines(host):
 
 # The title sshd 9.6p1 gives its listener process: "sshd: " + the command line it was started with +
 # " [listener] N of M-K startups" (measured, docs/evaluations/2026-10-10-journal-retention-35-days.md,
-# "How the running sshd was started"). Its per-connection children are titled "sshd: NAME [priv]",
-# "sshd: NAME@notty" or "sshd: [accepted]": never with the mark, never with the daemon's options.
+# "How the running sshd was started"). Its children are titled by the closed set below, the only forms
+# `ps -ww -C sshd -o args=` showed during and after logins on 9.6p1; every other line is unknown.
 _SSHD_LISTENER_TITLE_RE = re.compile(r"sshd: (?P<args>\S.*) \[listener\] [0-9]+ of [0-9]+-[0-9]+ startups")
+_SSHD_NAME = r"[A-Za-z0-9_][A-Za-z0-9_.$-]*"
+_SSHD_CHILD_TITLE_RE = re.compile(
+    r"sshd: \[(?:accepted|net|rexeced)\]"
+    rf"|sshd: {_SSHD_NAME}(?: \[(?:net|priv)\]|@(?:notty|pts/[0-9]+))?"
+    r"|/usr/sbin/sshd -D -R|\[sshd\]|\[sshd\] <defunct>", re.ASCII)
 _SSHD_OPTIONS_WITH_ARGUMENT = "CEbcfghkopu"          # sshd's getopt string: `C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrt`
 
 
 def _sshd_daemon_options(host):
     """{"listeners", "config_file_options", "setting_options"}: how many sshd listener processes
-    run and how many `-f` and `-o` options their command lines hold, read from `ps -C sshd -o
-    args=` (counts only: no path, option value or process id leaves here). A listener is a process
-    whose title is the listener title above, which a child's never is. Options are read as getopt
-    does (`-f path`, `-fpath`, `-Df path`). The title joins the arguments with blanks and
+    run and how many `-f` and `-o` options their command lines hold, read from `ps -ww -C sshd -o
+    args=` (counts only: no path, option value or process id leaves here). `-ww` because procps
+    applies COLUMNS even to a pipe and would cut a long title (measured). Every non-empty line is
+    classified: a full-line listener title is counted; a full-line child title from the closed set
+    above is ignored; ANY OTHER line (a title cut short, as a daemon started with a small
+    environment gets, a process never retitled, a line a local account made, trailing blanks) makes
+    all three could-not-check, because it may be a second daemon with options. Options are read as
+    getopt does (`-f path`, `-fpath`, `-Df path`). The title joins the arguments with blanks and
     /proc/PID/cmdline holds that same one string (measured), so the original argument vector is not
     available: every word that starts with `-` is read as an option cluster and a word that does not
     (an option's value, a value holding a blank as two words) is skipped, never a reason to stop.
-    A value that itself starts with `-` reads as an option: the counts can only be too high. Not
-    seen: a daemon started by a socket-activated unit (another title, or none), and a title cut
-    short by the kernel (it loses the mark, so the count falls and the checklist judges it).
-    `ps` finding no sshd (rc 1, nothing on stderr) is 0 listeners; any other failure is
-    could-not-check, never a healthy-looking value."""
-    rc, out, err = host.run(["ps", "-C", "sshd", "-o", "args="])
-    if rc == 1 and not out.strip() and not err.strip():
+    A value that itself starts with `-` reads as an option: the counts can only be too high. `ps` finding
+    no sshd (rc 1, no output at all) is 0 listeners; any other failure is could-not-check, never a
+    healthy-looking value. Not seen: `ps -C sshd` lists by command name, so an OpenSSH daemon run
+    from a binary with another name is not listed (the listening-port items would show it); a daemon
+    started by a socket-activated unit (another title, or none); any local account can add a line that
+    looks like a listener or an unrecognised one, which makes the item CANNOT-VERIFY, never a pass."""
+    unknown = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+    rc, out, err = host.run(["ps", "-ww", "-C", "sshd", "-o", "args="])
+    if rc == 1 and not out and not err:
         return {"listeners": 0, "config_file_options": 0, "setting_options": 0}
     if rc != 0:
-        return {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+        return unknown
     listeners = config_files = settings = 0
     for line in out.split("\n"):
+        if not line:
+            continue
         m = _SSHD_LISTENER_TITLE_RE.fullmatch(line)
         if not m:
-            continue
+            if _SSHD_CHILD_TITLE_RE.fullmatch(line):
+                continue
+            return unknown
         listeners += 1
         for word in m.group("args").split()[1:]:      # the first word is the program
             if len(word) < 2 or word[0] != "-":
