@@ -155,7 +155,8 @@ _ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=
 def _run_real(argv, timeout=60, errors="strict"):
     try:
         # The lossy read names UTF-8, so "one replacement character for each byte, or cut-short
-        # sequence of bytes, that is not valid UTF-8" holds under any locale; the strict default keeps the locale's own encoding, as before.
+        # sequence of bytes, that is not valid UTF-8" holds under any locale; the strict default
+        # keeps the locale's own encoding, as before.
         decoding = {} if errors == "strict" else {"encoding": "utf-8"}
         p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors=errors, **decoding)
     except FileNotFoundError:

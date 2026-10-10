@@ -104,7 +104,8 @@ class TestChecklistSync(unittest.TestCase):
     def test_d2_3_says_how_many_days_it_covered_and_when_it_stands_for_30(self):
         block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.3"]
         rule = next(l for l in block.split("\n") if l.startswith("- **pass rule:**"))
-        for words in ("`reach_days` of at least `30`", "states the days the search covered", "in either direction"):
+        for words in ("`reach_days` of at least `30`", "states the days the search covered", "in either direction",
+                      "under two days"):
             self.assertIn(words, rule, words)
         self.assertIn("read as root only", block)
         for words in ("replacement characters", "namespaces", "300 thousand", "can be stored"):

@@ -37,6 +37,6 @@ PASS | NOT PASS — (one paragraph)
 - **D3.2 decision:** (ADMIN kept | replaced) — reason:
 - **D4.6 restarts:** (one line per `true` in `started_after_last_pass`: what started, when, why)
 - **D2.4 journal:** (only when `reach_days` is under 30: the UTC date and time the retention was raised and the journal service restarted; any other directory under `/var/log/journal` explained; `usage.files` lower than `reach_days` explained)
-- **D1.7 sshd:** (only when `match_lines`, `include_elsewhere`, `config_file_options` or `setting_options` is not `0`: what each block, file or option sets)
+- **D1.7 sshd:** (only when `match_lines`, `include_elsewhere`, `config_file_options` or `setting_options` is not `0`: what each block, file or option sets; and only when `allowtcpforwarding` is `local`: when it was set)
 - **D9 decisions:** (one line per finding: accepted (reason) | blocking)
 - **Signed:** operator, date
