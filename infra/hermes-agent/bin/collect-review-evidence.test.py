@@ -3265,6 +3265,84 @@ class TestD17AcceptedKeys(Base):
         self.assertEqual(out, ["permitlisten=<withheld>", "permitopen=<withheld>"])
 
 
+CAT_CONFIG = ("# /etc/systemd/journald.conf\n#  This file is part of systemd.\n\n# See journald.conf(5) for details.\n\n"
+              "[Journal]\n#Storage=auto\nSystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n\n"
+              "# /etc/systemd/journald.conf.d/50-hermes-retention.conf\n# Hermes: 35 days\n[Journal]\n"
+              "MaxRetentionSec=35day\nSystemMaxFiles=500\n\n"
+              "# /usr/lib/systemd/journald.conf.d/syslog.conf\n[Journal]\nForwardToSyslog=yes\n")
+OURS = "/etc/systemd/journald.conf.d/50-hermes-retention.conf"
+
+
+def _oldest_key(*selector):
+    return tuple(["journalctl", *CE.OLDEST_ENTRY_ARGS, *selector])
+
+
+def _entry(epoch):
+    return json.dumps({"__CURSOR": "s=abc", "__REALTIME_TIMESTAMP": str(epoch * 1000000 + 123456),
+                       "__MONOTONIC_TIMESTAMP": "1", "_BOOT_ID": "0" * 32,
+                       "__SEQNUM": "1", "__SEQNUM_ID": "0" * 32}) + "\n"
+
+
+class TestJournalHelpers(Base):
+    def test_the_last_file_that_sets_a_value_is_the_one_reported(self):
+        got, files = CE._journald_settings(CAT_CONFIG)
+        self.assertEqual(files, ["/etc/systemd/journald.conf", OURS, "/usr/lib/systemd/journald.conf.d/syslog.conf"])
+        self.assertEqual(got["MaxRetentionSec"], {"value": "35day", "file": OURS})
+        self.assertEqual(got["SystemMaxFiles"], {"value": "500", "file": OURS})
+        self.assertEqual(got["SystemMaxUse"], {"value": "1G", "file": "/etc/systemd/journald.conf"})
+        self.assertEqual(got["MaxFileSec"], {"value": "1day", "file": "/etc/systemd/journald.conf"})
+
+    def test_only_journal_section_lines_count_and_the_last_file_wins(self):
+        text = ("# /etc/systemd/journald.conf\n[Other]\nMaxRetentionSec=99day\n[Journal]\n  MaxRetentionSec = 7day  \n"
+                ";MaxRetentionSec=1day\n#MaxRetentionSec=2day\nSystemMaxUse=\n"
+                "# /etc/systemd/journald.conf.d/x.conf\nMaxRetentionSec=40day\n")
+        got, files = CE._journald_settings(text)
+        # the second `# /` line does not follow an empty line: it is a comment, not a file
+        self.assertEqual(files, ["/etc/systemd/journald.conf"])
+        self.assertEqual(got["MaxRetentionSec"], {"value": "40day", "file": "/etc/systemd/journald.conf"})
+        self.assertEqual(got["SystemMaxUse"], {"value": "", "file": "/etc/systemd/journald.conf"})
+        self.assertEqual(got["SystemMaxFiles"], {"value": None, "file": None})
+
+    def test_a_comment_that_looks_like_a_header_of_a_file_already_printed_is_could_not_check(self):
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(CAT_CONFIG + "\n# /etc/systemd/journald.conf\n[Journal]\nMaxRetentionSec=1day\n")
+
+    def test_spans_sizes_and_what_cannot_be_converted(self):
+        for text, want in (("35day", 3024000), ("7day", 604800), ("1month", 2629800), ("2h 30min", 9000),
+                           ("1w", 604800), ("90", 90), ("1.5h", 5400), ("0", 0), ("1y", 31557600),
+                           ("1 fortnight", R.COULD_NOT_CHECK), ("", R.COULD_NOT_CHECK),
+                           ("infinity", R.COULD_NOT_CHECK), ("day", R.COULD_NOT_CHECK), ("-1day", R.COULD_NOT_CHECK)):
+            self.assertEqual(CE._span_seconds(text), want, text)
+        for text, want in (("1G", 1 << 30), ("500M", 500 << 20), ("4096", 4096), ("8K", 8192), ("2T", 2 << 40),
+                           ("1.5G", R.COULD_NOT_CHECK), ("", R.COULD_NOT_CHECK), ("big", R.COULD_NOT_CHECK)):
+            self.assertEqual(CE._size_bytes(text), want, text)
+
+    def test_the_oldest_entry_is_a_utc_time_and_the_selector_comes_last(self):
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[_oldest_key()] = (0, _entry(1759000000), "")
+        host = self.host()
+        self.assertEqual(CE._oldest_entry(host), "2025-09-27T19:06:40Z")
+        self.assertEqual(CE._oldest_entry(host, ("-u", "hermes-app-broker@ads-audit", "--since", "-30d")),
+                         "2025-10-09T08:53:20Z")
+        self.assertEqual(host.calls[-1][-4:], ["-u", "hermes-app-broker@ads-audit", "--since", "-30d"])
+        self.assertEqual(host.calls[0][:2], ["journalctl", "-q"])     # never the leak checks' own prefixes
+
+    def test_no_entry_is_none_and_a_failure_is_could_not_check(self):
+        self.outputs[_oldest_key()] = (0, "", "")
+        self.assertIsNone(CE._oldest_entry(self.host()))
+        for bad in ((1, "", "boom"), (0, "not json\n", ""), (0, "{}\n", ""), (0, '{"__REALTIME_TIMESTAMP": "x"}\n', ""),
+                    (0, "[1]\n", ""), (0, '{"__REALTIME_TIMESTAMP": "9" }\n' * 2, "")):
+            self.outputs[_oldest_key()] = bad
+            self.assertEqual(CE._oldest_entry(self.host()), R.COULD_NOT_CHECK, bad)
+
+    def test_ok_passes_its_time_limit_to_the_host(self):
+        seen = []
+        host = CE.Host(self.root, lambda argv, timeout=60: seen.append(timeout) or (0, "x", ""))
+        CE._ok(host, ["true"])
+        CE._ok(host, ["true"], timeout=300)
+        self.assertEqual(seen, [60, 300])
+
+
 class TestD46StartTimes(Base):
     START = "Wed 2026-10-07 06:45:46 UTC"      # as `systemctl show -p ActiveEnterTimestamp --value` prints it
     START_ISO = "2026-10-07T06:45:46Z"
