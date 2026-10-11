@@ -103,7 +103,11 @@ What it shows:
 
 The image is `ubuntu:24.04` with `systemd`, `systemd-sysv`, `python3`, `bsdutils`; its `/etc/systemd/journald.conf`
 is `Storage=persistent`, `SystemMaxUse=1G`, `MaxRetentionSec=7day`, `MaxFileSec=1day` (the box's values), and a unit
-`ticker.service` echoes a line every second (a stand-in for a long-running service). Containers were started with
+`ticker.service` echoes a line every second (a stand-in for a long-running service). Stand-ins used for the
+runbook's blocks (section 5): the container itself for the server; in the second round a unit named
+`hermes-listener-check.service` and a script in the place of the audit broker; for the laptop block a private ssh
+agent, a throwaway key and, for one run, a shell function in the place of the keychain load. Section 5 says for
+each output which of these it rests on. Containers were started with
 `--privileged --cgroupns=host`, `/run` and `/run/lock` as tmpfs, and the host's `/sys/fs/cgroup` mounted; the
 first attempt worked, so the fallback (no container) was not needed.
 
@@ -2034,8 +2038,9 @@ container's; the operator's trial collection shows the box's.
 
 Rehearsed 2026-10-11 (UTC; 2026-10-10 local). Every block that `infra/hermes-agent/deploy/BRING-UP.md` tells the
 operator to paste in "The journal's retention (finding F58)" and the new block of "A security review" was taken OUT
-OF THE RUNBOOK FILE by a script (the text between its code fences), not retyped, and run as below. After the last
-edit of the runbook the blocks in the file were compared again with the ones rehearsed: equal, byte for byte.
+OF THE RUNBOOK FILE by a script (the text between its code fences), not retyped, and run as below. Several blocks
+were changed after the review of this task: "After the review" below holds the rehearsal of the blocks as they now
+stand, and its outputs replace the ones before it for the changed blocks. What is a stand-in is said there.
 
 **How.** The VPS blocks ran in the container `jr`, where the caller is root and there is no `sudo`: the only change
 to each block is that the word `sudo ` is removed (`sed 's/sudo //g'`). Each was piped to `docker exec -i jr bash`,
@@ -2404,28 +2409,322 @@ private agent stopped
   write to the operator's keychain.
 - The function is not left defined after the paste.
 
+### After the review: the blocks as changed, rehearsed again (2026-10-11 UTC)
+
+The review of this task changed these blocks: VPS 1 (the server program's own release line `sshd -V`; the error
+texts of `docker info` and of the journal directory's `ls` are no longer printed), VPS 3 (the listener check's own
+line is picked out with `grep`), live check a of step 11 (one guard added around the handoff's lines), `kc` (it
+counts the key again after taking it out); and added two: "take the file out again" after a stop in VPS 2, and a
+label for the flush block. VPS 2, VPS 4, the flush line, and checks b, c, the prompt and "afterwards" are unchanged.
+Every block was again taken out of the runbook file by script and run exactly as written, `sudo ` removed (and
+`sudo -u hermes-app-ads-audit ` for step 11); after the last edit the blocks in the file were compared once more
+with the ones run: equal. **The outputs below replace those above for the changed blocks.**
+
+**Stand-ins in this round, and only these.** (1) A unit `hermes-listener-check.service` in `jr`, `Type=oneshot`,
+first with `ExecStart=/bin/true` (it writes no line of its own), then with an `echo` of a line in the real check's
+form. (2) A unit `hermes-app-broker@.service` in `jr` running the script below, which answers a request file with a
+journal line of the broker's shape. (3) For `kc` run 5, the shell function described above. (4) `jr` is root without
+`sudo`, and the request files are written by root, not by the app's user. The real listener check, the real broker
+and its ledger were not run. All stand-in units, the script and `/var/lib/hermes` were removed from `jr` afterwards.
+
+#### The journal blocks in `jr`
+
+`jr` was first brought back to the state before the step. Order: VPS 1, VPS 2, the take-out block, the take-out
+block again, VPS 2, VPS 3 (silent stand-in), VPS 3 (speaking stand-in), the flush block, VPS 4, VPS 4, VPS 1,
+VPS 2, VPS 3.
+
+```
+===== vps1 (before anything)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-10T17:43:26+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+sshd release: sh: 1: sshd: not found
+sshd listeners: 0 | words starting -f or -o: 0
+docker logging: 
+Sun Oct 11 01:48:05 UTC 2026
+===== vps2 (first)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+===== takeout (after a stop in VPS 2)
+our file still there: no | directory still there: no
+===== takeout (pasted again, nothing there)
+rmdir: failed to remove '/etc/systemd/journald.conf.d': No such file or directory
+our file still there: no | directory still there: no
+===== vps2 (again)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+===== vps3 (the listener stand-in writes NO line of its own)
+journal service: active | started: Sun 2026-10-11 01:48:06 UTC | journal on disk: yes
+oldest entry before: 2026-10-10T17:43:26+00:00 | after: 2026-10-10T17:43:26+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+listener_check_rc=0
+Sun Oct 11 01:48:11 UTC 2026
+===== (stand-in changed: the listener check now writes a status=ok line)
+===== vps3 (pasted again; the stand-in writes its line)
+journal service: active | started: Sun 2026-10-11 01:48:11 UTC | journal on disk: yes
+oldest entry before: 2026-10-10T17:43:26+00:00 | after: 2026-10-10T17:43:26+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+listener_check_rc=0
+hermes-listener-check: status=ok reason=- listeners=[9119] unexpected=[] docker_dns_listeners=1
+Sun Oct 11 01:48:16 UTC 2026
+===== what the journal holds for that unit, for comparison (the brief's tail -1 would have printed its last line)
+Starting hermes-listener-check.service...
+hermes-listener-check: status=ok reason=- listeners=[9119] unexpected=[] docker_dns_listeners=1
+hermes-listener-check.service: Deactivated successfully.
+Finished hermes-listener-check.service.
+===== flush (the flush block)
+journal on disk: yes
+===== vps4 (undo)
+journal service: active | our file still there: no
+===== vps4 (pasted again)
+journal service: active | our file still there: no
+===== vps1 (after the undo)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-10T17:43:26+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+sshd release: sh: 1: sshd: not found
+sshd listeners: 0 | words starting -f or -o: 0
+docker logging: 
+Sun Oct 11 01:48:26 UTC 2026
+===== vps2 (second install)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+===== vps3 (second apply)
+journal service: active | started: Sun 2026-10-11 01:48:26 UTC | journal on disk: yes
+oldest entry before: 2026-10-10T17:43:26+00:00 | after: 2026-10-10T17:43:26+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+listener_check_rc=0
+hermes-listener-check: status=ok reason=- listeners=[9119] unexpected=[] docker_dns_listeners=1
+Sun Oct 11 01:48:31 UTC 2026
+```
+
+- **VPS 1:** `sshd release:` holds the shell's `sshd: not found` (no sshd in `jr`; `jr11` below has one). `docker
+  logging:` has nothing after it and no error line is printed any more.
+- **The take-out block:** removes the file and the directory; pasted again, `rmdir` says `No such file or
+  directory` and the line is the same.
+- **VPS 3, the listener line.** With the silent stand-in: `listener_check_rc=0` and NO line after it, which the
+  runbook names as a stop. With the speaking stand-in: the check's own line. The four lines the journal holds for
+  the unit are printed after it for comparison: the last is systemd's `Finished hermes-listener-check.service.`,
+  which is what the block's earlier `tail -1` would have shown.
+- VPS 2, the flush block and VPS 4 printed what they printed before.
+
+The third line of VPS 2 pasted alone (the runbook's "Reading it later" asks for it) printed the same six lines and
+`files in the directory: 1`.
+
+#### VPS 1 with a real sshd, and the take-out block with another file present (`jr11`, started again, removed)
+
+`sshd -V` in that container printed `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19, OpenSSL 3.0.13 30 Jan 2024` with exit
+status 0, so the block reads the server program, not the client.
+
+```
+===== vps1 in jr11 (a real sshd, started through ssh.socket)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-11T01:46:04+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+sshd release: OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+sshd listeners: 1 | words starting -f or -o: 0
+docker logging: 
+Sun Oct 11 01:49:22 UTC 2026
+===== vps2 in jr11, then another file put in the directory, then the take-out block
+files in the directory: 1
+rmdir: failed to remove '/etc/systemd/journald.conf.d': Directory not empty
+our file still there: no | directory still there: yes
+```
+
+#### Step 11 in `jr`, against the stand-in broker
+
+The stand-in broker (`/usr/local/bin/standin-broker`):
+
+```bash
+#!/bin/bash
+# STAND-IN for the audit broker, for the rehearsal only: it answers a request file with a journal line of the broker's shape.
+D=/var/lib/hermes/spool/apps/ads-audit/requests; SW=/var/lib/hermes/app-state/ads-audit/DISABLED
+while sleep 1; do for f in "$D"/*.json; do [ -e "$f" ] || continue; r=$(basename "$f" .json)
+  if ! grep -q '"op"' "$f"; then echo "hermes-app-broker[ads-audit]: request=$r op=- client=- status=refused reason=bad_request"
+  elif [ -e "$SW" ]; then echo "hermes-app-broker[ads-audit]: request=$r op=run client=standin status=refused reason=disabled"
+  else echo "hermes-app-broker[ads-audit]: request=$r op=run client=standin status=queued reason=-"; fi
+  rm -f "$f"; done; done
+```
+
+The driver (each block is evaluated as text in one shell, as pastes into one login are):
+
+```bash
+# Each block is evaluated as text in ONE shell, as pastes into one login are. STAND-INS: no sudo (root), the broker is /usr/local/bin/standin-broker.
+P() { echo "===== $1"; }
+P "the hidden prompt (the word typed is 'standin', 7 characters)"; eval "$(cat /tmp/s11-prompt)" <<< "standin"
+P "check a, state 1: the switch's directory does not exist, so touch fails"; eval "$(cat /tmp/s11-a)"
+echo "requests directory exists: $([ -d /var/lib/hermes/spool/apps/ads-audit/requests ] && echo yes || echo no) | switch: $([ -e /var/lib/hermes/app-state/ads-audit/DISABLED ] && echo present || echo absent)"
+mkdir -p /var/lib/hermes/app-state/ads-audit /var/lib/hermes/spool/apps/ads-audit/requests
+chattr +i /var/lib/hermes/app-state/ads-audit 2>/dev/null && { P "check a, state 2: the directory exists but cannot be written (immutable), so touch fails"; eval "$(cat /tmp/s11-a)"; echo "requests waiting: $(ls /var/lib/hermes/spool/apps/ads-audit/requests | wc -l)"; chattr -i /var/lib/hermes/app-state/ads-audit; } || echo "(chattr not available: state 2 not run)"
+P "check a, state 3: the switch can be set, the stand-in broker is STOPPED (no answer)"; eval "$(cat /tmp/s11-a)"
+echo "requests waiting: $(ls /var/lib/hermes/spool/apps/ads-audit/requests | wc -l) | switch: $([ -e /var/lib/hermes/app-state/ads-audit/DISABLED ] && echo present || echo absent)"
+rm -f /var/lib/hermes/app-state/ads-audit/DISABLED; systemctl start hermes-app-broker@ads-audit; sleep 1; echo "(switch removed by hand; stand-in broker: $(systemctl is-active hermes-app-broker@ads-audit))"
+P "check a, state 4: the stand-in broker running"; eval "$(cat /tmp/s11-a)"
+P "check a, pasted again"; eval "$(cat /tmp/s11-a)"
+P "check b (no ledger and no /opt/hermes-agent in the stand-in: the counter cannot be read)"; eval "$(cat /tmp/s11-b)"
+P "check c"; eval "$(cat /tmp/s11-c)"
+P "afterwards"; eval "$(cat /tmp/s11-after)"; echo "C after the block: [${C-unset}]"
+```
+
+```
+===== the hidden prompt (the word typed is 'standin', 7 characters)
+
+length 7
+===== check a, state 1: the switch's directory does not exist, so touch fails
+touch: cannot touch '/var/lib/hermes/app-state/ads-audit/DISABLED': No such file or directory
+a: STOPPED, the switch is not set | nothing was placed
+requests directory exists: no | switch: absent
+===== check a, state 2: the directory exists but cannot be written (immutable), so touch fails
+touch: cannot touch '/var/lib/hermes/app-state/ads-audit/DISABLED': Operation not permitted
+a: STOPPED, the switch is not set | nothing was placed
+requests waiting: 0
+===== check a, state 3: the switch can be set, the stand-in broker is STOPPED (no answer)
+a: UNEXPECTED [] | test request deleted | switch LEFT ON: stop
+requests waiting: 0 | switch: present
+(switch removed by hand; stand-in broker: active)
+===== check a, state 4: the stand-in broker running
+a: status=refused reason=disabled | switch off again: yes
+===== check a, pasted again
+a: status=refused reason=disabled | switch off again: yes
+===== check b (no ledger and no /opt/hermes-agent in the stand-in: the counter cannot be read)
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'app_lib'
+HELD_RUNS=
+b: SKIPPED, nothing was placed
+===== check c
+c: status=refused reason=bad_request
+===== afterwards
+      1 status=refused reason=bad_request
+      2 status=refused reason=disabled
+switch present: no | requests waiting: 0
+C after the block: [unset]
+```
+
+- **Check a, the guard.** With the switch's directory missing, and with it present but unwritable, `touch` fails and
+  the block prints `a: STOPPED, the switch is not set | nothing was placed`; no request file was written (in state 1
+  the requests directory did not even exist; in state 2 it held 0 files). With the switch settable and no broker:
+  `a: UNEXPECTED [] | test request deleted | switch LEFT ON: stop`, 0 requests waiting, the switch present. With the
+  stand-in broker: the expected line, twice.
+- **The inner lines are the handoff's.** `diff` of lines 2 to 4 of the handoff's block against lines 3 to 5 of the
+  runbook's: no output, exit status 0; `cmp`: identical, 764 bytes.
+- **Check b** printed `HELD_RUNS=` and `b: SKIPPED, nothing was placed` after a Python error: the stand-in has no
+  `app_lib` and no ledger, so only the "counter not read" path ran. Its placing branch was not run.
+- **Check c** and **afterwards** printed their expected forms (two `disabled` lines because check a ran twice; no
+  `quota` line because check b placed nothing). The client variable is unset afterwards.
+- Not produced: an admitted request (`status=queued reason=-`) in check a or b. The stand-in would write that line
+  with the switch off, but the guarded block never places a request then.
+
+#### `kc` again (zsh, private agent, throwaway key; the same five runs)
+
+```
+lines of the block that set K: 1
+===== run 1: the block, K set to the throwaway key
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+keychain load rc=0
+supplied by the keychain: 0
+===== run 2: pasted again
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+keychain load rc=0
+supplied by the keychain: 0
+===== run 3: the throwaway key put in the agent first
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+STOPPED: the key is in the agent already (a work session): run this again after 'ssh-add -d ~/.ssh/vps-hermes'
+throwaway key still in the agent: 1
+===== run 4: no public file
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+STOPPED: could not read the key's public file
+===== run 5: a stand-in ssh-add whose keychain load supplies the throwaway key
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+keychain load rc=0
+supplied by the keychain: 1 -- the passphrase is in the keychain again; still in the agent: 0 (0 expected); stop and report
+throwaway key in the agent afterwards: 0
+function kc left defined: no
+private agent stopped
+```
+
+Run 5 (the stand-in keychain load) now ends `still in the agent: 0 (0 expected)`: the count is taken after the
+removal instead of being asserted.
+
+#### How the runbook's rendering was checked
+
+Step 11's fences are at column 0, which ends the numbered item, so its paragraphs after the first fence now have
+no indent (indented by four they rendered as code). Checked two ways: by count (in step 11, 5 fenced blocks and 0
+lines indented by four or more outside the fences after the first fence), and by rendering the three edited
+sections with `marked` 12.0.2 (`npx`): step 11 with its neighbours 5 `<pre>` for 5 fences, the journal section 6
+for 6, "A security review" 1 for 1.
+
 ### Pasted twice, and stopped half-way: what was checked
 
 | Block | Pasted twice | A middle line fails |
 |---|---|---|
 | VPS 1 | Read-only. Run three times here. | Read-only: a failing part leaves its line empty or with the error; the stop rules cover every line. |
-| VPS 2 | Run twice: `install` writes the same directory and file again. | Run in `jr12`: the second `install` failed, the last line shows no file of ours and `0`; the runbook says stop. What is left is an empty directory (its time is newer than the service's start, so D2.4 would show `config_changed_after_start: true` until the next restart; VPS 3 or VPS 4 restarts). |
+| VPS 2 | Run twice: `install` writes the same directory and file again. Pasted after VPS 3 it rewrites the file, so D2.4 reads `config_changed_after_start: true` until VPS 3 runs again (the runbook says so; by reading, not run through the collector here). | Run in `jr12`: the second `install` failed, the last line shows no file of ours and `0`; the runbook says stop. What is left is an empty directory (its time is newer than the service's start, so D2.4 would show `config_changed_after_start: true` until the next restart; VPS 3 or VPS 4 restarts). |
 | VPS 3 | Run twice: a second restart; the oldest entry stayed the same; the start time is the second one, so the runbook says to give the first time. | If the restart fails the next line shows the state and `same:`; the runbook sends the operator to VPS 4. Changed from the brief: `same:` now reads `NO` when the first read printed nothing (two empty reads compared equal before). A restart that fails was not produced. |
 | The flush line | `journalctl --flush` again is harmless (run after a healthy flush and after a relinquish). | Its second part only reads. |
 | VPS 4 | Run twice, and once with nothing installed. | Changed from the brief, which had `rm … && restart`: had the restart been interrupted after the file was removed, a second paste would have stopped at `rm` (no such file) and never restarted, leaving the service running on settings whose file is gone. The block now uses `rm -f` and always restarts, and prints whether the file is gone. |
 | The trial line | Read-only for what a review looks at (the collector's own note on its two probes stands). | The collector stopping is shown by `collector_rc` and the summary tool's own line (run in `jr`). |
+| The take-out block (new) | Run twice, and with another file present: the second time and the non-empty directory each give a harmless `rmdir` error. | Its last part only reads and says what is left. |
 | `kc` | Run twice. | Each part prints its own line; the two `STOPPED` paths return before the keychain is asked. |
-| Step 11's five blocks | Not run (below). Read: a second paste of a, b or c places one more test request that is refused, and one more journal line. | Read, not changed (the blocks are the handoff's, byte for byte): in check a, if the first line (`sudo touch …`) fails, the second still places a `run` request with the switch off. The runbook therefore says: `sudo -v` alone first, do the checks after the day's chat audit (a held run makes the broker refuse a second one), and stop at once if the first line printed an error. |
+| Step 11's five blocks | Check a run twice against the stand-in broker. Read for b and c: a second paste places one more test request that is refused, and one more journal line. | Check a as the handoff had it: if the first line (`sudo touch …`) failed, the second still placed a `run` request with the switch off. Changed after review (the controller's decision): the block now places the request only when it has seen the switch, and says `a: STOPPED …` otherwise (run in two failing states). A paste that misses the block's first two lines is not protected; the runbook says to paste it whole. |
 
 ### What could not be rehearsed
 
-- **Step 11's five blocks** (the hidden prompt, live checks a, b, c, afterwards): the broker, its spool and its
-  ledger exist on the box only. They are the blocks that ran on the box on 2026-10-09, copied byte for byte from
-  the appendix of `docs/superpowers/handoffs/2026-10-09-review-9-pass.md` (compared by script: five blocks, all
-  equal).
+- **Step 11's five blocks against the real broker** (the hidden prompt, live checks a, b, c, afterwards): the
+  broker, its spool and its ledger exist on the box only; "After the review" ran them against a stand-in. Four are
+  the blocks that ran on the box on 2026-10-09, byte for byte from the appendix of
+  `docs/superpowers/handoffs/2026-10-09-review-9-pass.md` (compared by script); check a is that block's lines 2 to 4,
+  unchanged, inside one added guard.
 - **VPS 1:** `docker info` and the broker's refusal counts (neither exists in the stand-ins). The operator read the
   logging driver on the box on 2026-10-10 (`json-file`, section 2).
-- **VPS 3:** the three Hermes services and the listener check; and the restart of the box's own journal service
+- **VPS 3:** the three Hermes services and the real listener check (a stand-in unit of its name was used); and the restart of the box's own journal service
   with its real load (section 4).
 - **The server's real sshd:** the stand-in's sshd is the same release and package revision, started the same way
   (through `ssh.socket`); the box's own process list was read by the operator on 2026-10-11 (section 2).

@@ -608,9 +608,11 @@ def _sshd_daemon_options(host):
     A value that itself starts with `-` reads as an option: the counts can only be too high. `ps` finding
     no sshd (rc 1, no output at all) is 0 listeners; any other failure is could-not-check, never a
     healthy-looking value. Not seen: `ps -C sshd` lists by command name, so an OpenSSH daemon run
-    from a binary with another name is not listed (the listening-port items would show it); a daemon
-    started by a socket-activated unit (another title, or none); any local account can add a line that
-    looks like a listener or an unrecognised one, which makes the item CANNOT-VERIFY, never a pass."""
+    from a binary with another name is not listed (the listening-port items would show it); any local
+    account can add a line that looks like a listener or an unrecognised one, which makes the item
+    CANNOT-VERIFY, never a pass. A daemon started through `ssh.socket` has the ordinary listener title
+    once a first connection has started it (measured in a container, and read on the box on
+    2026-10-11: record section 2); before that connection there is no sshd process: 0 listeners."""
     unknown = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
     rc, out, err = host.run(["ps", "-ww", "-C", "sshd", "-o", "args="])
     if rc == 1 and not out and not err:
