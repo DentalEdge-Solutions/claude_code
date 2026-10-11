@@ -21,6 +21,8 @@ All at tag `v255` on github.com/systemd/systemd (`https://github.com/systemd/sys
 | `src/basic/time-util.c` | primary | The time units (`day`, `min`); `min` is here, not in the man page's list. | 2026-10-10 |
 | The rehearsal (section 3) | measurement | R1 to R6. | 2026-10-10 |
 | The key-case measurement (section 3b) | measurement | What `sshd` 9.6p1 does with four key lines. | 2026-10-10 |
+| The operator's read-only look at the box (section 2) | measurement on the box | The box's OpenSSH release and package revision, how its sshd is started, the journal's on-disk flag, no linked settings path. | 2026-10-11 |
+| The runbook blocks (section 5) | measurement | Each block of the runbook as written, in the stand-in; the laptop block against a private agent. | 2026-10-11 |
 
 ## 2 · The box, read-only
 
@@ -68,6 +70,34 @@ What it shows:
 - The journal service started 2026-09-30 06:23:38 UTC.
 - Timing settled: at 17:41 on 2026-10-10 the oldest entry was 2026-10-04 15:12, so the daily trim (about 15:12 UTC) had already deleted the file that began 2026-10-03 15:12, at 7.0 days. The file holding the 2026-10-09 refusals began 2026-10-08 about 15:12 and so leaves at the trim of 2026-10-15, about 15:12 UTC.
 - The operator's decision (2026-10-10): the other machine's directory is left as it is and stated in review #10's evidence.
+
+### The sshd and journal look (the operator's read-only block, 2026-10-11)
+
+Run by the operator on the box, 2026-10-11 01:31:04 UTC (pasted starting after the prompt line; account names inside
+process titles were replaced by the block's own `sed`):
+
+```
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+ssh.socket: active | ssh.service: active
+root     sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+root     sshd: <account> [priv]
+hermeso+ sshd: hermesops
+root     sshd: <account> [priv]
+hermeso+ sshd: <account>@<terminal>
+ExecStart=/usr/sbin/sshd -D $SSHD_OPTS
+SSHD_OPTS=
+journal on disk flag: yes
+settings paths that are links: 0
+Sun Oct 11 01:31:04 UTC 2026
+```
+
+What it shows:
+- The box runs OpenSSH_9.6p1 Ubuntu-3ubuntu13.19, the same release and package revision the key-line and configuration measurements were made on (section 3b). This replaces "no record of that reading was found".
+- sshd is socket-activated (`ssh.socket` active) and `ssh.service` is active; the unit starts `/usr/sbin/sshd -D $SSHD_OPTS` and `SSHD_OPTS` is empty.
+- The process list has ONE listener line, in exactly the form measured in the container (`sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups`), with no `-f` and no `-o`: D1.7 `daemon_options` will read `{"listeners": 1, "config_file_options": 0, "setting_options": 0}`.
+- The other lines are session children in forms the collector's closed set knows: `sshd: NAME [priv]`, `sshd: NAME@terminal`, and a bare `sshd: hermesops`, which is ignored because `hermesops` is an account in `/etc/passwd`.
+- `/run/systemd/journal/flushed` exists: the journal is on disk (D2.4 `usage.flushed_to_disk` will be `true`).
+- None of the fourteen path parts D2.4 walks is a symbolic link.
 
 ## 3 · The rehearsal
 
@@ -564,7 +594,8 @@ The probe as committed in Task 7 (before this fix), run in that state:
 Every value is the healthy one except `other_files` (this rehearsal put the setting in a drop-in of its own; in the
 server's own main file there would be no sign at all): `35day` from our file, `usage` from the stale file on disk.
 After the fixes, the probe in the same state (re-run in the container `jr4` of R13, 12 s after the restart; the
-probe's own lines, the two other settings left out):
+probe's own lines, the two other settings left out). The commands that set the state for this re-run were not kept:
+the implementer's report of that task gives its result only ("volatile → `Storage` `volatile`, age 12"):
 
 ```
 "settings": {"MaxRetentionSec": {"value": "35day", "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "number": 3024000}, "Storage": {"value": "volatile", "file": "/etc/systemd/journald.conf.d/90-s.conf", "number": null}, ...}
@@ -644,7 +675,8 @@ ActiveState=inactive
 ```
 
 After the fixes, the probe with the service stopped (re-run in `jr4`, one second after the stop; the probe's own
-lines):
+lines). The commands that set the state for this re-run were not kept: the implementer's report gives its result
+only ("stopped → `active: false`, age 1"):
 
 ```
 "settings": {"MaxRetentionSec": {"value": "35day", "file": "/etc/systemd/journald.conf.d/50-hermes-retention.conf", "number": 3024000}, "Storage": {"value": "persistent", "file": "/etc/systemd/journald.conf", "number": null}, ...}
@@ -680,7 +712,8 @@ lrwxrwxrwx 1 root root    6 Oct 10 20:01 journald.conf.d -> real.d
 13:# /usr/lib/systemd/journald.conf.d/syslog.conf
 ```
 
-The fixed probe (re-run the same way in `jr4`; the probe's own lines):
+The fixed probe (re-run the same way in `jr4`; the probe's own lines). The commands that set the state for this
+re-run were not kept: the implementer's report gives its result only ("linked directory → as in round 1, age 2"):
 
 ```
 "settings": "could-not-check"
@@ -896,8 +929,10 @@ After `journalctl --flush` again (rc 0; `ls`: there):
 Measured 2026-10-10 on the laptop (macOS, shell zsh; Docker 29, linux/aarch64 container, `ubuntu:24.04`), against a
 throwaway `sshd` on 127.0.0.1 port 2222, with five throwaway ed25519 keys (no key body is kept here): four in the
 server's `authorized_keys` (`a` to `d`) and a fifth, `x`, that is NOT in the file. Server version line:
-`OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`; the box's release is 9.6p1 as the plan states, confirmed on the box on
-2026-10-08 (not re-checked here).
+`OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`. The box's release was read on the box on 2026-10-11 (section 2, "The sshd and
+journal look"): `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`, the same release and package revision. (An earlier wording here
+said "as the plan states, confirmed on the box on 2026-10-08"; no record of a reading on that day was found.) The
+runbook's VPS 1 block reads it again at the rollout.
 
 How each line was tested: one real `ssh` public-key login per key to 127.0.0.1 port 2222 as user `u`, offering that
 key only (`IdentitiesOnly=yes`, `IdentityAgent=none`, `BatchMode=yes`), running `true`. Exit status 0 is "accepted",
@@ -925,11 +960,16 @@ Both controls held (`d` accepted, `x` refused), so the measurement is valid.
 - One change to the measuring loop, none to the server or the file. The first run printed `refused` for all five
   lines, control `d` included, which is how the fault was seen. The ssh options had been held in one shell variable,
   which zsh passes as a single word, so every login failed before reaching the key. The server's debug log, read after
-  that faulty run, showed the key of `d` accepted. The options were then written out literally, as in the plan, and
+  that faulty run, showed the key of `d` accepted (as the implementer observed; no excerpt kept). The options were then written out literally, as in the plan, and
   the result above is from that run. The four lines in the file were never changed.
-- After that final run, a separate check: with the account `u` locked (`!` password, as it was made) `d` was accepted;
-  with the password set to `*`, all five lines gave the results above. (An earlier `usermod -p '*'` and a restart of
-  `sshd` were made while looking for the fault, before the final run; the account is unlocked in the final run.)
+- The account's state, said outright. The account `u` was made by `useradd`, so its password field was `!` (locked).
+  While the fault was looked for, `usermod -p '*'` was run and `sshd` restarted, both BEFORE the final run: the five
+  results above were taken with the password field `*`, not in the locked state. The lock checks came AFTER that final
+  run: with the account locked again (`!`), `d` was accepted; with `*` again, all five lines gave the results above
+  (which of the two was tried first is not recorded). This is what the implementer's report of that task records ("tested the account locked
+  ('!') vs '*': d accepted both ways"; "the locked vs `*` check was made after the final run, with an earlier
+  usermod/sshd restart before it"); it keeps no command and no output of the lock checks, and for the locked state it
+  names `d` only.
 - What it means for the reader: `sshd` 9.6p1 accepts the quote-in-comment line, the option-first line with that
   comment, and the carriage-return line, so the D1.7 reader counts as unreadable lines (a, b and c) that the server
   accepts. The next task decides what to do with it.
@@ -1939,3 +1979,460 @@ drwxr-sr-x+ 1 root systemd-journal    4096 Oct 10 20:53 ..
 ```
 
 A user with a journal of its own reads **rc 0, nothing on stderr**, and sees only its own entries (8 characters here, against 61505 as root): a partial read that nothing announces. So the collector refuses to read the journal unless it runs as root (`the journal is read as root only`).
+
+### Item 8, the standard error of the single-entry reads on a healthy service
+
+Measured 2026-10-11 (UTC) in `jr`, as root, the journal service healthy and restarted a moment before. The script
+(scratch file `<scratchpad>/e4.sh`, piped to `docker exec -i jr bash`) and its output:
+
+```
+F="-q --no-pager -o json --output-fields=__REALTIME_TIMESTAMP"
+echo '--- whole';        journalctl $F -n +1 2>&1 >/dev/null | od -c | head -3; echo rc=$?
+echo '--- unit, 30d';    journalctl $F -u ticker --since -30d -n +1 2>&1 >/dev/null | od -c | head -3; echo rc=$?
+echo '--- no such unit'; journalctl $F -u no-such-unit -n +1 2>&1 >/dev/null | od -c | head -3; echo rc=$?
+echo '--- on disk, -D';  journalctl -D /var/log/journal/$(cat /etc/machine-id) $F -n 1 2>&1 >/dev/null | od -c | head -3; echo rc=$?
+echo '--- the four exit statuses and stdout sizes'
+journalctl $F -n +1 2>/dev/null | wc -c; echo rc=${PIPESTATUS[0]}
+journalctl $F -u ticker --since -30d -n +1 2>/dev/null | wc -c; echo rc=${PIPESTATUS[0]}
+journalctl $F -u no-such-unit -n +1 2>/dev/null | wc -c; echo rc=${PIPESTATUS[0]}
+journalctl -D /var/log/journal/$(cat /etc/machine-id) $F -n 1 2>/dev/null | wc -c; echo rc=${PIPESTATUS[0]}
+```
+
+```
+--- whole
+0000000
+rc=0
+--- unit, 30d
+0000000
+rc=0
+--- no such unit
+0000000
+rc=0
+--- on disk, -D
+0000000
+rc=0
+--- the four exit statuses and stdout sizes
+326
+rc=0
+327
+rc=0
+0
+rc=0
+333
+rc=0
+```
+
+`od -c` prints only its closing offset `0000000`: **no byte on standard error** for any of the four forms (the whole
+journal, `-u ticker --since -30d`, a unit that does not exist, and the on-disk read with `-D`). Each exits 0; the
+unit that does not exist prints nothing on standard output either. (The `rc=` after each `od` line is the pipe's, so
+the second half reads each command's own status.) The addendum's literal form
+(`docker exec jr sh -c '… -n +1 2>&1 >/dev/null | od -c | head -3; echo rc=$?'`) printed the same `0000000`, `rc=0`.
+So the collector's rule "anything on stderr is could-not-check" does not fire on a healthy service here. This is the
+container's; the operator's trial collection shows the box's.
+
+## 5 · The runbook blocks, as written
+
+Rehearsed 2026-10-11 (UTC; 2026-10-10 local). Every block that `infra/hermes-agent/deploy/BRING-UP.md` tells the
+operator to paste in "The journal's retention (finding F58)" and the new block of "A security review" was taken OUT
+OF THE RUNBOOK FILE by a script (the text between its code fences), not retyped, and run as below. After the last
+edit of the runbook the blocks in the file were compared again with the ones rehearsed: equal, byte for byte.
+
+**How.** The VPS blocks ran in the container `jr`, where the caller is root and there is no `sudo`: the only change
+to each block is that the word `sudo ` is removed (`sed 's/sudo //g'`). Each was piped to `docker exec -i jr bash`,
+so what ran is bash reading the pasted text. `jr` was first brought to the state of a box before the step: our file
+and its directory removed, the journal service restarted. Order in `jr`: VPS 1, VPS 2, VPS 2 again, VPS 3, VPS 3
+again, the flush line, VPS 4, VPS 4 again, VPS 1, VPS 2, VPS 3. `jr` is left running with our file installed and
+the service restarted after it. Two more containers from the same image were started for this section and
+removed afterwards: `jr11` (with `openssh-server` and `procps` installed, an sshd started through `ssh.socket`, and
+an empty client list `{"clients": {}}` so that the collector runs) and `jr12` (without the repository, for the
+failure paths).
+
+### The VPS blocks in `jr`
+
+```
+===== vps1 (before anything)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-10T17:43:26+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+ssh release: sh: 1: ssh: not found
+sshd listeners: 0 | words starting -f or -o: 0
+sh: 1: docker: not found
+docker logging: 
+Sun Oct 11 01:29:47 UTC 2026
+[exit status of the paste: 0]
+===== vps2 (first)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+[exit status of the paste: 0]
+===== vps2 (pasted again)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+[exit status of the paste: 0]
+===== vps3 (first)
+journal service: active | started: Sun 2026-10-11 01:29:47 UTC | journal on disk: yes
+oldest entry before: 2026-10-10T17:43:26+00:00 | after: 2026-10-10T17:43:26+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+Failed to start hermes-listener-check.service: Unit hermes-listener-check.service not found.
+listener_check_rc=5
+Sun Oct 11 01:29:52 UTC 2026
+[exit status of the paste: 0]
+===== vps3 (pasted again)
+journal service: active | started: Sun 2026-10-11 01:29:52 UTC | journal on disk: yes
+oldest entry before: 2026-10-10T17:43:26+00:00 | after: 2026-10-10T17:43:26+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+Failed to start hermes-listener-check.service: Unit hermes-listener-check.service not found.
+listener_check_rc=5
+Sun Oct 11 01:29:57 UTC 2026
+[exit status of the paste: 0]
+===== flush (the one line)
+journal on disk: yes
+[exit status of the paste: 0]
+===== vps4 (undo)
+journal service: active | our file still there: no
+[exit status of the paste: 0]
+===== vps4 (pasted again)
+journal service: active | our file still there: no
+[exit status of the paste: 0]
+===== vps1 (after the undo)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-10T17:43:26+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+ssh release: sh: 1: ssh: not found
+sshd listeners: 0 | words starting -f or -o: 0
+sh: 1: docker: not found
+docker logging: 
+Sun Oct 11 01:30:07 UTC 2026
+[exit status of the paste: 0]
+===== vps2 (second install)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+[exit status of the paste: 0]
+===== vps3 (second apply)
+journal service: active | started: Sun 2026-10-11 01:30:08 UTC | journal on disk: yes
+oldest entry before: 2026-10-10T17:43:26+00:00 | after: 2026-10-10T17:43:26+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+Failed to start hermes-listener-check.service: Unit hermes-listener-check.service not found.
+listener_check_rc=5
+Sun Oct 11 01:30:13 UTC 2026
+[exit status of the paste: 0]
+```
+
+Readings, block by block:
+
+- **VPS 1.** The settings lines, the oldest entry, the file count, the disk use, `journal on disk: yes` and
+  `settings paths that are links: 0` printed as the runbook expects, with the stand-in's stated differences
+  (`Storage=persistent` is set in its own file; 1 journal file; 2% used). `jr` has no ssh client, no sshd, no Docker
+  and no broker: `ssh release:` holds the shell's `ssh: not found`, the sshd counts are `0` and `0`, `docker
+  logging:` is empty after `docker: not found`, and no refusal line is printed. Expected text changed after the
+  rehearsal: the brief's `cut -c1-24` cut the time to `…+00:0`; the block now cuts at 25 and prints `…+00:00`.
+- **VPS 2.** The six lines in the runbook's order, then `files in the directory: 1`. Pasted again: the same output.
+- **VPS 3.** `journal service: active`, a start time 5 seconds before the block's last line, `journal on disk: yes`,
+  `same: yes`. The three Hermes services print `inactive` and the listener check `not found` with
+  `listener_check_rc=5`: none of them exists in `jr`. Pasted again: the same, with a new start time.
+- **The flush line.** `journal on disk: yes`.
+- **VPS 4.** `journal service: active | our file still there: no`; pasted again: the same. VPS 1 after it shows the
+  server's own settings only, as before the step.
+
+### VPS 1 with a real sshd, and VPS 2, VPS 3 once more (`jr11`)
+
+```
+===== vps1 in jr11 (a real sshd of the same release, started by its socket unit)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-11T00:57:37+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+ssh release: OpenSSH_9.6p1 Ubuntu-3ubuntu13.19
+sshd listeners: 1 | words starting -f or -o: 0
+sh: 1: docker: not found
+docker logging: 
+Sun Oct 11 01:30:34 UTC 2026
+===== vps2 in jr11
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+===== vps3 in jr11
+journal service: active | started: Sun 2026-10-11 01:31:08 UTC | journal on disk: yes
+oldest entry before: 2026-10-11T00:57:37+00:00 | after: 2026-10-11T00:57:37+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+Failed to start hermes-listener-check.service: Unit hermes-listener-check.service not found.
+listener_check_rc=5
+Sun Oct 11 01:31:13 UTC 2026
+```
+
+`ssh release:` and the two sshd counts print as the runbook expects. The box's own values were read by the operator
+on 2026-10-11 (section 2) and are the same.
+
+**Do the block's two counts agree with the collector?** The script below ran in `jr11` (scratch file
+`<scratchpad>/sshd-state.sh`); `counts` prints the block's two numbers and then `_sshd_daemon_options` of the
+collector in the checkout. The connection in state 2 is a plain TCP connection made by bash, not an ssh client.
+
+```
+counts() { echo "block: listeners $(ps -ww -C sshd -o args= | grep -c "\[listener\]") | words starting -f or -o: $(ps -ww -C sshd -o args= | grep "\[listener\]" | tr " " "\n" | grep -cE "^-[A-Za-z]*[fo]")"
+  python3 -c '
+import importlib.util,sys
+sys.dont_write_bytecode=True
+sp=importlib.util.spec_from_file_location("ce","/opt/projects/claude_code/infra/hermes-agent/bin/collect-review-evidence.py"); ce=importlib.util.module_from_spec(sp); sp.loader.exec_module(ce)
+print("collector:", ce._sshd_daemon_options(ce.Host("/")))'; }
+echo "=== 1 socket unit started, nothing connected yet"; systemctl start ssh.socket; sleep 1; echo "ssh.socket $(systemctl is-active ssh.socket) | ssh.service $(systemctl is-active ssh)"; ps -ww -C sshd -o args=; counts
+echo "=== 2 after one TCP connection to port 22 (bash /dev/tcp, no ssh client)"; (exec 3<>/dev/tcp/127.0.0.1/22; head -c 8 <&3 >/dev/null; exec 3<&-) 2>&1; sleep 2; echo "ssh.service $(systemctl is-active ssh)"; ps -ww -C sshd -o args=; counts
+echo "=== 3 a second daemon with -o and -E (a value word that holds f and o)"; mkdir -p /run/sshd; /usr/sbin/sshd -p 2022 -oLogLevel=INFO -E/tmp/logfile; sleep 1; ps -ww -C sshd -o args=; counts; pkill -f 'sshd -p 2022'; sleep 1
+echo "=== 4 back to one"; ps -ww -C sshd -o args=; counts
+```
+
+```
+=== 1 socket unit started, nothing connected yet
+ssh.socket active | ssh.service inactive
+block: listeners 0 | words starting -f or -o: 0
+collector: {'listeners': 0, 'config_file_options': 0, 'setting_options': 0}
+=== 2 after one TCP connection to port 22 (bash /dev/tcp, no ssh client)
+ssh.service active
+sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+block: listeners 1 | words starting -f or -o: 0
+collector: {'listeners': 1, 'config_file_options': 0, 'setting_options': 0}
+=== 3 a second daemon with -o and -E (a value word that holds f and o)
+sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+sshd: /usr/sbin/sshd -p 2022 -oLogLevel=INFO -E/tmp/logfile [listener] 0 of 10-100 startups
+block: listeners 2 | words starting -f or -o: 1
+collector: {'listeners': 2, 'config_file_options': 0, 'setting_options': 1}
+=== 4 back to one
+sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+block: listeners 1 | words starting -f or -o: 0
+collector: {'listeners': 1, 'config_file_options': 0, 'setting_options': 0}
+```
+
+- They agreed in all four states. A daemon started through `ssh.socket` has the ordinary listener title once the
+  first connection has started it; before that there is no sshd process and both read 0 listeners (on the box an
+  operator who is logged in over SSH has already started it).
+- Where they can differ, by reading the two (not produced here): the block gives ONE number for `-f` and `-o`
+  together, and counts every word that starts with `-` and has an `f` or `o` among its leading letters, while the
+  collector stops at the first letter of a word that takes a value (`-Elogfile` counts in the block and not in the
+  collector). So the block's number is never lower than the collector's two together and can be higher. The block
+  counts any line holding `[listener]`; the collector wants the whole line in the measured form and answers
+  `could-not-check` for a cut or unknown line. The runbook's stop text says both.
+
+### Failure paths (`jr12`, no repository mounted)
+
+```
+===== vps2 in jr12 (no checkout there: the install line fails)
+install: cannot stat '/opt/projects/claude_code/infra/hermes-agent/deploy/journald-hermes-retention.conf': No such file or directory
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 0
+===== the stop instruction's line, then the directory
+rc=0
+3
+===== vps4 in jr12 with no file of ours installed (the directory is empty)
+journal service: active | our file still there: no
+ls: cannot access '/etc/systemd/journald.conf.d': No such file or directory
+===== journal taken back to memory (journalctl --relinquish-var), then vps1 line and the flush line
+relinquish rc=0
+journal on disk: no
+journal on disk: yes
+```
+
+- VPS 2 without the repository file: `install: cannot stat …`, no line for our file, `files in the directory: 0`.
+  The runbook's stop rule covers it (the last `MaxRetentionSec=` is not `35day`). The stop instruction's `rm -f`
+  exits 0 with nothing to remove. The directory made by the first `install` line stays, empty (the `3` is `ls -la`'s
+  three lines for an empty directory).
+- VPS 4 with nothing of ours installed: it removes the empty directory, restarts, and prints the expected line.
+- After `journalctl --relinquish-var` the flag line reads `no`; the runbook's flush line then prints `yes`.
+
+### The trial collection piped into the summary tool
+
+The runbook's line, without `sudo`, run under a pseudo-terminal (`script -qc "bash /tmp/trial.sh" /dev/null`, the
+throwaway key written to it after 3 seconds) because the collector asks for the key on the terminal.
+
+In `jr` (no client list there, so the collector stops; this is the "collector stopped" path):
+
+```
+review fingerprint key (hidden, from `pbcopy < ~/.config/hermes-review/fp.key`): 
+collect-review-evidence: cannot load the redaction list: FileNotFoundError — refusing to print anything I cannot redact
+summarize-review-bundle: not a box bundle (did the collector stop? read its own message and its rc)
+collector_rc=2
+```
+
+In `jr11` (empty client list): 95 lines. The first four, the items the journal step concerns, and the closing list:
+
+```
+review fingerprint key (hidden, from `pbcopy < ~/.config/hermes-review/fp.key`): 
+collected_at 2026-10-11T01:31:16Z
+items 31 | not observed: D1.1, D1.2, D4.1, D5.2, D10.1, D10.2, D10.4, D10.6, D10.8
+other items: 0
+…
+D1.7  observed
+  accounts_checked: 22
+  unprivileged_port_start: 0
+  match_lines: 0
+  include_elsewhere: 0
+  daemon_options: {listeners: 1, config_file_options: 0, setting_options: 0}
+  sshd_settings: 8
+  files: 0
+…
+D2.3  observed
+  journal: {pattern_hits: 0, known_secret_hits: 0}
+  scanned_characters: 67030
+  undecodable_characters: 0
+  oldest_entry_read: 2026-10-11T00:57:37Z
+D2.4  observed
+  oldest_entry: {broker: null, journal: 2026-10-11T00:57:37Z, runner: null}
+  reach_days: 0
+  settings: {MaxFileSec: {number: 86400, set_by: other, value: 1day}, MaxRetentionSec: {number: 3024000, set_by: ours, value: 35day}, Storage: {number: null, set_by: other, value: persistent}, SystemMaxFiles: {number: 500, set_by: ours, value: 500}, SystemMaxUse: {number: 1073741824, set_by: other, value: 1G}}
+  drop_in: {equals_repo: true, owner_is_root: true, group_is_root: true, mode: 0o644, other_files: 0}
+  service: {active: true, started_at: 2026-10-11T01:31:08Z, config_changed_after_start: false}
+  usage: {bytes: 8392704, files: 1, bytes_percent_of_max_use: 0.8, files_percent_of_max_files: 0.2, free_bytes: 915297001472, free_percent: 93.6, other_directories: 0, newest_entry_on_disk: 2026-10-11T01:31:16Z, on_disk_age_seconds: 0, flushed_to_disk: true}
+…
+Before the real collection (ok = as expected, LOOK = look at it first):
+LOOK  every item observed (31 items) (not observed: D1.1, D1.2, D4.1, D5.2, D10.1, D10.2, D10.4, D10.6, D10.8)
+LOOK  nothing in the bundle is could-not-check (28 places)
+ok    sshd runs with its default settings file and no Match line
+LOOK  the three live refusals are in the journal (missing: refused/disabled, refused/quota, refused/bad_request)
+LOOK  at least one run/ok result
+ok    retention at least 30 days, set by our file, the file equal to the repository's, no other file
+LOOK  the journal reaches 30 days (reach is 0 days: the evidence needs the date the retention was raised)
+ok    the journal search read everything it was given
+ok    the running journal service has read its settings
+ok    the journal is being written to disk
+LOOK  the proxy matches the last PASS
+LOOK  no service runs older code than the box holds
+LOOK  fingerprint complete
+Reminders, not verdicts: the reviewer judges the real bundle against the checklist.
+collector_rc=0
+```
+
+The closing list has thirteen lines, in the wording the runbook lists. `the proxy matches the last PASS` reads `LOOK`
+because the trial line names no last PASS (`matches_last_pass` is `null`), which the runbook says. The other `LOOK`
+lines are the stand-in's: it has no Hermes services, no broker and no audit.
+
+### The laptop block `kc` (zsh on this Mac, a private agent, a throwaway key)
+
+The block was sourced by `zsh -f` from the text taken out of the runbook, with ONE change for the rehearsal only:
+`K="$HOME/.ssh/vps-hermes"` became the path of a throwaway ed25519 key made under `<scratchpad>/t11/k` (deleted
+afterwards). The shell first ran `eval "$(ssh-agent -s)"`, so `SSH_AUTH_SOCK` pointed at a private agent for that
+shell only; the operator's own agent was not touched, no real key or comment was read or printed, and no `ssh` was
+run. The agent was emptied and stopped at the end (`ssh-agent -k`). The first two lines of the block read this
+laptop's real `~/.ssh/config` and process list, as counts.
+
+```
+lines of the block that set K: 1
+===== run 1: the block, K set to the throwaway key
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+keychain load rc=0
+supplied by the keychain: 0
+===== run 2: pasted again
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+keychain load rc=0
+supplied by the keychain: 0
+===== run 3: the throwaway key put in the agent first
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+STOPPED: the key is in the agent already (a work session): run this again after 'ssh-add -d ~/.ssh/vps-hermes'
+throwaway key still in the agent: 1
+===== run 4: no public file
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+STOPPED: could not read the key's public file
+===== run 5: a stand-in ssh-add whose keychain load supplies the throwaway key
+UseKeychain lines left in the file: 0
+ssh on the new alias: 1; ssh on the old alias: 0
+keychain load rc=0
+supplied by the keychain: 1 -- the passphrase is in the keychain again; the key was taken out of the agent; stop and report
+throwaway key in the agent afterwards: 0
+function kc left defined: no
+private agent stopped
+```
+
+- Runs 1 and 2 (the block, and pasted again): the four lines the runbook expects. The real
+  `ssh-add --apple-load-keychain` ran against the private agent and ended with `rc=0`; afterwards that agent held
+  **0** keys (`ssh-add -l` exit status 1, counted separately; no name was listed). So on this Mac, today, the
+  keychain supplies no SSH key at all, and the load still ends with 0: the state LAPTOP 5c had marked "not
+  measured" before the rollout.
+- Run 3 (the key already in the agent): the first `STOPPED` line; the key was left in the agent, as the text says.
+- Run 4 (no public file): the second `STOPPED` line.
+- Run 5, with a STAND-IN: a shell function `ssh-add` that, for `--apple-load-keychain` only, adds the throwaway key
+  (every other call goes to the real `ssh-add`). The block printed `supplied by the keychain: 1 -- …` and the key was
+  out of the agent afterwards. The real keychain was not made to hold the throwaway key's passphrase: that would
+  write to the operator's keychain.
+- The function is not left defined after the paste.
+
+### Pasted twice, and stopped half-way: what was checked
+
+| Block | Pasted twice | A middle line fails |
+|---|---|---|
+| VPS 1 | Read-only. Run three times here. | Read-only: a failing part leaves its line empty or with the error; the stop rules cover every line. |
+| VPS 2 | Run twice: `install` writes the same directory and file again. | Run in `jr12`: the second `install` failed, the last line shows no file of ours and `0`; the runbook says stop. What is left is an empty directory (its time is newer than the service's start, so D2.4 would show `config_changed_after_start: true` until the next restart; VPS 3 or VPS 4 restarts). |
+| VPS 3 | Run twice: a second restart; the oldest entry stayed the same; the start time is the second one, so the runbook says to give the first time. | If the restart fails the next line shows the state and `same:`; the runbook sends the operator to VPS 4. Changed from the brief: `same:` now reads `NO` when the first read printed nothing (two empty reads compared equal before). A restart that fails was not produced. |
+| The flush line | `journalctl --flush` again is harmless (run after a healthy flush and after a relinquish). | Its second part only reads. |
+| VPS 4 | Run twice, and once with nothing installed. | Changed from the brief, which had `rm … && restart`: had the restart been interrupted after the file was removed, a second paste would have stopped at `rm` (no such file) and never restarted, leaving the service running on settings whose file is gone. The block now uses `rm -f` and always restarts, and prints whether the file is gone. |
+| The trial line | Read-only for what a review looks at (the collector's own note on its two probes stands). | The collector stopping is shown by `collector_rc` and the summary tool's own line (run in `jr`). |
+| `kc` | Run twice. | Each part prints its own line; the two `STOPPED` paths return before the keychain is asked. |
+| Step 11's five blocks | Not run (below). Read: a second paste of a, b or c places one more test request that is refused, and one more journal line. | Read, not changed (the blocks are the handoff's, byte for byte): in check a, if the first line (`sudo touch …`) fails, the second still places a `run` request with the switch off. The runbook therefore says: `sudo -v` alone first, do the checks after the day's chat audit (a held run makes the broker refuse a second one), and stop at once if the first line printed an error. |
+
+### What could not be rehearsed
+
+- **Step 11's five blocks** (the hidden prompt, live checks a, b, c, afterwards): the broker, its spool and its
+  ledger exist on the box only. They are the blocks that ran on the box on 2026-10-09, copied byte for byte from
+  the appendix of `docs/superpowers/handoffs/2026-10-09-review-9-pass.md` (compared by script: five blocks, all
+  equal).
+- **VPS 1:** `docker info` and the broker's refusal counts (neither exists in the stand-ins). The operator read the
+  logging driver on the box on 2026-10-10 (`json-file`, section 2).
+- **VPS 3:** the three Hermes services and the listener check; and the restart of the box's own journal service
+  with its real load (section 4).
+- **The server's real sshd:** the stand-in's sshd is the same release and package revision, started the same way
+  (through `ssh.socket`); the box's own process list was read by the operator on 2026-10-11 (section 2).
+- **A successful real collection through the summary tool:** the stand-in cannot observe most items.
+- **`kc` with the real administrative key and a keychain that holds its passphrase:** run 5 is a stand-in.
+- **A journal service that does not come back after the restart**, and VPS 4 after such a failure.
+
+In the runbook, the lines of VPS 1 and VPS 3 that the stand-in could not run, and the trial line, are marked "first
+run on the box", each with what to do when the output differs (stop and report); step 11 says that its blocks could
+not be rehearsed off the box.
