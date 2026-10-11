@@ -370,38 +370,43 @@ class TestSummary(unittest.TestCase):
                    "the journal reaches 30 days", "the running journal service has read its settings",
                    "the proxy matches the last PASS", "no service runs older code", "fingerprint complete",
                    "the journal is being written to disk", "sshd runs with its default settings file and no Match line",
-                   "the journal search read everything it was given"):
+                   "the journal search read everything it was given", r"no leak count above 0 \(D2\.3, D10\.7\)",
+                   "no other journal directory and no missing days"):
             self.assertRegex(closing, rf"(?m)^(ok    |LOOK  ){ok}")
         for ok in ("the three live refusals are in the journal", "at least one run/ok result",
                    "retention at least 30 days, set by our file", "the journal reaches 30 days",
                    "the running journal service has read its settings", "the proxy matches the last PASS",
                    "no service runs older code", "fingerprint complete",
                    "the journal is being written to disk", "sshd runs with its default settings file and no Match line",
-                   "the journal search read everything it was given"):
+                   "the journal search read everything it was given", r"no leak count above 0 \(D2\.3, D10\.7\)$",
+                   "no other journal directory and no missing days$"):
             self.assertRegex(closing, rf"(?m)^ok    {ok}")
+        self.assertIn("ok    retention at least 30 days, set by our file, the file equal to the repository's, "
+                      "no other file, root:root 0644\n", closing)
         self.assertIn("Reminders, not verdicts", closing)
-        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 13)
+        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 15)
 
-    def test_a_clean_bundle_is_ok_on_all_thirteen(self):
+    def test_a_clean_bundle_is_ok_on_all_fifteen(self):
         b = bundle()
         del b["items"]["D5.3"]
         closing = closing_of(b)
-        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 13)
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 15)
+        self.assertEqual(len(SB.CHECKS), 15)
         self.assertIn("ok    every item observed (12 items)", closing)
 
-    def test_the_closing_list_has_the_thirteen_lines_in_order(self):
+    def test_the_closing_list_has_the_fifteen_lines_in_order(self):
         closing = closing_of(bundle())
         order = ("every item observed", "nothing in the bundle", "sshd runs with", "the three live refusals",
                  "at least one run/ok", "retention at least 30 days", "the journal reaches 30 days",
-                 "the journal search read", "the running journal service", "the journal is being written",
-                 "the proxy matches", "no service runs older code", "fingerprint complete")
+                 "the journal search read", "no leak count above 0", "the running journal service",
+                 "the journal is being written", "no other journal directory and no missing days", "the proxy matches", "no service runs older code", "fingerprint complete")
         positions = [closing.index(o) for o in order]
         self.assertEqual(positions, sorted(positions))
 
     def test_each_closing_line_turns_to_look(self):
         def closing(change):
             b = bundle()
-            del b["items"]["D5.3"]                      # so that every case starts from thirteen ok
+            del b["items"]["D5.3"]                      # so that every case starts from fifteen ok
             change(b["items"])
             return closing_of(b)
         cases = (
@@ -491,7 +496,7 @@ class TestSummary(unittest.TestCase):
     def test_lines_that_read_other_parts_of_the_bundle_turn_to_look(self):
         def closing(change):
             b = bundle()
-            del b["items"]["D5.3"]                      # so that every case starts from thirteen ok
+            del b["items"]["D5.3"]                      # so that every case starts from fifteen ok
             change(b)
             return closing_of(b)
         cases = (
@@ -524,6 +529,115 @@ class TestSummary(unittest.TestCase):
         )
         for change, line in cases:
             self.assertRegex(closing(change), rf"(?m)^LOOK  {line}", line)
+
+    LEAK_LINE = r"no leak count above 0 \(D2\.3, D10\.7\)"
+    DIRS_LINE = "no other journal directory and no missing days"
+    ABOVE = " (a count is above 0: this is a FAIL, not a reminder)"
+
+    @staticmethod
+    def _closing(change):
+        b = bundle()
+        del b["items"]["D5.3"]                          # so that every case starts from fifteen ok
+        change(b["items"])
+        return closing_of(b)
+
+    def _leak_places(self):
+        return ([("D2.3", "journal", k) for k in ("pattern_hits", "known_secret_hits")]
+                + [("D10.7", j, k) for j in ("broker_journal", "runner_journal")
+                   for k in ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")])
+
+    def test_the_leak_keys_are_the_collectors(self):
+        class NoIds:
+            has_customer_id = staticmethod(lambda line: False)
+        self.assertEqual(set(SB.SEARCH_KEYS), set(CE._count_cred_text("", [])))
+        self.assertEqual(set(SB.LEAK_KEYS), set(CE._journal_leaks("", [], NoIds)))
+        self.assertEqual(len(self._leak_places()), len(SB.SEARCH_KEYS) + 2 * len(SB.LEAK_KEYS))
+
+    def test_every_leak_count_above_zero_turns_the_leak_line_to_look_in_fixed_words(self):
+        for item, group, key in self._leak_places():
+            for n in (1, 7, 10 ** 400):
+                text = self._closing(lambda it: it[item]["data"][group].update({key: n}))
+                self.assertRegex(text, rf"(?m)^LOOK  {self.LEAK_LINE} \(a count is above 0: this is a FAIL, not a reminder\)$", (item, group, key))
+                self.assertEqual(len(re.findall(r"(?m)^ok    ", text)), 14, (item, group, key))
+                self.assertNotRegex(text[text.index("no leak count"):], r"[0-9]{16}")
+
+    def test_a_leak_count_that_was_not_read_is_look_without_the_fail_words(self):
+        for item, group, key in self._leak_places():
+            for change in (lambda g: g.update({key: True}), lambda g: g.update({key: False}), lambda g: g.update({key: "0"}),
+                           lambda g: g.update({key: "could-not-check"}), lambda g: g.update({key: None}),
+                           lambda g: g.update({key: 0.0}), lambda g: g.update({key: -1}), lambda g: g.pop(key)):
+                text = self._closing(lambda it: change(it[item]["data"][group]))
+                self.assertRegex(text, rf"(?m)^LOOK  {self.LEAK_LINE} \(a count was not read\)$", (item, group, key))
+                self.assertNotIn(self.ABOVE, text)
+        for change in (lambda it: it["D2.3"].update(status="could-not-check"), lambda it: it.pop("D2.3"),
+                       lambda it: it["D10.7"].update(status="could-not-check"), lambda it: it.pop("D10.7"),
+                       lambda it: it["D2.3"]["data"].update(journal="could-not-check"),
+                       lambda it: it["D10.7"]["data"].update(broker_journal="could-not-check"),
+                       lambda it: it["D10.7"]["data"].update(runner_journal=[]),
+                       lambda it: it["D10.7"]["data"].pop("runner_journal")):
+            self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LEAK_LINE} \(a count was not read\)$")
+
+    def test_a_count_above_zero_is_said_even_beside_one_that_was_not_read(self):
+        def change(it):
+            it["D10.7"]["data"]["runner_journal"]["customer_id_lines"] = 2
+            it["D2.3"]["data"]["journal"].pop("pattern_hits")
+        self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LEAK_LINE} \(a count is above 0: this is a FAIL, not a reminder\)$")
+
+    def test_a_key_the_tool_does_not_name_changes_nothing_on_the_leak_line_and_is_never_printed(self):
+        text = self._closing(lambda it: it["D10.7"]["data"]["broker_journal"].update({"acmecorp": 9}))
+        self.assertRegex(text, rf"(?m)^ok    {self.LEAK_LINE}$")
+        self.assertNotIn("acmecorp", text)
+
+    def test_the_settings_file_must_be_root_root_0644(self):
+        line = "retention at least 30 days, set by our file"
+        for field, values in (("owner", ("acme-ops", "Root", "could-not-check", None, 0, True)),
+                              ("group", ("jsmith", "wheel", "could-not-check", None, 0, True)),
+                              ("mode", ("0o666", "0o664", "0o600", "0o0644", "644", "could-not-check", None, 420, True))):
+            for value in values:
+                text = self._closing(lambda it: it["D2.4"]["data"]["drop_in"].update({field: value}))
+                self.assertRegex(text, rf"(?m)^LOOK  {line}", (field, value))
+                for gone in ACCOUNTS + ("wheel",):
+                    self.assertNotIn(gone, text)
+            text = self._closing(lambda it: it["D2.4"]["data"]["drop_in"].pop(field))
+            self.assertRegex(text, rf"(?m)^LOOK  {line}", field)
+
+    def test_another_journal_directory_is_look_with_its_count(self):
+        look = lambda n: self._closing(lambda it: it["D2.4"]["data"]["usage"].update(other_directories=n))
+        self.assertRegex(look(1), rf"(?m)^LOOK  {self.DIRS_LINE} \(1 other: needs your statement in the evidence\)$")
+        self.assertRegex(look(3), rf"(?m)^LOOK  {self.DIRS_LINE} \(3 other: needs your statement in the evidence\)$")
+        self.assertRegex(look(10 ** 400), rf"(?m)^LOOK  {self.DIRS_LINE} \(<withheld> other: needs your statement in the evidence\)$")
+        for bad in (True, False, "could-not-check", None, "0", 0.0, -1, PLANT):
+            text = look(bad)
+            self.assertRegex(text, rf"(?m)^LOOK  {self.DIRS_LINE} \(not read\)$", bad)
+            self.assertNotIn("sk-or", text)
+        text = self._closing(lambda it: it["D2.4"]["data"]["usage"].pop("other_directories"))
+        self.assertRegex(text, rf"(?m)^LOOK  {self.DIRS_LINE} \(not read\)$")
+
+    def test_fewer_journal_files_than_days_is_look(self):
+        def look(files, reach=31):
+            def change(it):
+                it["D2.4"]["data"]["usage"]["files"] = files
+                it["D2.4"]["data"]["reach_days"] = reach
+            return self._closing(change)
+        self.assertRegex(look(30), rf"(?m)^LOOK  {self.DIRS_LINE} \(fewer files than days: needs explaining\)$")
+        self.assertRegex(look(6, 7), rf"(?m)^LOOK  {self.DIRS_LINE} \(fewer files than days: needs explaining\)$")
+        self.assertRegex(look(31), rf"(?m)^ok    {self.DIRS_LINE}$")
+        self.assertRegex(look(7, 7), rf"(?m)^ok    {self.DIRS_LINE}$")
+        self.assertRegex(look(32), rf"(?m)^ok    {self.DIRS_LINE}$")
+        for files, reach in ((True, 31), ("could-not-check", 31), (None, 31), (110, True), (110, None),
+                             (110, "could-not-check"), (110.0, 31), ("110", 31)):
+            self.assertRegex(look(files, reach), rf"(?m)^LOOK  {self.DIRS_LINE} \(not read\)$", (files, reach))
+        text = self._closing(lambda it: it["D2.4"]["data"]["usage"].pop("files"))
+        self.assertRegex(text, rf"(?m)^LOOK  {self.DIRS_LINE} \(not read\)$")
+        for change in (lambda it: it.pop("D2.4"), lambda it: it["D2.4"].update(status="could-not-check"),
+                       lambda it: it["D2.4"]["data"].update(usage="could-not-check")):
+            self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.DIRS_LINE} \(not read\)$")
+
+    def test_another_directory_and_fewer_files_are_both_said(self):
+        def change(it):
+            it["D2.4"]["data"]["usage"].update(other_directories=1, files=3)
+        self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.DIRS_LINE} \(fewer files than days: needs explaining\) "
+                                                r"\(1 other: needs your statement in the evidence\)$")
 
     def test_nothing_could_not_check_counts_the_places(self):
         b = bundle()

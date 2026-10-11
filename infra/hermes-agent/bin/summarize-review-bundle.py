@@ -67,6 +67,8 @@ THIRTY_DAYS = 30 * 86400
 LIMITED_OPTIONS = ['command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',
                    "port-forwarding", "restrict"]
 REFUSALS = ("refused/disabled", "refused/quota", "refused/bad_request")
+SEARCH_KEYS = ("pattern_hits", "known_secret_hits")                         # _count_cred_text: D2.3 `journal`
+LEAK_KEYS = ("credential_text_lines", "customer_id_lines") + SEARCH_KEYS    # _journal_leaks: D10.7's two journals
 DEFAULT_DAEMON = {"listeners": 1, "config_file_options": 0, "setting_options": 0}
 
 
@@ -220,13 +222,13 @@ def key_files(v):
 # ------------------------------------------------------------------ what is printed for each item
 _SETTING = fixed({"number": num, "set_by": ("file", set_by), "value": member(SETTING_VALUES)})
 _BROKER_RUNNER = fixed({k: when for k in sorted(JOURNAL_LABELS - {"journal"})})
-_LEAKS = fixed({"credential_text_lines": num, "customer_id_lines": num, "pattern_hits": num, "known_secret_hits": num})
+_LEAKS = fixed({k: num for k in LEAK_KEYS})
 
 SCHEMA = {
     "D1.7": {"accounts_checked": num, "unprivileged_port_start": num, "match_lines": num, "include_elsewhere": num,
              "daemon_options": fixed({"listeners": num, "config_file_options": num, "setting_options": num}),
              "sshd_settings": ("sshd", count), "files": key_files},
-    "D2.3": {"journal": fixed({"pattern_hits": num, "known_secret_hits": num}), "scanned_characters": num,
+    "D2.3": {"journal": fixed({k: num for k in SEARCH_KEYS}), "scanned_characters": num,
              "undecodable_characters": num, "oldest_entry_read": when},
     "D2.4": {"oldest_entry": fixed({k: when for k in sorted(JOURNAL_LABELS)}), "reach_days": num,
              "settings": keyed(SETTING_NAMES, _SETTING), "config_files": None,
@@ -357,12 +359,15 @@ def _retention(bundle, items):
     storage = _get(d24, "settings", "Storage")
     has_value = isinstance(storage, dict) and "value" in storage
     storage_ok = has_value and storage["value"] in STORAGE_OK
-    ok = (_int(number) and number >= THIRTY_DAYS and retention.get("file") == OUR_FILE
+    root_0644 = (is_root(_get(d24, "drop_in", "owner")) == "true" and is_root(_get(d24, "drop_in", "group")) == "true"
+                 and mode(_get(d24, "drop_in", "mode")) == "0o644")
+    ok = (_int(number) and number >= THIRTY_DAYS and retention.get("file") == OUR_FILE and root_0644
           and _get(d24, "drop_in", "equals_repo") is True and _get(d24, "drop_in", "other_files") == [] and storage_ok)
     note = ""
     if not storage_ok:
         note = f" (Storage is {member(SETTING_VALUES)(storage['value'])})" if has_value else " (Storage not read)"
-    return ok, "retention at least 30 days, set by our file, the file equal to the repository's, no other file" + note
+    return ok, ("retention at least 30 days, set by our file, the file equal to the repository's, no other file, "
+                "root:root 0644") + note
 
 
 def _reach(bundle, items):
@@ -382,6 +387,22 @@ def _search(bundle, items):
     return ok, "the journal search read everything it was given"
 
 
+def _no_leaks(bundle, items):
+    """Every leak count the checklist fails on, each read by the tool's own key names: a key the tool
+    does not name is not read here (the item line counts it as an other key)."""
+    d107 = _data(items, "D10.7")
+    groups = ((_data(items, "D2.3").get("journal"), SEARCH_KEYS), (d107.get("broker_journal"), LEAK_KEYS),
+              (d107.get("runner_journal"), LEAK_KEYS))
+    counts = [group.get(key) if isinstance(group, dict) else None for group, keys in groups for key in keys]
+    ok = all(_is(c, 0) for c in counts)
+    note = ""
+    if any(_int(c) and c > 0 for c in counts):
+        note = " (a count is above 0: this is a FAIL, not a reminder)"
+    elif not ok:
+        note = " (a count was not read)"
+    return ok, "no leak count above 0 (D2.3, D10.7)" + note
+
+
 def _service(bundle, items):
     d24 = _data(items, "D2.4")
     ok = _get(d24, "service", "active") is True and _get(d24, "service", "config_changed_after_start") is False
@@ -393,6 +414,21 @@ def _on_disk(bundle, items):
     usage = usage if isinstance(usage, dict) else {}
     age = usage.get("on_disk_age_seconds")
     return usage.get("flushed_to_disk") is True and _int(age) and 0 <= age <= 600, "the journal is being written to disk"
+
+
+def _no_other_directory_no_missing_days(bundle, items):
+    d24 = _data(items, "D2.4")
+    usage = _get(d24, "usage")
+    usage = usage if isinstance(usage, dict) else {}
+    other, files, reach = usage.get("other_directories"), usage.get("files"), d24.get("reach_days")
+    days_read = _int(files) and _int(reach)
+    ok = _is(other, 0) and days_read and files >= reach
+    note = ""
+    if days_read and files < reach:
+        note += " (fewer files than days: needs explaining)"
+    if _int(other) and other > 0:
+        note += f" ({num(other)} other: needs your statement in the evidence)"
+    return ok, "no other journal directory and no missing days" + (note or ("" if ok else " (not read)"))
 
 
 def _proxy(bundle, items):
@@ -413,7 +449,7 @@ def _fingerprint(bundle, items):
 
 
 CHECKS = (_all_observed, _no_could_not_check, _sshd_default, _refusals, _run_ok_line, _retention, _reach, _search,
-          _service, _on_disk, _proxy, _code, _fingerprint)
+          _no_leaks, _service, _on_disk, _no_other_directory_no_missing_days, _proxy, _code, _fingerprint)
 
 
 # ------------------------------------------------------------------ the summary
