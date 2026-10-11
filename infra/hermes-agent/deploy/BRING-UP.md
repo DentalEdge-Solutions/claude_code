@@ -1410,9 +1410,10 @@ Expected: `a: status=refused reason=disabled | switch off again: yes`. Every oth
 - An error that names `else` (`syntax error near unexpected token`): the paste lost its first two
   lines, so the request was placed without the guard. Any `switch LEFT ON` text printed above the
   error is not true. Run the "afterwards" block to see the switch and the waiting requests, and report.
-  The request was placed with the switch off, so a real audit of that client may have started, and
-  the day's "exactly 1" count that check b relies on is then no longer 1: do not run check b that
-  day, and say so in the report.
+  The request was placed with the switch off, so the broker decided it as a real request: with the
+  day's audit already held it is refused for quota and nothing starts; with none held it is admitted
+  and a real, paid audit of that client starts. Which of the two happened is not known until the
+  outputs are read: do not run check b that day, and say so in the report.
 - `a: UNEXPECTED […] | test request deleted | switch LEFT ON: stop`: the block has deleted the test
   request and left the switch ON. Stop: read `systemctl is-active hermes-app-broker@ads-audit` and
   report both outputs. Empty brackets (`[]`) can mean two things: the broker did not answer, or it
