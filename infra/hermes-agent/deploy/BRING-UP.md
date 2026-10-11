@@ -1368,7 +1368,8 @@ Requires part 1 on the box. Still not live until review #6.
     stop.
 
     How to run them. Do them on the day of step 10's chat audit, after it, in the order a, b, c. Run
-    `sudo -v` alone first, and again if more than a few minutes pass between two blocks. Paste each block
+    `sudo -v` alone first, and again if more than a few minutes pass between two blocks, so that sudo's
+    password prompt cannot take the pasted lines that follow as password attempts. Paste each block
     WHOLE, from its first line to its last. Report each block's output starting after the prompt line.
     Wait for each block to print its line (about 6 seconds) before pasting the next. Off the box the
     blocks were rehearsed only against a stand-in for the broker; b, c and the two others are written
@@ -1385,7 +1386,9 @@ Expected: `length ` and the number of characters you typed. Nothing else is prin
 paste the line again and type it again.
 
 **VPS, live check a, the kill switch.** Any `run` request is refused while the switch is set, before
-anything else is checked. First run on the box in this form (the inner lines are those used on
+anything else is checked. The checks assume the kill switch is OFF when you start (they run after the
+day's chat audit). Check a takes the switch off again when it succeeds, so do not use it while the
+switch is on for another reason. First run on the box in this form (the inner lines are those used on
 2026-10-09): the block now places its request only after it has seen that the switch is set. Paste the
 block WHOLE: a paste that misses its first two lines is not protected.
 
@@ -1400,8 +1403,13 @@ else echo "a: STOPPED, the switch is not set | nothing was placed"; fi
 
 Expected: `a: status=refused reason=disabled | switch off again: yes`. Every other output:
 
-- `a: STOPPED, the switch is not set | nothing was placed`: the switch could not be set. Stop and
-  report; nothing was changed.
+- `a: STOPPED, the switch is not set | nothing was placed`: the block did not see the switch. Stop and
+  report. Nothing was placed; run the "afterwards" block to see whether the switch is on.
+- Nothing printed and a `>` prompt: the paste lost its last line. Press Ctrl-C. The switch is ON and
+  nothing was placed: take it off with step 9's `off:` line, then paste the block whole.
+- An error that names `else` (`syntax error near unexpected token`): the paste lost its first two
+  lines, so the request was placed without the guard. Any `switch LEFT ON` text printed above the
+  error is not true. Run the "afterwards" block to see the switch and the waiting requests, and report.
 - `a: UNEXPECTED […] | test request deleted | switch LEFT ON: stop`: the block has deleted the test
   request and left the switch ON. Stop: read `systemctl is-active hermes-app-broker@ads-audit` and
   report both outputs. Empty brackets (`[]`) can mean two things: the broker did not answer, or it
@@ -1555,7 +1563,7 @@ the output is as expected.
 **First run on the box.** The blocks were rehearsed in a stand-in server (a container with systemd 255,
 the server's release). Four things are not in that stand-in, so the box is the first place they run:
 Docker's logging driver and the broker's refusal counts (VPS 1), and the three Hermes services and the
-listener check (VPS 3). Each is marked below. The restart of the server's own journal service (VPS 3) is
+listener check (VPS 3). A fifth, VPS 1's `sshd release:` line, ran only against a stand-in's sshd. Each is marked below. The restart of the server's own journal service (VPS 3) is
 also a first: the rehearsal restarted the stand-in's. If one of them prints something other than the expected text, stop
 and report the output; do not go on.
 
@@ -1573,8 +1581,10 @@ Expected on this box, in this order:
 - `journal files:` about 22, and `disk used:` about 13% (both read on the box on 2026-10-10).
 - `journal on disk: yes` (seen on the box on 2026-10-11).
 - `settings paths that are links: 0` (seen on the box on 2026-10-11).
-- `sshd release:` and a text that starts `OpenSSH_9.6p1` (on the box on 2026-10-11:
-  `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`). It is the server program's own answer (`sshd -V`).
+- `sshd release:` and a text that starts `OpenSSH_9.6p1`. First run on the box in this form: the line
+  asks the server program itself (`sshd -V`), which has run only in the rehearsal. What was read on the
+  box on 2026-10-11 is the client program's answer (`ssh -V`): `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`. The
+  two come from the same release.
 - `sshd listeners: 1 | words starting -f or -o: 0` (the box's process list held one listener line on
   2026-10-11, with no `-f` and no `-o`; sshd is started through `ssh.socket`).
 - `docker logging: json-file`. First run on the box in this block (read there on 2026-10-10). The block
@@ -1586,7 +1596,10 @@ Expected on this box, in this order:
 go on.
 
 - `docker logging:` is `journald`. The containers then log through the service that VPS 3 restarts.
-- A `# /` line names a file other than those two, or a `Storage=` line is shown (the box's files set none).
+- A `# /` line names a file other than those two, or a `Storage=` line is shown (the box's files set
+  none). This is the rule BEFORE the step. When VPS 1 is run AFTER the step ("Reading it later"), our
+  file `/etc/systemd/journald.conf.d/50-hermes-retention.conf` is the third and is expected; any FOURTH
+  file is then the reason to stop.
 - `docker logging:` has nothing after it. Docker did not answer.
 - `journal files:` is `0`. The journal's directory could not be read (the block hides the error text,
   which would name the machine).
@@ -1674,14 +1687,15 @@ Expected:
 
 What to do when it differs:
 
-- Nothing stands after `oldest entry before:` (and `same:` is `NO`): the journal could not be read
-  before the restart. That is a failed read, not a loss. Stop and report; do not run VPS 4.
-- The journal service is not `active`, or `same:` is `NO` with a time after `before:`: **stop** and go
+- Look at `oldest entry before:` first. If no time stands between `before:` and the `|` after it, the
+  journal could not be read before the restart. That is a failed read, not a loss. Stop and report,
+  whatever the other lines say; do not run VPS 4.
+- `before:` shows a time, and the journal service is not `active` or `same:` is `NO`: **stop** and go
   to VPS 4.
 - `journal on disk: no`: paste the flush block below, once. If it still reads `no`, stop and report.
-- One of the three services is not `active`; or `listener_check_rc` is not `0`; or no line follows
-  `listener_check_rc=0` (the check wrote no line of its own to the journal); or that line does not start
-  `hermes-listener-check: status=ok`: stop and report the output. Do not run VPS 4 for that reason
+- One of the three services is not `active`; or `listener_check_rc` is not `0`; or the line right after
+  `listener_check_rc=0` is the date (the check wrote no line of its own to the journal); or that line
+  does not start `hermes-listener-check: status=ok`: stop and report the output. Do not run VPS 4 for that reason
   alone.
 
 **VPS, flush (only when `journal on disk:` reads `no`):**
@@ -1705,10 +1719,12 @@ time.
 **VPS 4, undo (only if needed).** It can be pasted again.
 
 ```bash
-sudo rm -f /etc/systemd/journald.conf.d/50-hermes-retention.conf; sudo rmdir /etc/systemd/journald.conf.d 2>/dev/null; sudo systemctl restart systemd-journald; sleep 5; echo "journal service: $(systemctl is-active systemd-journald) | our file still there: $([ -e /etc/systemd/journald.conf.d/50-hermes-retention.conf ] && echo YES || echo no)"
+sudo rm -f /etc/systemd/journald.conf.d/50-hermes-retention.conf; sudo rmdir /etc/systemd/journald.conf.d 2>/dev/null; sudo systemctl restart systemd-journald; sleep 5; echo "journal service: $(systemctl is-active systemd-journald) | our file still there: $([ -e /etc/systemd/journald.conf.d/50-hermes-retention.conf ] && echo YES || echo no)"; [ -d /etc/systemd/journald.conf.d ] && echo "directory still there: another file is in it"
 ```
 
-Expected: `journal service: active | our file still there: no`. Anything else: stop and report. Then
+Expected: `journal service: active | our file still there: no`, and no line after it. A second line,
+`directory still there: another file is in it`, means the settings directory was not empty and was
+left: report it. Anything else: stop and report. Then
 VPS 1 again: the settings are the server's own. The box is back to 7 days, and at the next daily trim
 everything older leaves the journal.
 
@@ -1718,10 +1734,13 @@ and file limits. What to do for each thing it can show:
 
 - `config_changed_after_start: true`: a settings file or directory changed after the service started
   (after this step, a system update that rewrites a settings file, or an edit). Run VPS 1 first.
-  **Stop** and report unless its settings lines are what VPS 2 expects and nothing more: the server's own
-  three lines unchanged, and no file other than the server's two and ours (VPS 1 does not show our
-  file's two lines; paste VPS 2's third line alone to see `MaxRetentionSec=35day` and
-  `SystemMaxFiles=500` under our file). Only then run VPS 3, and collect again. VPS 3 restarts the
+  After the step its settings lines are these, in this order: `# /etc/systemd/journald.conf`,
+  `SystemMaxUse=1G`, `MaxRetentionSec=7day`, `MaxFileSec=1day`; then
+  `# /etc/systemd/journald.conf.d/50-hermes-retention.conf`, `MaxRetentionSec=35day`,
+  `SystemMaxFiles=500`; then `# /usr/lib/systemd/journald.conf.d/syslog.conf` with nothing under it.
+  Here our file's line is expected: it is not the "other file" that VPS 1's stop rule means before the
+  step. **Stop** and report if a settings line differs, one is missing, or a fourth `# /` line is
+  there. Only when the lines are exactly these, run VPS 3, then collect again. VPS 3 restarts the
   service onto whatever the files now say, so they are read first.
 - `service.active` not `true`: the journal service is not running. Stop and report.
 - `usage.flushed_to_disk` not `true`, or `on_disk_age_seconds` above 600: run `sudo journalctl --flush`
@@ -1784,7 +1803,7 @@ gitignored `security-reviews/`; only the report is committed.
    The trial collection's closing list has thirteen lines. Each starts `ok` or `LOOK`. For a `LOOK`:
    - `every item observed (N items)`: it names the items that were not observed. Stop and report the summary.
    - `nothing in the bundle is could-not-check`: it gives the number of places. Find them in the items above it; for D2.4 see "Reading it later" under "The journal's retention". A collection run without `sudo` reads so in D2.3, D2.4 and D10.7.
-   - `sshd runs with its default settings file and no Match line`: read D1.7 in the summary. `match_lines`, `include_elsewhere`, `config_file_options` or `setting_options` above `0`: D1.7 then needs your statement in the evidence (step 6). `listeners` other than `1`, or `could-not-check` in `daemon_options`: the item cannot pass and no statement changes that; stop and report.
+   - `sshd runs with its default settings file and no Match line`: read D1.7 in the summary. `match_lines`, `include_elsewhere`, `config_file_options` or `setting_options` above `0`: D1.7 then needs your statement in the evidence (step 6). `listeners` other than `1`, or `could-not-check` in `daemon_options`, `match_lines` or `include_elsewhere`: the item cannot pass and no statement changes that; stop and report.
    - `the three live refusals are in the journal`: it names the missing ones. Run those live checks first (part 2 step 11).
    - `at least one run/ok result`: run a chat audit first (part 2 step 10).
    - `retention at least 30 days, set by our file, the file equal to the repository's, no other file`: "The journal's retention", VPS 1 and VPS 2.

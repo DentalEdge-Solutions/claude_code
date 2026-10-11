@@ -2701,6 +2701,115 @@ lines indented by four or more outside the fences after the first fence), and by
 sections with `marked` 12.0.2 (`npx`): step 11 with its neighbours 5 `<pre>` for 5 fences, the journal section 6
 for 6, "A security review" 1 for 1.
 
+#### Second round after review (2026-10-11 UTC): VPS 1 after the step, VPS 4's extra line, cut pastes of check a
+
+One block changed: VPS 4 now prints `directory still there: another file is in it` when the settings directory was
+not empty (its `rmdir` error stays hidden). The other eleven blocks are as in the round before (compared by
+script). All ran in `jr` as before (`sudo ` removed). Stand-ins: for the cut pastes, the switch and spool directories
+were made by hand, no broker ran and the client was the letter `x`; they were removed afterwards. The two refusal
+lines VPS 1 now prints in `jr` are the stand-in broker's lines of the round before, still in its journal (shell
+line-number prefixes of two error lines are cut).
+
+```
+===== vps1 (as jr stands: our file installed, the service restarted after it)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-10T17:43:26+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+sshd release: sh: 1: sshd: not found
+sshd listeners: 0 | words starting -f or -o: 0
+docker logging: 
+      1 status=refused reason=bad_request
+      2 status=refused reason=disabled
+Sun Oct 11 01:58:11 UTC 2026
+===== vps4 (undo; the directory is empty)
+journal service: active | our file still there: no
+===== vps2 (install again)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+===== (another file, other.conf, put in the directory)
+===== vps4 (undo; another file is in the directory)
+journal service: active | our file still there: no
+directory still there: another file is in it
+===== (the other file and the directory removed by hand)
+===== vps2 (install)
+# /etc/systemd/journald.conf
+MaxRetentionSec=7day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+files in the directory: 1
+===== vps3 (apply (no stand-in unit this round))
+journal service: active | started: Sun 2026-10-11 01:58:22 UTC | journal on disk: yes
+oldest entry before: 2026-10-10T17:43:26+00:00 | after: 2026-10-10T17:43:26+00:00 | same: yes
+hermes-broker: inactive
+hermes-docker-proxy: inactive
+hermes-app-broker@ads-audit: inactive
+Failed to start hermes-listener-check.service: Unit hermes-listener-check.service not found.
+listener_check_rc=5
+Sun Oct 11 01:58:27 UTC 2026
+===== vps1 (after the step, once more)
+# /etc/systemd/journald.conf
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=7day
+MaxFileSec=1day
+# /etc/systemd/journald.conf.d/50-hermes-retention.conf
+MaxRetentionSec=35day
+SystemMaxFiles=500
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+oldest entry: 2026-10-10T17:43:26+00:00
+journal files: 1 | disk used: 2%
+journal on disk: yes
+settings paths that are links: 0
+sshd release: sh: 1: sshd: not found
+sshd listeners: 0 | words starting -f or -o: 0
+docker logging: 
+      1 status=refused reason=bad_request
+      2 status=refused reason=disabled
+Sun Oct 11 01:58:27 UTC 2026
+===== check a, cut pastes (no broker; the switch and spool directories made by hand; 'x' as the client)
+--- the last line lost (piped, so bash reports the end of input where a terminal shows a > prompt)
+syntax error: unexpected end of file
+switch: ON | requests waiting: 0
+--- the first two lines lost
+syntax error near unexpected token `else'
+`else echo "a: STOPPED, the switch is not set | nothing was placed"; fi'
+a: UNEXPECTED [] | test request deleted | switch LEFT ON: stop
+switch: off | requests waiting: 0
+```
+
+- **VPS 1 after the step** (never run in that state before): between the server's own lines and the distribution's
+  `syslog.conf` line it prints `# /etc/systemd/journald.conf.d/50-hermes-retention.conf`, `MaxRetentionSec=35day`,
+  `SystemMaxFiles=500`. The runbook's "Reading it later" said VPS 1 does not show our file's lines: that was wrong
+  and is corrected to this order; VPS 1's stop rule now says that our file is the expected third file after the
+  step and a fourth is the reason to stop.
+- **VPS 4:** with an empty directory, the one expected line; with another file in the directory, the second line.
+- **Check a, the last line lost:** piped, bash reports the end of input (at a terminal it waits at a `>` prompt and
+  prints nothing); the switch is ON and no request was placed.
+- **Check a, the first two lines lost:** the inner lines ran without the guard (here: no broker, so `a: UNEXPECTED []
+  … switch LEFT ON`) and bash reports a syntax error at `else`; the switch was in fact OFF, so the printed text is
+  not true, as the runbook now says. (At a terminal the error comes after that text; here the two streams arrived
+  in the other order.)
+- VPS 2 and VPS 3 were run again to leave `jr` with our file installed and the service restarted after it (VPS 3's
+  listener lines are the `not found` ones: no stand-in unit this round).
+- Rendering checked again as before: step 11 5 `<pre>` for 5 fences, the journal section 6 for 6.
+
 ### Pasted twice, and stopped half-way: what was checked
 
 | Block | Pasted twice | A middle line fails |
@@ -2709,7 +2818,7 @@ for 6, "A security review" 1 for 1.
 | VPS 2 | Run twice: `install` writes the same directory and file again. Pasted after VPS 3 it rewrites the file, so D2.4 reads `config_changed_after_start: true` until VPS 3 runs again (the runbook says so; by reading, not run through the collector here). | Run in `jr12`: the second `install` failed, the last line shows no file of ours and `0`; the runbook says stop. What is left is an empty directory (its time is newer than the service's start, so D2.4 would show `config_changed_after_start: true` until the next restart; VPS 3 or VPS 4 restarts). |
 | VPS 3 | Run twice: a second restart; the oldest entry stayed the same; the start time is the second one, so the runbook says to give the first time. | If the restart fails the next line shows the state and `same:`; the runbook sends the operator to VPS 4. Changed from the brief: `same:` now reads `NO` when the first read printed nothing (two empty reads compared equal before). A restart that fails was not produced. |
 | The flush line | `journalctl --flush` again is harmless (run after a healthy flush and after a relinquish). | Its second part only reads. |
-| VPS 4 | Run twice, and once with nothing installed. | Changed from the brief, which had `rm … && restart`: had the restart been interrupted after the file was removed, a second paste would have stopped at `rm` (no such file) and never restarted, leaving the service running on settings whose file is gone. The block now uses `rm -f` and always restarts, and prints whether the file is gone. |
+| VPS 4 | Run twice, once with nothing installed, and once with another file in the directory (it then says the directory is still there). | Changed from the brief, which had `rm … && restart`: had the restart been interrupted after the file was removed, a second paste would have stopped at `rm` (no such file) and never restarted, leaving the service running on settings whose file is gone. The block now uses `rm -f` and always restarts, and prints whether the file is gone. |
 | The trial line | Read-only for what a review looks at (the collector's own note on its two probes stands). | The collector stopping is shown by `collector_rc` and the summary tool's own line (run in `jr`). |
 | The take-out block (new) | Run twice, and with another file present: the second time and the non-empty directory each give a harmless `rmdir` error. | Its last part only reads and says what is left. |
 | `kc` | Run twice. | Each part prints its own line; the two `STOPPED` paths return before the keychain is asked. |
