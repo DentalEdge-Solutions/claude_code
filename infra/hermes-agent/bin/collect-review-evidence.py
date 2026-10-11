@@ -587,6 +587,8 @@ def _account_names(host):
             return {line.split(":", 1)[0] for line in f.read().split("\n") if line and not line.startswith("#")}
     except (OSError, UnicodeDecodeError):
         return None
+
+
 _SSHD_OPTIONS_WITH_ARGUMENT = "CEbcfghkopu"          # sshd's getopt string: `C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrt`
 
 
