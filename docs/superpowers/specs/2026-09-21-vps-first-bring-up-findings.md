@@ -732,7 +732,7 @@ collection, on 2026-10-08, failed D10.7; this finding is why.
 
 | # | Finding | Decision | Now |
 |---|---|---|---|
-| F59 | D2.3 searches the message text of journal entries only. Other fields journald stores with an entry are not searched, for example the command line a process was started with (`_CMDLINE`): a secret typed into a command would be stored and not found. Measured 2026-10-10 (`docs/evaluations/2026-10-10-journal-retention-35-days.md`, R14 item 6). True since review #1; nothing suggests a leak (the services take secrets from protected files, not from commands). | state the limit in the checklist now; fix with the next box change (operator, 2026-10-10) | **open.** The checklist states the limit (D2.3, v1.19, "What this item cannot show"). The search itself is unchanged: widening it to the other fields is for the next box change. |
+| F59 | D2.3 searches the message text of journal entries only. Other fields journald stores with an entry are not searched, for example the command line a process was started with (`_CMDLINE`): a secret typed into a command would be stored and not found. Measured 2026-10-10 (`docs/evaluations/2026-10-10-journal-retention-35-days.md`, R14 item 6). True since review #1; nothing suggests a leak (the services take secrets from protected files, not from commands). | state the limit in the checklist now; fix with the next box change (operator, 2026-10-10) | **accepted at review #10's sign-off (2026-10-12)** for that review; fix with the next box change. The checklist states the limit (D2.3, v1.19, "What this item cannot show"). The search itself is unchanged: widening it to the other fields is for the next box change. |
 
 ## Final state of the box (end of session)
 
