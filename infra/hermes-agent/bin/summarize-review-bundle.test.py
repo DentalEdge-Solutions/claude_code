@@ -668,12 +668,18 @@ class TestSummary(unittest.TestCase):
         for change in (lambda d: d["history_counts"].__setitem__("could-not-check", "x"),      # not a count
                        lambda d: d["history_counts"].__setitem__("could-not-check", True),
                        lambda d: d["history_counts"].__setitem__("could-not-check", -1),
+                       lambda d: d["history_counts"].__setitem__("could-not-check", 10 ** 15),   # too long to print
                        lambda d: d.__setitem__("history_counts", "could-not-check"),           # the field not read
                        lambda d: d["alert_log"].__setitem__("could-not-check", 1),             # another dict
                        lambda d: d.__setitem__("could-not-check", 1)):
             b = clean()
             change(b["items"]["D4.5"]["data"])
             self.assertRegex(closing_of(b), r"(?m)^LOOK  nothing in the bundle is could-not-check \(1 place\)$")
+        b = clean()                                               # no number longer than the print rule allows
+        b["items"]["D4.5"]["data"]["history_counts"]["could-not-check"] = 4111111111111111
+        self.assertNotIn("4111111111111111", closing_of(b))
+        b["items"]["D4.5"]["data"]["history_counts"]["could-not-check"] = 10 ** 15 - 1
+        self.assertIn("(not counted: 999999999999999 past", closing_of(b))
         b = clean()                                               # an item that was not observed is not excused
         b["items"]["D4.5"] = {"status": "could-not-check", "data": {"history_counts": {"could-not-check": 1}}}
         self.assertRegex(closing_of(b), r"(?m)^LOOK  nothing in the bundle is could-not-check \(2 places\)$")
