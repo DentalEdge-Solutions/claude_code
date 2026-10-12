@@ -5,7 +5,7 @@ description: Security review #9 passed 37 of 37 on checklist v1.18, signed by th
 tags: []
 timestamp: 2026-10-09T15:39:00
 sources: [sessions/daily/2026-10-09.md]
-status: active
+status: superseded
 promoted_at: 2026-10-09
 ---
 
