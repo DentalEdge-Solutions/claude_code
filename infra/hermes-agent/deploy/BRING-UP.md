@@ -1357,32 +1357,119 @@ Requires part 1 on the box. Still not live until review #6.
     `sudo shred -u /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2`
     `sudo ls /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2` → both `No such file or directory`
 11. Live refusal checks (review D10.7 needs one each of `refused/disabled`, `refused/quota` and
-    `refused/bad_request` in the broker journal, 30 days back; the broker journal shows the client
-    short name by design). They place a request file in the spool the way the gateway's MCP tool does
-    (`requests/<uuid>.json`, as the broker's own user, which owns that directory) and read the journal
-    line the broker writes for it (it polls every 2 s). None runs an audit. Each line is one paste;
-    `<client>` is the client of step 10's chat audit.
-    a. Kill switch, then a request while it is set (any `run` request is refused before anything else is checked):
-    `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
-    `R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "<client>", "op": "run", "request_id": "%s"}' "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
-    → `hermes-app-broker[ads-audit]: request=<uuid> op=run client=<client> status=refused reason=disabled`
-    Only when that line has appeared: `sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED` (switch off again before the next check). If no line appeared (the broker is stopped or slow), delete the request first with `sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json`, check `systemctl is-active hermes-app-broker@ads-audit`, and only then remove the switch: a request still in `requests/` is decided afresh once the switch is gone, and could start a real audit.
-    b. Quota (the manifest allows one `run` per client per UTC day. The broker refuses a second one only
-    while a `run` for that client is HELD today: a `list` request, a `run` that ended `busy` and a run
-    from another day do not count. If none is held, the request below would be admitted and start a
-    real, paid audit.) Ask the broker's own counter, as root, on the same UTC day as step 10's audit:
-    `sudo python3 -c 'import sys; sys.path.insert(0, "/opt/hermes-agent/bin"); import app_lib as A; print("HELD_RUNS=%d" % A.Ledger("/var/lib/hermes/app-state/ads-audit/state/ledger.jsonl").count(A.utcnow()[:10], "run", "<client>"))'`
-    → `HELD_RUNS=1` is the only output that means safe to paste the next line (paste it at once, not after midnight UTC). Any other output (`HELD_RUNS=0`, an error): skip the quota check for today and run it after the next day's first real audit.
-    Then the same second-run request as in a:
-    `R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "<client>", "op": "run", "request_id": "%s"}' "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
-    → `... request=<uuid> op=run client=<client> status=refused reason=quota`
-    If no line appears, delete `requests/$R.json` as in a before doing anything else.
-    c. Malformed request. It must be a well-named file (`<36 characters of 0-9a-f and ->.json`, a fresh
-    uuid) with content the broker rejects (here `{}`: the keys are wrong): that is `refused/bad_request`.
-    A badly named file (any other name) is only `dropped/bad_request`, which does not count:
-    `R=$(cat /proc/sys/kernel/random/uuid); printf '{}' | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R"`
-    → `hermes-app-broker[ads-audit]: request=<uuid> op=- client=- status=refused reason=bad_request`
-    Confirm all three at once: `sudo journalctl -u hermes-app-broker@ads-audit --since -30d -o cat --no-pager | grep -oE 'status=refused reason=(disabled|quota|bad_request)' | sort | uniq -c` → one line each. Each refusal also leaves a result file in `results/` (the review's D10.8 lists them; they are in the whitelist).
+    `refused/bad_request` in the broker journal, 30 days back; with "The journal's retention" applied they
+    stay 35 days). They place a request file in the spool the way the gateway's MCP tool does and read the
+    journal line the broker writes for it (it polls every 2 s). None runs an audit. Each block is one paste
+    and prints only `status=… reason=…`, never the client; the client is typed once, at a hidden prompt.
+    These are the blocks used on the box on 2026-10-09; check a has one added guard around the same lines.
+    Check b needs a real chat audit for that client on the same UTC day (step 10) and places its request
+    only when the broker's own counter says exactly 1. Every block cleans up after itself: if the broker
+    does not answer, the test request is deleted, and in check a the kill switch is LEFT ON; say so and
+    stop.
+
+    How to run them. Do them on the day of step 10's chat audit, after it, in the order a, b, c. Run
+    `sudo -v` alone first, and again if more than a few minutes pass between two blocks, so that sudo's
+    password prompt cannot take the pasted lines that follow as password attempts. Paste each block
+    WHOLE, from its first line to its last. Report each block's output starting after the prompt line.
+    Wait for each block to print its line (about 6 seconds) before pasting the next. Off the box the
+    blocks were rehearsed only against a stand-in for the broker; b, c and the two others are written
+    here as they ran on the box on 2026-10-09.
+
+    **VPS, the client at a hidden prompt (once per login).** Paste this line ALONE; it waits. Then type
+    the client of step 10's chat audit and press Enter. Nothing typed is shown.
+
+```bash
+read -r -s -p "client (hidden): " C; echo; echo "length ${#C}"
+```
+
+Expected: `length ` and the number of characters you typed. Nothing else is printed. A wrong number:
+paste the line again and type it again.
+
+**VPS, live check a, the kill switch.** Any `run` request is refused while the switch is set, before
+anything else is checked. The checks assume the kill switch is OFF when you start (they run after the
+day's chat audit). Check a takes the switch off again when it succeeds, so do not use it while the
+switch is on for another reason. First run on the box in this form (the inner lines are those used on
+2026-10-09): the block now places its request only after it has seen that the switch is set. Paste the
+block WHOLE: a paste that misses its first two lines is not protected.
+
+```bash
+sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED
+if sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED; then
+R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "%s", "op": "run", "request_id": "%s"}' "$C" "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6
+L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_]+')
+if [ "$L" = "status=refused reason=disabled" ]; then sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED; echo "a: $L | switch off again: $(sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED && echo NO-STILL-ON || echo yes)"; else sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "a: UNEXPECTED [$L] | test request deleted | switch LEFT ON: stop"; fi
+else echo "a: STOPPED, the switch is not set | nothing was placed"; fi
+```
+
+Expected: `a: status=refused reason=disabled | switch off again: yes`. Every other output:
+
+- `a: STOPPED, the switch is not set | nothing was placed`: the block did not see the switch. Stop and
+  report. Nothing was placed; run the "afterwards" block to see whether the switch is on.
+- Nothing printed and a `>` prompt: the paste lost its last line. Press Ctrl-C. The switch is ON and
+  nothing was placed: take it off with step 9's `off:` line, then paste the block whole.
+- An error that names `else` (`syntax error near unexpected token`): the paste lost its first two
+  lines, so the request was placed without the guard. Any `switch LEFT ON` text printed above the
+  error is not true. Run the "afterwards" block to see the switch and the waiting requests, and report.
+  The request was placed with the switch off, so the broker decided it as a real request: with the
+  day's audit already held it is refused for quota and nothing starts; with none held it is admitted
+  and a real, paid audit of that client starts. Which of the two happened is not known until the
+  outputs are read: do not run check b that day, and say so in the report.
+- `a: UNEXPECTED […] | test request deleted | switch LEFT ON: stop`: the block has deleted the test
+  request and left the switch ON. Stop: read `systemctl is-active hermes-app-broker@ads-audit` and
+  report both outputs. Empty brackets (`[]`) can mean two things: the broker did not answer, or it
+  answered with a line this block cannot read, such as `status=queued reason=-` (the request was
+  admitted). With the switch set an admitted request is not expected; report it as it is.
+- While the switch is on, no audit can be started from chat. Take it off (step 9's `off` line) only
+  when the broker is `active` again and `sudo ls /var/lib/hermes/spool/apps/ads-audit/requests | wc -l`
+  prints `0`: a request still in `requests/` is decided afresh once the switch is gone, and could start
+  a real audit.
+
+**VPS, live check b, quota.** The manifest allows one `run` per client per UTC day.
+
+```bash
+H=$(sudo python3 -c 'import sys; sys.path.insert(0, "/opt/hermes-agent/bin"); import app_lib as A; print(A.Ledger("/var/lib/hermes/app-state/ads-audit/state/ledger.jsonl").count(A.utcnow()[:10], "run", sys.argv[1]))' "$C"); echo "HELD_RUNS=$H"
+if [ "$H" = "1" ]; then R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "%s", "op": "run", "request_id": "%s"}' "$C" "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "b: NO ANSWER | test request deleted: stop"; else echo "b: $L"; fi; else echo "b: SKIPPED, nothing was placed"; fi
+```
+
+Expected: `HELD_RUNS=1`, then `b: status=refused reason=quota`. The quota is counted only while a
+`run` for that client is held today: a `list` request, a `run` that ended `busy` and a run from
+another day do not count, and with none held the request would be admitted and start a real, paid
+audit. That is why the block places it only when the counter says exactly 1. Paste the block on the
+same UTC day as step 10's audit, not across midnight UTC. Every other output:
+
+- `b: SKIPPED, nothing was placed` (the counter said something other than 1, or the first line printed
+  an error): skip the quota check for today and run it after the next day's first real audit.
+- `b: NO ANSWER | test request deleted: stop`: stop and report it.
+- Any other `b:` line: stop and report it. `b: status=queued reason=-` means the request was admitted
+  and an audit is running.
+
+**VPS, live check c, a malformed request.** A well-named file (a fresh uuid) with content the broker
+rejects (`{}`: the keys are wrong).
+
+```bash
+R=$(cat /proc/sys/kernel/random/uuid); printf '{}' | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "c: NO ANSWER | test request deleted: stop"; else echo "c: $L"; fi
+```
+
+Expected: `c: status=refused reason=bad_request`. A badly named file (any other name) is only
+`dropped/bad_request`, which does not count; the block names its file correctly. Every other output:
+
+- `c: NO ANSWER | test request deleted: stop`: stop and report it.
+- Any other `c:` line: stop and report it.
+
+**VPS, afterwards.** It confirms all three at once, and forgets the client.
+
+```bash
+sudo journalctl -u hermes-app-broker@ads-audit --since -30d -o cat --no-pager | grep -oE 'status=refused reason=(disabled|quota|bad_request)' | sort | uniq -c
+echo "switch present: $(sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED && echo YES || echo no) | requests waiting: $(sudo ls /var/lib/hermes/spool/apps/ads-audit/requests | wc -l)"; unset C
+```
+
+Expected: three lines, each a count of 1 or more and one of `status=refused reason=bad_request`,
+`status=refused reason=disabled`, `status=refused reason=quota`; then `switch present: no | requests
+waiting: 0`. A missing line: that check did not happen; run it (the client must be read in again,
+because this block forgets it). `switch present: YES` or a number other than `0`: stop and report.
+Each refusal also leaves a result file in `results/` (the review's D10.8 lists them; they are in the
+whitelist).
+
 12. Rollback (only if part 2 must be undone):
     `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
     `sudo systemctl disable --now hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path`
@@ -1462,6 +1549,215 @@ server is back on: check that `platforms.api_server.enabled: false` is still in
 
 ---
 
+## The journal's retention (finding F58)
+
+The server came with a journal that keeps 7 days. The security review's leak checks read the journal, and
+the review needs the live refusal checks of part 2 step 11 to be in it, so the box keeps 35 days (review
+item D2.4 needs 30; a journal file is deleted whole, up to a day early). Until the journal is 30 days long,
+the review needs the date and time of VPS 3 (below) in its evidence. The setting lives in a file of our
+own; the server's `/etc/systemd/journald.conf` is not edited. Do it once, after a pull that brings
+`deploy/journald-hermes-retention.conf`, and before the first review on a new box. Measured beforehand:
+`docs/evaluations/2026-10-10-journal-retention-35-days.md` (its last section holds each block below as it
+ran in the rehearsal).
+
+How to run it. Run `sudo -v` alone first, so that sudo's password prompt cannot take a pasted line. Each
+block is one paste. Report its output starting after the prompt line. Go on to the next block only when
+the output is as expected.
+
+**First run on the box.** The blocks were rehearsed in a stand-in server (a container with systemd 255,
+the server's release). Four things are not in that stand-in, so the box is the first place they run:
+Docker's logging driver and the broker's refusal counts (VPS 1), and the three Hermes services and the
+listener check (VPS 3). A fifth, VPS 1's `sshd release:` line, ran only against a stand-in's sshd. Each is marked below. The restart of the server's own journal service (VPS 3) is
+also a first: the rehearsal restarted the stand-in's. If one of them prints something other than the expected text, stop
+and report the output; do not go on.
+
+**VPS 1, look (read-only; it changes nothing and can be pasted again):**
+
+```bash
+sudo sh -c 'systemd-analyze cat-config systemd/journald.conf | grep -E "^# /|^(MaxRetentionSec|SystemMaxUse|SystemMaxFiles|MaxFileSec|SystemKeepFree|Storage)[[:space:]]*="; echo "oldest entry: $(journalctl -q --no-pager -o short-iso --no-hostname -n +1 | cut -c1-25)"; echo "journal files: $(ls /var/log/journal/$(cat /etc/machine-id) 2>/dev/null | wc -l) | disk used: $(df --output=pcent /var/log/journal | tail -1 | tr -d " ")"; echo "journal on disk: $([ -f /run/systemd/journal/flushed ] && echo yes || echo no)"; echo "settings paths that are links: $(for p in /etc /etc/systemd /etc/systemd/journald.conf.d /run /run/systemd /usr /usr/lib /usr/lib/systemd /usr/lib/systemd/journald.conf.d /usr/local /usr/local/lib /var /var/log /var/log/journal; do [ -L "$p" ] && echo x; done | wc -l)"; echo "sshd release: $(sshd -V 2>&1 | head -1 | cut -d, -f1)"; echo "sshd listeners: $(ps -ww -C sshd -o args= | grep -c "\[listener\]") | words starting -f or -o: $(ps -ww -C sshd -o args= | grep "\[listener\]" | tr " " "\n" | grep -cE "^-[A-Za-z]*[fo]")"; echo "docker logging: $(docker info --format "{{.LoggingDriver}}" 2>/dev/null)"; journalctl -u hermes-app-broker@ads-audit --since -30d -o cat --no-pager | grep -oE "status=refused reason=(disabled|quota|bad_request)" | sort | uniq -c'; date -u
+```
+
+Expected on this box, in this order:
+
+- `# /etc/systemd/journald.conf`, then `SystemMaxUse=1G`, `MaxRetentionSec=7day`, `MaxFileSec=1day`.
+- `# /usr/lib/systemd/journald.conf.d/syslog.conf`, with nothing under it.
+- `oldest entry:` and a time 6 to 8 days back.
+- `journal files:` about 22, and `disk used:` about 13% (both read on the box on 2026-10-10).
+- `journal on disk: yes` (seen on the box on 2026-10-11).
+- `settings paths that are links: 0` (seen on the box on 2026-10-11).
+- `sshd release:` and a text that starts `OpenSSH_9.6p1`. First run on the box in this form: the line
+  asks the server program itself (`sshd -V`), which has run only in the rehearsal. What was read on the
+  box on 2026-10-11 is the client program's answer (`ssh -V`): `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`. The
+  two come from the same release.
+- `sshd listeners: 1 | words starting -f or -o: 0` (the box's process list held one listener line on
+  2026-10-11, with no `-f` and no `-o`; sshd is started through `ssh.socket`).
+- `docker logging: json-file`. First run on the box in this block (read there on 2026-10-10). The block
+  hides Docker's own error text, so a Docker that does not answer shows as nothing after the colon.
+- Up to three lines, each a count and `status=refused reason=…`. First run on the box in this block.
+- The date and time (UTC).
+
+**Stop** and report the output, and do nothing else, in each of these cases. None of them is a reason to
+go on.
+
+- `docker logging:` is `journald`. The containers then log through the service that VPS 3 restarts.
+- A `# /` line names a file other than those two, or a `Storage=` line is shown (the box's files set
+  none). This is the rule BEFORE the step. When VPS 1 is run AFTER the step ("Reading it later"), our
+  file `/etc/systemd/journald.conf.d/50-hermes-retention.conf` is the third and is expected; any FOURTH
+  file is then the reason to stop.
+- `docker logging:` has nothing after it. Docker did not answer.
+- `journal files:` is `0`. The journal's directory could not be read (the block hides the error text,
+  which would name the machine).
+- `journal on disk:` is `no`. The journal is then kept in memory, and review item D2.4 cannot pass.
+- `settings paths that are links:` is not `0`. D2.4 refuses a settings path that is a link.
+- `sshd release:` does not start `OpenSSH_9.6p1`. What the review reads of an SSH key line was measured on that
+  release.
+- `sshd listeners:` is not `1`. Review item D1.7 then cannot pass (CANNOT-VERIFY), and no statement of
+  yours changes that. Stop and report.
+- `sshd listeners:` is `1` and the number after it is not `0`. sshd then runs with a settings file or
+  settings of its own (`-f`, `-o`). D1.7 can pass only with your statement, in the evidence, of the
+  file or the settings and of what they change. Stop and report before going on.
+
+The collector reads the same process list more strictly than these two counts. It sorts the options
+into `-f` and `-o`, where this line gives one number for both, so this number can be higher than the
+collector's two together and never lower. And when a line of the list is cut short or has a form it
+does not know, the collector reports `could-not-check` (CANNOT-VERIFY) where this line still shows a
+count.
+
+What the rehearsal printed, for comparison. The stand-in's own settings file also sets
+`Storage=persistent`, so that line was shown there; its journal has 1 file and its disk is 2% used. With
+an sshd running in it, the two sshd lines read `OpenSSH_9.6p1 Ubuntu-3ubuntu13.19` and `1 | … 0`, and the
+collector's `daemon_options` read `1`, `0`, `0` beside them. It has no Docker and no broker, so
+`docker logging:` had nothing after it, and no refusal line was printed.
+
+**VPS 2, install the file and read the settings again.** The journal service is told nothing yet. It
+can be pasted again before VPS 3: the same file is installed again. Pasted again AFTER VPS 3 it rewrites
+the file, so D2.4 shows `config_changed_after_start: true` until VPS 3 is run once more.
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d
+sudo install -o root -g root -m 0644 /opt/projects/claude_code/infra/hermes-agent/deploy/journald-hermes-retention.conf /etc/systemd/journald.conf.d/50-hermes-retention.conf
+systemd-analyze cat-config systemd/journald.conf | grep -E "^# /|^(MaxRetentionSec|SystemMaxFiles)[[:space:]]*="; echo "files in the directory: $(ls /etc/systemd/journald.conf.d | wc -l)"
+```
+
+Expected, in this order: `# /etc/systemd/journald.conf`, `MaxRetentionSec=7day`,
+`# /etc/systemd/journald.conf.d/50-hermes-retention.conf`, `MaxRetentionSec=35day`, `SystemMaxFiles=500`,
+`# /usr/lib/systemd/journald.conf.d/syslog.conf`, then `files in the directory: 1`. The LAST
+`MaxRetentionSec=` line is the one that counts.
+
+**Stop** unless that last line is `35day`, it stands under our file's line, and the directory holds 1
+file. This also covers an error from one of the two `install` lines (for example the pull was not done:
+`cannot stat`). Then paste the block below and report both outputs. Nothing has changed for the running
+service at this point.
+
+**VPS, take the file out again (only after a stop in VPS 2):**
+
+```bash
+sudo rm -f /etc/systemd/journald.conf.d/50-hermes-retention.conf; sudo rmdir /etc/systemd/journald.conf.d; echo "our file still there: $([ -e /etc/systemd/journald.conf.d/50-hermes-retention.conf ] && echo YES || echo no) | directory still there: $([ -d /etc/systemd/journald.conf.d ] && echo yes || echo no)"
+```
+
+Expected: `our file still there: no | directory still there: no`. The empty directory is removed too,
+because a directory made after the service started also reads as "changed after start" in D2.4. If
+another file is in the directory, `rmdir` says `Directory not empty` and leaves it: that is harmless;
+the line then ends `directory still there: yes`, and you report it. Pasted a second time, `rmdir` says
+`No such file or directory`: harmless too.
+
+Our file must be the only file in that directory: D2.4 fails with any other file there. Never put a
+settings file under `/run/systemd/journald.conf.d` on this box. That directory vanishes at a reboot, and
+D2.4 cannot see a directory that was removed whole after the service started.
+
+**VPS 3, apply.** It restarts the journal service. It can be pasted again: a second restart does no harm.
+
+```bash
+B=$(sudo journalctl -q --no-pager -o short-iso --no-hostname -n +1 | cut -c1-25); sudo systemctl restart systemd-journald; sleep 5
+A=$(sudo journalctl -q --no-pager -o short-iso --no-hostname -n +1 | cut -c1-25); echo "journal service: $(systemctl show systemd-journald -p ActiveState --value) | started: $(systemctl show systemd-journald -p ActiveEnterTimestamp --value) | journal on disk: $([ -f /run/systemd/journal/flushed ] && echo yes || echo no)"; echo "oldest entry before: $B | after: $A | same: $([ -n "$B" ] && [ "$B" = "$A" ] && echo yes || echo NO)"
+for u in hermes-broker hermes-docker-proxy hermes-app-broker@ads-audit; do echo "$u: $(systemctl is-active $u)"; done
+sudo systemctl start hermes-listener-check.service; echo "listener_check_rc=$?"; sudo journalctl -u hermes-listener-check --since -1min -o cat --no-pager | grep '^hermes-listener-check: ' | tail -1
+date -u
+```
+
+Expected:
+
+- `journal service: active`, a start time about 5 seconds before the block's last line, and
+  `journal on disk: yes`.
+- `oldest entry before:` and `after:` with the same time, and `same: yes`. The oldest entry is still
+  there.
+- Three lines ending `active`. First run on the box: the stand-in has none of these services, and
+  printed `inactive` for each.
+- `listener_check_rc=0`, then a line starting `hermes-listener-check: status=ok`. First run on the box
+  (rehearsed with a stand-in service of that name that writes such a line). It shows that a service
+  started after the restart writes to the journal. The block shows only the check's own line, not
+  systemd's lines about the service.
+- The date and time (UTC). Write it down: the review's evidence needs it (see below).
+
+What to do when it differs:
+
+- Look at `oldest entry before:` first. If no time stands between `before:` and the `|` after it, the
+  journal could not be read before the restart. That is a failed read, not a loss. Stop and report,
+  whatever the other lines say; do not run VPS 4.
+- `before:` shows a time, and the journal service is not `active` or `same:` is `NO`: **stop** and go
+  to VPS 4.
+- `journal on disk: no`: paste the flush block below, once. If it still reads `no`, stop and report.
+- One of the three services is not `active`; or `listener_check_rc` is not `0`; or the line right after
+  `listener_check_rc=0` is the date (the check wrote no line of its own to the journal); or that line
+  does not start `hermes-listener-check: status=ok`: stop and report the output. Do not run VPS 4 for that reason
+  alone.
+
+**VPS, flush (only when `journal on disk:` reads `no`):**
+
+```bash
+sudo journalctl --flush; echo "journal on disk: $([ -f /run/systemd/journal/flushed ] && echo yes || echo no)"
+```
+
+Expected: `journal on disk: yes`.
+
+Then run live check c of part 2 step 11 (the malformed request). Its `c: status=refused
+reason=bad_request` shows that the audit broker, which was running through the restart, still writes to
+the journal. `hermes-broker` and `hermes-docker-proxy` have no harmless request to make them write; the
+rehearsal showed a long-running service logging through the restart.
+
+Put the date and time of this block (UTC) into the next review's evidence. D2.4 asks for the date the
+retention was raised until the journal is 30 days long. The restart of the journal service is not among
+the starts that D4.6 reports, so nothing else records it. If the block was pasted twice, give the first
+time.
+
+**VPS 4, undo (only if needed).** It can be pasted again.
+
+```bash
+sudo rm -f /etc/systemd/journald.conf.d/50-hermes-retention.conf; sudo rmdir /etc/systemd/journald.conf.d 2>/dev/null; sudo systemctl restart systemd-journald; sleep 5; echo "journal service: $(systemctl is-active systemd-journald) | our file still there: $([ -e /etc/systemd/journald.conf.d/50-hermes-retention.conf ] && echo YES || echo no)"; [ -d /etc/systemd/journald.conf.d ] && echo "directory still there: another file is in it"
+```
+
+Expected: `journal service: active | our file still there: no`, and no line after it. A second line,
+`directory still there: another file is in it`, means the settings directory was not empty and was
+left: report it. Anything else: stop and report. Then
+VPS 1 again: the settings are the server's own. The box is back to 7 days, and at the next daily trim
+everything older leaves the journal.
+
+Reading it later. Review item D2.4 reports the reach, the settings and the file that sets each, whether
+the running service has read them, whether the journal is written to disk, and how near it is to its size
+and file limits. What to do for each thing it can show:
+
+- `config_changed_after_start: true`: a settings file or directory changed after the service started
+  (after this step, a system update that rewrites a settings file, or an edit). Run VPS 1 first.
+  After the step its settings lines are these, in this order: `# /etc/systemd/journald.conf`,
+  `SystemMaxUse=1G`, `MaxRetentionSec=7day`, `MaxFileSec=1day`; then
+  `# /etc/systemd/journald.conf.d/50-hermes-retention.conf`, `MaxRetentionSec=35day`,
+  `SystemMaxFiles=500`; then `# /usr/lib/systemd/journald.conf.d/syslog.conf` with nothing under it.
+  Here our file's line is expected: it is not the "other file" that VPS 1's stop rule means before the
+  step. **Stop** and report if a settings line differs, one is missing, or a fourth `# /` line is
+  there. Only when the lines are exactly these, run VPS 3, then collect again. VPS 3 restarts the
+  service onto whatever the files now say, so they are read first.
+- `service.active` not `true`: the journal service is not running. Stop and report.
+- `usage.flushed_to_disk` not `true`, or `on_disk_age_seconds` above 600: run `sudo journalctl --flush`
+  and collect again. If it is still so, stop and report.
+- `settings` reads `could-not-check`: a settings file holds a line the collector does not recognise, a
+  listed file is not an ordinary file, or a directory is a link. Read the files named by
+  `systemd-analyze cat-config --tldr systemd/journald.conf`. Do not edit the server's own file to "fix"
+  it without asking.
+- A size or file limit at 90% or more, or free space under 20%: nothing to do on the day. The item then passes only when the
+  journal is measured to reach 30 days.
+
+---
+
 ## Replace the OpenRouter key
 
 The gateway's OpenRouter key is the box's alone: created in the OpenRouter console for the box
@@ -1501,17 +1797,35 @@ of the old `.env` is made (the review's sweep reports one as `unlisted`, a FAIL)
 
 ## A security review
 
-Since checklist v1.17 it also needs the listener check installed and running ("The listener check"; D4.5), and reads the dashboard's secrets in whichever form Phase 7 left them (D2.1, D4.1); since v1.18 it also reads the accepted SSH keys (D1.7) and each service's start time (D4.6).
+Since checklist v1.17 it also needs the listener check installed and running ("The listener check"; D4.5), and reads the dashboard's secrets in whichever form Phase 7 left them (D2.1, D4.1); since v1.18 it also reads the accepted SSH keys (D1.7) and each service's start time (D4.6); since v1.19 it reads the journal's reach and settings (D2.4), which needs "The journal's retention" applied. Since v1.19 the collection MUST be run with `sudo`: the journal is read as root only, and D2.3, D10.7 and parts of D2.4 are `could-not-check` otherwise.
 Run it after parts 1 and 2 are applied and the rollback backups are shredded (part 2 step 10;
-the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three live refusal checks of part 2 step 11 must have been run within the last 30 days (D10.7). The chat audit of part 2 step 10 must have returned `ok` within the last 7 days (D10.8: the broker deletes a result 7 days after writing it): collect the evidence within 7 days of that audit, or run another chat audit first. Raw bundles live in the
+the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three live refusal checks of part 2 step 11 must be in the journal, at most 30 days back (D10.7; read the three counts with the last line of step 11 before collecting, never assume them). The chat audit of part 2 step 10 must have returned `ok` within the last 7 days (D10.8: the broker deletes a result 7 days after writing it): collect the evidence within 7 days of that audit, or run another chat audit first. Raw bundles live in the
 gitignored `security-reviews/`; only the report is committed.
 
 1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
-2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is four lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. Then count the `Match` blocks in the sshd configuration (D1.7): `sudo sh -c 'cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | grep -ciE "^[[:space:]]*match[[:space:]]"'` prints the number of `Match` lines; expected `0`. Put the number in the evidence file (D1.7 cannot pass without it); another number needs your statement of what each block sets. The command reads those two fixed places only: it also prints `0` when neither can be read, and a `Match` line in a file that an `Include` brings in from another directory is not counted, so say in the evidence that the count covers `/etc/ssh/sshd_config` and `/etc/ssh/sshd_config.d/*.conf` (rehearsed on a stand-in server: `0`, `1` and `2`; on the box it runs for the first time). After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's (the collector run once with a throwaway key before the real collection, to see that every item is observed: `K=$(openssl rand -hex 32); echo "throwaway key: $K"` prints the key, 64 characters, which is typed or pasted at the collector's key prompt and discarded afterwards) D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
+2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is four lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. The collector counts the sshd `Match` lines itself since v1.19, and reads how the running sshd was started (D1.7 `match_lines`, `include_elsewhere` and `daemon_options`): nothing is pasted by the operator for them. After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's (the collector run once with a throwaway key before the real collection, to see that every item is observed: `K=$(openssl rand -hex 32); echo "throwaway key: $K"` prints the key, 64 characters, which is typed or pasted at the collector's key prompt and discarded afterwards; pipe it into the summary tool, ALONE: `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty | python3 infra/hermes-agent/bin/summarize-review-bundle.py; echo "collector_rc=${PIPESTATUS[0]}"`. It lists every item with its status and ends with a list headed "Before the real collection": every line there should read `ok`, and a `LOOK` line says what to settle first (the fifteen lines are listed under this step). It prints numbers, yes or no, times and words from fixed lists only (a name, a path or anything else shows as `<withheld>` or `<other>`), so its output can be pasted in full) D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
+   The trial collection's closing list has fifteen lines. Each starts `ok` or `LOOK`. On this box some of them read `LOOK` on every trial, and more of them before the journal step ("The journal's retention", VPS 1 to VPS 3); compare line by line. BEFORE the journal step, five lines read `LOOK`: `nothing in the bundle is could-not-check` (with `(3 places)`, all three in D2.4's `drop_in`: our settings file is not installed yet, so its owner, group and mode cannot be read), `retention at least 30 days, …` (our file does not set it yet), `the journal reaches 30 days` (the journal holds 6 to 7 days), `no other journal directory and no missing days` (with `(1 other: needs your statement in the evidence)`) and `the proxy matches the last PASS`. AFTER the journal step, three lines read `LOOK`: `the journal reaches 30 days` (until about 23 days after the step), `no other journal directory and no missing days` (on every trial, see its line below) and `the proxy matches the last PASS` (on every trial); `nothing in the bundle is could-not-check` and the retention line must then read `ok`. Every other line should read `ok` both times. A `LOOK` that is not in this list, a number of places other than 3 before the step, or a place outside D2.4's `drop_in`: do what its line below says. For a `LOOK`:
+   - `every item observed (N items)`: it names the items that were not observed. Stop and report the summary.
+   - `nothing in the bundle is could-not-check`: it gives the number of places. Find them in the items above it; for D2.4 see "Reading it later" under "The journal's retention". A collection run without `sudo` reads so in D2.3, D2.4 and D10.7.
+   - `sshd runs with its default settings file and no Match line`: read D1.7 in the summary. `match_lines`, `include_elsewhere`, `config_file_options` or `setting_options` above `0`: D1.7 then needs your statement in the evidence (step 6). `listeners` other than `1`, or `could-not-check` in `daemon_options`, `match_lines` or `include_elsewhere`: the item cannot pass and no statement changes that; stop and report.
+   - `the three live refusals are in the journal`: it names the missing ones. Run those live checks first (part 2 step 11).
+   - `at least one run/ok result`: run a chat audit first (part 2 step 10).
+   - `retention at least 30 days, set by our file, the file equal to the repository's, no other file, root:root 0644`: "The journal's retention", VPS 1 and VPS 2. The last words are our settings file's owner, group and mode as D2.4 `drop_in` shows them (`owner_is_root`, `group_is_root`, `mode`): anything else is a failed review item, so install the file again as VPS 2 does.
+   - `the journal reaches 30 days`: expected until about 23 days after the retention was raised (the journal already held about 7 days). The evidence then needs the date and time of VPS 3 (step 6).
+   - `the journal search read everything it was given`: read D2.3 in the summary and report it.
+   - `no leak count above 0 (D2.3, D10.7)`: with `(a count is above 0: this is a FAIL, not a reminder)`, stop: this is a failed review item (credential text or a customer id is in the journal). Do not go on to the real collection. Report the summary, and do not paste any journal line anywhere. With `(a count was not read)`: read D2.3 and D10.7 in the summary and report them.
+   - `the running journal service has read its settings`: "The journal's retention", "Reading it later" (VPS 1 first, then VPS 3), then collect again.
+   - `the journal is being written to disk`: `sudo journalctl --flush`, then collect again; still `LOOK`: stop and report.
+   - `no other journal directory and no missing days`: on this box ONE other directory is expected (an old file from the machine the server image was built on), so this line reads `LOOK` with `(1 other: needs your statement in the evidence)` on every trial; the statement is the one step 6 describes, and it goes in the evidence file at any reach. A number other than 1, `(fewer files than days: needs explaining)` or `(not read)`: stop and report the summary.
+   - `the proxy matches the last PASS`: this trial command names no last PASS, so the line always reads `LOOK` here. Step 3's real collection gives it; after a `systemctl daemon-reload` see step 3.
+   - `no service runs older code than the box holds`: restart the service that D4.6 `files_newer_than_start` counts (above), then collect again.
+   - `fingerprint complete`: stop and report the summary.
+   The command's last line is `collector_rc=0`. Another number, or `summarize-review-bundle: not a box bundle`: the collector stopped; read its own message and report it. First run on the box: the pipe was rehearsed in the stand-in, where most items cannot be observed.
 3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):
    `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <the last PASS report's execstart_sha256> --last-pass-collected-at <the last PASS box bundle's collected_at> > ~/bundle-box.json`
    (the collector re-runs both probes as D10.1 and D10.2, so this step takes as long as step 2 again; `--last-pass-execstart` is the last PASS report's D4.2 `execstart_sha256`, 64 lowercase hex characters. `--last-pass-collected-at` is in the last PASS report's header from review #9 on; for review #9 itself, read it from review #8's bundle.)
    Once the key is pasted, clear the laptop's clipboard: `pbcopy < /dev/null`.
+   A value that is pasted at a prompt on the box is copied in a SECOND laptop window, after the block is pasted and its prompt is waiting: copying the block itself replaces what the clipboard held.
    If the proxy's `ExecStart` hash will not match the last PASS (D4.2) because `systemctl daemon-reload` ran since
    then (part 2 step 4 runs one, and so does "The listener check"; the line then shows `start_time=[n/a]` and `pid=0` for a running proxy), put this
    output in the operator evidence file. Its first hash is the bundle's `execstart_sha256`; its second puts the
@@ -1519,7 +1833,30 @@ gitignored `security-reviews/`; only the report is committed.
    `L=$(systemctl show hermes-docker-proxy -p ExecStart --no-pager); P=$(systemctl show hermes-docker-proxy -p MainPID --value); T=$(systemctl show hermes-docker-proxy -p ExecMainStartTimestamp --value); echo "pid=$P start=$T"; printf '%s\n' "$L" | sha256sum; printf '%s\n' "$L" | sed "s/start_time=\[n\/a\] ; stop_time=\[n\/a\] ; pid=0/start_time=[$T] ; stop_time=[n\/a] ; pid=$P/" | sha256sum`
 4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file, and refuses one with any group or other access: it is `0600`; the ads repo checked out at the pin, with `.claude/settings.json` stashed).
 5. Copy the box bundle to the laptop's `security-reviews/`, and delete it from the box. Check that both bundles show the same `cid_key_id`.
-6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement that the `ok` run came from chat, D1.7's statement of whose each accepted key is (and the `Match` count of step 2), D4.6's statement of each restart since the last PASS (what started, when, why).
+6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement that the `ok` run came from chat, D1.7's statement of whose each accepted key is (and of any `Match` block, `Include` of another place or daemon option, none expected; and, when `allowtcpforwarding` is `local`, of when it was set), D2.4's date the journal's retention was raised (while `reach_days` is under 30) with the time the journal service was restarted, D2.4's statement of the other directory under `/var/log/journal` (on this box there is one: an old file from the machine the server image was built on, outside the live journal; the operator decided on 2026-10-10 to leave it and state it; the statement is needed at any reach, whenever `other_directories` is above `0`), D2.4's explanation of `usage.files` lower than `reach_days` (whenever it is so, at any reach), the laptop keychain check below, D4.6's statement of each restart since the last PASS (what started, when, why). While `reach_days` is under 30 the report states the days D2.3's search covered and the days the two unit journals of D10.7 covered (REPORT-TEMPLATE has both lines). Every console screen and every pasted output is read in full before it goes into the evidence file: twice a paste turned out to be the day before's, and once a screen showed more than the statement said.
+7. Laptop, for the evidence file: is the administrative key's passphrase still out of the keychain (step 7f
+   took it out)? LAPTOP, one paste: one function and its call; it prints counts only. The first two lines
+   only read. The third part asks the keychain to load what it holds, which is the only way to see what it
+   would supply. That loads every key whose passphrase the keychain holds into the laptop's ssh agent, as
+   a login does. If it supplies the administrative key, the block takes that key out of the agent again
+   and prints how many times it is still there (`still in the agent: 0` is expected). It can be pasted again.
+
+```bash
+kc() {
+  local FP K="$HOME/.ssh/vps-hermes"
+  echo "UseKeychain lines left in the file: $(grep -ciE '^[[:space:]]*usekeychain([[:space:]=]|$)' "$HOME/.ssh/config" 2>/dev/null)"
+  echo "ssh on the new alias: $(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box-tunnel$' | wc -l | tr -d ' '); ssh on the old alias: $(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box$' | wc -l | tr -d ' ')"
+  FP=$(ssh-keygen -lf "$K.pub" 2>/dev/null | awk '{print $2}')
+  [ -n "$FP" ] || { echo "STOPPED: could not read the key's public file"; return; }
+  if [ "$(ssh-add -l 2>/dev/null | grep -cF "$FP")" != 0 ]; then echo "STOPPED: the key is in the agent already (a work session): run this again after 'ssh-add -d ~/.ssh/vps-hermes'"; return; fi
+  ssh-add --apple-load-keychain >/dev/null 2>&1; echo "keychain load rc=$?"
+  if [ "$(ssh-add -l 2>/dev/null | grep -cF "$FP")" = 0 ]; then echo "supplied by the keychain: 0"; else ssh-add -d "$K" >/dev/null 2>&1; echo "supplied by the keychain: 1 -- the passphrase is in the keychain again; still in the agent: $(ssh-add -l 2>/dev/null | grep -cF "$FP") (0 expected); stop and report"; fi
+}; kc; unset -f kc
+```
+
+   Expected: `UseKeychain lines left in the file: 0`; `ssh on the new alias: 1; ssh on the old alias: 0`;
+   `keychain load rc=0`; `supplied by the keychain: 0`. Paste the four lines into the evidence file. Any
+   other output: stop and report it; do not run step 7f's removal again without asking.
 
 ---
 
@@ -2296,9 +2633,9 @@ nothing. Rehearsed against the stand-in server, whose page answers `302` as the 
 the six expected lines, six accepted logins and no refused one in that server's log. The same
 block with the administrative key gave `20 bytes, link up`, `OPENED`, `13 bytes, link up` and
 `rc=0`, so each test can tell allowed from refused; with the key's line taken off the server it
-printed `T1 … -> 000` and `STOPPED after T1`, and the server logged ONE refused login. macOS's own
-`nc`, `curl` and `ssh` against a real server were not rehearsed: pasted into zsh on this Mac the
-block ran only with `ssh`, `scp` and `curl` replaced by stand-ins.
+printed `T1 … -> 000` and `STOPPED after T1`, and the server logged ONE refused login. Run for real
+on this Mac against the box on 2026-10-08: gate `rc=1`, T1 `302`, T4 `0 bytes, link up`, T5a `refused`,
+T5b `refused`, T6 `0 bytes, link up`, T7 `rc=255`.
 
 LAPTOP 4a: the login item's file, only after every line of LAPTOP 3b is as expected. It changes
 the file's tenth argument from `hermes-box` to `hermes-box-tunnel`, and changes nothing when the
@@ -2336,8 +2673,7 @@ could not be written (second line: `hermes-box`); a file whose tenth argument is
 instead of replacing the tenth (measured in the review of this runbook).
 
 LAPTOP 4b: reload the login item, only after LAPTOP 4a's second line reads `hermes-box-tunnel`.
-**First run on this laptop, not rehearsed**: the rehearsal replaced `launchctl` by a stand-in, so
-only the block's own check and its order were run.
+Run for real on this Mac on 2026-10-08: `RELOADED: bootstrap rc=0`.
 
 ```bash
 P=~/Library/LaunchAgents/com.dentaledge.hermes-box-tunnel.plist
@@ -2357,9 +2693,9 @@ not loaded) is not a failure by itself. Every other output:
   1` is the second). The box is not affected in either case. Run LAPTOP 4b once more. If the number
   is again not `0`, run LAPTOP 4c, then stop and report both outputs; do not go on to LAPTOP 5a.
 
-LAPTOP 4c: is the link up, and on which alias? Read-only; it can be run again. **First run on this
-laptop, not rehearsed for real**: its `launchctl print` ran only as a stand-in, and the other two
-lines ran with another port number against a scratch page and stand-in processes.
+LAPTOP 4c: is the link up, and on which alias? Read-only; it can be run again. Run for real on this Mac
+on 2026-10-08: `state = running` together with two `state = active` lines, `302`, `ssh on the new
+alias: 1; ssh on the old alias: 0`.
 
 ```bash
 launchctl print gui/$(id -u)/com.dentaledge.hermes-box-tunnel | grep -E '^\s*state = '
@@ -2367,10 +2703,12 @@ curl -s -o /dev/null -w 'dashboard through the link -> %{http_code}\n' --max-tim
 echo "ssh on the new alias: $(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box-tunnel$' | wc -l | tr -d ' '); ssh on the old alias: $(pgrep -f '19119:127\.0\.0\.1:9119 hermes-box$' | wc -l | tr -d ' ')"
 ```
 
-Expected: `state = running`; `dashboard through the link -> 302`; `ssh on the new alias: 1; ssh on
+Expected: one `state = running` line (this macOS also prints two `state = active` lines, from nested
+sections of `launchctl print`: they are not a fault; what matters is that `state = running` is
+there); `dashboard through the link -> 302`; `ssh on the new alias: 1; ssh on
 the old alias: 0`. Every other output:
 
-- No `state = ` line, or another state; or a code other than `302`; or `ssh on the new alias: 0`
+- No `state = running` line; or a code other than `302`; or `ssh on the new alias: 0`
   (no forward is running on the new key): the login item starts its `ssh` at most once every two
   minutes. Wait two minutes and run LAPTOP 4c again, ONCE. If any of the three is still not as
   expected, do not go on to the next block, and FIRST stop the login item (below), then report.
@@ -2491,7 +2829,8 @@ keychain_out() {
 ```
 
 Expected: `Identity added: …`, `in the agent before: 1`, `Identity removed: …`, `in the agent
-after: 0`, `keychain load rc=0`, `supplied by the keychain: 0`. If the first line asks for the
+after: 0`, `keychain load rc=0`, `supplied by the keychain: 0`. The first and third lines carry the
+key's path and its comment: do not paste those two lines, report the other four. If the first line asks for the
 passphrase (the keychain did not hold it, as on a second run), type it: that line stores it and the
 next line removes it again. Every other output:
 
@@ -2508,10 +2847,8 @@ next line removes it again. Every other output:
   to LAPTOP 6. (Rehearsed with a stand-in that ends with `1`: `keychain load rc=1`, then `0`.
   Measured for real on this Mac with the throwaway key: `rc=0` both while the keychain held that
   key's passphrase and after it was removed; in every one of those runs the keychain still
-  supplied one other key. Not measured: what the real `ssh-add --apple-load-keychain` ends with
-  when the keychain holds no SSH passphrase at all, which is the state here if the administrative
-  key's was the only one stored. `rc=0` is what is expected of it; if the laptop prints another
-  number in that state, this stop is a false alarm, and it is still the right thing to report.) At this point the key has already left the agent and the keychain. You are not locked out: the first administrative session is still open, and LAPTOP 5a showed that you can type the passphrase. Report it before going on.
+  supplied one other key. Measured on 2026-10-08 with the real key: `keychain load rc=0` and
+  `supplied by the keychain: 0`.) At this point the key has already left the agent and the keychain. You are not locked out: the first administrative session is still open, and LAPTOP 5a showed that you can type the passphrase. Report it before going on.
 - `STOPPED: could not read …/vps-hermes.pub -- nothing removed`: the key's public file is missing.
   Stop and report it.
 - `in the agent before: 0`: the key could not be loaded, so the removal had nothing to act on.
@@ -2549,8 +2886,8 @@ prompt on the box. Type `exit` to come back. Every other output:
   (step 1d, item 5) is the way back.
 
 Rehearsed on the stand-in laptop with a throwaway key that has a passphrase: the right passphrase
-(a prompt on the server), a wrong one three times, Ctrl+C. Not rehearsed: the same on macOS, where
-the keychain could answer.
+(a prompt on the server), a wrong one three times, Ctrl+C. On this Mac, 2026-10-08: `ssh
+hermes-box` asked for the passphrase and got in; the keychain did not answer.
 
 LAPTOP 6b: after `exit`, on the laptop: did that login put the key back (one function and its
 call)? **Its `ssh-add` lines were rehearsed for real on this Mac with a throwaway key and a

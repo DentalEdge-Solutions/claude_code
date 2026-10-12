@@ -728,6 +728,12 @@ collection, on 2026-10-08, failed D10.7; this finding is why.
 |---|---|---|---|
 | F58 | The box's journal keeps 7 days (`MaxRetentionSec=7day`, `MaxFileSec=1day`, `SystemMaxUse=1G`; read on the box on 2026-10-09: oldest entry 2026-10-02 15:11 UTC, 85.4M in use). The setting is not in this repository and the operator did not set it: it came with the server. The checklist and the collector assume 30 days (`journalctl --since -30d` in D2.3 and D10.7), so the leak checks cover about a week, and the live refusals of 2026-10-02 had aged out of D10.7's counts by the collection of 2026-10-08 (review #8, collected on the fifth day, still saw them). The report's signed text calls this finding "new, no F number yet". | accepted at review #9's sign-off for that review; fix with the next box change | **open.** Until it is fixed, the three live refusal checks (BRING-UP part 2 step 11) are repeated within 7 days before every collection, which sets the audit kill switch on the production box for a few seconds each time. To do with the next box change: keep at least 30 days of journal (a journald setting on the box, so a reviewed change), and have the collector report the window it actually read. |
 
+### F59: found while the box change for review #10 was built (2026-10-10)
+
+| # | Finding | Decision | Now |
+|---|---|---|---|
+| F59 | D2.3 searches the message text of journal entries only. Other fields journald stores with an entry are not searched, for example the command line a process was started with (`_CMDLINE`): a secret typed into a command would be stored and not found. Measured 2026-10-10 (`docs/evaluations/2026-10-10-journal-retention-35-days.md`, R14 item 6). True since review #1; nothing suggests a leak (the services take secrets from protected files, not from commands). | state the limit in the checklist now; fix with the next box change (operator, 2026-10-10) | **open.** The checklist states the limit (D2.3, v1.19, "What this item cannot show"). The search itself is unchanged: widening it to the other fields is for the next box change. |
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,

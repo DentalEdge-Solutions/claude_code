@@ -83,14 +83,112 @@ class TestChecklistSync(unittest.TestCase):
         for field in [*d4_6, *d4_6["started_at"]]:
             self.assertIn(f"`{field}`", blocks["D4.6"], field)
 
+    def test_d2_3_and_d10_7_name_the_reach_fields(self):
+        ce = _load("ce", "collect-review-evidence.py")
+        blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
+        import tempfile
+        root = tempfile.mkdtemp()
+        reg = root + ce.GOV + "/registry/clients.json"
+        os.makedirs(os.path.dirname(reg))
+        with open(reg, "w") as f:
+            f.write('{"clients": {}}')
+        host = ce.Host(root, lambda argv, timeout=60: (0, "", ""))
+        d23 = ce.d2_3(host, {})
+        d107 = ce.d10_7(host, ce.context(host, b"\x11" * 32))
+        for field in (*d23, ):
+            self.assertIn(f"`{field}`", blocks["D2.3"], field)
+        for field in ("oldest_entry_read", *d107["oldest_entry_read"]):
+            self.assertIn(f"`{field}`", blocks["D10.7"], field)
+        self.assertEqual(sorted(d107["oldest_entry_read"]), ["broker", "runner"])
+
+    def test_d2_3_says_how_many_days_it_covered_and_when_it_stands_for_30(self):
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.3"]
+        rule = next(l for l in block.split("\n") if l.startswith("- **pass rule:**"))
+        for words in ("`reach_days` of at least `30`", "states the days the search covered", "in either direction",
+                      "under two days"):
+            self.assertIn(words, rule, words)
+        self.assertIn("read as root only", block)
+        for words in ("replacement characters", "namespaces", "300 thousand", "can be stored"):
+            self.assertIn(words, block, words)
+        self.assertNotIn("is can be", block)
+        self.assertIn("not run as root", rule)
+
+    def test_d10_7_says_what_the_report_states_when_the_journal_is_short(self):
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D10.7"]
+        rule = next(l for l in block.split("\n") if l.startswith("- **pass rule:**"))
+        claim = next(l for l in block.split("\n") if l.startswith("- **claim:**"))
+        self.assertIn("states the days", rule)
+        self.assertIn("up to 30 days back", claim)
+        self.assertNotIn("(30 days)", claim)
+
+    def test_d2_4_names_every_field_the_collector_reports(self):
+        ce = _load("ce", "collect-review-evidence.py")
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.4"]
+        import tempfile
+        root = tempfile.mkdtemp()
+        files = {"/etc/systemd/journald.conf": "[Journal]\nSystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n",
+                 ce.JOURNALD_DROP_IN: "[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n"}
+        for path, body in files.items():
+            os.makedirs(os.path.dirname(root + path), exist_ok=True)
+            with open(root + path, "w") as f:
+                f.write(body)
+        cat = "\n".join(f"# {p}\n{c}" for p, c in files.items())
+        host = ce.Host(root, lambda argv, timeout=60: (0, cat if argv == ce.JOURNALD_CAT_CONFIG else "", ""))
+        d = ce.d2_4(host, {})
+        self.assertEqual(sorted(d["service"]), ["active", "config_changed_after_start", "started_at"])
+        self.assertEqual(list(d["usage"])[-3:], ["newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk"])
+        self.assertIn("`/run/systemd/journal/flushed`", block)
+        self.assertIn("Storage", d["settings"])
+        for word in ("auto", "persistent", "volatile", "none"):
+            self.assertIn(f"`{word}`", block, word)
+        self.assertEqual(d["config_files"], list(files))                # the real dict, not could-not-check
+        self.assertEqual(sorted(d["settings"]), sorted(ce.JOURNALD_SETTINGS))
+        for part in ("oldest_entry", "drop_in", "service", "usage"):
+            self.assertIsInstance(d[part], dict, part)
+        fields = [*d, *d["oldest_entry"], *d["settings"], *d["settings"]["MaxRetentionSec"], *d["drop_in"],
+                  *d["service"], *d["usage"]]
+        for field in fields:
+            self.assertIn(f"`{field}`", block, field)
+        self.assertIn(f"`{ce.JOURNALD_DROP_IN}`", block)
+        self.assertIn("`/etc/systemd/journald.conf.d/50-hermes-retention.conf`", block)
+        self.assertIn("`2592000`", block)
+        self.assertIn("`" + " ".join(ce.JOURNALD_CAT_CONFIG) + "`", block)
+        for d_ in ce.JOURNALD_DROP_IN_DIRS:
+            self.assertIn(f"`{d_}`", block)
+        lines = [l for l in block.split("\n")[1:] if l and not l.startswith("## ")]
+        self.assertEqual([l.split("**")[1] for l in lines if l.startswith("- **")],     # four bullets, one line each
+                         ["source:", "claim:", "expected:", "pass rule:"])
+        self.assertEqual(len(lines), 4)
+
+    def test_d2_4_keeps_the_words_that_carry_its_rulings(self):
+        """Each of these was a ruling after a review found a route to a wrong PASS; an edit must not drop one quietly."""
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D2.4"]
+        rule = next(l for l in block.split("\n") if l.startswith("- **pass rule:**"))
+        parts = dict(re.findall(r"\((\d)\) \*\*([^*]+):\*\*", rule))
+        self.assertEqual(parts, {"1": "Not read", "2": "The setting", "3": "In force", "4": "Written to disk",
+                                 "5": "The reach", "6": "The limits", "7": "Other directories", "8": "No missing days"})
+        text = dict(zip(parts.values(), re.split(r"\(\d\) \*\*[^*]+:\*\*", rule)[1:]))
+        for part, words in (("Not read", ("WHOLE item", "`usage.on_disk_age_seconds`", "`usage.flushed_to_disk`", "`service.active`", "informational")),
+                            ("The setting", ("`volatile`, `none` or any other value is a FAIL", "`0`, which systemd reads as no limit")),
+                            ("In force", ("`service.active` other than `true` is CANNOT-VERIFY",)),
+                            ("Written to disk", ("`usage.flushed_to_disk` other than `true` is CANNOT-VERIFY", "`usage.on_disk_age_seconds` above `600`",
+                                                "either alone")),
+                            ("The limits", ("no explanation replaces the measurement", "`reach_days` as measured is at least `30`")),
+                            ("No missing days", ("`usage.files` lower than `reach_days`",))):
+            for w in words:
+                self.assertIn(w, text[part], (part, w))
+        self.assertNotIn("for its part", rule)
+        self.assertNotIn("less than 600 seconds before the collection", rule)
+        self.assertNotIn("unless the operator explains it: at a limit", rule)
+
     def test_d1_7_states_the_limited_keys_exact_options(self):
         blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
         for opt in ('command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',
                     "port-forwarding", "restrict"):
             self.assertIn(f"`{opt}`", blocks["D1.7"], opt)
 
-    def test_the_version_is_1_18(self):
-        self.assertRegex(items()[0], r"(?m)^version: 1\.18$")
+    def test_the_version_is_1_19(self):
+        self.assertRegex(items()[0], r"(?m)^version: 1\.19$")
 
     def test_d10_6_states_the_committed_mcp_block(self):
         """D10.6 judges the box's `mcp_servers:` block by `equals_repo`, `reason` and the sha256 of

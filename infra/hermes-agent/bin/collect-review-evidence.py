@@ -152,9 +152,13 @@ _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ARGV_RES = (re.compile(r"argv\[\]=.* ; ignore_errors="), re.compile(r"argv\[\]=.*? ; "))
 
 
-def _run_real(argv, timeout=60):
+def _run_real(argv, timeout=60, errors="strict"):
     try:
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # The lossy read names UTF-8, so "one replacement character for each byte, or cut-short
+        # sequence of bytes, that is not valid UTF-8" holds under any locale; the strict default
+        # keeps the locale's own encoding, as before.
+        decoding = {} if errors == "strict" else {"encoding": "utf-8"}
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors=errors, **decoding)
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: not found"
     with p:                                     # on every path: pipes closed (unread), child reaped
@@ -177,7 +181,7 @@ def _run_real(argv, timeout=60):
 class Host:
     """Everything a probe touches, injectable for tests: the file root and the runner."""
     def __init__(self, root="/", run=None):
-        self.root, self._run = root, run or _run_real
+        self.root, self._run, self._real = root, run or _run_real, run is None
 
     def path(self, p):
         return os.path.join(self.root, p.lstrip("/"))
@@ -185,13 +189,19 @@ class Host:
     def run(self, argv, timeout=60):
         return self._run(argv, timeout)
 
+    def run_lossy(self, argv, timeout=60):
+        """The same single command and limit as run(), for a read whose bytes need not be valid
+        text (the journal): a byte that is not UTF-8 becomes U+FFFD instead of ending the read. A
+        host built with a fake runner calls it unchanged."""
+        return _run_real(argv, timeout, errors="replace") if self._real else self._run(argv, timeout)
+
 
 class CouldNotCheck(Exception):
     pass
 
 
-def _ok(host, argv):
-    rc, out, err = host.run(argv)
+def _ok(host, argv, timeout=60):
+    rc, out, err = host.run(argv, timeout)
     if rc != 0:
         raise CouldNotCheck(f"{argv[0]} exited {rc}: {(err or out).strip()[:200]}")
     return out
@@ -356,22 +366,50 @@ def _shown_option(opt):
     return opt if rx and rx.fullmatch(inner) else f"{name}={WITHHELD}"
 
 
+# What sshd's base64 reader skips inside a key body besides the space and tab that end it
+# (measured against sshd 9.6p1: docs/evaluations/2026-10-10-journal-retention-35-days.md).
+_KEY_BODY_SKIPPED = str.maketrans("", "", "\r\n\x0b\x0c")
+
+
+def _key_fields(text):
+    """(type, body bytes) when `text` starts with a key type and a key body, as sshd's key reader
+    takes them: two fields, each ended by a space or a tab. Whatever follows is the comment; it
+    is never looked at (a quote in it means nothing to sshd). None otherwise."""
+    parts = re.split(r"[ \t]+", text, maxsplit=2)
+    if len(parts) < 2 or not _KEY_TYPE_RE.fullmatch(parts[0]):
+        return None
+    body = parts[1].translate(_KEY_BODY_SKIPPED)
+    if not _KEY_BODY_RE.fullmatch(body):
+        return None
+    try:
+        return parts[0], base64.b64decode(body, validate=True)
+    except ValueError:
+        return None
+
+
 def _key_row(line):
     """One authorized_keys line as its key type, its options and a short fingerprint of the key
-    body, or None when it is not a key line. The body and the comment are never returned."""
-    tokens, unbalanced = _split_unquoted(line.strip(" \t"), " \t")      # sshd skips only spaces and tabs
-    if unbalanced:
-        return None
-    for i in (0, 1):                                    # the key type is first, or second after the options
-        if len(tokens) > i + 1 and _KEY_TYPE_RE.fullmatch(tokens[i]) and _KEY_BODY_RE.fullmatch(tokens[i + 1]):
-            try:
-                body = base64.b64decode(tokens[i + 1], validate=True)
-            except ValueError:
-                return None
-            options = _split_unquoted(tokens[0], ",")[0] if i == 1 else []
-            return {"type": tokens[i], "options": sorted(_shown_option(o) for o in options),
-                    "sha12": PK.sha256_bytes(body)[:12]}
-    return None
+    body, or None when it is not a key line. Read as sshd reads it: a key first, or the options
+    (up to the first space or tab outside double quotes) and then a key. The body and the comment
+    are never returned."""
+    text = line.strip(" \t")
+    got, options = _key_fields(text), []
+    if got is None:
+        i, quoted = 0, False
+        while i < len(text) and (quoted or text[i] not in " \t"):
+            if text[i] == "\\" and text[i + 1:i + 2] == '"':
+                i += 1                                  # sshd skips both characters
+            elif text[i] == '"':
+                quoted = not quoted
+            i += 1
+        if quoted:                                      # the options never end: sshd finds no key
+            return None
+        got = _key_fields(text[i:].lstrip(" \t"))
+        if got is None:
+            return None
+        options = _split_unquoted(text[:i], ",")[0]
+    return {"type": got[0], "options": sorted(_shown_option(o) for o in options),
+            "sha12": PK.sha256_bytes(got[1])[:12]}
 
 
 def _authorized_keys_paths(pattern, user, home):
@@ -435,7 +473,7 @@ def _authorized_keys_row(host, p, users):
         return {**row, **unread}
     keys, unparsed = [], 0
     for line in lines:
-        if not line.strip(" \t") or line.lstrip(" \t").startswith("#"):
+        if not line.strip(" \t\r") or line.lstrip(" \t").startswith("#"):
             continue
         key = _key_row(line)
         if key is None:
@@ -460,13 +498,162 @@ def _unprivileged_port_start(host):
     return int(m.group(1))
 
 
+SSHD_CONFIG = "/etc/ssh/sshd_config"
+SSHD_CONFIG_DIR = "/etc/ssh/sshd_config.d"
+# The only spellings of the standard Include that are not counted as reaching elsewhere: the glob
+# bare or in one pair of double quotes, after the bare keyword and blanks (measured on sshd 9.6p1:
+# an `=`, a quoted blank, a control character or a second argument around it makes sshd read another
+# path or pattern as well).
+_SSHD_STANDARD_INCLUDE_RE = re.compile(
+    r'[ \t]*(?i:include)[ \t]+(")?(?:/etc/ssh/sshd_config\.d/\*\.conf|sshd_config\.d/\*\.conf)(?(1)")[ \t\r]*',
+    re.ASCII)                                       # the keyword folds ASCII letters only, as sshd's does
+
+
+def _sshd_skipped(c):
+    """A character the head scan skips: a blank or control character, a double quote or an `=`."""
+    return c <= " " or c == "\x7f" or c in '"='
+
+
+def _sshd_head(line):
+    """(head, index): the first 7 characters of `line` that are not skipped, lower-cased, and the
+    index just after the last one taken."""
+    taken, i = [], 0
+    while i < len(line) and len(taken) < 7:
+        if not _sshd_skipped(line[i]):
+            taken.append(line[i])
+        i += 1
+    return "".join(taken).lower(), i
+
+
+def _sshd_match_lines(host):
+    """(match_lines, include_elsewhere): the `Match` lines in the two places this collector reads
+    (the main file and sshd_config.d/*.conf), and the `Include` lines there that name anything
+    else than the standard glob. A `Match` block's settings are not read: its presence is what a
+    reviewer must hear of. A file brought in from elsewhere is not read either, which is why it is
+    counted. The count is a superset by construction. Match: a line is read by skipping every blank
+    or control character, double quote and `=`, which is more than sshd's tokenizer drops before and
+    inside a keyword (measured on sshd 9.6p1, docs/evaluations/2026-10-10-journal-retention-35-days.md);
+    a head starting `match` is a Match line (sshd refuses a keyword it does not know, so counting
+    `Matchmaker` falls only on a file it refuses). Include: the same head says it is an Include line,
+    and it is "not elsewhere" only when the whole line is the standard glob in four forms (absolute
+    or relative, bare or in one pair of double quotes) after the bare keyword in any ASCII letter case,
+    with spaces or tabs before and between, and spaces, tabs or carriage returns after; every other
+    spelling counts as elsewhere, an over-count. A place that cannot be read, is
+    over the limit or holds a NUL byte (which may join two lines for sshd) makes both could-not-check:
+    a count of 0 must mean 0 was found."""
+    try:
+        names = sorted(n for n in os.listdir(host.path(SSHD_CONFIG_DIR)) if n.endswith(".conf"))
+    except FileNotFoundError:
+        names = []
+    except OSError:
+        return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+    matches = elsewhere = 0
+    for p in [SSHD_CONFIG] + [SSHD_CONFIG_DIR + "/" + n for n in names]:
+        try:
+            with open(host.path(p), "rb") as f:
+                data = f.read(AUTHORIZED_KEYS_READ_LIMIT + 1)
+        except OSError:
+            return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+        if len(data) > AUTHORIZED_KEYS_READ_LIMIT:
+            return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+        if b"\x00" in data:
+            return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
+        for line in data.decode("utf-8", errors="replace").split("\n"):
+            head, end = _sshd_head(line)
+            if head.startswith("match"):
+                matches += 1
+            elif head == "include":
+                elsewhere += not _SSHD_STANDARD_INCLUDE_RE.fullmatch(line)
+    return matches, elsewhere
+
+
+# The title sshd 9.6p1 gives its listener process: "sshd: " + the command line it was started with +
+# " [listener] N of M-K startups" (measured, docs/evaluations/2026-10-10-journal-retention-35-days.md,
+# "How the running sshd was started"). Its children are titled by the closed set below, the only forms
+# `ps -ww -C sshd -o args=` showed during and after logins on 9.6p1; every other line is unknown.
+_SSHD_LISTENER_TITLE_RE = re.compile(r"sshd: (?P<args>\S.*) \[listener\] [0-9]+ of [0-9]+-[0-9]+ startups")
+_SSHD_NAME = r"[A-Za-z0-9_][A-Za-z0-9_.$-]*"
+_SSHD_CHILD_TITLE_RE = re.compile(
+    r"sshd: \[(?:accepted|net|rexeced)\]"
+    rf"|sshd: {_SSHD_NAME}(?: \[(?:net|priv)\]|@(?:notty|pts/[0-9]+))"
+    r"|/usr/sbin/sshd -D -R|\[sshd\]|\[sshd\] <defunct>", re.ASCII)
+_SSHD_BARE_NAME_RE = re.compile(rf"sshd: ({_SSHD_NAME})", re.ASCII)
+
+
+def _account_names(host):
+    """The account names in /etc/passwd, or None when the file cannot be read."""
+    try:
+        with open(host.path("/etc/passwd")) as f:
+            return {line.split(":", 1)[0] for line in f.read().split("\n") if line and not line.startswith("#")}
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+_SSHD_OPTIONS_WITH_ARGUMENT = "CEbcfghkopu"          # sshd's getopt string: `C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrt`
+
+
+def _sshd_daemon_options(host):
+    """{"listeners", "config_file_options", "setting_options"}: how many sshd listener processes
+    run and how many `-f` and `-o` options their command lines hold, read from `ps -ww -C sshd -o
+    args=` (counts only: no path, option value or process id leaves here). `-ww` because procps
+    applies COLUMNS even to a pipe and would cut a long title (measured). Every non-empty line is
+    classified: a full-line listener title is counted; a full-line child title from the closed set
+    above is ignored; ANY OTHER line (a title cut short, as a daemon started with a small
+    environment gets, a process never retitled, a line a local account made, trailing blanks) makes
+    all three could-not-check, because it may be a second daemon with options. The bare form
+    `sshd: NAME` is ignored only when NAME is an account in /etc/passwd, because a daemon's own cut
+    title can end that way (its last argument's last character) while a suffixed form cannot. Options are read as
+    getopt does (`-f path`, `-fpath`, `-Df path`). The title joins the arguments with blanks and
+    /proc/PID/cmdline holds that same one string (measured), so the original argument vector is not
+    available: every word that starts with `-` is read as an option cluster and a word that does not
+    (an option's value, a value holding a blank as two words) is skipped, never a reason to stop.
+    A value that itself starts with `-` reads as an option: the counts can only be too high. `ps` finding
+    no sshd (rc 1, no output at all) is 0 listeners; any other failure is could-not-check, never a
+    healthy-looking value. Not seen: `ps -C sshd` lists by command name, so an OpenSSH daemon run
+    from a binary with another name is not listed (the listening-port items would show it); any local
+    account can add a line that looks like a listener or an unrecognised one, which makes the item
+    CANNOT-VERIFY, never a pass. A daemon started through `ssh.socket` has the ordinary listener title
+    once a first connection has started it (measured in a container, and read on the box on
+    2026-10-11: record section 2); before that connection there is no sshd process: 0 listeners."""
+    unknown = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+    rc, out, err = host.run(["ps", "-ww", "-C", "sshd", "-o", "args="])
+    if rc == 1 and not out and not err:
+        return {"listeners": 0, "config_file_options": 0, "setting_options": 0}
+    if rc != 0:
+        return unknown
+    listeners = config_files = settings = 0
+    for line in out.split("\n"):
+        if not line:
+            continue
+        m = _SSHD_LISTENER_TITLE_RE.fullmatch(line)
+        if not m:
+            if _SSHD_CHILD_TITLE_RE.fullmatch(line):
+                continue
+            bare = _SSHD_BARE_NAME_RE.fullmatch(line)
+            if bare and bare.group(1) in (_account_names(host) or ()):
+                continue
+            return unknown
+        listeners += 1
+        for word in m.group("args").split()[1:]:      # the first word is the program
+            if len(word) < 2 or word[0] != "-":
+                continue                                # not an option word (a value, perhaps with a blank)
+            for letter in word[1:]:                     # a cluster: letters up to the first that takes an argument
+                if letter in _SSHD_OPTIONS_WITH_ARGUMENT:
+                    config_files += letter == "f"
+                    settings += letter == "o"
+                    break
+    return {"listeners": listeners, "config_file_options": config_files, "setting_options": settings}
+
+
 def d1_7(host, ctx):
     """Every SSH key the box accepts, for EVERY account in /etc/passwd: an account with no login
     shell can still be used for a forward. Key types, options and short fingerprints only. The
-    sshd settings are the global ones (`sshd -T`): a `Match` block is not read here (the
-    fingerprint's entry_points component carries the whole of `sshd -T`). The kernel's
+    sshd settings are the global ones (`sshd -T`): a `Match` block's settings are not
+    read here, only counted (`match_lines`); the fingerprint's entry_points component carries
+    the whole of `sshd -T`. The kernel's
     net.ipv4.ip_unprivileged_port_start setting is read because the limited key's permitlisten
-    depends on it."""
+    depends on it. `sshd -T`, `match_lines` and `include_elsewhere` all read the default configuration;
+    `daemon_options` says whether the running daemon uses it."""
     got = {}
     for line in _ok(host, ["sshd", "-T"]).splitlines():
         k, _, v = line.partition(" ")
@@ -495,9 +682,13 @@ def d1_7(host, ctx):
                 except OSError:
                     pass                    # cannot tell: keep the path, the row says so
                 users_of.setdefault(p, set()).add(parts[0])
+    match_lines, include_elsewhere = _sshd_match_lines(host)
+    daemon_options = _sshd_daemon_options(host)
     return {"sshd": {k: got.get(k, R.COULD_NOT_CHECK) for k in SSHD_KEY_SOURCES},
             "accounts_checked": accounts,
             "unprivileged_port_start": _unprivileged_port_start(host),
+            "match_lines": match_lines, "include_elsewhere": include_elsewhere,
+            "daemon_options": daemon_options,
             "files": [_authorized_keys_row(host, p, users_of[p]) for p in sorted(users_of)]}
 
 
@@ -888,8 +1079,514 @@ def d2_2(host, ctx):
     return {"histories": out}
 
 
+# The search of the whole journal measured 2 s at 7 days on the box (2026-10-10). Times 5 for 35 days,
+# times 10 for margin is 100 s; the limit is never under 300 s.
+JOURNAL_SCAN_TIMEOUT = 300
+
+
+def _not_root_on_a_real_host(host):
+    """Run by anyone but root, journalctl shows only that user's own entries, with rc 0 and nothing
+    on stderr (record R14, item 7). The real host (built with the real runner) refuses; a host
+    built with a fake runner (tests) is not asked."""
+    return host._real and os.geteuid() != 0
+
+
+def _journal_read(host, argv, timeout=60):
+    """The text of a journal read, or CouldNotCheck. A read that ends with anything on stderr is
+    not a whole read even at rc 0 (record R14: a truncated archived file is skipped with a
+    warning and rc 0; without rights journalctl prints a notice): what it covered is unknown.
+    The reason is in fixed words, never the stderr text (it can hold a path with the machine id).
+    The text is decoded with replacement: a replaced byte cannot turn text that is not a credential
+    into one, and a credential is ASCII, so it is still found beside a replaced byte; what could be
+    lost is a credential WITH an invalid byte inside it, which is not that credential."""
+    if _not_root_on_a_real_host(host):
+        raise CouldNotCheck("the journal is read as root only")
+    rc, out, err = host.run_lossy(argv, timeout)
+    if rc != 0:
+        raise CouldNotCheck(f"{argv[0]} exited {rc}")
+    if err.strip():
+        raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
+    return out
+
+
 def d2_3(host, ctx):
-    return {"journal": _count_cred_text(_ok(host, ["journalctl", "-o", "cat", "--no-pager"]), ctx.get("secrets", []))}
+    """The message text of every entry journalctl shows, as far back as it reaches (D2.4 judges how far). The oldest entry is
+    read AFTER the search: entries only ever leave, so the search reached at least that far.
+    An oldest entry that cannot be read is could-not-check; the counts of the search stay."""
+    text = _journal_read(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
+    return {"journal": _count_cred_text(text, ctx.get("secrets", [])), "scanned_characters": len(text),
+            "undecodable_characters": text.count("\ufffd"), "oldest_entry_read": _oldest_entry_or_unknown(host)}
+
+
+def _oldest_entry_or_unknown(host, selector=()):
+    try:
+        return _oldest_entry(host, selector)
+    except (OSError, ValueError):                   # the runner itself failed, or its output is not text
+        return R.COULD_NOT_CHECK
+
+
+# D2.4: the journal service's settings. `systemd-analyze cat-config --tldr systemd/journald.conf`
+# (systemd 255, measured, record R8/R9) lists the files in the order systemd reads them: a `# <path>`
+# header per file, one empty line between files, no comment lines of the contents. It prints lines
+# systemd rejects as they are, and a file name holding newlines prints as several lines, so the
+# printout decides WHICH files and in what order; the files themselves are read too.
+JOURNALD_CAT_CONFIG = ["systemd-analyze", "cat-config", "--tldr", "systemd/journald.conf"]
+# Storage= is read too (record R10): with `volatile` or `none` nothing new reaches the disk, while
+# the files already there, and our retention, still look healthy.
+JOURNALD_SETTINGS = ("MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec", "Storage")
+_JOURNALD_MAIN = "/etc/systemd/journald.conf"      # journald 255 reads the main file only here
+_JOURNALD_FILE_RE = re.compile(r"/etc/systemd/journald\.conf|"
+                               r"/(?:etc|run|usr/lib|usr/local/lib)/systemd/journald\.conf\.d/[A-Za-z0-9._@-]+\.conf")
+_JOURNALD_FILE_LIMIT = 64 * 1024
+# The directories journald 255 reads drop-ins from (journald.conf(5)), and the only names of a
+# settings file in them that this reader accepts.
+JOURNALD_DROP_IN_DIRS = ("/etc/systemd/journald.conf.d", "/run/systemd/journald.conf.d",
+                         "/usr/local/lib/systemd/journald.conf.d", "/usr/lib/systemd/journald.conf.d")
+_JOURNALD_DROP_IN_NAME_RE = re.compile(r"[A-Za-z0-9._@-]+\.conf")
+_JOURNALD_ASSIGN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*)=([\x21-\x5b\x5d-\x7e]*)")
+# systemd.time(7) units of one second or more, as integers (src/basic/time-util.c, v255).
+_SPAN_UNITS = {"": 1, "seconds": 1, "second": 1, "sec": 1, "s": 1, "minutes": 60, "minute": 60, "min": 60, "m": 60,
+               "hours": 3600, "hour": 3600, "hr": 3600, "h": 3600, "days": 86400, "day": 86400, "d": 86400,
+               "weeks": 604800, "week": 604800, "w": 604800, "months": 2629800, "month": 2629800, "M": 2629800,
+               "years": 31557600, "year": 31557600, "y": 31557600}
+_SPAN_RE = re.compile(r"([0-9]{1,9})([A-Za-z]*)")
+_SIZE_RE = re.compile(r"([0-9]{1,12})([KMGTPE]?)")
+_SIZE_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40, "P": 1 << 50, "E": 1 << 60}
+# The oldest entry journalctl would show: its time and nothing else (no message, no host name).
+# The selector (a unit, a window) goes AFTER these, so the call never starts as a leak check's does.
+OLDEST_ENTRY_ARGS = ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "+1"]
+# The newest entry of ONE journal directory, after `-D <directory>` (measured, record R13: one
+# object and rc 0; nothing and rc 0 for a directory without an entry; rc 1 for a missing one).
+NEWEST_ENTRY_ARGS = ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "1"]
+_TIMESTAMP_RE = re.compile(r"[0-9]{1,17}")
+
+
+def _span_seconds(value):
+    """A systemd time span as whole seconds, or could-not-check. Closed grammar: up to nine digits
+    and one unit of a second or more, nothing else (no fraction, blank, sign, several parts), and
+    the span must fit systemd's microsecond arithmetic (its parse_time fails when
+    digits >= (2**64 - 1) // (unit seconds * 10**6)), so a number returned is one systemd accepts
+    and computes the same; anything else is never guessed at."""
+    m = _SPAN_RE.fullmatch(value)
+    if not m or m.group(2) not in _SPAN_UNITS:
+        return R.COULD_NOT_CHECK
+    unit = _SPAN_UNITS[m.group(2)]
+    if int(m.group(1)) >= (2 ** 64 - 1) // (unit * 10 ** 6):
+        return R.COULD_NOT_CHECK
+    return int(m.group(1)) * unit
+
+
+def _size_bytes(value):
+    """A size as journald.conf writes it (up to twelve digits and K, M, G, T, P or E, powers of
+    1024), below 2**63; otherwise could-not-check."""
+    m = _SIZE_RE.fullmatch(value)
+    if not m:
+        return R.COULD_NOT_CHECK
+    n = int(m.group(1)) * _SIZE_UNITS[m.group(2)]
+    return n if n < 1 << 63 else R.COULD_NOT_CHECK
+
+
+def _journald_printout_settings(text):
+    """(settings, files) from the `--tldr` printout, by a CLOSED grammar over it: an empty line, a
+    `# <path>` header of a journald settings file (each once), exactly `[Journal]`, and `Key=value`
+    lines (a key of letters and digits, a value of printable non-blank ASCII without a backslash)
+    after the section line of their file. Any other line raises CouldNotCheck; the reason names
+    the kind of line, never its content."""
+    files, current, section = [], None, False
+    last = {k: {"value": None, "file": None} for k in JOURNALD_SETTINGS}
+    for line in text.split("\n"):
+        if line == "":
+            continue
+        if line[0] in "#;":
+            path = line[2:] if line.startswith("# ") else None
+            if path is None or not _JOURNALD_FILE_RE.fullmatch(path):
+                raise CouldNotCheck("cat-config shows a comment or a header this reader does not know")
+            if path in files:
+                raise CouldNotCheck("cat-config shows one settings file twice")
+            current, section = path, False
+            files.append(path)
+        elif current is None:
+            raise CouldNotCheck("cat-config shows a line before the first file header")
+        elif line[0] == "[":
+            if line != "[Journal]":
+                raise CouldNotCheck("cat-config shows a section other than [Journal]")
+            section = True
+        else:
+            m = _JOURNALD_ASSIGN_RE.fullmatch(line)
+            if not m or not section:
+                raise CouldNotCheck("cat-config shows a line this reader does not model")
+            if m.group(1) in last:
+                last[m.group(1)] = {"value": m.group(2), "file": current}
+    if not files:
+        raise CouldNotCheck("cat-config shows no settings file")
+    if files[0] != _JOURNALD_MAIN and _JOURNALD_MAIN in files:
+        raise CouldNotCheck("cat-config shows the main settings file after a drop-in")
+    return last, files
+
+
+def _journald_file_settings(host, files):
+    """The same four settings read from the files themselves, in order, by the closed grammar
+    systemd's own parser makes safe to model: blank lines and lines whose first non-blank
+    character is # or ; are skipped, exactly `[Journal]` is the section, any other line starting
+    (after blanks) with `[` raises (systemd stops reading there: record R9), `Key=value` after
+    `[Journal]` is read as in the printout, anything else raises. A line ending in a backslash
+    or holding a carriage return raises (a continuation or a line end this reader does not model).
+    Each listed path must be a regular file (not a link, not a directory, not missing: a missing
+    file is a forged header), at most 64 kB, ASCII, without a NUL byte. The path is opened once,
+    without following a link in its last part and without waiting on a FIFO, and "regular file"
+    is decided on the open file, so what is judged is what is read."""
+    last = {k: {"value": None, "file": None} for k in JOURNALD_SETTINGS}
+    for path in files:
+        try:
+            fd = os.open(host.path(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            raise CouldNotCheck("a settings file cat-config lists cannot be opened, or is a link")
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise CouldNotCheck("a settings file cat-config lists is not a regular file")
+            with os.fdopen(os.dup(fd), "rb") as f:
+                raw = f.read(_JOURNALD_FILE_LIMIT + 1)
+        except OSError:
+            raise CouldNotCheck("a settings file cat-config lists cannot be read")
+        finally:
+            os.close(fd)
+        if len(raw) > _JOURNALD_FILE_LIMIT or b"\0" in raw:
+            raise CouldNotCheck("a settings file is too large or holds a NUL byte")
+        try:
+            body = raw.decode("ascii")
+        except UnicodeDecodeError:
+            raise CouldNotCheck("a settings file holds a byte outside ASCII")
+        section = False
+        for line in body.split("\n"):
+            if "\r" in line or line.endswith("\\"):
+                raise CouldNotCheck("a settings file holds a carriage return or a continuation line")
+            stripped = line.strip(" \t")
+            if not stripped or stripped[0] in "#;":
+                continue
+            if stripped[0] == "[":
+                if line != "[Journal]":
+                    raise CouldNotCheck("a settings file holds a section other than [Journal], or a broken one")
+                section = True
+                continue
+            m = _JOURNALD_ASSIGN_RE.fullmatch(line)
+            if not m or not section:
+                raise CouldNotCheck("a settings file holds a line this reader does not model")
+            if m.group(1) in last:
+                last[m.group(1)] = {"value": m.group(2), "file": path}
+    return last
+
+
+def _journald_refuse_linked_dirs(host):
+    """Raises CouldNotCheck unless every drop-in directory that exists is a real directory reached
+    through real directories only (each part of its path, by lstat; the main file's directory is
+    among them). Through a link the collector would read files, and compare times, that are not
+    those of the place it names: a link's own time does not change when a file is added to or
+    removed from the directory behind it. A part that does not exist ends the walk (nothing is
+    there); a part that cannot be looked at, or is not a directory, raises."""
+    for d in JOURNALD_DROP_IN_DIRS:
+        path = ""
+        for part in d.strip("/").split("/"):
+            path += "/" + part
+            try:
+                st = os.lstat(host.path(path))
+            except FileNotFoundError:
+                break
+            except OSError:
+                raise CouldNotCheck("a journald settings directory cannot be looked at")
+            if not stat.S_ISDIR(st.st_mode):
+                raise CouldNotCheck("a journald settings directory is a link, or not a directory")
+
+
+def _journald_refuse_odd_names(host):
+    """Raises CouldNotCheck when a drop-in directory holds a `.conf` entry whose name is not a
+    plain one, or cannot be listed, or is not a real directory (see above). systemd lists such a
+    file, and a name holding newlines makes the printout show header and content lines that stand
+    in no file (record R9). A directory that does not exist is fine; a name that does not end in
+    `.conf` is not a settings file."""
+    _journald_refuse_linked_dirs(host)
+    for d in JOURNALD_DROP_IN_DIRS:
+        try:
+            names = os.listdir(host.path(d))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise CouldNotCheck("a journald drop-in directory cannot be listed")
+        if any(n.endswith(".conf") and not _JOURNALD_DROP_IN_NAME_RE.fullmatch(n) for n in names):
+            raise CouldNotCheck("a journald drop-in directory holds an oddly named settings file")
+
+
+def _journald_settings(host, text):
+    """(settings, files): for each name in JOURNALD_SETTINGS the value written LAST under
+    [Journal] and the file it stands in (both None when no file sets it), and the files listed,
+    in order. Both the `--tldr` printout `text` and the listed files are read, and they must
+    agree: the printout decides WHICH files systemd lists and in what order, but it prints lines
+    systemd rejects as they are (a broken section line in an earlier file makes systemd stop
+    reading, so a later value never applies) and a file name holding newlines forges a header;
+    only the files show every line systemd parses. Any line either reading does not model, a
+    listed file that is not a regular file on disk, an oddly named settings file in a drop-in
+    directory, or a disagreement raises CouldNotCheck."""
+    _journald_refuse_odd_names(host)
+    printed, files = _journald_printout_settings(text)
+    read = _journald_file_settings(host, files)
+    if printed != read:
+        raise CouldNotCheck("the settings printed by cat-config and the settings read from the files differ")
+    return read, files
+
+
+def _oldest_entry(host, selector=()):
+    """The UTC time of the oldest entry journalctl shows for `selector`: None when it shows no
+    entry, could-not-check when the answer is not exactly one entry whose time is a string of one
+    to seventeen digits above zero."""
+    return _entry_time(host, ["journalctl", *OLDEST_ENTRY_ARGS, *selector])
+
+
+def _entry_time(host, argv):
+    """The UTC time of the one entry `argv` (a journalctl call for a single entry, its time only)
+    prints: None for no entry, could-not-check for anything but exactly one entry with a time."""
+    if _not_root_on_a_real_host(host):
+        return R.COULD_NOT_CHECK
+    rc, out, err = host.run(argv)
+    if rc != 0 or err.strip():              # a warning at rc 0 (a skipped, damaged file): part of the journal was not read
+        return R.COULD_NOT_CHECK
+    lines = [l for l in out.split("\n") if l.strip()]
+    if not lines:
+        return None
+    try:
+        if len(lines) != 1:
+            raise ValueError("more than one entry")
+        stamp = json.loads(lines[0])["__REALTIME_TIMESTAMP"]
+        if not isinstance(stamp, str) or not _TIMESTAMP_RE.fullmatch(stamp) or int(stamp) <= 0:
+            raise ValueError("not a timestamp")
+        return _iso(int(stamp) // 1000000)
+    except (ValueError, KeyError, TypeError, OverflowError, OSError):
+        return R.COULD_NOT_CHECK
+
+
+JOURNAL_DIR = "/var/log/journal"
+# systemd's own sign that the journal is on disk (measured, record R13): there once the journal
+# was moved to /var, gone after `journalctl --relinquish-var` and still gone after a restart of
+# the service, back after `journalctl --flush`.
+JOURNAL_FLUSHED_FLAG = "/run/systemd/journal/flushed"
+JOURNALD_DROP_IN_DIR = JOURNALD_DROP_IN_DIRS[0]
+JOURNALD_DROP_IN = JOURNALD_DROP_IN_DIR + "/50-hermes-retention.conf"
+JOURNALD_DROP_IN_REPO = CHECKOUT + "/infra/hermes-agent/deploy/journald-hermes-retention.conf"
+JOURNALD_DEFAULT_MAX_FILES = 100                # journald.conf(5), systemd 255: SystemMaxFiles= defaults to 100
+JOURNAL_UNITS = {"broker": "hermes-app-broker@" + APP, "runner": "hermes-app-runner@" + APP}
+# When the journal service's process now running was started, in UTC to the microsecond (measured,
+# systemd 255, record R7). The process reads its settings after this moment, never before it.
+# Second precision is not enough: BRING-UP installs our file and restarts the service at once,
+# and in the rehearsal the two were 21 ms apart, inside one second.
+# With it, whether the service runs at all (record R11): a stopped service keeps this time, shows
+# `ActiveState=inactive` and `MainPID=0`. systemd prints the three as `Name=value` lines in its
+# own order, so they are read by name.
+JOURNALD_STARTED = ["systemctl", "show", "systemd-journald", "--timestamp=us+utc", "-p", "ExecMainStartTimestamp",
+                    "-p", "ActiveState", "-p", "MainPID"]
+_UNIT_STATE_RE = re.compile(r"[a-z]+(?:-[a-z]+)*")
+_PID_RE = re.compile(r"[1-9][0-9]{0,9}")
+_SYSTEMD_US_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2})\.([0-9]{6}) UTC")
+# A file's times come from the kernel's coarse clock, which can be one tick behind the clock
+# systemd reads: 10 ms is the longest tick Linux is built with (HZ=100). A change stamped less
+# than this before the start may really have happened after it.
+_CLOCK_TICK_NS = 10 * 10 ** 6
+# An entry's time and the collector's clock are the same clock, both cut to the second, and the
+# entry is read before the clock: an entry later than the clock means the clock went back. Up to
+# two seconds is ordinary time-keeping (a small correction between the write and the read) and
+# counts as an age of 0; beyond that there is nothing to measure an age with.
+_CLOCK_STEP_MARGIN = 2
+# SystemMaxFiles as a plain decimal count. A leading zero is refused: systemd's integer parser
+# may read it as octal (not measured), and a number is never guessed at.
+_MAX_FILES_RE = re.compile(r"0|[1-9][0-9]{0,8}")
+_SETTING_NUMBER = {"MaxRetentionSec": _span_seconds, "MaxFileSec": _span_seconds, "SystemMaxUse": _size_bytes,
+                   "SystemMaxFiles": lambda v: int(v) if _MAX_FILES_RE.fullmatch(v) else R.COULD_NOT_CHECK,
+                   "Storage": lambda v: None}   # a word, not a quantity: the checklist judges `value`
+
+
+def _percent(part, whole):
+    ok = all(isinstance(x, int) and not isinstance(x, bool) for x in (part, whole)) and whole > 0
+    return round(100 * part / whole, 1) if ok else R.COULD_NOT_CHECK
+
+
+def _changed_at_ns(host, p):
+    """When a settings file or directory last changed, in nanoseconds: the later of its content
+    time and its inode time (a copy that keeps the old content time still shows here). Of the
+    path itself, never of a link's target."""
+    st = os.lstat(host.path(p))
+    return max(st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _journald_started(host):
+    """(active, started_at, start_ns) from JOURNALD_STARTED. `active` is True only when the unit's
+    state is `active` AND it has a main process; False when a state is read and is another one;
+    could-not-check when the answer is not exactly the three properties, or says `active` without
+    a process. The start (UTC to the second, and nanoseconds since the epoch) is given only for a
+    running service and only as one UTC time with microseconds: otherwise both are
+    could-not-check and None. A time this collector cannot place is never compared, and the start
+    of a process that is gone says nothing about what is in force."""
+    unknown = (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK, None)
+    rc, out, _ = host.run(JOURNALD_STARTED)
+    lines = out.split("\n")
+    if rc != 0 or lines[-1] != "" or len(lines) != 4:
+        return unknown
+    got = dict(line.partition("=")[::2] for line in lines[:3] if "=" in line)
+    if sorted(got) != ["ActiveState", "ExecMainStartTimestamp", "MainPID"]:
+        return unknown
+    if not _UNIT_STATE_RE.fullmatch(got["ActiveState"]):
+        return unknown
+    if got["ActiveState"] != "active":
+        return False, R.COULD_NOT_CHECK, None
+    if not _PID_RE.fullmatch(got["MainPID"]):
+        return unknown
+    m = _SYSTEMD_US_TS_RE.fullmatch(got["ExecMainStartTimestamp"])
+    if not m:
+        return True, R.COULD_NOT_CHECK, None
+    iso = f"{m.group(1)}T{m.group(2)}Z"
+    try:
+        return True, iso, _epoch(iso) * 10 ** 9 + int(m.group(3)) * 1000
+    except ValueError:                              # digits that are not a date
+        return True, R.COULD_NOT_CHECK, None
+
+
+def _journald_service(host, files):
+    """Whether the journal service runs, when its process started, and whether the settings
+    changed after that: the service reads its settings when it starts, so a newer file is not yet
+    in force. What is compared: every listed file, and every drop-in directory that exists (its
+    time changes when a file in it is added, removed or renamed: a drop-in the service read and
+    that was deleted since is still in force and is in no list). Nothing is compared without the
+    list of files; nothing is compared and no start is shown for a service that is not running,
+    or when a settings directory is not a real directory (its time would be a link's)."""
+    row = {"active": R.COULD_NOT_CHECK, "started_at": R.COULD_NOT_CHECK, "config_changed_after_start": R.COULD_NOT_CHECK}
+    try:
+        row["active"], started, start_ns = _journald_started(host)
+        if start_ns is None:
+            return row
+        _journald_refuse_linked_dirs(host)
+        row["started_at"] = started
+        if isinstance(files, list) and files:
+            times = [_changed_at_ns(host, p) for p in files]
+            for d in JOURNALD_DROP_IN_DIRS:
+                try:
+                    times.append(_changed_at_ns(host, d))
+                except FileNotFoundError:
+                    pass
+            row["config_changed_after_start"] = any(t + _CLOCK_TICK_NS > start_ns for t in times)
+    except (CouldNotCheck, OSError, ValueError):
+        pass
+    return row
+
+
+def _journal_usage(host, settings):
+    """As the service counts it (journal-vacuum.c): the files of the machine's OWN directory,
+    512 bytes times each file's blocks. Other directories under /var/log/journal are counted,
+    not measured: the service does not trim them and journalctl does not read them. The two
+    percentages need the settings: without them, or without a number for the limit, they are
+    could-not-check (the size limit has no default this collector assumes).
+    Files on disk do not show that the service is writing them (record R13: after
+    `journalctl --relinquish-var` an active service with a healthy Storage= writes to /run only,
+    and journalctl merges both; a /var it could not open is covered by the age rule and was not
+    measured). So the newest entry of the on-disk
+    directory ALONE is read, and its age: the machine id goes into that command, never into the
+    result. The age cannot show a journal that left the disk a moment ago (150 s in R13), so
+    systemd's flag is read too: True when an ordinary file is there, False when
+    nothing is, could-not-check for anything else there (a link, a directory) or when it cannot be
+    looked at. The machine's directory and /var/log/journal, /var/log, /var must be real
+    directories (not links): otherwise all of usage is could-not-check."""
+    keys = ("bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
+            "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk")
+    try:
+        with open(host.path("/etc/machine-id")) as f:
+            mid = f.read(64).strip()
+        if not re.fullmatch(r"[0-9a-f]{32}", mid):
+            raise ValueError("machine-id")
+        base = host.path(JOURNAL_DIR)
+        own = os.path.join(base, mid)
+        # listdir, statvfs and `journalctl -D` all follow a link: a journal directory linked to a
+        # memory file system would read fully healthy. Each part of the path must be a real directory.
+        for part in (own, base, os.path.dirname(base), os.path.dirname(os.path.dirname(base))):
+            if not stat.S_ISDIR(os.lstat(part).st_mode):
+                raise ValueError("journal directory path")
+        names = [n for n in os.listdir(own) if n.endswith((".journal", ".journal~"))]
+        used = sum(os.lstat(os.path.join(own, n)).st_blocks * 512 for n in names)
+        others = sum(1 for n in os.listdir(base) if n != mid and os.path.isdir(os.path.join(base, n)))
+        vfs = os.statvfs(own)
+    except (OSError, ValueError):
+        return {k: R.COULD_NOT_CHECK for k in keys}
+    try:
+        newest = _entry_time(host, ["journalctl", "-D", JOURNAL_DIR + "/" + mid, *NEWEST_ENTRY_ARGS])
+    except (OSError, ValueError):                   # the runner itself failed, or its output is not text
+        newest = R.COULD_NOT_CHECK
+    age = R.COULD_NOT_CHECK
+    if newest is not None and newest != R.COULD_NOT_CHECK:
+        seconds = int(time.time()) - _epoch(newest)
+        if seconds >= -_CLOCK_STEP_MARGIN:
+            age = max(0, seconds)
+    try:
+        # systemd tests the path with access(), which follows links, so a dangling link is absent
+        # for it: only an ordinary file is True; a link, a directory or anything else cannot be judged.
+        flushed = True if stat.S_ISREG(os.lstat(host.path(JOURNAL_FLUSHED_FLAG)).st_mode) else R.COULD_NOT_CHECK
+    except FileNotFoundError:
+        flushed = False
+    except OSError:
+        flushed = R.COULD_NOT_CHECK
+    max_use = max_files = R.COULD_NOT_CHECK
+    if isinstance(settings, dict):
+        max_use = settings["SystemMaxUse"]["number"]
+        max_files = (JOURNALD_DEFAULT_MAX_FILES if settings["SystemMaxFiles"]["value"] is None
+                     else settings["SystemMaxFiles"]["number"])
+    return {"bytes": used, "files": len(names), "bytes_percent_of_max_use": _percent(used, max_use),
+            "files_percent_of_max_files": _percent(len(names), max_files),
+            "free_bytes": vfs.f_bavail * vfs.f_frsize, "free_percent": _percent(vfs.f_bavail, vfs.f_blocks),
+            "other_directories": others, "newest_entry_on_disk": newest, "on_disk_age_seconds": age,
+            "flushed_to_disk": flushed}
+
+
+def _journald_drop_in(host):
+    try:
+        st = _stat(host, JOURNALD_DROP_IN)
+        row = {"owner": st["owner"], "group": st["group"], "mode": st["mode"]}
+    except OSError:
+        row = {"owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK, "mode": R.COULD_NOT_CHECK}
+    try:
+        others = sorted(n for n in os.listdir(host.path(JOURNALD_DROP_IN_DIR))
+                        if n != os.path.basename(JOURNALD_DROP_IN))
+        others = [n if re.fullmatch(r"[A-Za-z0-9._@-]+", n) else WITHHELD for n in others]
+    except FileNotFoundError:
+        others = []
+    except OSError:
+        others = R.COULD_NOT_CHECK
+    return {"equals_repo": _same_file(host, JOURNALD_DROP_IN, JOURNALD_DROP_IN_REPO), **row, "other_files": others}
+
+
+def d2_4(host, ctx):
+    """How far back the journal reaches and what decides it (F58: the box kept 7 days while the
+    leak checks assumed 30). Times, numbers, setting names and settings-file paths only: no
+    journal line, no machine id. Each part that cannot be read is could-not-check on its own."""
+    def oldest_entry(selector=()):
+        try:
+            return _oldest_entry(host, selector)
+        except (OSError, ValueError):               # the runner itself failed, or its output is not text
+            return R.COULD_NOT_CHECK
+
+    oldest = {"journal": oldest_entry()}
+    for label, unit in JOURNAL_UNITS.items():
+        oldest[label] = oldest_entry(("-u", unit))
+    reach = R.COULD_NOT_CHECK
+    if oldest["journal"] is None:
+        reach = None
+    elif oldest["journal"] != R.COULD_NOT_CHECK:
+        age = int(time.time()) - _epoch(oldest["journal"])
+        if age >= 0:                                # an entry later than this clock: nothing to measure with
+            reach = age // 86400
+    settings = files = R.COULD_NOT_CHECK
+    try:
+        got, listed = _journald_settings(host, _ok(host, JOURNALD_CAT_CONFIG))
+        settings = {k: {**v, "number": None if v["value"] is None else _SETTING_NUMBER[k](v["value"])}
+                    for k, v in got.items()}
+        files = listed
+    except (CouldNotCheck, OSError, UnicodeDecodeError):
+        settings = files = R.COULD_NOT_CHECK
+    return {"oldest_entry": oldest, "reach_days": reach, "settings": settings, "config_files": files,
+            "drop_in": _journald_drop_in(host), "service": _journald_service(host, files),
+            "usage": _journal_usage(host, settings)}
 
 
 # ---------------------------------------------------------------- D4 isolation boundaries
@@ -1524,7 +2221,7 @@ def _label(value, allowed):
 
 
 def _journal(host, unit):
-    return _ok(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
+    return _journal_read(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
 
 
 def _journal_leaks(text, secrets, redactor):
@@ -1543,6 +2240,8 @@ def d10_7(host, ctx):
     which is where run-client-audit's own output lands (its unit sets no StandardOutput)."""
     broker = _journal(host, f"hermes-app-broker@{APP}")
     runner = _journal(host, f"hermes-app-runner@{APP}")
+    oldest = {label: _oldest_entry_or_unknown(host, ("-u", unit, "--since", "-30d"))
+              for label, unit in JOURNAL_UNITS.items()}
     counts, notes, other = {}, {}, 0
     for line in broker.splitlines():
         if not line.strip():
@@ -1563,7 +2262,7 @@ def d10_7(host, ctx):
     return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
             "broker_journal": _journal_leaks(broker, secrets, ctx["redactor"]),
             "runner_journal": _journal_leaks(runner, secrets, ctx["redactor"]),
-            "known_secrets_checked": len(secrets)}
+            "known_secrets_checked": len(secrets), "oldest_entry_read": oldest}
 
 
 def d10_8(host, ctx):
@@ -1594,7 +2293,7 @@ def d10_8(host, ctx):
 
 
 PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6, "D1.7": d1_7,
-          "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3,
+          "D2.1": d2_1, "D2.2": d2_2, "D2.3": d2_3, "D2.4": d2_4,
           "D4.1": d4_1, "D4.2": d4_2, "D4.3": d4_3, "D4.4": d4_4, "D4.5": d4_5, "D4.6": d4_6,
           "D5.1": d5_1, "D5.2": d5_2, "D5.3": d5_3, "D5.4": d5_4,
           "D6.1": d6_1, "D6.2": d6_2, "D7.1": d7_1,

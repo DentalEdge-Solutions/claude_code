@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64, contextlib, hashlib, importlib.util, io, json, os, shutil, stat, sys, tempfile, time, unittest
+import subprocess, base64, contextlib, hashlib, importlib.util, io, json, os, shutil, stat, sys, tempfile, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -2291,6 +2291,11 @@ class TestRunReal(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.d, True)
         self.marker = os.path.join(self.d, "cleaned")
 
+    def test_a_35_day_journal_passes_through_the_real_runner_whole(self):
+        n = 5 * 4630823
+        rc, out, err = CE._run_real([sys.executable, "-c", f"import sys; sys.stdout.write('x' * {n})"], timeout=120)
+        self.assertEqual((rc, len(out), err), (0, n, ""))
+
     # What gives the child's interpreter time to install its handler before SIGTERM arrives.
     TIMEOUT = 5
 
@@ -2801,7 +2806,255 @@ class TestD17AcceptedKeys(Base):
 
     def test_the_result_has_exactly_these_top_level_fields(self):
         self.assertEqual(sorted(CE.d1_7(self.host(), {})),
-                         ["accounts_checked", "files", "sshd", "unprivileged_port_start"])
+                         ["accounts_checked", "daemon_options", "files", "include_elsewhere", "match_lines", "sshd",
+                          "unprivileged_port_start"])
+
+    def _sshd_config(self, main, **drop_ins):
+        self._w("/etc/ssh/sshd_config", main)
+        for name, body in drop_ins.items():
+            self._w("/etc/ssh/sshd_config.d/" + name.replace("_", "."), body)
+
+    def test_match_lines_are_counted_in_the_main_file_and_the_conf_files(self):
+        self._two()
+        self._sshd_config("Include /etc/ssh/sshd_config.d/*.conf\nPort 22\n# Match User x\n"
+                          "Match User a\n  X11Forwarding no\n\tmatch=Group b\n",
+                          a_conf="MATCH all\nPermitRootLogin no\n", b_txt="Match User ignored\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (3, 0))
+
+    def test_no_match_line_is_zero_not_could_not_check(self):
+        self._two()
+        self._sshd_config("Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin no\nAllowUsers matchbox\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 0))
+
+    def test_an_include_that_reaches_elsewhere_is_counted_per_line(self):
+        self._two()
+        self._sshd_config('Include /etc/ssh/sshd_config.d/*.conf\ninclude /etc/ssh/extra/*.conf "/opt/x y.conf"\n'
+                          "Include sshd_config.d/*.conf\nInclude other.conf\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 2))
+
+    def test_every_match_form_sshd_honoured_counts(self):
+        """Each form opened a Match block (or, marked below, was ignored or refused) in sshd 9.6p1:
+        docs/evaluations/2026-10-10-journal-retention-35-days.md. The count is a superset by construction."""
+        forms = ['Match User u', '"Match" User u', 'Ma"tch" User u', 'Match"" User u', '""Match User u',
+                 '"" "Match" User u', '"Match"User u', 'Match\rUser u', '\rMatch User u', 'Match=User u',
+                 'Match\tUser u', '=Match User u', '= Match User u', '="Match" User u',
+                 '==Match User u', '""=Match User u', '"" ""Match User u',      # these three: sshd ignored the line
+                 '"Match"=User u', '"Match User" u']                         # these two: sshd refuses the file
+        self._two()
+        for form in forms:
+            self._sshd_config(form + "\n  X11Forwarding yes\n")
+            d = CE.d1_7(self.host(), {})
+            self.assertEqual((d["match_lines"], d["include_elsewhere"]), (1, 0), repr(form))
+
+    def test_matchmaker_counts_as_a_match_line(self):
+        """sshd 9.6p1 refuses a file with `Matchmaker yes` (rc 255): counting it is an over-count that can
+        only fall on a file sshd will not run, which is what a superset must do."""
+        self._two()
+        self._sshd_config('Matchmaker yes\n"Matchmaker" yes\n')
+        self.assertEqual(CE.d1_7(self.host(), {})["match_lines"], 2)
+
+    def test_lines_that_are_not_a_match_or_an_include_do_not_count(self):
+        self._two()
+        self._sshd_config('# Match User x\n # Include /opt/x\nPort 22\nPermitRootLogin no\nAllowUsers matchbox\n\n'
+                          '\r\n"" ""\n')
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 0))
+
+    def test_every_include_form_sshd_honoured_is_read(self):
+        """An outside path counts in every spelling sshd honoured (9.6p1, see the evaluation record)."""
+        self._two()
+        forms = ['Include {}', '"Include" {}', 'In"clude" {}', 'Include\r{}', 'Include "{}"', 'Include={}',
+                 '=Include {}', '""Include {}', '"Include"{}', 'Include\t{}', 'Include = {}']
+        for form in forms:
+            self._sshd_config(form.format("/opt/extra.conf") + "\n")
+            d = CE.d1_7(self.host(), {})
+            self.assertEqual((d["match_lines"], d["include_elsewhere"]), (0, 1), repr(form))
+
+    GLOB = "/etc/ssh/sshd_config.d/*.conf"
+
+    def _include_elsewhere(self, line):
+        self._sshd_config(line + "\n")
+        return CE.d1_7(self.host(), {})["include_elsewhere"]
+
+    def test_the_standard_glob_is_recognised_only_in_a_closed_set_of_spellings(self):
+        self._two()
+        for line in (f"Include {self.GLOB}", f"  include\t{self.GLOB}", f'INCLUDE "{self.GLOB}"',
+                     f"Include {self.GLOB} \r", "Include sshd_config.d/*.conf", 'Include "sshd_config.d/*.conf"'):
+            self.assertEqual(self._include_elsewhere(line), 0, repr(line))
+
+    def test_anything_else_around_the_standard_glob_is_elsewhere(self):
+        """Measured on sshd 9.6p1 (-ddd 'new include'): `= =`, a quoted `=` or blank, `==`, a control
+        character before or after the glob each make sshd read another path or pattern as well."""
+        self._two()
+        g = self.GLOB
+        for line in (f"Include = = {g}", f'Include "=" {g}', f'Include " " {g}', f"Include =={g}",
+                     f"Include \x01{g}", f"Include {g}\x01", f"Include {g}\x0b", f"Include {g}\x7f",
+                     f"Include {g}\x0c", f'"Include" {g}', f"Include={g}", f"Include = {g}", f"Include\r{g}",
+                     f"Include {g} # c", f'Include "{g}', f'Include {g}"', f"Include {g}\r/opt/x.conf",
+                     f"Include {g} /opt/x.conf", "Include /etc/ssh/x/../sshd_config.d/*.conf",
+                     "Include ~/../" + g, "Include /etc/ssh/sshd_ config.d/*.conf", "Include", f"Include {g}x",
+                     f"Include /{g}", f'Include "{g}""', f"=Include {g}", f"Include\t{g}\x0c",
+                     f"Include=={g}", f"Include \x0b{g}", f'Include /etc/ssh/sshd_config.d/"*.conf'):
+            self.assertEqual(self._include_elsewhere(line), 1, repr(line))
+
+    def test_the_keyword_case_folding_is_ascii_only(self):
+        """Python folds U+0130 and U+0131 onto `i` in a str pattern; sshd does not (ASCII letters only)."""
+        for line in (f"\u0130nclude {self.GLOB}", f"\u0131nclude {self.GLOB}"):
+            self.assertIsNone(CE._SSHD_STANDARD_INCLUDE_RE.fullmatch(line), repr(line))
+        self.assertIsNotNone(CE._SSHD_STANDARD_INCLUDE_RE.fullmatch(f"iNcLuDe {self.GLOB}"))   # control
+
+    # The process lists below are what `ps -C sshd -o args=` printed on sshd 9.6p1 (the evaluation record,
+    # "How the running sshd was started"), one line per process.
+    LISTENER = "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups\n"
+    CHILDREN = "sshd: u [priv]\nsshd: u@notty\nsshd: [accepted]\n"
+
+    PS = ("ps", "-ww", "-C", "sshd", "-o", "args=")
+
+    def _ps(self, out, rc=0, err=""):
+        self.outputs[self.PS] = (rc, out, err)
+        return CE.d1_7(self.host(), {})["daemon_options"]
+
+    def host_calls_for(self, name):
+        host = self.host()
+        CE.d1_7(host, {})
+        return [c for c in host.calls if c[0] == name]
+
+    def _opts(self, listeners, f, o):
+        return {"listeners": listeners, "config_file_options": f, "setting_options": o}
+
+    def test_a_plain_listener_has_no_options(self):
+        for out in ("sshd: /usr/sbin/sshd [listener] 0 of 10-100 startups\n", self.LISTENER):
+            self.assertEqual(self._ps(out), self._opts(1, 0, 0), repr(out))
+
+    def test_children_of_the_listener_are_not_counted(self):
+        self.assertEqual(self._ps("sshd: /usr/sbin/sshd -D [listener] 1 of 10-100 startups\n" + self.CHILDREN),
+                         self._opts(1, 0, 0))
+        self.assertEqual(self._ps("sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o X11Forwarding=yes "
+                                  "[listener] 0 of 10-100 startups\nsshd: u [priv]\nsshd: u@notty\n"),
+                         self._opts(1, 1, 1))
+
+    def test_config_file_and_setting_options_are_counted_in_every_spelling(self):
+        for args, f, o in (("-f /tmp/alt.conf -o X11Forwarding=yes", 1, 1),
+                           ("-f/tmp/alt.conf -oX11Forwarding=yes", 1, 1),
+                           ("-D -f /tmp/alt.conf -o X11Forwarding=yes -o Port=22", 1, 2),
+                           ("-o A=1 -oB=2 -o C=3", 0, 3), ("-f /a -f /b", 2, 0),
+                           ("-Df /tmp/alt.conf", 1, 0), ("-Dfpath", 1, 0), ("-Do X=1", 0, 1),
+                           ("-p 2222 -4", 0, 0), ("-o -f", 1, 1), ("-o X=1 -- -f", 1, 1),
+                           ("-D -o AllowUsers u v -o X11Forwarding=yes", 0, 2),
+                           ("-f /tmp/a b.conf -o X11Forwarding=yes", 1, 1),
+                           ("-o Banner /etc/x y -f /tmp/alt.conf", 1, 1), ("-D -e -f /tmp/alt.conf", 1, 0),
+                           ("-De -f /tmp/alt.conf", 1, 0), ("-Def/tmp/alt.conf", 1, 0),
+                           ("-Def /tmp/alt.conf", 1, 0), ("-Deo X11Forwarding=yes", 0, 1),
+                           ("-Dof X11Forwarding=yes", 0, 1), ("-f /tmp/alt.conf -f /tmp/alt.conf", 2, 0),
+                           ("-4 -6 -D -d -e -i -q -t", 0, 0)):
+            out = f"sshd: /usr/sbin/sshd {args} [listener] 0 of 10-100 startups\n"
+            self.assertEqual(self._ps(out), self._opts(1, f, o), repr(args))
+
+    CNC = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+    # Every title below is one `ps -ww -C sshd -o args=` printed on sshd 9.6p1 during or after a login
+    # (the evaluation record, "How the running sshd was started", fix round 1).
+    CHILD_TITLES = ("sshd: [accepted]\n", "sshd: [net]\n", "sshd: [rexeced]\n", "sshd: hermesops\n", "sshd: u [net]\n",
+                    "sshd: u [priv]\n", "sshd: u@notty\n", "sshd: u@pts/0\n", "sshd: unknown [net]\n",
+                    "sshd: unknown [priv]\n", "/usr/sbin/sshd -D -R\n", "[sshd]\n", "[sshd] <defunct>\n")
+
+    def test_every_measured_child_title_beside_a_listener_is_ignored(self):
+        for child in self.CHILD_TITLES:
+            self.assertEqual(self._ps(self.LISTENER + child), self._opts(1, 0, 0), repr(child))
+        self.assertEqual(self._ps(self.LISTENER + "".join(self.CHILD_TITLES)), self._opts(1, 0, 0))
+
+    def test_two_full_listeners_one_with_an_option_are_both_counted(self):
+        self.assertEqual(self._ps(self.LISTENER + "sshd: /usr/sbin/sshd -D -f /x [listener] 0 of 10-100 startups\n"),
+                         self._opts(2, 1, 0))
+        self.assertEqual(self._ps(self.LISTENER * 2), self._opts(2, 0, 0))
+
+    def test_a_line_that_is_not_a_listener_or_a_measured_child_makes_the_item_could_not_check(self):
+        """Never a quiet skip: a second daemon whose title is cut short or was never retitled (measured:
+        a small environment cuts it, `... -o AuthorizedKey x`) would otherwise read as healthy. Any local
+        account can also make such a line, which gives CANNOT-VERIFY, not a pass."""
+        for extra in ("sshd: /usr/sbin/sshd -D -f /opt/alt/sshd_config -o Port=2222 -o AuthorizedKeysFile=/x [liste\n",
+                      "sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o AuthorizedKey x\n",
+                      "/usr/sbin/sshd -D -f /x -o A=b\n", "/usr/sbin/sshd -D\n", "sshd: /usr/sbin/sshd -D [listener]\n",
+                      "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups x\n",
+                      "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startupsX\n", "sshd: [listener] 0 of 10-100 startups\n",
+                      "sshd: u [pam]\n", "sshd: -f [priv]\n", "sshd: u [priv] \n", " sshd: u [priv]\n", "sshd: u [priv]\r\n",
+                      "sshd: u@notty \n", "sshd: u -f /x [priv]\n", "sshd:  u\n",
+                      # measured on 9.6p1 (record, fix round 1): the cut titles of a daemon started with an
+                      # empty environment, a title cut by COLUMNS=60, and a title cut after the program path
+                      "sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o Port=2222 -o AuthorizedKey x\n",
+                      "sshd: /usr/sbin/sshd -D -f /tmp/alt.conf -o 2\n",
+                      "sshd: /usr/sbin/sshd -D -f /tmp/a-rather-long-directory-name\n", "sshd: /usr/sbin/sshd\n",
+                      "sshd: s x\n", "s: s x\n"):
+            self.assertEqual(self._ps(self.LISTENER + extra), self.CNC, repr(extra))
+            self.assertEqual(self._ps(extra), self.CNC, repr(extra))               # alone, too
+
+    def test_a_bare_sshd_name_line_is_ignored_only_for_a_real_account(self):
+        """A daemon's own cut title can end as `sshd: x` (the last character of its last argument): the
+        bare form is a child only when NAME is an account in /etc/passwd. Only `unknown [net]` and
+        `unknown [priv]` were seen, never a bare `sshd: unknown`."""
+        for name in ("x", "unknown", "u", "Hermesops", "hermesop"):
+            self.assertEqual(self._ps(self.LISTENER + f"sshd: {name}\n"), self.CNC, name)
+        for name in ("hermesops", "hermes-broker", "root", "daemon"):
+            self.assertEqual(self._ps(self.LISTENER + f"sshd: {name}\n"), self._opts(1, 0, 0), name)
+        self.assertEqual(self._ps(self.LISTENER + "sshd: x [priv]\nsshd: x@notty\nsshd: x [net]\n"),
+                         self._opts(1, 0, 0))                      # a suffixed form needs no account
+
+    def test_a_bare_sshd_name_line_with_no_readable_account_list_is_could_not_check(self):
+        os.remove(os.path.join(self.root, "etc/passwd"))
+        self.outputs[self.PS] = (0, self.LISTENER + "sshd: hermesops\n", "")
+        self.assertEqual(CE._sshd_daemon_options(self.host()), self.CNC)
+        self.outputs[self.PS] = (0, self.LISTENER + "sshd: u [priv]\n", "")
+        self.assertEqual(CE._sshd_daemon_options(self.host()), self._opts(1, 0, 0))
+
+    def test_the_process_list_is_not_cut_to_a_width(self):
+        """`ps -ww`: without it procps applies COLUMNS even to a pipe (measured), cutting a long title."""
+        self._ps(self.LISTENER)
+        self.assertEqual(self.host_calls_for("ps"), [["ps", "-ww", "-C", "sshd", "-o", "args="]])
+
+    def test_no_listener_is_zero_and_the_checklist_judges_it(self):
+        self.assertEqual(self._ps("", rc=1), self._opts(0, 0, 0))
+
+    def test_a_failing_process_list_is_could_not_check(self):
+        cnc = {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")}
+        self.assertEqual(self._ps("", rc=1, err='error: unknown user-defined format specifier "x"\n'), cnc)
+        self.assertEqual(self._ps("", rc=127, err="not found"), cnc)
+        self.assertEqual(self._ps(self.LISTENER, rc=2), cnc)
+        self.assertEqual(self._ps(self.LISTENER, rc=1), cnc)               # output on a non-zero rc
+
+    def test_a_process_list_that_cannot_be_run_is_could_not_check(self):
+        """No `ps` answer in the fake at all (it reports 127)."""
+        self.assertEqual(CE.d1_7(self.host(), {})["daemon_options"],
+                         {k: R.COULD_NOT_CHECK for k in ("listeners", "config_file_options", "setting_options")})
+
+    def test_the_daemon_options_hold_no_path_and_no_value(self):
+        out = json.dumps(self._ps(
+            "sshd: /usr/sbin/sshd -f /tmp/alt.conf -o X11Forwarding=yes [listener] 0 of 10-100 startups\n"))
+        self.assertIn('"config_file_options": 1', out)                # control: the line was read
+        for gone in ("/tmp/alt.conf", "X11Forwarding", "alt.conf", "yes", "/usr/sbin/sshd"):
+            self.assertNotIn(gone, out)
+
+    def test_a_nul_byte_in_a_configuration_file_is_could_not_check(self):
+        """sshd 9.6p1 honoured `Ma<NUL>` newline `tch User u` as a Match block: a NUL may join lines."""
+        self._two()
+        self._sshd_config("Port 22\n", a_conf="Ma\x00\ntch User u\n")
+        self.assertEqual({k: CE.d1_7(self.host(), {})[k] for k in ("match_lines", "include_elsewhere")},
+                         {"match_lines": R.COULD_NOT_CHECK, "include_elsewhere": R.COULD_NOT_CHECK})
+        self._sshd_config("Po\x00rt 22\n")
+        self.assertEqual(CE.d1_7(self.host(), {})["match_lines"], R.COULD_NOT_CHECK)
+
+    def test_a_configuration_file_over_the_read_limit_is_could_not_check(self):
+        self._two()
+        self._sshd_config("Port 22\n" + "#" * CE.AUTHORIZED_KEYS_READ_LIMIT + "\n")
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_a_configuration_that_cannot_be_read_is_could_not_check_and_the_keys_are_still_listed(self):
+        self._two()                                             # no /etc/ssh/sshd_config in the fake root
+        d = CE.d1_7(self.host(), {})
+        self.assertEqual((d["match_lines"], d["include_elsewhere"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+        self.assertEqual(len(d["files"][0]["keys"]), 2)
 
     def test_a_setting_sshd_did_not_print_is_could_not_check(self):
         self.outputs[("sshd", "-T")] = (0, self.SSHD.replace("trustedusercakeys none\n", ""), "")
@@ -2946,6 +3199,36 @@ class TestD17AcceptedKeys(Base):
             row = CE.d1_7(self.host(), {})["files"][0]
         self.assertEqual((row["keys"], row["unparsed_lines"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
 
+    def test_a_quote_in_a_keys_comment_does_not_hide_the_key(self):
+        self._keys("/home/hermesops", f'ssh-ed25519 {_keybody(1)} com"ment\n'
+                                      f'no-pty ssh-ed25519 {_keybody(2)} com"ment\n')
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual(([k["options"] for k in row["keys"]], row["unparsed_lines"]), ([[], ["no-pty"]], 0))
+        self.assertNotIn("ment", json.dumps(row))
+
+    def test_a_carriage_return_after_the_key_body_does_not_hide_the_key(self):
+        self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\r\n{TUNNEL_OPTS} ssh-ed25519 {_keybody(2)}\r\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((len(row["keys"]), row["unparsed_lines"]), (2, 0))
+        self.assertEqual(row["keys"][0]["sha12"], hashlib.sha256(base64.b64decode(_keybody(1))).hexdigest()[:12])
+
+    def test_an_unclosed_quote_in_the_options_is_still_not_a_key(self):
+        self._keys("/home/hermesops", f'command="unbalanced ssh-ed25519 {_keybody(1)}\n')
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((row["keys"], row["unparsed_lines"]), ([], 1))
+
+    def test_the_rows_of_ordinary_lines_are_what_they_were(self):
+        self._two()
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual([k["options"] for k in row["keys"]],
+                         [[], ['command="/bin/false"', 'permitlisten="127.0.0.1:1"',
+                               'permitopen="127.0.0.1:9119"', "port-forwarding", "restrict"]])
+
+    def test_an_empty_line_in_a_file_with_cr_lf_endings_is_blank(self):
+        self._keys("/home/hermesops", f"# two keys\r\n\r\nssh-ed25519 {_keybody(1)} one\r\n   \r\n")
+        row = CE.d1_7(self.host(), {})["files"][0]
+        self.assertEqual((len(row["keys"]), row["unparsed_lines"]), (1, 0))
+
     def test_a_path_that_cannot_be_examined_is_reported_not_skipped(self):
         p = self._keys("/home/hermesops", f"ssh-ed25519 {_keybody(1)}\n")
         real_lstat, real_open = os.lstat, os.open
@@ -2985,6 +3268,1193 @@ class TestD17AcceptedKeys(Base):
                    f'ssh-ed25519 {_keybody(1)}\n')
         out = CE.d1_7(self.host(), {})["files"][0]["keys"][0]["options"]
         self.assertEqual(out, ["permitlisten=<withheld>", "permitopen=<withheld>"])
+
+
+# `systemd-analyze cat-config --tldr` layout, measured on systemd 255 (docs/evaluations/2026-10-10-journal-retention-35-days.md, R8, R9):
+# a `# <path>` header per file, one empty line between files, no comment lines of the contents.
+MAIN = "/etc/systemd/journald.conf"
+SYSLOG = "/usr/lib/systemd/journald.conf.d/syslog.conf"
+OURS = "/etc/systemd/journald.conf.d/50-hermes-retention.conf"
+FILES = {MAIN: "[Journal]\nSystemMaxFileSize=100M\nCompress=yes\nSystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n",
+         OURS: "[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n",
+         SYSLOG: "[Journal]\nForwardToSyslog=yes\n"}
+CAT_CONFIG = "\n".join(f"# {p}\n{c}" for p, c in FILES.items())
+
+
+def _oldest_key(*selector):
+    return tuple(["journalctl", *CE.OLDEST_ENTRY_ARGS, *selector])
+
+
+def _entry(epoch):
+    return json.dumps({"__CURSOR": "s=abc", "__REALTIME_TIMESTAMP": str(epoch * 1000000 + 123456),
+                       "__MONOTONIC_TIMESTAMP": "1", "_BOOT_ID": "0" * 32,
+                       "__SEQNUM": "1", "__SEQNUM_ID": "0" * 32}) + "\n"
+
+
+class TestJournalReach(Base):
+    SECRET = "sk-or-v1-" + "0123456789abcdef" * 4
+    M2_BYTES = 4630823                                  # the whole journal on the box, 2026-10-10 (7 days)
+
+    def test_d2_3_reports_the_size_searched_and_the_oldest_entry_read_after_the_search(self):
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n" * 3, "")
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        host = self.host()
+        d = CE.d2_3(host, {"secrets": []})
+        self.assertEqual(d, {"journal": {"pattern_hits": 0, "known_secret_hits": 0},
+                             "scanned_characters": 27, "undecodable_characters": 0, "oldest_entry_read": "2025-10-09T08:53:20Z"})
+        self.assertEqual([c[1] for c in host.calls], ["-o", "-q"])      # the search first, then the oldest entry
+
+    def test_d2_3_an_oldest_entry_that_cannot_be_read_is_could_not_check_and_the_search_still_counts(self):
+        CN = R.COULD_NOT_CHECK
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n", "")
+        for answer, want in (((1, "", "Failed"), CN), ((127, "", "not found"), CN), ((0, "not json\n", ""), CN),
+                             ((0, _entry(1760000000) * 2, ""), CN), ((0, "", ""), None)):
+            with self.subTest(answer=answer):
+                self.outputs[_oldest_key()] = answer
+                d = CE.d2_3(self.host(), {"secrets": []})
+                self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (want, 9))
+        def run(argv, timeout=60):
+            if argv[1] == "-q":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return (0, "Started.\n", "")
+        d = CE.d2_3(CE.Host(self.root, run), {"secrets": []})
+        self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (CN, 9))
+
+    # Measured (record R14, systemd 255): a truncated archived file is skipped with this on stderr and rc 0;
+    # without rights journalctl says the second line, with rc 1 and nothing on stdout.
+    TRUNCATED = "Journal file /var/log/journal/" + "0" * 32 + "/system@" + "0" * 32 + "-1-2.journal is truncated, ignoring file.\n"
+    NO_RIGHTS = "No journal files were opened due to insufficient permissions.\n"
+
+    def test_d2_3_a_read_that_ends_with_a_warning_is_could_not_check_never_a_healthy_count(self):
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        for what, answer in (("truncated file, rc 0", (0, "Started.\n", self.TRUNCATED)),
+                             ("no rights, rc 0 (NOT produced in the measurement: rc 1 was; kept as the case the stderr rule exists for)", (0, "", self.NO_RIGHTS)),
+                             ("no rights, rc 1", (1, "", self.NO_RIGHTS)),
+                             ("time-out", (124, "", "journalctl: timed out")),
+                             ("rc 1 without a word", (1, "", ""))):
+            with self.subTest(what=what):
+                self.outputs[("journalctl", "-o")] = answer
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE.d2_3(self.host(), {"secrets": []})
+                it = CE.collect(self.host(), self.KEY)["items"]["D2.3"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                self.assertNotIn("truncated", it["reason"])               # the warning's text is not carried
+                self.assertNotIn("/var/log/journal", it["reason"])
+
+    BAD_BYTE_CHILD = ["-c", "import sys; sys.stdout.buffer.write(b'ok\\n\\xff GOOGLE_ADS_REFRESH_TOKEN=" + TOKEN + "\\n')"]
+
+    def test_the_strict_runner_raises_on_a_byte_that_is_not_text_and_the_lossy_one_replaces_it(self):
+        argv = [sys.executable, *self.BAD_BYTE_CHILD]
+        with self.assertRaises(UnicodeDecodeError):
+            CE._run_real(argv)
+        rc, out, err = CE._run_real(argv, errors="replace")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(out, "ok\n\ufffd GOOGLE_ADS_REFRESH_TOKEN=" + TOKEN + "\n")
+
+    def test_d2_3_searches_past_a_byte_that_is_not_text_and_says_how_many_were_replaced(self):
+        argv = [sys.executable, *self.BAD_BYTE_CHILD]
+        # the real runner is reached through Host(root) with no fake: patch only the program that is started
+        real = CE._run_real
+        with mock.patch.object(CE, "_run_real", lambda a, timeout=60, errors="strict": real(argv, timeout, errors=errors)), \
+                mock.patch.object(os, "geteuid", return_value=0):               # this host is the real one: root only
+            host = CE.Host(self.root)
+            d = CE.d2_3(host, {"secrets": []})
+        self.assertEqual(d["journal"]["pattern_hits"], 1)
+        self.assertEqual(d["undecodable_characters"], 1)
+
+    def test_a_known_secret_beside_a_replaced_byte_is_still_counted(self):
+        self.outputs[("journalctl", "-o")] = (0, "x \ufffd " + self.SECRET + "\n", "")
+        self.outputs[_oldest_key()] = (0, "", "")
+        d = CE.d2_3(self.host(), {"secrets": [self.SECRET]})
+        self.assertEqual((d["journal"]["known_secret_hits"], d["undecodable_characters"]), (1, 1))
+
+    def test_a_fake_run_host_works_with_run_lossy_unchanged(self):
+        seen = []
+        def run(argv, timeout=60):
+            seen.append((argv, timeout))
+            return (0, "t", "")
+        self.assertEqual(CE.Host(self.root, run).run_lossy(["x"], 7), (0, "t", ""))
+        self.assertEqual(seen, [(["x"], 7)])
+
+    def test_the_reason_of_a_failed_journal_read_holds_no_journalctl_words_nor_path_nor_machine_id(self):
+        mid = "0123456789abcdef0123456789abcdef"
+        said = f"Journal file /var/log/journal/{mid}/system@x.journal is truncated, ignoring file.\n"
+        for answer in ((0, "x\n", said), (1, "", said), (1, said, "")):
+            with self.subTest(answer=answer[0]):
+                self.outputs[("journalctl", "-o")] = answer
+                it = CE.collect(self.host(), self.KEY)["items"]["D2.3"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                for bad in (mid, "/var/log/journal", "truncated", "system@x"):
+                    self.assertNotIn(bad, it["reason"])
+                self.outputs[("journalctl", "-u")] = answer
+                it = CE.collect(self.host(), self.KEY)["items"]["D10.7"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                for bad in (mid, "/var/log/journal", "truncated"):
+                    self.assertNotIn(bad, it["reason"])
+
+    def _real_host(self):
+        """A host that counts as the real one (built with the real runner) but whose commands are the fake's."""
+        host = self.host()
+        host._real = True
+        fake = host._fake
+        return host, mock.patch.object(CE, "_run_real", lambda argv, timeout=60, errors="strict": fake(argv, timeout))
+
+    def test_the_journal_is_read_as_root_only_on_a_real_host(self):
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n", "")
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        self.outputs[("journalctl", "-u")] = (0, "", "")
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, _entry(1760000000), "")
+        for euid, ok in ((1000, False), (0, True)):
+            with self.subTest(euid=euid):
+                host, patch = self._real_host()
+                with patch, mock.patch.object(os, "geteuid", return_value=euid):
+                    if ok:
+                        self.assertEqual(CE.d2_3(host, {"secrets": []})["scanned_characters"], 9)
+                        self.assertEqual(CE.d10_7(host, CE.context(host, self.KEY))["oldest_entry_read"]["runner"], "2025-10-09T08:53:20Z")
+                    else:
+                        with self.assertRaises(CE.CouldNotCheck) as c:
+                            CE.d2_3(host, {"secrets": []})
+                        self.assertEqual(str(c.exception), "the journal is read as root only")
+                        with self.assertRaises(CE.CouldNotCheck):
+                            CE.d10_7(host, CE.context(host, self.KEY))
+                        self.assertEqual(CE._oldest_entry(host), R.COULD_NOT_CHECK)
+                        self.assertEqual([c for c in host.calls if c[0] == "journalctl"], [])    # nothing was run
+        with mock.patch.object(os, "geteuid", return_value=1000):                   # a test host is unaffected
+            self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 9)
+
+    def test_a_warning_on_stderr_at_rc_0_makes_an_oldest_entry_could_not_check(self):
+        for answer in ((0, _entry(1760000000), self.TRUNCATED), (0, "", self.TRUNCATED)):
+            with self.subTest(answer=answer[1][:1]):
+                self.outputs[_oldest_key()] = answer
+                self.outputs[("journalctl", "-o")] = (0, "Started.\n", "")
+                self.assertEqual(CE._oldest_entry(self.host()), R.COULD_NOT_CHECK)
+                self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["oldest_entry_read"], R.COULD_NOT_CHECK)
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), " \n")
+        self.assertEqual(CE._oldest_entry(self.host()), "2025-10-09T08:53:20Z")
+
+    def test_the_lossy_read_names_utf_8_and_the_strict_read_does_not(self):
+        seen = []
+        class P:
+            def __init__(self, argv, **kw):
+                seen.append(kw)
+                raise FileNotFoundError
+        with mock.patch.object(subprocess, "Popen", P):
+            CE._run_real(["x"], errors="replace")
+            CE._run_real(["x"])
+        self.assertEqual((seen[0]["encoding"], seen[0]["errors"]), ("utf-8", "replace"))
+        self.assertNotIn("encoding", seen[1])
+        self.assertEqual(seen[1]["errors"], "strict")
+
+    def test_d2_3_empty_stderr_at_rc_0_reads_as_before(self):
+        self.outputs[("journalctl", "-o")] = (0, "Started.\n", "  \n")
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 9)
+
+    def test_d10_7_a_journal_read_that_ends_with_a_warning_is_could_not_check(self):
+        for unit in ("broker", "runner"):
+            for what, answer in (("truncated file, rc 0", (0, "x\n", self.TRUNCATED)),
+                                 ("no rights, rc 0 (NOT produced in the measurement: rc 1 was; kept as the case the stderr rule exists for)", (0, "", self.NO_RIGHTS)),
+                                 ("time-out", (124, "", "journalctl: timed out"))):
+                with self.subTest(unit=unit, what=what):
+                    host = self.host()
+                    ok = (0, "", "")
+                    def run(argv, timeout=60):
+                        return answer if argv[:3] == ["journalctl", "-u", f"hermes-app-{unit}@ads-audit"] and "-q" not in argv else ok
+                    host = CE.Host(self.root, run)
+                    with self.assertRaises(CE.CouldNotCheck):
+                        CE.d10_7(host, CE.context(host, self.KEY))
+
+    def test_d2_3_gives_the_journal_300_seconds(self):
+        seen = {}
+        def run(argv, timeout=60):
+            seen[tuple(argv[:2])] = timeout
+            return (0, "", "")
+        CE.d2_3(CE.Host(self.root, run), {"secrets": []})
+        self.assertEqual(seen[("journalctl", "-o")], 300)
+
+    def test_d2_3_finds_a_secret_and_a_pattern_at_the_far_end_of_35_days_of_journal(self):
+        line = "hermes-app-broker[ads-audit]: request=0 op=run client=x status=ok reason=-\n"
+        filler = line * (5 * self.M2_BYTES // len(line))
+        text = f"leak {self.SECRET}\n" + filler + f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n"
+        self.assertGreaterEqual(len(text), 5 * self.M2_BYTES - len(line))
+        self.outputs[("journalctl", "-o")] = (0, text, "")
+        t0 = time.monotonic()
+        d = CE.d2_3(self.host(), {"secrets": [self.SECRET]})
+        took = time.monotonic() - t0
+        self.assertEqual(d["journal"], {"pattern_hits": 1, "known_secret_hits": 1})
+        self.assertEqual(d["scanned_characters"], len(text))
+        self.assertLess(took, 60, "the search of a 35-day journal must end far inside the 300 s limit")
+
+    def test_d10_7_reports_the_oldest_entry_read_for_each_unit_inside_its_30_days(self):
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, "", "")
+        self.outputs[("journalctl", "-u")] = (0, "", "")
+        host = self.host()
+        d = CE.d10_7(host, CE.context(host, self.KEY))
+        self.assertEqual(d["oldest_entry_read"], {"broker": "2025-10-09T08:53:20Z", "runner": None})
+        oldest = [c for c in host.calls if c[1] == "-q"]
+        self.assertEqual(len(oldest), 2)
+        self.assertTrue(all(c[-2:] == ["--since", "-30d"] for c in oldest), oldest)
+
+    def test_d10_7_an_oldest_entry_that_cannot_be_read_is_could_not_check_for_that_unit_alone(self):
+        CN = R.COULD_NOT_CHECK
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (1, "", "Failed")
+        self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[("journalctl", "-u")] = (0, "", "")
+        host = self.host()
+        d = CE.d10_7(host, CE.context(host, self.KEY))
+        self.assertEqual(d["oldest_entry_read"], {"broker": CN, "runner": "2025-10-09T08:53:20Z"})
+        def run(argv, timeout=60):
+            if argv[1] == "-q":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return (0, "", "")
+        host = CE.Host(self.root, run)
+        d = CE.d10_7(host, CE.context(host, self.KEY))
+        self.assertEqual(d["oldest_entry_read"], {"broker": CN, "runner": CN})
+
+
+class TestJournalHelpers(Base):
+    def _disk(self, files):
+        for path, content in files.items():
+            self._w(path, content)
+
+    def _read(self, files, text=None):
+        """Write `files` under the fake root and read them with the printout `text` (default: what --tldr prints)."""
+        self._disk(files)
+        return CE._journald_settings(self.host(), text if text is not None else
+                                     "\n".join(f"# {p}\n{c}" for p, c in files.items()))
+
+    def test_the_last_file_that_sets_a_value_is_the_one_reported(self):
+        got, files = self._read(FILES)
+        self.assertEqual(files, [MAIN, OURS, SYSLOG])
+        self.assertEqual(got["MaxRetentionSec"], {"value": "35day", "file": OURS})
+        self.assertEqual(got["SystemMaxFiles"], {"value": "500", "file": OURS})
+        self.assertEqual(got["SystemMaxUse"], {"value": "1G", "file": MAIN})
+        self.assertEqual(got["MaxFileSec"], {"value": "1day", "file": MAIN})
+
+    def test_last_wins_empty_value_and_unknown_or_lower_case_keys(self):
+        got, files = self._read({MAIN: "[Journal]\nMaxRetentionSec=7day\nmaxretentionsec=1day\nSystemMaxUse=\n"
+                                       "MaxRetentionSec=40day\nFoo=bar\n"})
+        self.assertEqual(files, [MAIN])
+        self.assertEqual(got["MaxRetentionSec"], {"value": "40day", "file": MAIN})
+        self.assertEqual(got["SystemMaxUse"], {"value": "", "file": MAIN})
+        self.assertEqual(got["SystemMaxFiles"], {"value": None, "file": None})
+
+    def test_comments_and_blank_lines_in_a_real_file_are_fine(self):
+        files = {**FILES, MAIN: "#  This file is part of systemd.\n\n  # indented\n; semi\n \t \n[Journal]\n#Storage=auto\n"
+                                "SystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n"}
+        # the printout has no comment lines: build it from the measured layout instead
+        printed = ("# " + MAIN + "\n[Journal]\nSystemMaxUse=1G\nMaxRetentionSec=7day\nMaxFileSec=1day\n\n"
+                   "# " + OURS + "\n[Journal]\nMaxRetentionSec=35day\nSystemMaxFiles=500\n\n"
+                   "# " + SYSLOG + "\n[Journal]\nForwardToSyslog=yes\n")
+        got, _ = self._read(files, printed)
+        self.assertEqual(got["MaxRetentionSec"]["value"], "35day")
+        self.assertEqual(got["SystemMaxUse"], {"value": "1G", "file": MAIN})
+
+    def test_the_command_is_the_measured_one(self):
+        self.assertEqual(CE.JOURNALD_CAT_CONFIG, ["systemd-analyze", "cat-config", "--tldr", "systemd/journald.conf"])
+
+    def _raises(self, later, path="/etc/systemd/journald.conf.d/99-local.conf"):
+        with self.assertRaises(CE.CouldNotCheck):
+            self._read({**{k: FILES[k] for k in (MAIN, OURS)}, path: later})
+
+    def test_lines_outside_the_closed_grammar_are_could_not_check(self):
+        for later in ("[Journal]\n\n# /run/systemd/journald.conf.d/zz.conf\nMaxRetentionSec=1day\n",   # C1
+                      "[Journal]\nCompress=yes \\\n[Other]\nMaxRetentionSec=1day\n",                  # C2
+                      "\ufeff[Journal]\nMaxRetentionSec=1day\n",                                      # C3
+                      "[Journal\nMaxRetentionSec=1day\n",                                              # I4
+                      "[Journal]\n\n# /etc/systemd/journald.conf.d/99+local.conf\nMaxRetentionSec=40day\n",  # I5
+                      "[Journal]\n; a comment\n",    # the printout never shows a comment
+                      "[Journal]\nMaxRetentionSec = 1day\n", "[Journal]\n MaxRetentionSec=1day\n",
+                      "[Journal]\nMaxRetentionSec=1day \n", "[Journal]\nMaxRetentionSec=1day\\\n",
+                      "[journal]\nMaxRetentionSec=1day\n", "[ Journal ]\nMaxRetentionSec=1day\n",
+                      "MaxRetentionSec=1day\n[Journal]\n", "[Journal]\nMaxRetentionSec=1d\u00e4y\n",
+                      "[Journal]\nMaxRetentionSec=1day\x01\n", "[Journal]\nMaxRetentionSec=1\tday\n",
+                      "[Journal]\nnot an assignment\n"):
+            with self.subTest(later=later):
+                self._raises(later)
+
+    def test_a_broken_section_line_that_the_printout_shows_cleanly_is_could_not_check(self):
+        # Record R9 (N1): systemd stops reading at `[Broken`, so a later file's value never applies. Each printout
+        # here is clean and AGREES with what a reader that skipped the broken line would find in the files, so
+        # only the file reader's refusal of that line can raise.
+        ours = FILES[OURS]
+        for broken in ("[Broken\n[Journal]\nCompress=yes\n", "[Broken\n", "[Journal]\nX=1\n[Broken\n[Journal]\nMaxRetentionSec=35day\n"):
+            with self.subTest(broken=broken):
+                self._disk({MAIN: FILES[MAIN], "/etc/systemd/journald.conf.d/10-x.conf": broken, OURS: ours})
+                printed = ("# " + MAIN + "\n" + FILES[MAIN] + "\n# /etc/systemd/journald.conf.d/10-x.conf\n"
+                           "[Journal]\nCompress=yes\n\n# " + OURS + "\n" + ours)
+                CE._journald_printout_settings(printed)                    # the printout alone is accepted
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_settings(self.host(), printed)
+        os.remove(self.host().path("/etc/systemd/journald.conf.d/10-x.conf"))
+        # our own file with a broken section line after a [Journal] block; the printout does not show that line
+        self._disk({MAIN: FILES[MAIN], OURS: "[Journal]\nX=1\n[Broken\n[Journal]\nMaxRetentionSec=35day\n"})
+        printed = "# " + MAIN + "\n" + FILES[MAIN] + "\n# " + OURS + "\n[Journal]\nX=1\nMaxRetentionSec=35day\n"
+        CE._journald_printout_settings(printed)
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), printed)
+
+    def test_the_file_reader_alone_refuses_each_line_it_does_not_model(self):
+        # The line is in the FILE only; the printout is clean and agrees with what a reader that trimmed
+        # blanks, joined or skipped the line would find. So the file reader (step b) is what raises.
+        local = "/etc/systemd/journald.conf.d/99-local.conf"
+        clean = "[Journal]\nMaxRetentionSec=40day\n"
+        head = "# " + MAIN + "\n" + FILES[MAIN] + "\n# " + OURS + "\n" + FILES[OURS] + "\n# " + local + "\n"
+        for name, body, shown in (
+                ("a blank before a key", "[Journal]\n MaxRetentionSec=40day\n", clean),
+                ("a tab before a key", "[Journal]\n\tMaxRetentionSec=40day\n", clean),
+                ("blanks around the equals sign", "[Journal]\nMaxRetentionSec = 40day\n", clean),
+                ("a trailing blank", "[Journal]\nMaxRetentionSec=40day \n", clean),
+                ("a line ending in a backslash", "[Journal]\nMaxRetentionSec=40day\\\n", clean),
+                ("a continued line", "[Journal]\nCompress=yes\\\nMaxRetentionSec=40day\n", "[Journal]\nMaxRetentionSec=40day\n"),
+                ("a section line with a trailing blank", "[Journal] \nMaxRetentionSec=40day\n", clean),
+                ("a broken section line after a blank", "[Journal]\nMaxRetentionSec=40day\n [Broken\n", clean)):
+            with self.subTest(name=name):
+                self._disk({**{k: FILES[k] for k in (MAIN, OURS)}, local: body})
+                files = CE._journald_printout_settings(head + shown)[1]    # the printout alone is accepted
+                self.assertEqual(files, [MAIN, OURS, local])
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_file_settings(self.host(), files)
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_settings(self.host(), head + shown)
+        # the control: the clean body in the file reads, so the cases above fail for their one line
+        self._disk({local: clean})
+        self.assertEqual(CE._journald_settings(self.host(), head + clean)[0]["MaxRetentionSec"],
+                         {"value": "40day", "file": local})
+
+    def test_a_main_file_ending_in_a_broken_section_line_is_refused_by_the_file_reader(self):
+        self._disk({**FILES, MAIN: FILES[MAIN] + "[Broken\n"})
+        self.assertEqual(CE._journald_printout_settings(CAT_CONFIG)[1], [MAIN, OURS, SYSLOG])
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_file_settings(self.host(), [MAIN, OURS, SYSLOG])
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_an_oddly_named_settings_file_in_any_drop_in_directory_is_could_not_check(self):
+        # Record R9 (N2): systemd lists a `.conf` file whose NAME holds newlines, and the printout then shows
+        # header and content lines that stand in no file. The printout here is the healthy one.
+        for d in CE.JOURNALD_DROP_IN_DIRS:
+            for name in ("50-hermes-retention.conf\n[Journal]\nMaxRetentionSec=35day\nX=.conf", "my file.conf",
+                         "a;b.conf", "café.conf", ".conf"):
+                with self.subTest(d=d, name=name):
+                    self._disk(FILES)
+                    odd = self._w(d + "/" + name, "[Journal]\n")
+                    with self.assertRaises(CE.CouldNotCheck):
+                        CE._journald_settings(self.host(), CAT_CONFIG)
+                    os.remove(odd)
+                    self.assertEqual(CE._journald_settings(self.host(), CAT_CONFIG)[1], [MAIN, OURS, SYSLOG])
+
+    def test_the_four_drop_in_directories_are_the_ones_journald_reads(self):
+        self.assertEqual(CE.JOURNALD_DROP_IN_DIRS, ("/etc/systemd/journald.conf.d", "/run/systemd/journald.conf.d",
+                                                    "/usr/local/lib/systemd/journald.conf.d",
+                                                    "/usr/lib/systemd/journald.conf.d"))
+
+    def test_an_odd_name_that_is_not_a_settings_file_is_ignored(self):
+        self._disk(FILES)
+        self._w("/usr/lib/systemd/journald.conf.d/odd name;\n.bak", "x")
+        self._w("/etc/systemd/journald.conf.d/README", "x")
+        self._w("/etc/systemd/journald.conf.d/x.conf\n", "x")              # does not END in .conf
+        self.assertEqual(CE._journald_settings(self.host(), CAT_CONFIG)[1], [MAIN, OURS, SYSLOG])
+
+    def test_a_drop_in_directory_that_cannot_be_listed_is_could_not_check(self):
+        self._disk(FILES)
+        self._w("/run/systemd/journald.conf.d", "a file where a directory belongs")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        os.remove(self.host().path("/run/systemd/journald.conf.d"))
+        with mock.patch.object(CE.os, "listdir", side_effect=PermissionError("no")):
+            with self.assertRaises(CE.CouldNotCheck):
+                CE._journald_settings(self.host(), CAT_CONFIG)
+        CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_a_listed_file_is_opened_without_following_a_link_and_judged_by_what_was_opened(self):
+        self._disk(FILES)
+        real = self.host().path(OURS)
+        opened = []
+        real_open, real_lstat = os.open, os.lstat
+        listed = {self.host().path(p) for p in (MAIN, OURS, SYSLOG)}
+
+        def lstat(p, *a, **k):                         # the directories are looked at by path; a listed file never is
+            if p in listed:
+                raise AssertionError("judged by path, not by the open file")
+            return real_lstat(p, *a, **k)
+        with mock.patch.object(CE.os, "open", lambda p, flags, *a, **k: opened.append((p, flags)) or real_open(p, flags, *a, **k)), \
+                mock.patch.object(CE.os, "lstat", lstat):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        self.assertEqual([p for p, _ in opened], [self.host().path(p) for p in (MAIN, OURS, SYSLOG)])
+        for _, flags in opened:
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            self.assertTrue(flags & os.O_NONBLOCK)
+        os.remove(real)
+        os.mkfifo(real)                                # a FIFO: opening it must not wait for a writer
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(5):                             # the refused file's descriptor is closed
+            with self.assertRaises(CE.CouldNotCheck):
+                CE._journald_settings(self.host(), CAT_CONFIG)
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+    def test_a_header_forged_through_a_file_name_is_could_not_check(self):
+        # Record R9 (N2): the printout shows our header and 35day; no file of our name exists on disk.
+        self._disk({MAIN: FILES[MAIN], SYSLOG: FILES[SYSLOG]})
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_a_listed_file_that_is_not_a_plain_small_ascii_file_is_could_not_check(self):
+        self._disk(FILES)
+        real = self.host().path(OURS)
+        elsewhere = self._w("/elsewhere.conf", FILES[OURS])
+        os.remove(real)
+        os.symlink(elsewhere, real)                                        # a symbolic link
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        os.remove(real)
+        os.mkdir(real)                                                     # a directory
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        os.rmdir(real)
+        for body in (FILES[OURS] + "#" + "x" * 70000 + "\n", FILES[OURS] + "# a\0b\n"):    # too large; a NUL
+            with open(real, "w") as f:
+                f.write(body)
+            with self.assertRaises(CE.CouldNotCheck):
+                CE._journald_settings(self.host(), CAT_CONFIG)
+        with open(real, "wb") as f:                                         # a non-ASCII byte
+            f.write(FILES[OURS].encode() + b"# \xc3\xa9\n")
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+        with open(real, "w", newline="") as f:                              # a carriage return
+            f.write(FILES[OURS].replace("\n", "\r\n"))
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_the_printout_and_the_files_must_agree(self):
+        self._disk({**FILES, OURS: "[Journal]\nMaxRetentionSec=1day\nSystemMaxFiles=500\n"})
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(self.host(), CAT_CONFIG)
+
+    def test_headers_that_cannot_be_trusted_are_could_not_check(self):
+        self._disk(FILES)
+        host = self.host()
+        for text in (CAT_CONFIG + "\n# " + OURS + "\n[Journal]\nMaxRetentionSec=1day\n",           # our header twice
+                     CAT_CONFIG + "\n# /etc/systemd/journald.conf.d/x/y.conf\n[Journal]\n",           # not a known path
+                     "# Main configuration file systemd/journald.conf not found\n",                    # the tool's note
+                     "[Journal]\nMaxRetentionSec=1day\n",                                              # content before a header
+                     CAT_CONFIG + "\n# " + MAIN + "\n[Journal]\nMaxRetentionSec=1day\n",               # main header twice
+                     "", "\n", "\n\n"):                                                              # nothing at all
+            with self.subTest(text=text):
+                with self.assertRaises(CE.CouldNotCheck):
+                    CE._journald_settings(host, text)
+        self._w("/usr/lib/systemd/journald.conf", FILES[MAIN])             # a main file only under /etc counts
+        with self.assertRaises(CE.CouldNotCheck):
+            CE._journald_settings(host, "# /usr/lib/systemd/journald.conf\n" + FILES[MAIN])
+
+    def test_spans_sizes_and_what_cannot_be_converted(self):
+        CN = R.COULD_NOT_CHECK
+        for text, want in (("35day", 3024000), ("7day", 604800), ("1month", 2629800), ("1w", 604800), ("90", 90),
+                           ("0", 0), ("0day", 0), ("1y", 31557600), ("213503981day", 213503981 * 86400), ("213503982day", CN),
+                           ("584541y", 584541 * 31557600), ("584542y", CN), ("999999999y", CN),
+                           ("2h 30min", CN), ("1.5h", CN), ("29.99999999999999999day", CN), ("3000000000day", CN),
+                           ("99999999999999999999day", CN), ("0.99999999999999999999s", CN), ("1 fortnight", CN),
+                           ("", CN), ("infinity", CN), ("day", CN), ("-1day", CN), ("+35day", CN), ("35 day", CN),
+                           ("35ms", CN), (" 35day", CN), ("35day ", CN)):
+            self.assertEqual(CE._span_seconds(text), want, text)
+        for text, want in (("1G", 1 << 30), ("500M", 500 << 20), ("4096", 4096), ("8K", 8192), ("2T", 2 << 40),
+                           ("1.5G", CN), ("", CN), ("big", CN), ("16E", CN), ("99999999999999999999G", CN),
+                           ("1024B", CN), ("1G 500M", CN)):
+            self.assertEqual(CE._size_bytes(text), want, text)
+
+    def test_the_oldest_entry_is_a_utc_time_and_the_selector_comes_last(self):
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(1760000000), "")
+        self.outputs[_oldest_key()] = (0, _entry(1759000000), "")
+        host = self.host()
+        self.assertEqual(CE._oldest_entry(host), "2025-09-27T19:06:40Z")
+        self.assertEqual(CE._oldest_entry(host, ("-u", "hermes-app-broker@ads-audit", "--since", "-30d")),
+                         "2025-10-09T08:53:20Z")
+        self.assertEqual(host.calls[-1][-4:], ["-u", "hermes-app-broker@ads-audit", "--since", "-30d"])
+        self.assertEqual(host.calls[0][:2], ["journalctl", "-q"])     # never the leak checks' own prefixes
+
+    def test_no_entry_is_none_and_a_failure_is_could_not_check(self):
+        self.outputs[_oldest_key()] = (0, "", "")
+        self.assertIsNone(CE._oldest_entry(self.host()))
+        for bad in ((1, "", "boom"), (0, "not json\n", ""), (0, "{}\n", ""), (0, '{"__REALTIME_TIMESTAMP": "x"}\n', ""),
+                    (0, "[1]\n", ""), (0, '{"__REALTIME_TIMESTAMP": "9" }\n' * 2, ""),
+                    (0, '{"__REALTIME_TIMESTAMP": true}\n', ""), (0, '{"__REALTIME_TIMESTAMP": 1760000000000000}\n', ""),
+                    (0, '{"__REALTIME_TIMESTAMP": "-5000000"}\n', ""), (0, '{"__REALTIME_TIMESTAMP": "0"}\n', ""),
+                    (0, '{"__REALTIME_TIMESTAMP": "' + "1" * 18 + '"}\n', "")):
+            self.outputs[_oldest_key()] = bad
+            self.assertEqual(CE._oldest_entry(self.host()), R.COULD_NOT_CHECK, bad)
+
+    def test_ok_passes_its_time_limit_to_the_host(self):
+        seen = []
+        host = CE.Host(self.root, lambda argv, timeout=60: seen.append(timeout) or (0, "x", ""))
+        CE._ok(host, ["true"])
+        CE._ok(host, ["true"], timeout=300)
+        self.assertEqual(seen, [60, 300])
+
+
+class TestD24Journal(Base):
+    MID = "0123456789abcdef0123456789abcdef"
+    REPO_FILE = CE.CHECKOUT + "/infra/hermes-agent/deploy/journald-hermes-retention.conf"
+    # as `systemctl show systemd-journald --timestamp=us+utc -p ExecMainStartTimestamp -p ActiveState -p MainPID`
+    # prints it (record R7, R11): the three properties come back named, in systemd's order, not the order asked for
+    START_TEXT = "Sat 2026-10-10 12:00:00.500000 UTC"
+
+    @staticmethod
+    def _shown(started=START_TEXT, state="active", pid="146"):
+        return f"MainPID={pid}\nExecMainStartTimestamp={started}\nActiveState={state}\n"
+
+    STARTED = _shown.__func__()
+    START_NS = CE._epoch("2026-10-10T12:00:00Z") * 10 ** 9 + 500 * 10 ** 6
+    DIRS = ("/etc/systemd/journald.conf.d", "/usr/lib/systemd/journald.conf.d")
+
+    def setUp(self):
+        super().setUp()
+        self.cat_key, self.start_key = tuple(CE.JOURNALD_CAT_CONFIG), tuple(CE.JOURNALD_STARTED)
+        self._w("/etc/machine-id", self.MID + "\n")
+        for name in ("system.journal", "user-1000.journal", "system@a-1-2.journal", "user-1000@b-1-2.journal~"):
+            self._w(f"/var/log/journal/{self.MID}/{name}", "x" * 8192)
+        self._w(f"/var/log/journal/{self.MID}/not-a-journal.txt", "x")
+        self._w(self.REPO_FILE, FILES[OURS])
+        self.conf_paths = [self._w(p, FILES[p]) for p in (MAIN, OURS, SYSLOG)]   # they AGREE with CAT_CONFIG
+        os.chmod(self.conf_paths[1], 0o644)
+        self._all_older_than_the_start()
+        self.outputs[self.cat_key] = (0, CAT_CONFIG, "")
+        self.outputs[self.start_key] = (0, self.STARTED, "")
+        now = int(time.time())
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(now - 3 * 86400), "")
+        self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, "", "")
+        self.outputs[_oldest_key()] = (0, _entry(now - 31 * 86400 - 60), "")
+        self.disk_key = ("journalctl", "-D", "/var/log/journal/" + self.MID)
+        self.flag = self._w("/run/systemd/journal/flushed", "")
+        self.outputs[self.disk_key] = (0, _entry(now - 7), "")
+
+    def _all_older_than_the_start(self):
+        old = CE._epoch("2026-10-10T11:00:00Z")
+        for p in [*self.conf_paths, *(os.path.join(self.root, d.lstrip("/")) for d in self.DIRS)]:
+            os.utime(p, (old, old))
+
+    def _content_time_only(self):
+        """A test cannot set a file's inode change time: compare by the content time alone."""
+        return mock.patch.object(CE, "_changed_at_ns", lambda host, p: os.lstat(host.path(p)).st_mtime_ns)
+
+    def _set(self, path, ns):
+        os.utime(os.path.join(self.root, path.lstrip("/")), ns=(ns, ns))
+
+    def _swap(self, main_body):
+        """The main file alone, on disk and in the printout."""
+        self._w(MAIN, main_body)
+        self.outputs[self.cat_key] = (0, "# " + MAIN + "\n" + main_body, "")
+
+    def _raising(self, first, exc):
+        host = self.host()
+        fake = host._run
+
+        def run(argv, timeout=60):
+            if argv[0] == first:
+                raise exc
+            return fake(argv, timeout)
+        host._run = run
+        return host
+
+    def test_a_healthy_box(self):
+        with self._content_time_only():
+            d = CE.d2_4(self.host(), {})
+        self.assertEqual(sorted(d), ["config_files", "drop_in", "oldest_entry", "reach_days", "service", "settings", "usage"])
+        self.assertEqual(d["reach_days"], 31)
+        self.assertRegex(d["oldest_entry"]["journal"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertRegex(d["oldest_entry"]["broker"], r"Z$")
+        self.assertIsNone(d["oldest_entry"]["runner"])
+        self.assertEqual(d["settings"]["MaxRetentionSec"], {"value": "35day", "file": OURS, "number": 3024000})
+        self.assertEqual(d["settings"]["SystemMaxFiles"], {"value": "500", "file": OURS, "number": 500})
+        self.assertEqual(d["settings"]["SystemMaxUse"], {"value": "1G", "file": MAIN, "number": 1 << 30})
+        self.assertEqual(d["settings"]["MaxFileSec"], {"value": "1day", "file": MAIN, "number": 86400})
+        self.assertEqual(d["config_files"], [MAIN, OURS, SYSLOG])
+        self.assertEqual((d["drop_in"]["equals_repo"], d["drop_in"]["mode"], d["drop_in"]["other_files"]),
+                         (True, "0o644", []))
+        self.assertEqual(d["service"], {"active": True, "started_at": "2026-10-10T12:00:00Z",
+                                        "config_changed_after_start": False})
+        self.assertEqual(d["settings"]["Storage"], {"value": None, "file": None, "number": None})
+        self.assertEqual(list(d["settings"]), ["MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec", "Storage"])
+        own = os.path.join(self.root, "var/log/journal", self.MID)
+        blocks = sum(os.lstat(os.path.join(own, n)).st_blocks for n in os.listdir(own) if ".journal" in n)
+        self.assertEqual((d["usage"]["files"], d["usage"]["bytes"], d["usage"]["other_directories"]),
+                         (4, blocks * 512, 0))
+        self.assertEqual(d["usage"]["files_percent_of_max_files"], 0.8)
+        self.assertIsInstance(d["usage"]["bytes_percent_of_max_use"], float)
+        self.assertIsInstance(d["usage"]["free_bytes"], int)
+        self.assertTrue(0 <= d["usage"]["free_percent"] <= 100)
+
+    def test_the_names_later_tasks_read(self):
+        self.assertEqual(CE.JOURNALD_DROP_IN, OURS)
+        self.assertEqual(CE.JOURNAL_UNITS, {"broker": "hermes-app-broker@ads-audit", "runner": "hermes-app-runner@ads-audit"})
+        self.assertIs(CE.PROBES["D2.4"], CE.d2_4)
+        self.assertEqual(list(CE.PROBES)[list(CE.PROBES).index("D2.3") + 1], "D2.4")
+
+    def test_the_commands_are_the_measured_ones_and_each_unit_is_asked_for(self):
+        self.assertEqual(CE.JOURNALD_STARTED, ["systemctl", "show", "systemd-journald", "--timestamp=us+utc",
+                                               "-p", "ExecMainStartTimestamp", "-p", "ActiveState", "-p", "MainPID"])
+        host = self.host()
+        CE.d2_4(host, {})
+        self.assertIn(CE.JOURNALD_CAT_CONFIG, host.calls)
+        self.assertIn(CE.JOURNALD_STARTED, host.calls)
+        for selector in ([], ["-u", "hermes-app-broker@ads-audit"], ["-u", "hermes-app-runner@ads-audit"]):
+            self.assertIn(["journalctl", *CE.OLDEST_ENTRY_ARGS, *selector], host.calls)
+
+    # ---- service: has the running journal service read the files shown?
+    def test_a_settings_file_newer_than_the_service_start_is_reported(self):
+        for path in (MAIN, OURS, SYSLOG):
+            with self.subTest(path=path):
+                self._all_older_than_the_start()
+                self._set(path, self.START_NS + 1000)                       # one microsecond after the start
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self.assertIs(d["service"]["config_changed_after_start"], True)
+
+    def test_installed_then_restarted_within_one_second_is_not_reported(self):
+        # Record R7: in the rehearsal our file was written 21 ms before the service's process started, in
+        # the same second. At second precision that reads as "changed after the start".
+        self._set(OURS, self.START_NS - 21 * 10 ** 6)
+        self._set(self.DIRS[0], self.START_NS - 22 * 10 ** 6)
+        with self._content_time_only():
+            self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], False)
+
+    def test_a_change_stamped_within_one_clock_tick_before_the_start_counts_as_after(self):
+        # A file's time is taken from the kernel's coarse clock: up to one tick (10 ms at most) older than the change.
+        self.assertEqual(CE._CLOCK_TICK_NS, 10 * 10 ** 6)
+        for before_ns, want in ((10 * 10 ** 6 - 1, True), (10 * 10 ** 6, False), (0, True)):
+            with self.subTest(before_ns=before_ns):
+                self._set(OURS, self.START_NS - before_ns)
+                with self._content_time_only():
+                    self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], want)
+
+    def test_a_file_added_to_or_removed_from_a_settings_directory_after_the_start_is_reported(self):
+        # A drop-in the service read and that was then deleted is still in force, and is in no list.
+        for d in self.DIRS:
+            with self.subTest(d=d):
+                self._all_older_than_the_start()
+                self._set(d, self.START_NS + 10 ** 9)
+                with self._content_time_only():
+                    got = CE.d2_4(self.host(), {})
+                self.assertIs(got["service"]["config_changed_after_start"], True)
+                self.assertEqual(got["config_files"], [MAIN, OURS, SYSLOG])
+        self._all_older_than_the_start()                                    # and really, with the real clock:
+        self.outputs[self.start_key] = (0, self._shown(time.strftime("%a %Y-%m-%d %H:%M:%S.000000 UTC", time.gmtime(time.time() + 3600))), "")
+        self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], False)   # control: start in an hour
+        os.utime(os.path.join(self.root, self.DIRS[1].lstrip("/")), None)
+        self.outputs[self.start_key] = (0, self._shown(time.strftime("%a %Y-%m-%d %H:%M:%S.000000 UTC", time.gmtime(time.time() - 3600))), "")
+        self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], True)
+
+    def test_a_file_just_written_is_newer_than_an_old_start_without_any_patching(self):
+        # the real clock: every file of this test was created just now, the service started long ago
+        self.outputs[self.start_key] = (0, self._shown("Thu 2020-01-02 00:00:00.000000 UTC"), "")
+        d = CE.d2_4(self.host(), {})["service"]
+        self.assertEqual(d, {"active": True, "started_at": "2020-01-02T00:00:00Z", "config_changed_after_start": True})
+
+    def test_the_inode_change_time_counts_not_only_the_content_time(self):
+        # a copy that keeps an old content time (cp -p, tar, touch -d) still changed the file just now
+        before = time.time_ns() - 5 * 10 ** 9
+        self.assertEqual(os.lstat(self.conf_paths[1]).st_mtime, CE._epoch("2026-10-10T11:00:00Z"))
+        self.assertGreater(CE._changed_at_ns(self.host(), OURS), before)
+        os.symlink("/nowhere", os.path.join(self.root, "a-link"))            # the link itself, never its target
+        self.assertGreater(CE._changed_at_ns(self.host(), "/a-link"), before)
+
+    def test_a_start_time_that_cannot_be_read_is_could_not_check_never_false(self):
+        CN = R.COULD_NOT_CHECK
+        for started in ("", "Sat 2026-10-10 12:00:00 UTC",                    # empty; no microseconds
+                        "Sat 2026-10-10 14:00:00.500000 CEST",                # not UTC
+                        "Sat 2026-13-45 12:00:00.500000 UTC",                 # not a date
+                        "@1791654218", "n/a"):
+            with self.subTest(started=started):
+                self.outputs[self.start_key] = (0, self._shown(started), "")
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self.assertEqual(d["service"], {"active": True, "started_at": CN, "config_changed_after_start": CN})
+
+    def test_a_service_that_is_not_running_is_never_reported_as_having_read_the_settings(self):
+        # Record R11: a stopped journal service keeps its ExecMainStartTimestamp (and shows MainPID=0, inactive).
+        CN = R.COULD_NOT_CHECK
+        for state, pid, active in (("inactive", "0", False), ("failed", "0", False), ("deactivating", "146", False),
+                                   ("activating", "146", False), ("reloading", "146", False), ("maintenance", "0", False),
+                                   ("active", "0", CN),                       # active without a process: not understood
+                                   ("active", "", CN), ("active", "-1", CN), ("active", "1e3", CN), ("active", "0146", CN),
+                                   ("Active", "146", CN), ("", "146", CN), ("active (running)", "146", CN)):
+            with self.subTest(state=state, pid=pid):
+                self.outputs[self.start_key] = (0, self._shown(state=state, pid=pid), "")
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self.assertEqual(d["service"], {"active": active, "started_at": CN, "config_changed_after_start": CN})
+                self.assertEqual(d["settings"]["MaxRetentionSec"]["number"], 3024000)     # the other parts are still read
+
+    def test_an_answer_about_the_service_that_is_not_the_three_properties_is_could_not_check(self):
+        CN = R.COULD_NOT_CHECK
+        good = self.STARTED
+        for answer in ((0, "\n", ""), (0, "", ""), (1, good, ""), (127, "", "not found"),
+                       (0, self.START_TEXT + "\n", ""),                               # the bare value
+                       (0, good + good, ""),                                          # each property twice
+                       (0, good + "SubState=running\n", ""),                          # one more
+                       (0, good.replace("ActiveState=active\n", ""), ""),             # one missing
+                       (0, good.replace("MainPID=146\n", "MainPID=146\nMainPID=147\n").replace("ActiveState=active\n", ""), ""),
+                       (0, good.replace("ActiveState=", "ActiveState "), ""),
+                       (0, good.replace("\n", "\r\n"), "")):
+            with self.subTest(answer=answer):
+                self.outputs[self.start_key] = answer
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self.assertEqual(d["service"], {"active": CN, "started_at": CN, "config_changed_after_start": CN})
+        self.outputs[self.start_key] = (0, "ActiveState=active\nExecMainStartTimestamp=" + self.START_TEXT + "\nMainPID=7\n", "")
+        with self._content_time_only():                                               # any order of the three is read
+            self.assertEqual(CE.d2_4(self.host(), {})["service"],
+                             {"active": True, "started_at": "2026-10-10T12:00:00Z", "config_changed_after_start": False})
+
+    # ---- a settings directory that is not a real directory (review of Task 7, Critical 1)
+    def _link_a_directory(self, d):
+        """`d` becomes a symbolic link to a real directory holding what `d` held."""
+        real = os.path.join(self.root, d.lstrip("/"))
+        elsewhere = os.path.join(self.root, "elsewhere" + d.replace("/", "-"))
+        if os.path.isdir(real):
+            os.rename(real, elsewhere)
+        else:
+            os.makedirs(elsewhere)
+            os.makedirs(os.path.dirname(real), exist_ok=True)
+        os.symlink(elsewhere, real)
+        old = CE._epoch("2026-10-10T11:00:00Z")
+        os.utime(elsewhere, (old, old))
+        os.utime(real, (old, old), follow_symlinks=False)
+        return elsewhere
+
+    def _nothing_about_the_settings_is_claimed(self, d):
+        CN = R.COULD_NOT_CHECK
+        self.assertEqual((d["settings"], d["config_files"]), (CN, CN))
+        self.assertEqual(d["service"], {"active": True, "started_at": CN, "config_changed_after_start": CN})
+        self.assertEqual((d["usage"]["bytes_percent_of_max_use"], d["usage"]["files_percent_of_max_files"]), (CN, CN))
+
+    def test_a_drop_in_directory_that_is_a_link_is_could_not_check_never_false(self):
+        # The reviewer's case: the directory is a link, the service read a second file there (7 days) and that
+        # file was removed since. The link's own time did not change, and every file read through it looks healthy.
+        for d in CE.JOURNALD_DROP_IN_DIRS:
+            with self.subTest(d=d):
+                elsewhere = self._link_a_directory(d)
+                if d == CE.JOURNALD_DROP_IN_DIR:
+                    short = os.path.join(elsewhere, "99-short.conf")
+                    with open(short, "w") as f:
+                        f.write("[Journal]\nMaxRetentionSec=7day\n")
+                    os.remove(short)                                        # the real directory's time is now: after the start
+                with self._content_time_only():
+                    d24 = CE.d2_4(self.host(), {})
+                self._nothing_about_the_settings_is_claimed(d24)
+                os.remove(os.path.join(self.root, d.lstrip("/")))
+                os.rename(elsewhere, os.path.join(self.root, d.lstrip("/")))
+                self._all_older_than_the_start()
+                with self._content_time_only():                             # control: a real directory again
+                    self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], False)
+
+    def test_a_parent_of_a_settings_directory_reached_through_a_link_is_could_not_check(self):
+        for parent in ("/etc/systemd", "/etc", "/usr/lib/systemd", "/usr/lib", "/usr", "/usr/local", "/usr/local/lib",
+                       "/usr/local/lib/systemd", "/run", "/run/systemd"):
+            with self.subTest(parent=parent):
+                elsewhere = self._link_a_directory(parent)
+                with self._content_time_only():
+                    d = CE.d2_4(self.host(), {})
+                self._nothing_about_the_settings_is_claimed(d)
+                os.remove(os.path.join(self.root, parent.lstrip("/")))
+                os.rename(elsewhere, os.path.join(self.root, parent.lstrip("/")))
+                self._all_older_than_the_start()
+                with self._content_time_only():
+                    self.assertEqual(CE.d2_4(self.host(), {})["config_files"], [MAIN, OURS, SYSLOG])
+
+    def test_a_settings_directory_that_is_a_file_is_could_not_check(self):
+        self._w("/run/systemd/journald.conf.d", "a file where a directory belongs")
+        with self._content_time_only():
+            self._nothing_about_the_settings_is_claimed(CE.d2_4(self.host(), {}))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads through any permission")
+    def test_an_existing_directory_whose_time_cannot_be_read_is_could_not_check(self):
+        # Nothing is patched: the directory exists, and its parent does not let this user look at it.
+        os.makedirs(os.path.join(self.root, "usr/local/lib/systemd/journald.conf.d"))
+        parent = os.path.join(self.root, "usr/local/lib/systemd")
+        with self._content_time_only():
+            self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], True)    # the new directory
+        old = CE._epoch("2026-10-10T11:00:00Z")
+        os.utime(os.path.join(parent, "journald.conf.d"), (old, old))
+        with self._content_time_only():
+            self.assertIs(CE.d2_4(self.host(), {})["service"]["config_changed_after_start"], False)   # control
+        os.chmod(parent, 0)
+        self.addCleanup(os.chmod, parent, 0o755)
+        with self.assertRaises(PermissionError):
+            os.lstat(os.path.join(parent, "journald.conf.d"))
+        with self._content_time_only():
+            self._nothing_about_the_settings_is_claimed(CE.d2_4(self.host(), {}))
+        self._nothing_about_the_settings_is_claimed(CE.d2_4(self.host(), {}))              # and with the real function
+
+    def test_the_service_part_refuses_a_linked_directory_on_its_own(self):
+        # even handed a list of files (as if the settings reader had accepted them)
+        self._link_a_directory("/run/systemd/journald.conf.d")
+        with self._content_time_only():
+            got = CE._journald_service(self.host(), [MAIN, OURS, SYSLOG])
+        self.assertEqual(got, {"active": True, "started_at": R.COULD_NOT_CHECK, "config_changed_after_start": R.COULD_NOT_CHECK})
+
+    # ---- Storage= (record R10)
+    def test_storage_is_reported_as_written_by_the_file_that_sets_it_last(self):
+        for value in ("volatile", "none", "persistent", "auto", "Volatile", "", "disk"):
+            with self.subTest(value=value):
+                self._swap("[Journal]\nStorage=persistent\nSystemMaxUse=1G\nStorage=" + value + "\n")
+                d = CE.d2_4(self.host(), {})["settings"]
+                self.assertEqual(d["Storage"], {"value": value, "file": MAIN, "number": None})
+        local = "/etc/systemd/journald.conf.d/90-s.conf"                    # as measured: a later drop-in wins
+        self._w(MAIN, FILES[MAIN] + "Storage=persistent\n")
+        self._w(local, "[Journal]\nStorage=volatile\n")
+        self.outputs[self.cat_key] = (0, "\n".join(f"# {p}\n{c}" for p, c in (
+            (MAIN, FILES[MAIN] + "Storage=persistent\n"), (OURS, FILES[OURS]), (local, "[Journal]\nStorage=volatile\n"),
+            (SYSLOG, FILES[SYSLOG]))), "")
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual(d["settings"]["Storage"], {"value": "volatile", "file": local, "number": None})
+        self.assertEqual(d["settings"]["MaxRetentionSec"]["value"], "35day")
+        self._w(local, "[Journal]\n")                                      # the printout says volatile, no file does
+        self.assertEqual(CE.d2_4(self.host(), {})["settings"], R.COULD_NOT_CHECK)
+
+    def test_a_listed_file_whose_time_cannot_be_read_is_could_not_check_and_the_start_is_still_shown(self):
+        def gone(host, p):
+            raise PermissionError(p)
+        with mock.patch.object(CE, "_changed_at_ns", gone):
+            d = CE.d2_4(self.host(), {})
+        self.assertEqual(d["service"], {"active": True, "started_at": "2026-10-10T12:00:00Z",
+                                        "config_changed_after_start": R.COULD_NOT_CHECK})
+
+    # ---- drop_in
+    def test_a_missing_a_different_and_a_neighbouring_file_are_each_visible(self):
+        self._w("/etc/systemd/journald.conf.d/99-other.conf", "[Journal]\n")
+        self._w("/etc/systemd/journald.conf.d/odd name;.conf", "")
+        self._w(OURS, FILES[OURS].replace("35day", "36day"))
+        d = CE.d2_4(self.host(), {})["drop_in"]
+        self.assertEqual((d["equals_repo"], d["other_files"]), (False, ["99-other.conf", CE.WITHHELD]))
+        shutil.rmtree(os.path.join(self.root, "etc/systemd/journald.conf.d"))
+        d = CE.d2_4(self.host(), {})["drop_in"]
+        self.assertEqual(d, {"equals_repo": False, "owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK,
+                             "mode": R.COULD_NOT_CHECK, "other_files": []})
+
+    def test_a_drop_in_directory_that_cannot_be_listed_and_a_missing_repo_file(self):
+        os.remove(os.path.join(self.root, self.REPO_FILE.lstrip("/")))
+        real = os.listdir
+        with mock.patch.object(CE.os, "listdir", lambda p: (_ for _ in ()).throw(PermissionError(p))
+                               if p.endswith("journald.conf.d") else real(p)):
+            d = CE.d2_4(self.host(), {})
+        self.assertEqual((d["drop_in"]["equals_repo"], d["drop_in"]["other_files"], d["drop_in"]["mode"]),
+                         (False, R.COULD_NOT_CHECK, "0o644"))
+        self.assertEqual((d["settings"], d["config_files"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    # ---- settings
+    def test_no_setting_by_any_file_uses_systemds_default_file_limit(self):
+        self._swap("[Journal]\nMaxRetentionSec=1.5h\n")
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual(d["config_files"], [MAIN])
+        self.assertEqual(d["settings"]["MaxRetentionSec"], {"value": "1.5h", "file": MAIN, "number": R.COULD_NOT_CHECK})
+        self.assertEqual(d["settings"]["SystemMaxFiles"], {"value": None, "file": None, "number": None})
+        self.assertEqual(d["settings"]["SystemMaxUse"], {"value": None, "file": None, "number": None})
+        self.assertEqual(d["usage"]["files_percent_of_max_files"], 4.0)        # 4 files of the default 100
+        self.assertEqual(d["usage"]["bytes_percent_of_max_use"], R.COULD_NOT_CHECK)   # no default is assumed for the size
+        self.assertIsInstance(d["usage"]["bytes"], int)
+
+    def test_a_value_the_reader_does_not_model_makes_the_settings_could_not_check(self):
+        self._swap("[Journal]\nMaxRetentionSec=1 fortnight\n")             # a blank in a value: refused as a line
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual((d["settings"], d["config_files"]), (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+        self.assertEqual((d["usage"]["files"], d["usage"]["files_percent_of_max_files"],
+                          d["usage"]["bytes_percent_of_max_use"]), (4, R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+        self.assertEqual(d["service"]["config_changed_after_start"], R.COULD_NOT_CHECK)
+
+    def test_a_number_systemd_might_read_otherwise_is_could_not_check_never_a_guess(self):
+        CN = R.COULD_NOT_CHECK
+        for value, number, percent in (("500", 500, 0.8), ("100", 100, 4.0), ("4", 4, 100.0), ("999999999", 999999999, 0.0),
+                                       ("0", 0, CN),                        # no count to compare with
+                                       ("0500", CN, CN), ("00", CN, CN),     # a leading zero: octal to a C parser
+                                       ("0x10", CN, CN), ("1000000000", CN, CN), ("+5", CN, CN), ("5e2", CN, CN),
+                                       ("", CN, CN)):                       # an empty assignment resets the setting
+            with self.subTest(value=value):
+                self._swap("[Journal]\nSystemMaxUse=1G\nSystemMaxFiles=" + value + "\n")
+                d = CE.d2_4(self.host(), {})
+                self.assertEqual(d["settings"]["SystemMaxFiles"], {"value": value, "file": MAIN, "number": number})
+                self.assertEqual(d["usage"]["files_percent_of_max_files"], percent)
+        for value in ("0", "", "1.5G"):
+            with self.subTest(max_use=value):
+                self._swap("[Journal]\nSystemMaxUse=" + value + "\n")
+                d = CE.d2_4(self.host(), {})
+                self.assertEqual(d["usage"]["bytes_percent_of_max_use"], CN)
+        self._swap("[Journal]\nMaxRetentionSec=0\nMaxFileSec=\n")           # 0: no time limit to systemd; shown as it is
+        d = CE.d2_4(self.host(), {})["settings"]
+        self.assertEqual((d["MaxRetentionSec"]["number"], d["MaxFileSec"]["number"]), (0, CN))
+
+    def test_the_command_exiting_non_zero_is_could_not_check_and_the_other_parts_are_still_read(self):
+        self.outputs[self.cat_key] = (1, CAT_CONFIG, "Failed to read a file")     # a full, healthy-looking printout
+        with self._content_time_only():
+            d = CE.d2_4(self.host(), {})
+        self._settings_unknown_the_rest_read(d)
+        self.assertIs(d["drop_in"]["equals_repo"], True)
+
+    def test_a_printout_and_files_that_disagree_are_could_not_check(self):
+        self._w(MAIN, FILES[MAIN].replace("SystemMaxUse=1G", "SystemMaxUse=2G"))
+        self._all_older_than_the_start()
+        with self._content_time_only():
+            d = CE.d2_4(self.host(), {})
+        self._settings_unknown_the_rest_read(d)
+        self.assertIs(d["drop_in"]["equals_repo"], True)
+
+    def test_our_file_listed_by_the_printout_and_missing_from_disk(self):
+        os.remove(self.conf_paths[1])
+        with self._content_time_only():
+            d = CE.d2_4(self.host(), {})
+        self._settings_unknown_the_rest_read(d)
+        self.assertEqual(d["drop_in"], {"equals_repo": False, "owner": R.COULD_NOT_CHECK, "group": R.COULD_NOT_CHECK,
+                                        "mode": R.COULD_NOT_CHECK, "other_files": []})
+
+    def _settings_unknown_the_rest_read(self, d):
+        CN = R.COULD_NOT_CHECK
+        self.assertEqual((d["settings"], d["config_files"]), (CN, CN))
+        self.assertEqual(d["reach_days"], 31)
+        self.assertRegex(d["oldest_entry"]["journal"], r"Z$")
+        self.assertEqual(d["service"], {"active": True, "started_at": "2026-10-10T12:00:00Z", "config_changed_after_start": CN})
+        self.assertEqual((d["usage"]["files"], d["usage"]["other_directories"]), (4, 0))
+        self.assertIsInstance(d["usage"]["bytes"], int)
+        self.assertIsInstance(d["usage"]["free_percent"], float)
+        self.assertEqual((d["usage"]["bytes_percent_of_max_use"], d["usage"]["files_percent_of_max_files"]), (CN, CN))
+
+    def test_a_runner_that_raises_is_could_not_check_for_that_part_only(self):
+        CN = R.COULD_NOT_CHECK
+        for exc in (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), PermissionError("no"), OSError("gone")):
+            with self.subTest(exc=type(exc).__name__):
+                d = CE.d2_4(self._raising("systemd-analyze", exc), {})
+                self.assertEqual((d["settings"], d["config_files"], d["reach_days"]), (CN, CN, 31))
+                d = CE.d2_4(self._raising("journalctl", exc), {})
+                self.assertEqual((d["oldest_entry"], d["reach_days"]), ({"journal": CN, "broker": CN, "runner": CN}, CN))
+                self.assertEqual(d["config_files"], [MAIN, OURS, SYSLOG])
+                d = CE.d2_4(self._raising("systemctl", exc), {})
+                self.assertEqual(d["service"], {"active": CN, "started_at": CN, "config_changed_after_start": CN})
+                self.assertEqual(d["settings"]["MaxRetentionSec"]["number"], 3024000)
+
+    def test_what_cannot_be_read_is_could_not_check_part_by_part(self):
+        self.outputs[self.cat_key] = (1, "", "boom")
+        self.outputs[_oldest_key()] = (1, "", "boom")
+        os.remove(os.path.join(self.root, "etc/machine-id"))
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual(d["oldest_entry"]["journal"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["reach_days"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["settings"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["config_files"], R.COULD_NOT_CHECK)
+        self.assertEqual(set(d["usage"].values()), {R.COULD_NOT_CHECK})
+        self.assertIs(d["drop_in"]["equals_repo"], True)                # the other parts are still read
+
+    # ---- reach
+    def test_a_journal_without_an_entry_has_no_reach_and_an_entry_from_the_future_is_could_not_check(self):
+        self.outputs[_oldest_key()] = (0, "", "")
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual((d["oldest_entry"]["journal"], d["reach_days"]), (None, None))
+        now = int(time.time())
+        for age, want in ((-3600, R.COULD_NOT_CHECK), (0, 0), (86340, 0), (86460, 1), (30 * 86400 - 60, 29), (30 * 86400 + 60, 30)):
+            with self.subTest(age=age):
+                self.outputs[_oldest_key()] = (0, _entry(now - age), "")
+                self.assertEqual(CE.d2_4(self.host(), {})["reach_days"], want)
+
+    def test_d2_4_reads_no_journal_as_a_user_who_is_not_root_on_a_real_host(self):
+        CN = R.COULD_NOT_CHECK
+        with mock.patch.object(os, "geteuid", return_value=1000):
+            host = self.host()
+            host._real = True
+            d = CE.d2_4(host, {})
+            self.assertEqual(d["oldest_entry"], {"journal": CN, "broker": CN, "runner": CN})
+            self.assertEqual((d["reach_days"], d["usage"]["newest_entry_on_disk"], d["usage"]["on_disk_age_seconds"]), (CN, CN, CN))
+            self.assertEqual(d["usage"]["files"], 4)                                  # what is not a journal read is read
+            d = CE.d2_4(self.host(), {})
+            self.assertEqual(d["reach_days"], 31)                                     # a test host is unaffected
+        with mock.patch.object(os, "geteuid", return_value=0):
+            host = self.host()
+            host._real = True
+            self.assertEqual(CE.d2_4(host, {})["reach_days"], 31)
+
+    def test_a_warning_on_stderr_at_rc_0_makes_d2_4s_entry_times_could_not_check(self):
+        CN = R.COULD_NOT_CHECK
+        warn = "Journal file /var/log/journal/" + "0" * 32 + "/system@1-2.journal is truncated, ignoring file.\n"
+        self.outputs[_oldest_key()] = (0, _entry(int(time.time()) - 31 * 86400), warn)
+        self.outputs[self.disk_key] = (0, _entry(int(time.time()) - 7), warn)
+        d = CE.d2_4(self.host(), {})
+        self.assertEqual((d["oldest_entry"]["journal"], d["reach_days"]), (CN, CN))
+        self.assertEqual((d["usage"]["newest_entry_on_disk"], d["usage"]["on_disk_age_seconds"]), (CN, CN))
+
+    # ---- usage
+    def test_another_machines_directory_is_counted_not_measured(self):
+        self._w("/var/log/journal/ffffffffffffffffffffffffffffffff/system.journal", "y" * 4096)
+        self._w("/var/log/journal/a-loose-file", "y")
+        d = CE.d2_4(self.host(), {})["usage"]
+        self.assertEqual((d["files"], d["other_directories"]), (4, 1))
+
+    def test_a_usage_that_cannot_be_counted_is_could_not_check_never_zero(self):
+        keys = {"bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
+                "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk"}
+        mid_path = os.path.join(self.root, "etc/machine-id")
+        for body in ("uninitialized\n", "", self.MID.upper() + "\n", self.MID[:31] + "\n", "../../etc\n"):
+            with self.subTest(body=body):
+                with open(mid_path, "w") as f:
+                    f.write(body)
+                self.assertEqual(CE.d2_4(self.host(), {})["usage"], {k: R.COULD_NOT_CHECK for k in keys})
+        with open(mid_path, "w") as f:
+            f.write(self.MID + "\n")
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"]["files"], 4)     # control
+        shutil.rmtree(os.path.join(self.root, "var/log/journal", self.MID))  # e.g. a journal kept in memory only
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"], {k: R.COULD_NOT_CHECK for k in keys})
+
+    # ---- is the on-disk journal the one being written? (record R13)
+    def test_a_journal_being_written_to_disk_has_a_newest_entry_a_few_seconds_old(self):
+        host = self.host()
+        d = CE.d2_4(host, {})["usage"]
+        self.assertRegex(d["newest_entry_on_disk"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertIn(d["on_disk_age_seconds"], (7, 8, 9))
+        self.assertEqual(CE.NEWEST_ENTRY_ARGS, ["-q", "--no-pager", "-o", "json", "--output-fields=__REALTIME_TIMESTAMP", "-n", "1"])
+        self.assertIn(["journalctl", "-D", "/var/log/journal/" + self.MID, *CE.NEWEST_ENTRY_ARGS], host.calls)
+        self.assertEqual(list(CE.d2_4(host, {})["usage"])[-3:], ["newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk"])
+
+    def test_a_relinquished_on_disk_journal_shows_its_age_while_everything_else_reads_healthy(self):
+        # Record R13: after `journalctl --relinquish-var` (and after a restart of the service) the on-disk directory
+        # answers with ONE object, rc 0, whose time stays where it was; the merged journal goes on growing.
+        now = int(time.time())
+        measured = ('{"__MONOTONIC_TIMESTAMP":"9160068110","__SEQNUM":"2152","__SEQNUM_ID":"' + "0" * 32 + '",'
+                    '"__REALTIME_TIMESTAMP":"' + str((now - 3 * 3600) * 1000000 + 486776) + '","__CURSOR":"s=abc","_BOOT_ID":"' + "0" * 32 + '"}\n')
+        self.outputs[self.disk_key] = (0, measured, "")
+        with self._content_time_only():
+            d = CE.d2_4(self.host(), {})
+        self.assertEqual(d["usage"]["newest_entry_on_disk"], CE._iso(now - 3 * 3600))
+        self.assertIn(d["usage"]["on_disk_age_seconds"], (10800, 10801, 10802))
+        self.assertEqual((d["reach_days"], d["settings"]["Storage"]["value"], d["service"]["active"],
+                          d["service"]["config_changed_after_start"], d["usage"]["files"]), (31, None, True, False, 4))
+
+    def test_systemds_own_flag_says_whether_the_journal_is_on_disk(self):
+        # Record R13: /run/systemd/journal/flushed is there once the journal was moved to disk, gone after
+        # `journalctl --relinquish-var` (also after a restart of the service), back after `journalctl --flush`.
+        # The age alone read 150 s in the relinquished state: inside any limit that a quiet box needs.
+        self.assertEqual(CE.JOURNAL_FLUSHED_FLAG, "/run/systemd/journal/flushed")
+        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], True)
+        os.remove(self.flag)
+        d = CE.d2_4(self.host(), {})["usage"]
+        self.assertIs(d["flushed_to_disk"], False)
+        self.assertIn(d["on_disk_age_seconds"], (7, 8, 9))                   # the age is read on its own
+        shutil.rmtree(os.path.join(self.root, "run/systemd/journal"))
+        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], False)
+        shutil.rmtree(os.path.join(self.root, "run"))
+        self.assertIs(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], False)
+
+    def test_a_link_or_a_directory_where_the_flag_belongs_is_could_not_check(self):
+        # systemd tests the path with access(), which follows links: a dangling link is absent for it.
+        # Only an ordinary file is "true"; anything else there cannot be judged.
+        real = self._w("/run/systemd/journal/real-file", "")
+        for what in ("dangling link", "link to a real file", "directory"):
+            with self.subTest(what=what):
+                if os.path.lexists(self.flag):
+                    (shutil.rmtree if os.path.isdir(self.flag) and not os.path.islink(self.flag) else os.remove)(self.flag)
+                if what == "dangling link":
+                    os.symlink("/nowhere", self.flag)
+                elif what == "link to a real file":
+                    os.symlink(real, self.flag)
+                else:
+                    os.mkdir(self.flag)
+                d = CE.d2_4(self.host(), {})["usage"]
+                self.assertEqual(d["flushed_to_disk"], R.COULD_NOT_CHECK)
+                self.assertEqual(d["files"], 4)
+
+    def test_a_journal_directory_that_is_a_link_makes_all_of_usage_could_not_check(self):
+        keys = ("bytes", "files", "bytes_percent_of_max_use", "files_percent_of_max_files", "free_bytes",
+                "free_percent", "other_directories", "newest_entry_on_disk", "on_disk_age_seconds", "flushed_to_disk")
+        CN = {k: R.COULD_NOT_CHECK for k in keys}
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"]["files"], 4)                  # control: healthy stays healthy
+        elsewhere = os.path.join(self.root, "elsewhere")
+        for part in ("var/log/journal/" + self.MID, "var/log/journal", "var/log", "var"):
+            with self.subTest(part=part):
+                target = os.path.join(self.root, part)
+                moved = target + ".moved"
+                os.rename(target, moved)
+                try:
+                    os.symlink(moved, target)               # the link leads to a real, healthy-looking directory
+                    self.assertEqual(CE.d2_4(self.host(), {})["usage"], CN)
+                finally:
+                    os.remove(target)
+                    os.rename(moved, target)
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"]["files"], 4)
+
+    def test_a_journal_directory_that_is_a_file_makes_all_of_usage_could_not_check(self):
+        target = os.path.join(self.root, "var/log/journal", self.MID)
+        shutil.rmtree(target)
+        self._w("/var/log/journal/" + self.MID, "not a directory")
+        d = CE.d2_4(self.host(), {})["usage"]
+        self.assertEqual({v for v in d.values()}, {R.COULD_NOT_CHECK})
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads through any permission")
+    def test_a_flag_that_cannot_be_looked_at_is_could_not_check_never_false(self):
+        parent = os.path.dirname(self.flag)
+        os.chmod(parent, 0)
+        self.addCleanup(os.chmod, parent, 0o755)
+        d = CE.d2_4(self.host(), {})["usage"]
+        self.assertEqual(d["flushed_to_disk"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["files"], 4)
+        os.chmod(parent, 0o755)
+        os.remove(self.flag)
+        os.rmdir(parent)
+        self._w("/run/systemd/journal", "a file where a directory belongs")  # ENOTDIR: not "does not exist"
+        self.assertEqual(CE.d2_4(self.host(), {})["usage"]["flushed_to_disk"], R.COULD_NOT_CHECK)
+
+    def test_an_on_disk_journal_without_an_entry_or_that_cannot_be_read_has_no_age(self):
+        CN = R.COULD_NOT_CHECK
+        for answer, newest in (((0, "", ""), None), ((0, "\n", ""), None),               # measured: an empty directory, rc 0
+                               ((1, "", "Failed to open"), CN), ((127, "", "not found"), CN),
+                               ((0, "not json\n", ""), CN), ((0, _entry(1760000000) * 2, ""), CN),
+                               ((0, '{"__REALTIME_TIMESTAMP": "0"}\n', ""), CN)):
+            with self.subTest(answer=answer):
+                self.outputs[self.disk_key] = answer
+                d = CE.d2_4(self.host(), {})["usage"]
+                self.assertEqual((d["newest_entry_on_disk"], d["on_disk_age_seconds"]), (newest, CN))
+                self.assertEqual(d["files"], 4)                                         # the counts are still read
+
+        def run(argv, timeout=60, fake=self.host()._run):
+            if argv[:2] == ["journalctl", "-D"]:
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            return fake(argv, timeout)
+        d = CE.d2_4(CE.Host(self.root, run), {})["usage"]
+        self.assertEqual((d["newest_entry_on_disk"], d["on_disk_age_seconds"], d["files"]), (CN, CN, 4))
+
+    def test_an_on_disk_entry_later_than_the_clock_has_no_age(self):
+        now = int(time.time())
+        self.assertEqual(CE._CLOCK_STEP_MARGIN, 2)
+        for ahead, want in ((0, (0, 1)), (2, (0,)), (60, (R.COULD_NOT_CHECK,)), (86400, (R.COULD_NOT_CHECK,))):
+            with self.subTest(ahead=ahead):
+                self.outputs[self.disk_key] = (0, _entry(now + ahead), "")
+                d = CE.d2_4(self.host(), {})["usage"]
+                self.assertIn(d["on_disk_age_seconds"], want)
+                self.assertEqual(d["newest_entry_on_disk"], CE._iso(now + ahead))
+
+    def test_the_oldest_and_the_newest_entry_are_read_by_one_grammar(self):
+        seen = []
+        real = CE._entry_time
+        with mock.patch.object(CE, "_entry_time", lambda host, argv: seen.append(argv[1]) or real(host, argv)):
+            CE.d2_4(self.host(), {})
+        self.assertEqual(seen, ["-q", "-q", "-q", "-D"])
+
+    def test_percent_is_only_ever_computed_from_two_counts(self):
+        CN = R.COULD_NOT_CHECK
+        self.assertEqual(CE._percent(1, 8), 12.5)
+        for part, whole in ((1, 0), (1, None), (1, CN), (CN, 8), (None, 8), (True, 8), (1, True), (1, -8), (1.0, 8)):
+            self.assertEqual(CE._percent(part, whole), CN, (part, whole))
+
+    # ---- what the item may hold
+    def test_no_machine_id_no_path_outside_the_settings_and_no_journal_text_in_the_item(self):
+        self._w("/var/log/journal/ffffffffffffffffffffffffffffffff/system.journal", "y")
+        out = json.dumps(CE.d2_4(self.host(), {}))
+        self.assertNotIn(self.MID, out)
+        self.assertNotIn("f" * 32, out)
+        self.assertNotIn("s=abc", out)
+        self.assertNotIn(self.root, out)
+        self.assertNotIn("/var/log", out)
+        self.assertIn('"newest_entry_on_disk": "2', out)                     # read, and still no id in the item
+
+    def test_it_is_in_the_bundle(self):
+        self.assertEqual(CE.collect(self.host(), self.KEY)["items"]["D2.4"]["status"], R.OBSERVED)
 
 
 class TestD46StartTimes(Base):

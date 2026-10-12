@@ -426,5 +426,14 @@ class TestListenerCheckUnits(unittest.TestCase):
         self.assertTrue(os.access(os.path.join(HERE, "show-listener-check"), os.X_OK))
 
 
+class TestJournalRetentionDropIn(unittest.TestCase):
+    """The file says what the design says. That systemd applies it is measured, not tested here:
+    docs/evaluations/2026-10-10-journal-retention-35-days.md."""
+
+    def test_it_sets_exactly_two_values_under_journal(self):
+        self.assertEqual(live_lines(unit("journald-hermes-retention.conf")),
+                         ["[Journal]", "MaxRetentionSec=35day", "SystemMaxFiles=500"])
+
+
 if __name__ == "__main__":
     unittest.main()
