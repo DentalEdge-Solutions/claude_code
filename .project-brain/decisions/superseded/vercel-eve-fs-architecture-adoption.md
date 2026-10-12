@@ -1,6 +1,6 @@
 ---
 type: synthesis
-status: active
+status: superseded
 title: "Vercel Eve filesystem-centric architecture — adoption analysis for the Hermes orchestrator layer"
 description: "Whether to adopt Vercel Eve's filesystem-as-registry pattern into the planned Hermes orchestrator layer. Recommendation: adopt the PATTERN (convention-over-config folder registry + evals-as-deploy-gate), not the Eve runtime; keep it framework-agnostic and VPS-friendly."
 tags: [architecture, agents, orchestrator, hermes, eve, filesystem-registry, adoption, deferred]

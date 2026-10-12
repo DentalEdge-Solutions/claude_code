@@ -5,7 +5,7 @@ description: The runner restart-spin fix is merged to main via PR #90 (CI green)
 tags: []
 timestamp: 2026-10-01T19:35:00
 sources: [sessions/daily/2026-10-01.md]
-status: active
+status: superseded
 promoted_at: 2026-10-01
 ---
 

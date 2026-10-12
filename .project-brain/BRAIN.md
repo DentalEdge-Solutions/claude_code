@@ -1,7 +1,7 @@
 # Project Brain — claude_code
 
 > **Created:** 2026-07-09 · **Mode:** standard · **Capsule:** `.project-brain/`
-> Last reviewed: 2026-10-09
+> Last reviewed: 2026-10-12
 
 Status page and operating protocol for this project's Second Brain.
 
