@@ -39,3 +39,4 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-10-09 promoted decisions/candidates/2026-10-09-security-review-9-pass-37-37-v1-18-f58-opened-the-box-s-jour.md → decisions/active/2026-10-09-security-review-9-pass-37-37-v1-18-f58-opened-the-box-s-jour.md
 - 2026-10-09 promoted decisions/candidates/2026-09-29-d3-2-decided-hermes-runs-read-only-no-write-credential.md → canon/2026-09-29-d3-2-decided-hermes-runs-read-only-no-write-credential.md
 - 2026-10-09 promoted decisions/candidates/2026-08-18-credential-access-levels-are-measured-never-asserted.md → canon/2026-08-18-credential-access-levels-are-measured-never-asserted.md
+- 2026-10-12 promoted decisions/candidates/2026-10-12-security-review-10-pass-38-38-v1-19-f58-fixed-on-the-box-f59.md → decisions/active/2026-10-12-security-review-10-pass-38-38-v1-19-f58-fixed-on-the-box-f59.md
