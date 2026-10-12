@@ -99,6 +99,49 @@ What it shows:
 - `/run/systemd/journal/flushed` exists: the journal is on disk (D2.4 `usage.flushed_to_disk` will be `true`).
 - None of the fourteen path parts D2.4 walks is a symbolic link.
 
+### The rollout on the box (2026-10-12, the operator, block by block)
+
+Each block is the runbook's (`deploy/BRING-UP.md`, "The journal's retention"), pasted by the operator; the
+outputs below are as reported, with nothing cut.
+
+- **Pull** (before the first trial collection): the checkout moved from `df58e10` to `634c190` (the merge of PR #114), fast-forward;
+  `git status --short` printed 0 lines.
+- **Trial collection before the step** (`collected_at 2026-10-12T15:08:35Z`, through the summary tool): 31 items,
+  all observed, `collector_rc=0`. D2.4: `MaxRetentionSec` `7day` (604800, not set by our file), `SystemMaxUse` `1G`,
+  `MaxFileSec` `1day`, `Storage` and `SystemMaxFiles` set by no file; `reach_days` 6; `drop_in` not equal to the
+  repository's, owner, group and mode `could-not-check` (the file was not installed); service active, started
+  2026-09-30T06:23:38Z, `config_changed_after_start` false; 24 files, 101593088 bytes (9.5% of the size limit),
+  87.7% of the disk free, 1 other directory, `flushed_to_disk` true. Five closing lines read `LOOK`, the five the
+  runbook names. One difference from the runbook: the first of them read `(4 places)`, not 3. The fourth is the
+  KEY `could-not-check` in D4.5's `history_counts` (`{could-not-check: 1, ok: 472}`), a count of past runs of the
+  listener check, which the summary tool counted as a place; review #9's report shows the same single run and
+  CHECKLIST D4.5 calls it a count of runs. The tool no longer counts that key (it prints
+  `(not counted: N past listener-check runs in D4.5's history)`), changed after the rollout.
+- **VPS 1** (15:15:45 UTC): the server's own file with `SystemMaxUse=1G`, `MaxRetentionSec=7day`, `MaxFileSec=1day`;
+  the `syslog.conf` drop-in with nothing under it; oldest entry 2026-10-05T16:53:19+00:00; 25 journal files, disk
+  13% used; journal on disk yes; 0 settings paths that are links; `sshd release: OpenSSH_9.6p1 Ubuntu-3ubuntu13.19`
+  (the first time the server program itself was asked on the box); 1 listener, 0 words starting `-f` or `-o`;
+  `docker logging: json-file`; one refusal each of `bad_request`, `disabled`, `quota`.
+- **VPS 2**: our file listed third, `MaxRetentionSec=35day`, `SystemMaxFiles=500`; 1 file in the directory.
+- **VPS 3**: `journal service: active | started: Mon 2026-10-12 16:06:05 UTC | journal on disk: yes`; oldest entry
+  before and after 2026-10-05T16:53:19+00:00, `same: yes`; `hermes-broker`, `hermes-docker-proxy` and
+  `hermes-app-broker@ads-audit` active; `listener_check_rc=0` and
+  `hermes-listener-check: status=ok reason=- listeners=[9119] unexpected=[] docker_dns_listeners=1`; the block ended
+  Mon Oct 12 16:06:11 UTC 2026. **The retention was raised on 2026-10-12 at 16:06:05 UTC.**
+- **Live check c**: `c: status=refused reason=bad_request` (the audit broker, running since 2026-10-08, writes to
+  the journal after the restart).
+- **Trial collection after the step** (`collected_at 2026-10-12T16:10:39Z`): 31 items, all observed,
+  `collector_rc=0`. D2.4: `MaxRetentionSec` `35day` (3024000) and `SystemMaxFiles` 500, both set by our file;
+  `drop_in` equal to the repository's, root, root, `0o644`, 0 other files; service active, started
+  2026-10-12T16:06:05Z, `config_changed_after_start` false; 25 files (5.0% of the file limit), 106614784 bytes
+  (9.9%), `on_disk_age_seconds` 19, `flushed_to_disk` true; `reach_days` 6. D2.3: 4718282 characters, 0
+  undecodable, oldest entry read 2026-10-05T16:53:19Z, no hit. D10.7: refusals `bad_request` 2, `disabled` 1,
+  `quota` 1. Four closing lines read `LOOK`: could-not-check `(1 places)` (the history key above), the reach (6
+  days), the other directory (1), and the proxy (a trial is given no last-PASS reference). The retention line, the
+  service line and the on-disk line read `ok`.
+- Nothing was undone and nothing was deleted: the other journal directory stays, as the operator decided on
+  2026-10-10.
+
 ## 3 · The rehearsal
 
 The image is `ubuntu:24.04` with `systemd`, `systemd-sysv`, `python3`, `bsdutils`; its `/etc/systemd/journald.conf`
