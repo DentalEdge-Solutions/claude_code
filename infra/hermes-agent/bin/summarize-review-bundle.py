@@ -326,8 +326,16 @@ def _all_observed(bundle, items):
 
 def _no_could_not_check(bundle, items):
     places = cnc_places(bundle)
+    # D4.5's history_counts is keyed by the status of each recorded run: a key named could-not-check
+    # there is a count of runs (CHECKLIST D4.5, pass rule (1)), not a field that was not read.
+    history = _data(items, "D4.5").get("history_counts")
+    runs = history.get(CNC) if isinstance(history, dict) else None
+    counted = _int(runs) and runs >= 0
+    places -= 1 if counted else 0
     listed = isinstance(bundle.get("credentials"), list)
-    note = (f" ({places} places)" if places else "") + ("" if listed else " (credentials is not a list)")
+    note = (f" ({places} {'place' if places == 1 else 'places'})" if places else "") \
+        + ("" if listed else " (credentials is not a list)") \
+        + (f" (not counted: {runs} past listener-check runs in D4.5's history)" if counted and runs else "")
     return places == 0 and listed, "nothing in the bundle is could-not-check" + note
 
 

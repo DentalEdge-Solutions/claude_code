@@ -645,6 +645,39 @@ class TestSummary(unittest.TestCase):
         b["items"]["D1.7"]["data"]["unprivileged_port_start"] = "could-not-check"
         self.assertIn("LOOK  nothing in the bundle is could-not-check (3 places)", closing_of(b))   # D5.3's status is the third
 
+    def test_a_history_key_named_could_not_check_is_a_count_of_runs_not_a_place(self):
+        def clean():                                              # the fixture's D5.3 is could-not-check
+            b = bundle()
+            del b["items"]["D5.3"]
+            return b
+        # Seen on the box on 2026-10-12: history_counts {could-not-check: 1, ok: 477}, which CHECKLIST
+        # D4.5 calls a count of runs. The line stays ok and says what it did not count.
+        b = clean()
+        b["items"]["D4.5"]["data"]["history_counts"]["could-not-check"] = 1
+        self.assertRegex(closing_of(b), r"(?m)^ok    nothing in the bundle is could-not-check "
+                                        r"\(not counted: 1 past listener-check runs in D4\.5's history\)$")
+        b["items"]["D1.7"]["data"]["unprivileged_port_start"] = "could-not-check"
+        self.assertRegex(closing_of(b), r"(?m)^LOOK  nothing in the bundle is could-not-check \(1 place\) "
+                                        r"\(not counted: 1 past listener-check runs in D4\.5's history\)$")
+
+    def test_only_that_one_key_with_a_count_is_left_out(self):
+        def clean():
+            b = bundle()
+            del b["items"]["D5.3"]
+            return b
+        for change in (lambda d: d["history_counts"].__setitem__("could-not-check", "x"),      # not a count
+                       lambda d: d["history_counts"].__setitem__("could-not-check", True),
+                       lambda d: d["history_counts"].__setitem__("could-not-check", -1),
+                       lambda d: d.__setitem__("history_counts", "could-not-check"),           # the field not read
+                       lambda d: d["alert_log"].__setitem__("could-not-check", 1),             # another dict
+                       lambda d: d.__setitem__("could-not-check", 1)):
+            b = clean()
+            change(b["items"]["D4.5"]["data"])
+            self.assertRegex(closing_of(b), r"(?m)^LOOK  nothing in the bundle is could-not-check \(1 place\)$")
+        b = clean()                                               # an item that was not observed is not excused
+        b["items"]["D4.5"] = {"status": "could-not-check", "data": {"history_counts": {"could-not-check": 1}}}
+        self.assertRegex(closing_of(b), r"(?m)^LOOK  nothing in the bundle is could-not-check \(2 places\)$")
+
     def test_a_storage_word_outside_the_set_is_other(self):
         def look(value):
             b = bundle()
@@ -669,7 +702,7 @@ class TestSummary(unittest.TestCase):
         b["credentials"] = {"could-not-check": "OSError: /var/lib/hermes/acmecorp.json: denied"}
         text = run(json.dumps(b))[1]
         self.assertRegex(text, r"(?m)^credentials: <withheld>$")
-        self.assertRegex(text, r"(?m)^LOOK  nothing in the bundle is could-not-check \(1 places\) \(credentials is not a list\)$")
+        self.assertRegex(text, r"(?m)^LOOK  nothing in the bundle is could-not-check \(1 place\) \(credentials is not a list\)$")
         for gone in ("/var/lib", "acmecorp", "denied", "OSError"):
             self.assertNotIn(gone, text)
         b["credentials"] = {"role": "x"}                 # not a list, nothing could-not-check in it
