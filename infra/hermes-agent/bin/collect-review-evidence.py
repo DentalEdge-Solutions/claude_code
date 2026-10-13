@@ -19,7 +19,7 @@ probe. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, ast, base64, calendar, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, tempfile, threading, time
+import argparse, ast, base64, calendar, collections, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, tempfile, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import app_lib as A
@@ -286,35 +286,106 @@ def _ok(host, argv, timeout=60):
     return out
 
 
-def _declared_apps(host):
+# The job sets, computed once per collection and kept in ctx, so no two items see different sets
+# and a command that did not answer is one could-not-check for all of them.
+Jobs = collections.namedtuple("Jobs", "manifests installed units_not_counted on_disk on_disk_not_counted names")
+
+
+def _once(ctx, key, fn):
+    """fn()'s answer, or its could-not-check, the first time; the same one every later time."""
+    cache = ctx.setdefault("job_sets", {})
+    if key not in cache:
+        try:
+            cache[key] = fn()
+        except CouldNotCheck as e:
+            cache[key] = e
+    if isinstance(cache[key], CouldNotCheck):
+        raise cache[key]
+    return cache[key]
+
+
+def _declared_apps(host, ctx):
     """{app: Manifest} for every job the box's checkout declares. A directory that cannot be read
     whole declares nothing this collector trusts: could-not-check, in fixed words (never a file
     name or what a file holds)."""
-    try:
-        return A.load_manifests(host.path(APPS_DIR))
-    except (OSError, ValueError):
-        raise CouldNotCheck("the jobs' description files could not all be loaded")
+    def load():
+        try:
+            return A.load_manifests(host.path(APPS_DIR))
+        except (OSError, ValueError):
+            raise CouldNotCheck("the jobs' description files could not all be loaded")
+    return _once(ctx, "declared", load)
 
 
-def _installed_apps(host):
-    """The jobs systemd knows a broker or runner unit for, loaded or not: names only, sorted. A
-    unit whose instance name is not an app name is not a job and is not printed."""
-    out = _ok(host, ["systemctl", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
-                     "hermes-app-broker@*", "hermes-app-runner@*"])
-    found = set()
-    for line in out.splitlines():
-        cols = line.split()
-        m = _APP_UNIT_RE.fullmatch(cols[0]) if cols else None
-        if m:
-            found.add(m.group(1))
-    return sorted(found)
+def _installed_apps(host, ctx):
+    """(names, not_counted). An installed job is one systemd has LOADED a broker or runner unit
+    for: `list-units --all` prints UNIT LOAD ACTIVE SUB DESCRIPTION, and a line counts only when
+    its unit is `hermes-app-(broker|runner)@<app name>.(service|path)` and its LOAD is `loaded`
+    (`not-found` is a name systemd only remembers). Every other line that is not empty is
+    counted in `not_counted`, never printed: 0 on a healthy box. A systemctl that does not answer
+    is could-not-check: the installed set is then unknown."""
+    def listed():
+        try:
+            out = _ok(host, ["systemctl", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
+                             "hermes-app-broker@*", "hermes-app-runner@*"])
+        except (OSError, ValueError):               # the runner itself failed, or its output is not text
+            raise CouldNotCheck("systemctl could not list the jobs' units")
+        found, skipped = set(), 0
+        for line in out.splitlines():
+            cols = line.split()
+            if not cols:
+                continue
+            m = _APP_UNIT_RE.fullmatch(cols[0])
+            if m and len(cols) > 1 and cols[1] == "loaded":
+                found.add(m.group(1))
+            else:
+                skipped += 1
+        return sorted(found), skipped
+    return _once(ctx, "installed", listed)
 
 
-def _jobs(host):
-    """(manifests, installed, names): the declared jobs, the installed ones, and the sorted union
-    the per-job items measure. A job systemd knows without a description file is still measured."""
-    manifests, installed = _declared_apps(host), _installed_apps(host)
-    return manifests, installed, sorted(set(manifests) | set(installed))
+def _on_disk_apps(host, ctx):
+    """(names, not_counted): the app names that are real directories under spool/apps or under
+    app-state (a stopped, disabled job no description file names still has them). Anything else
+    there (a file, a link, a name that is not an app name) is counted, never printed. A root that
+    is not there holds nothing; one that cannot be listed is could-not-check."""
+    def listed():
+        found, skipped = set(), 0
+        for root in (HL.DEFAULT_APPS_ROOT, HL.DEFAULT_STATE_ROOT):
+            try:
+                names = os.listdir(host.path(root))
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise CouldNotCheck("the jobs' directories could not be listed")
+            for n in names:
+                try:
+                    real_dir = stat.S_ISDIR(os.lstat(os.path.join(host.path(root), n)).st_mode)
+                except OSError:
+                    real_dir = False
+                if real_dir and A.APP_RE.fullmatch(n):
+                    found.add(n)
+                else:
+                    skipped += 1
+        return sorted(found), skipped
+    return _once(ctx, "on_disk", listed)
+
+
+def _jobs(host, ctx):
+    """The declared, the installed and the on-disk jobs, and `names`: the sorted union every
+    per-job item measures. A job in any one of the three is measured."""
+    manifests = _declared_apps(host, ctx)
+    installed, units_skipped = _installed_apps(host, ctx)
+    on_disk, disk_skipped = _on_disk_apps(host, ctx)
+    return Jobs(manifests, installed, units_skipped, on_disk, disk_skipped,
+                sorted(set(manifests) | set(installed) | set(on_disk)))
+
+
+def _per_job(host, ctx, measure):
+    """{app: what `measure(app)` returns, plus whether the job is declared and installed} for
+    every job, so no value has to be cross-read with another item."""
+    jobs = _jobs(host, ctx)
+    return {app: {**measure(app), "declared": app in jobs.manifests, "installed": app in jobs.installed}
+            for app in jobs.names}
 
 
 def _app_user(app):
@@ -1845,7 +1916,7 @@ def d2_4(host, ctx):
         # Per declared job. Description files that do not load cost this part alone: they must not
         # hide the journal's retention.
         oldest["apps"] = {app: {label: oldest_entry(("-u", unit)) for label, unit in _journal_units(app).items()}
-                          for app in sorted(_declared_apps(host))}
+                          for app in sorted(_declared_apps(host, ctx))}
     except CouldNotCheck:
         oldest["apps"] = R.COULD_NOT_CHECK
     reach = R.COULD_NOT_CHECK
@@ -2116,14 +2187,22 @@ def d4_6(host, ctx):
     --last-pass-collected-at), and which files each service loads that changed after it
     started. D4.2's hash is the same string after any daemon-reload, so it cannot show a
     restart (review #8); this item can. Timestamps, unit names, job names and file names only.
-    `apps_declared` is the sorted list of declared jobs: could-not-check when the description
-    files do not load, and then no job's broker is reported while everything else still is."""
-    services = dict(SERVICE_FILES)
+    The brokers reported are those of the declared jobs and of the installed ones (an undeclared
+    broker that runs is what this item is for). `apps_declared` and `apps_installed` are the two
+    sorted lists; each is could-not-check when it could not be had (the description files do not
+    load; systemctl did not list the units), and the brokers are then those of the other list."""
+    services, brokers = dict(SERVICE_FILES), set()
     try:
-        declared = sorted(_declared_apps(host))
-        services.update({_app_broker_unit(app): APP_BROKER_FILES for app in declared})
+        declared = sorted(_declared_apps(host, ctx))
+        brokers |= set(declared)
     except CouldNotCheck:
         declared = R.COULD_NOT_CHECK
+    try:
+        installed = _installed_apps(host, ctx)[0]
+        brokers |= set(installed)
+    except CouldNotCheck:
+        installed = R.COULD_NOT_CHECK
+    services.update({_app_broker_unit(app): APP_BROKER_FILES for app in sorted(brokers)})
     starts = {"boot": _boot_at(host), "docker": _unit_started_at(host, "docker"),
               "systemd-journald": _unit_started_at(host, "systemd-journald"),
               **{u: _unit_started_at(host, u) for u in services},
@@ -2136,7 +2215,8 @@ def d4_6(host, ctx):
         return None if base is None else ts > base       # one fixed-width UTC format: text order is time order
 
     files = {u: _files_newer_than_start(host, f, starts[u]) for u, f in services.items()}
-    return {"last_pass_collected_at": base, "apps_declared": declared, "started_at": starts,
+    return {"last_pass_collected_at": base, "apps_declared": declared, "apps_installed": installed,
+            "started_at": starts,
             "started_after_last_pass": {k: after(v) for k, v in starts.items()},
             "files_newer_than_start": {u: f[0] for u, f in files.items()},
             "files_checked": {u: f[1] for u, f in files.items()}}
@@ -2420,15 +2500,20 @@ def _app_units(host, app):
 
 
 def d10_3(host, ctx):
-    """Which jobs there are (`declared_apps`: the description files of the box's checkout;
-    `installed_apps`: the units systemd knows), whether the three template unit files equal the
-    repository's, and each job's units, user and path unit, for every job in either list."""
-    manifests, installed, names = _jobs(host)
-    return {"declared_apps": sorted(manifests), "installed_apps": installed,
+    """Which jobs there are, whether the three template unit files equal the repository's, and
+    each job's units, user and path unit. `declared_apps`: the description files of the box's
+    checkout. `installed_apps`: the jobs systemd has loaded a unit for, with `units_not_counted`
+    (lines of that listing that are not a loaded unit of a job; 0 when healthy). `on_disk_apps`:
+    the jobs with a directory under spool/apps or app-state, with `on_disk_not_counted`. `apps`
+    holds every job in any of the three lists."""
+    jobs = _jobs(host, ctx)
+    return {"declared_apps": sorted(jobs.manifests), "installed_apps": jobs.installed,
+            "units_not_counted": jobs.units_not_counted,
+            "on_disk_apps": jobs.on_disk, "on_disk_not_counted": jobs.on_disk_not_counted,
             "installed_equal_repo": {u: _same_file(host, "/etc/systemd/system/" + u,
                                                    CHECKOUT + "/infra/hermes-agent/deploy/" + u)
                                      for u in APP_UNITS},
-            "apps": {app: _app_units(host, app) for app in names}}
+            "apps": _per_job(host, ctx, lambda app: _app_units(host, app))}
 
 
 def _exposes_app_state(source):
@@ -2437,21 +2522,49 @@ def _exposes_app_state(source):
     return s == root or s.startswith(root + "/") or root.startswith(s.rstrip("/") + "/")
 
 
-def _app_layout_problems(host, app):
-    """One job's layout problems. Any refusal (the job's account does not exist yet, which is the
-    ordinary state between pulling a checkout that declares a job and installing it; the `hermes`
-    group is not the executor's; a name the layout does not take) is could-not-check for this job
-    alone: the other jobs and the container counts are still reported. The refusal's text is not
-    carried."""
+LAYOUT_REASONS = ("no-account", "host-layout", "other")
+
+
+def _app_layout(host, app):
+    """One job's layout: `layout_problems` (a list, empty when the layout is as it should be) and
+    `layout_reason`, null when the layout was checked. A refusal is could-not-check for this job
+    alone, with one of LAYOUT_REASONS and never the refusal's text: `no-account` when only the
+    job's own account does not resolve (the ordinary state between pulling a checkout that
+    declares a job and installing it); `host-layout` when a name the jobs share does not resolve
+    or is not the executor's (`root`, the `hermes` group); `other` for anything else."""
+    def refused(reason):
+        return {"layout_problems": R.COULD_NOT_CHECK, "layout_reason": reason}
     try:
-        return HL.check_app(app, host.path(HL.DEFAULT_APPS_ROOT), host.path(HL.DEFAULT_STATE_ROOT),
-                            HL.system_resolver(layout=HL.app_layout(app)), ancestor_top=host.root)
+        layout = HL.app_layout(app)
     except HL.LayoutError:
-        return R.COULD_NOT_CHECK
+        return refused("other")
+    try:
+        resolver = HL.system_resolver(layout=layout)
+    except HL.LayoutError:                          # the `hermes` group is not the executor's
+        return refused("host-layout")
+    try:
+        return {"layout_problems": HL.check_app(app, host.path(HL.DEFAULT_APPS_ROOT), host.path(HL.DEFAULT_STATE_ROOT),
+                                                resolver, ancestor_top=host.root),
+                "layout_reason": None}
+    except HL.LayoutError:
+        missing = set()
+        for entry in layout:
+            for name, look in ((entry.owner, resolver.uid), (entry.group, resolver.gid)):
+                try:
+                    look(name)
+                except HL.LayoutError:
+                    missing.add(name)
+        if missing - {_app_user(app)}:
+            return refused("host-layout")
+        return refused("no-account" if missing else "other")
 
 
 def d10_4(host, ctx):
-    apps = {app: {"layout_problems": _app_layout_problems(host, app)} for app in _jobs(host)[2]}
+    """Each job's spool and state layout against host_layout's table, and how many running
+    containers mount app-state (or a path inside or above it). A job's layout that cannot be
+    checked costs that job alone; the item is could-not-check only when the job sets or the
+    container listing cannot be had."""
+    apps = _per_job(host, ctx, lambda app: _app_layout(host, app))
     ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
     mounting = not_inspected = 0
     for cid in ids:
@@ -2598,7 +2711,7 @@ def d10_7(host, ctx):
     # ones and any other it finds. With none
     # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
     secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
-    return {"apps": {app: _app_journal(host, ctx, app, secrets) for app in _jobs(host)[2]},
+    return {"apps": _per_job(host, ctx, lambda app: _app_journal(host, ctx, app, secrets)),
             "known_secrets_checked": len(secrets)}
 
 
@@ -2642,9 +2755,9 @@ def d10_8(host, ctx):
     closed-set labels only: never the slug, the request id or a file name. A job systemd knows
     without a description file has no rule to be judged by, and a job without a results directory
     has nothing to judge: its two values are could-not-check, and the other jobs are still shown."""
-    manifests, _installed, names = _jobs(host)
-    return {"apps": {app: _app_results(host, app, manifests[app]) if app in manifests else dict(_UNJUDGED)
-                     for app in names}}
+    manifests = _jobs(host, ctx).manifests
+    return {"apps": _per_job(host, ctx, lambda app: _app_results(host, app, manifests[app]) if app in manifests
+                             else dict(_UNJUDGED))}
 
 
 PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6, "D1.7": d1_7,

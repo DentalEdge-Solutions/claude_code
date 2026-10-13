@@ -45,6 +45,7 @@ class FakeHost(CE.Host):
 
 
 APPS = ("ads-audit", "ads-report")
+BOTH = {"declared": True, "installed": True}        # what every per-job entry says of a job that is both
 
 
 class Base(unittest.TestCase):
@@ -1346,13 +1347,14 @@ class TestD10(JobBox):
         self.assertEqual((it["data"]["containers"], it["data"]["containers_mounting_app_state"],
                           it["data"]["containers_not_inspected"]), (5, 1, 4))
 
-    def test_d10_4_layout_refusal_is_could_not_check(self):
+    def test_d10_4_a_layout_refusal_costs_each_job_its_layout_and_the_item_stays_observed(self):
         # Per job since the collector checks every job: the item stays observed, the containers are still counted.
         self._containers({"c1": (0, json.dumps([{"Type": "bind", "Source": "/var/lib/hermes/app-state"}]), "")})
         with mock.patch.object(CE.HL, "system_resolver", side_effect=CE.HL.LayoutError("group 'hermes' is gid 5")):
             it = self._item("D10.4")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"]["apps"], {a: {"layout_problems": R.COULD_NOT_CHECK} for a in APPS})
+        self.assertEqual(it["data"]["apps"], {a: {"layout_problems": R.COULD_NOT_CHECK, "layout_reason": "host-layout", **BOTH}
+                                              for a in APPS})
         self.assertEqual((it["data"]["containers"], it["data"]["containers_mounting_app_state"]), (1, 1))
         self.assertNotIn("gid 5", json.dumps(it))
 
@@ -2282,7 +2284,7 @@ class TestD10(JobBox):
                 self.assertIn("journalctl exited 1", it["reason"])
 
     # ---- D10.8 -------------------------------------------------------------------------
-    def test_d10_8_could_not_check_when_the_job_s_manifest_cannot_be_loaded(self):
+    def test_d10_8_could_not_check_when_a_description_file_does_not_load(self):
         man = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "registry", "apps", "ads-audit.json")
         old_shape = {"app": "ads-audit", "user": "hermes-app-ads-audit", "command": "/usr/local/sbin/run-client-audit",
                      "ops": {}, "tools": {}, "wait_seconds": {}}
@@ -2296,12 +2298,15 @@ class TestD10(JobBox):
                 self.assertEqual(it["status"], R.COULD_NOT_CHECK)
                 self.assertEqual(it["reason"], "CouldNotCheck: the jobs' description files could not all be loaded")
                 self.assertNotIn("ads-audit.json", json.dumps(bundle))
+
+    def test_d10_8_a_job_without_a_description_file_is_observed_and_its_results_are_not_judged(self):
         # Missing, with the job still known to systemd: its results have no rule to be judged by.
-        os.unlink(man)
+        os.unlink(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "registry", "apps", "ads-audit.json"))
         bundle = CE.collect(self.host(), self.KEY)
         it = bundle["items"]["D10.8"]
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"]["apps"]["ads-audit"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK})
+        self.assertEqual(it["data"]["apps"]["ads-audit"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK,
+                                                           "declared": False, "installed": True})
         self.assertNotIn("ads-audit.json", json.dumps(bundle))
 
     def test_d10_8_flags_out_of_whitelist_results(self):
@@ -2369,7 +2374,7 @@ class TestD10(JobBox):
         with mock.patch.object(CE.A, "result_in_whitelist", side_effect=flaky):
             it = self._item("D10.8")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"]["apps"]["ads-audit"], {"out_of_whitelist": 2, "results": [
+        self.assertEqual(it["data"]["apps"]["ads-audit"], {**BOTH, "out_of_whitelist": 2, "results": [
             {"keys_ok": False, "values_ok": False},
             {"op": "run", "status": "ok", "reason": "?", "keys_ok": True, "values_ok": False}]})
 
@@ -2391,19 +2396,19 @@ class TestD10(JobBox):
         self._result(CE.A.refused_result(RID_A, None, None, "bad_request"))
         self._result(CE.A.refused_result(RID_B, "list", "acme-dental", "interrupted", status="failed"))
         d = self._item("D10.8")["data"]["apps"]["ads-audit"]
-        self.assertEqual(d, {"out_of_whitelist": 0, "results": [
+        self.assertEqual(d, {**BOTH, "out_of_whitelist": 0, "results": [
             {"op": "-", "status": "refused", "reason": "bad_request", "keys_ok": True, "values_ok": True},
             {"op": "list", "status": "failed", "reason": "interrupted", "keys_ok": True, "values_ok": True}]})
 
-    def test_d10_8_missing_results_dir_is_could_not_check(self):
+    def test_d10_8_a_missing_results_dir_is_could_not_check_for_that_job_alone(self):
         # For that job alone: the item stays observed and the other job is judged as usual.
         import shutil
         shutil.rmtree(self.res)
         self._result(CE.A.refused_result(RID_A, None, None, "bad_request"), app="ads-report")
         it = self._item("D10.8")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"]["apps"]["ads-audit"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK})
-        self.assertEqual(it["data"]["apps"]["ads-report"], {"out_of_whitelist": 0, "results": [
+        self.assertEqual(it["data"]["apps"]["ads-audit"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK, **BOTH})
+        self.assertEqual(it["data"]["apps"]["ads-report"], {**BOTH, "out_of_whitelist": 0, "results": [
             {"op": "-", "status": "refused", "reason": "bad_request", "keys_ok": True, "values_ok": True}]})
 
     def test_a_declared_job_that_is_not_installed_leaves_the_four_job_items_observed(self):
@@ -2411,9 +2416,13 @@ class TestD10(JobBox):
         self._units()
         self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-audit.service loaded active running x\n"
                                                         "hermes-app-runner@ads-audit.path loaded active waiting x\n", "")
-        # as systemd answers for a unit it does not know: exit 0 for `show`, `inactive` and exit 3 for `is-active`
-        for key in [k for k in self.outputs if k[:2] == ("systemctl", "show") and "ads-report" in k[2]]:
-            self.outputs[key] = (0, "", "")
+        # as systemd answers for an instance of an installed template that was never started: `show` exits 0
+        # with every property (the template's values) and ActiveState=inactive, LoadState=loaded; list-units does
+        # not list it; `is-active` says `inactive` and exits 3
+        shown = self.outputs[("systemctl", "show", "hermes-app-broker@ads-report")][1]
+        self.outputs[("systemctl", "show", "hermes-app-broker@ads-report")] = (
+            0, shown.replace("ActiveState=active", "ActiveState=inactive") + "LoadState=loaded\n", "")
+        self.outputs[("systemctl", "show", "hermes-app-runner@ads-report")] = (0, "Environment=\nLoadState=loaded\n", "")
         self.outputs[("systemctl", "is-active", "hermes-app-runner@ads-report.path")] = (3, "inactive\n", "")
         for cmd in (("id", "-nG"), ("sudo", "-l", "-U")):          # the audit's account answers, the other does not exist
             self.outputs[(*cmd, "hermes-app-ads-audit")] = self.outputs.pop(cmd)
@@ -2429,12 +2438,23 @@ class TestD10(JobBox):
                          dict.fromkeys(("D10.3", "D10.4", "D10.7", "D10.8"), R.OBSERVED))
         d3 = b["D10.3"]["data"]
         self.assertEqual((d3["declared_apps"], d3["installed_apps"]), (list(APPS), ["ads-audit"]))
-        self.assertEqual(d3["apps"]["ads-report"], {
-            "broker_unit": {**dict.fromkeys(CE.BROKER_PROPS, CN), "EnvironmentFiles": []},
-            "runner_unit": {"Environment": CN, "EnvironmentFiles": []},
-            "drop_in_paths": {u.replace("ads-audit", "ads-report"): CN for u in self.INSTANCES},
+        report = d3["apps"]["ads-report"]
+        # installed: false is said in the entry itself, so `inactive`, no groups and no sudo answer are not
+        # read as a fault of an installed job
+        self.assertEqual((report["declared"], report["installed"]), (True, False))
+        self.assertEqual({k: v for k, v in report.items() if k != "broker_unit"}, {
+            "runner_unit": {"Environment": [], "EnvironmentFiles": []},
+            "drop_in_paths": {u.replace("ads-audit", "ads-report"): [] for u in self.INSTANCES},
             "broker_user_groups": CN, "sudo_rules": {"rc": 1, "not_allowed": CN, "command_lines": CN},
-            "runner_path_active": "inactive"})
+            "runner_path_active": "inactive", "declared": True, "installed": False})
+        self.assertEqual((report["broker_unit"]["ActiveState"], report["broker_unit"]["User"], report["broker_unit"]["NoNewPrivileges"]),
+                         ("inactive", "hermes-app-ads-report", "yes"))
+        self.assertNotIn(CN, report["broker_unit"].values())
+        self.assertEqual((d3["on_disk_apps"], d3["units_not_counted"]), (["ads-audit"], 0))
+        self.assertEqual((d3["apps"]["ads-audit"]["declared"], d3["apps"]["ads-audit"]["installed"]), (True, True))
+        for iid in ("D10.4", "D10.7", "D10.8"):
+            self.assertEqual((b[iid]["data"]["apps"]["ads-report"]["declared"], b[iid]["data"]["apps"]["ads-report"]["installed"]),
+                             (True, False), iid)
         self.assertEqual(d3["apps"]["ads-audit"]["broker_unit"]["User"], "hermes-app-ads-audit")
         self.assertEqual(d3["apps"]["ads-audit"]["broker_user_groups"], ["hermes-app-ads-audit", "hermes"])
         d4 = b["D10.4"]["data"]
@@ -2448,9 +2468,10 @@ class TestD10(JobBox):
         self.assertEqual(b["D10.7"]["data"]["apps"]["ads-report"], {
             "journal_counts": {}, "note_counts": {}, "other_lines": 0, "broker_journal": zero, "runner_journal": zero,
             "journal_read": read, "oldest_entry_read": {"broker": None, "runner": None}, "first_entry": None,
-            "installed_since_last_pass": None})
+            "installed_since_last_pass": None, "declared": True, "installed": False})
         self.assertEqual(b["D10.7"]["data"]["apps"]["ads-audit"]["journal_counts"], {"refused/quota": 1, "ok/-": 1})
-        self.assertEqual(b["D10.8"]["data"]["apps"]["ads-report"], {"results": CN, "out_of_whitelist": CN})
+        self.assertEqual(b["D10.8"]["data"]["apps"]["ads-report"], {"results": CN, "out_of_whitelist": CN,
+                                                                    "declared": True, "installed": False})
         self.assertEqual(b["D10.8"]["data"]["apps"]["ads-audit"]["out_of_whitelist"], 1)
 
     def test_d10_items_survive_the_redactor_and_the_secret_check(self):
@@ -2470,7 +2491,7 @@ class TestEveryJob(JobBox):
         self.assertEqual((d["declared_apps"], d["installed_apps"], sorted(d["apps"])), (self.APPS, self.APPS, self.APPS))
         for app in self.APPS:
             self.assertEqual(set(d["apps"][app]), {"broker_unit", "runner_unit", "drop_in_paths", "broker_user_groups",
-                                                   "sudo_rules", "runner_path_active"})
+                                                   "sudo_rules", "runner_path_active", "declared", "installed"})
         self.assertEqual(sorted(d["installed_equal_repo"]), sorted(CE.APP_UNITS))
 
     def test_a_job_installed_without_a_description_file_and_the_reverse_are_both_shown(self):
@@ -2479,7 +2500,8 @@ class TestEveryJob(JobBox):
                                                         "hermes-app-broker@ghost.service loaded active running x\n", "")
         d = self._item("D10.3")["data"]
         self.assertEqual((d["declared_apps"], d["installed_apps"]), (["ads-audit"], ["ads-audit", "ghost"]))
-        self.assertEqual(sorted(d["apps"]), ["ads-audit", "ghost"])            # the undeclared one is still measured
+        self.assertEqual(sorted(d["apps"]), ["ads-audit", "ads-report", "ghost"])   # the undeclared one is still measured; so is
+        self.assertEqual(d["apps"]["ads-report"]["declared"], False)                # the one that is only a spool directory
 
     def test_a_description_file_that_does_not_load_makes_the_job_items_could_not_check(self):
         open(os.path.join(self.root, "opt/hermes-agent/registry/apps/ads-report.json"), "w").write("{}")
@@ -2524,12 +2546,17 @@ class TestEveryJob(JobBox):
         self._result(report_ok, app="ads-audit")                      # the same file in the audit's results is out of ITS rule
         d = self._item("D10.8")["data"]["apps"]
         self.assertEqual(d["ads-report"]["out_of_whitelist"], 0)
-        self.assertGreaterEqual(d["ads-audit"]["out_of_whitelist"], 1)
+        self.assertEqual(d["ads-audit"]["out_of_whitelist"], 2)       # the report's result, and the fixture's one bad result
 
     def test_the_layout_is_checked_per_job(self):
-        d = self._item("D10.4")["data"]
+        with self._audit_resolver():
+            d = self._item("D10.4")["data"]
         self.assertEqual(sorted(d["apps"]), self.APPS)
         self.assertIn("containers_mounting_app_state", d)
+        audit = d["apps"]["ads-audit"]
+        self.assertTrue(any("app-state" in p for p in audit["layout_problems"]))        # nothing built here
+        self.assertEqual({k: v for k, v in audit.items() if k != "layout_problems"},
+                         {"layout_reason": None, "declared": True, "installed": True})
 
     def test_the_journal_reach_and_the_restart_items_name_every_job(self):
         b = CE.collect(self.host(), self.KEY)["items"]
@@ -2541,44 +2568,38 @@ class TestEveryJob(JobBox):
 
     # ---- beyond the brief: the design points it states and its tests do not pin
     def test_a_job_s_layout_that_cannot_be_judged_costs_that_job_alone(self):
-        names = {"root": 0, "hermes": 10000, "hermes-app-ads-audit": 990}       # the audit's account resolves
-
-        def resolver(layout):                                                   # the report's is refused
-            if layout == CE.HL.app_layout("ads-report"):
-                raise CE.HL.LayoutError("refused for this job")
-            return CE.HL.Resolver(names, names)
-        with mock.patch.object(CE.HL, "system_resolver", side_effect=resolver):
+        with self._audit_resolver():                                            # the audit's account resolves, the report's does not
             it = self._item("D10.4")
         self.assertEqual(it["status"], R.OBSERVED)
         self.assertIsInstance(it["data"]["apps"]["ads-audit"]["layout_problems"], list)
-        self.assertEqual(it["data"]["apps"]["ads-report"], {"layout_problems": R.COULD_NOT_CHECK})
+        self.assertEqual(it["data"]["apps"]["ads-report"], {"layout_problems": R.COULD_NOT_CHECK, "layout_reason": "no-account", **BOTH})
         self.assertEqual((it["data"]["containers"], it["data"]["containers_not_inspected"]), (0, 0))
-        self.assertNotIn("refused for this job", json.dumps(it))
-        names["hermes-app-ads-report"] = 991                                    # control: with its account, it is judged
-        with mock.patch.object(CE.HL, "system_resolver", return_value=CE.HL.Resolver(names, names)):
+        with self._audit_resolver(**{"hermes-app-ads-report": 991}):            # control: with its account, it is judged
             self.assertIsInstance(self._item("D10.4")["data"]["apps"]["ads-report"]["layout_problems"], list)
 
     def test_a_job_without_a_results_directory_costs_that_job_alone(self):
         shutil.rmtree(self._results_dir("ads-report"))
         it = self._item("D10.8")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"]["apps"]["ads-report"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK})
+        self.assertEqual(it["data"]["apps"]["ads-report"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK, **BOTH})
         self.assertEqual((len(it["data"]["apps"]["ads-audit"]["results"]), it["data"]["apps"]["ads-audit"]["out_of_whitelist"]), (2, 1))
         os.makedirs(self._results_dir("ads-report"))                            # control: an empty directory is judged
-        self.assertEqual(self._item("D10.8")["data"]["apps"]["ads-report"], {"results": [], "out_of_whitelist": 0})
+        self.assertEqual(self._item("D10.8")["data"]["apps"]["ads-report"], {"results": [], "out_of_whitelist": 0, **BOTH})
 
-    def test_an_installed_list_line_that_is_not_a_unit_name_is_ignored(self):
+    def test_an_installed_list_line_that_is_not_a_loaded_unit_of_a_job_is_not_installed(self):
         self.outputs[("systemctl", "list-units")] = (0, "\n● hermes-app-broker@ads-report.service not-found inactive dead x\n"
                                                         "0 loaded units listed.\nhermes-app-broker@ads-audit.socket loaded x\n"
                                                         "  hermes-app-runner@ads-audit.path loaded active waiting x\n", "")
-        self.assertEqual(self._item("D10.3")["data"]["installed_apps"], ["ads-audit"])
+        d = self._item("D10.3")["data"]
+        self.assertEqual((d["installed_apps"], d["units_not_counted"]), (["ads-audit"], 3))
 
     def test_a_job_systemd_knows_without_a_description_file_is_measured_and_its_results_are_not_judged(self):
         self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ghost.service loaded active running x\n", "")
         self._journal(app="ghost", broker="hermes-app-broker[ghost]: request=1 op=run client=x status=ok reason=-\n", runner="")
         b = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(b["D10.7"]["data"]["apps"]["ghost"]["journal_counts"], {"ok/-": 1})
-        self.assertEqual(b["D10.8"]["data"]["apps"]["ghost"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK})
+        self.assertEqual(b["D10.8"]["data"]["apps"]["ghost"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK,
+                                                               "declared": False, "installed": True})
         self.assertEqual(b["D10.8"]["data"]["apps"]["ads-audit"]["out_of_whitelist"], 1)     # the declared ones are still judged
         self.assertIn("ghost", b["D10.4"]["data"]["apps"])
         self.assertNotIn("ghost", b["D2.4"]["data"]["oldest_entry"]["apps"])                 # D2.4 and D4.6: declared jobs only
@@ -2592,7 +2613,9 @@ class TestEveryJob(JobBox):
         d24, d46 = b["D2.4"]["data"], b["D4.6"]["data"]
         self.assertEqual((d24["oldest_entry"]["apps"], d24["reach_days"]), (R.COULD_NOT_CHECK, 3))
         self.assertEqual(d46["apps_declared"], R.COULD_NOT_CHECK)
-        self.assertEqual(set(d46["started_at"]), set(CE.SERVICE_FILES) | set(CE.OTHER_STARTS))
+        # the brokers are then those systemd lists
+        self.assertEqual(set(d46["started_at"]), set(CE.SERVICE_FILES) | set(CE.OTHER_STARTS) | {f"hermes-app-broker@{a}" for a in APPS})
+        self.assertEqual(d46["apps_installed"], self.APPS)
         for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
             self.assertEqual(b[iid]["reason"], "CouldNotCheck: the jobs' description files could not all be loaded", iid)
 
@@ -2609,6 +2632,108 @@ class TestEveryJob(JobBox):
         self.outputs[("systemctl", "list-units")] = (1, "", "Failed to connect to bus")
         for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
             self.assertEqual(self._item(iid)["status"], R.COULD_NOT_CHECK, iid)
+
+    # ---- fix round 1: a job is declared, installed or on disk, and each entry says which
+    def _audit_resolver(self, **more):
+        names = {"root": 0, "hermes": 10000, "hermes-app-ads-audit": 990, **more}
+        return mock.patch.object(CE.HL, "system_resolver", return_value=CE.HL.Resolver(names, names))
+
+    def test_a_unit_systemd_only_remembers_the_name_of_is_not_installed_and_is_counted(self):
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-audit.service loaded active running x\n"
+                                                        "hermes-app-broker@ads-report.service not-found inactive dead x\n"
+                                                        "hermes-app-runner@ads-report.path masked inactive dead x\n"
+                                                        "hermes-app-broker@Bad..Name.service loaded active running x\n"
+                                                        "hermes-app-broker@ads-audit.socket loaded active running x\n"
+                                                        "hermes-app-runner@ads-audit.path\n"
+                                                        "\n", "")
+        d = self._item("D10.3")["data"]
+        self.assertEqual((d["installed_apps"], d["units_not_counted"]), (["ads-audit"], 5))
+        self.assertEqual((d["apps"]["ads-report"]["declared"], d["apps"]["ads-report"]["installed"]), (True, False))
+        self.assertNotIn("Bad..Name", json.dumps(d))
+        self.setUp(); self.outputs[("systemctl", "show")] = (0, "", "")
+        self.assertEqual(self._item("D10.3")["data"]["units_not_counted"], 0)        # the healthy box
+
+    def test_a_job_that_exists_only_as_a_spool_directory_is_listed_and_measured(self):
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/spool/apps/stopped/results"))
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/spool/apps/Bad..Name"))
+        self._w("/var/lib/hermes/app-state/a-file", "x")
+        os.symlink(self._results_dir("ads-audit"), os.path.join(self.root, "var/lib/hermes/app-state/linked"))
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/app-state/parked"))
+        for app in ("stopped", "parked"):
+            self._journal(app=app, broker="", runner="")
+        b = CE.collect(self.host(), self.KEY)["items"]
+        d = b["D10.3"]["data"]
+        self.assertEqual((d["on_disk_apps"], d["on_disk_not_counted"]), (["ads-audit", "ads-report", "parked", "stopped"], 3))
+        self.assertEqual((d["declared_apps"], d["installed_apps"]), (self.APPS, self.APPS))
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            apps = b[iid]["data"]["apps"]
+            self.assertEqual(sorted(apps), ["ads-audit", "ads-report", "parked", "stopped"], iid)
+            self.assertEqual((apps["stopped"]["declared"], apps["stopped"]["installed"]), (False, False), iid)
+        self.assertEqual(b["D10.8"]["data"]["apps"]["stopped"]["results"], R.COULD_NOT_CHECK)   # no rule to judge by
+        self.assertNotIn("Bad..Name", json.dumps(b)); self.assertNotIn("a-file", json.dumps(b))
+
+    def test_the_restart_item_covers_an_undeclared_running_broker_and_says_when_systemd_did_not_answer(self):
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-audit.service loaded active running x\n"
+                                                        "hermes-app-broker@ghost.service loaded active running x\n", "")
+        d = CE.collect(self.host(), self.KEY)["items"]["D4.6"]["data"]
+        self.assertEqual((d["apps_declared"], d["apps_installed"]), (self.APPS, ["ads-audit", "ghost"]))
+        want = {f"hermes-app-broker@{a}" for a in (*self.APPS, "ghost")}
+        for key in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+            self.assertEqual({k for k in d[key] if k.startswith("hermes-app-broker@")}, want, key)
+        self.outputs[("systemctl", "list-units")] = (1, "", "Failed to connect to bus")
+        d = CE.collect(self.host(), self.KEY)["items"]["D4.6"]["data"]
+        self.assertEqual((d["apps_declared"], d["apps_installed"]), (self.APPS, R.COULD_NOT_CHECK))
+        self.assertEqual({k for k in d["started_at"] if k.startswith("hermes-app-broker@")},
+                         {f"hermes-app-broker@{a}" for a in self.APPS})
+
+    def test_every_per_job_entry_says_whether_the_job_is_declared_and_installed(self):
+        os.unlink(os.path.join(self.root, "opt/hermes-agent/registry/apps/ads-report.json"))
+        shutil.rmtree(os.path.dirname(self._results_dir("ads-report")))
+        self._journal(app="ghost", broker="", runner="")
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-report.service loaded active running x\n"
+                                                        "hermes-app-broker@ghost.service loaded active running x\n", "")
+        b = CE.collect(self.host(), self.KEY)["items"]
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            self.assertEqual({a: (e["declared"], e["installed"]) for a, e in b[iid]["data"]["apps"].items()},
+                             {"ads-audit": (True, False), "ads-report": (False, True), "ghost": (False, True)}, iid)
+
+    def test_a_layout_that_cannot_be_checked_says_which_kind_of_refusal(self):
+        CN = R.COULD_NOT_CHECK
+        with self._audit_resolver():                                    # the report's own account does not resolve
+            d = self._item("D10.4")["data"]["apps"]
+        self.assertEqual((d["ads-report"]["layout_problems"], d["ads-report"]["layout_reason"]), (CN, "no-account"))
+        self.assertIsInstance(d["ads-audit"]["layout_problems"], list)
+        self.assertIsNone(d["ads-audit"]["layout_reason"])
+        names = {"root": 0, "hermes-app-ads-audit": 990, "hermes-app-ads-report": 991}      # the shared group does not
+        with mock.patch.object(CE.HL, "system_resolver", return_value=CE.HL.Resolver(names, names)):
+            d = self._item("D10.4")["data"]["apps"]
+        self.assertEqual({a: (e["layout_problems"], e["layout_reason"]) for a, e in d.items()},
+                         {a: (CN, "host-layout") for a in self.APPS})
+        with mock.patch.object(CE.HL, "system_resolver", side_effect=CE.HL.LayoutError("group 'hermes' is gid 5")):
+            it = self._item("D10.4")
+        self.assertEqual({e["layout_reason"] for e in it["data"]["apps"].values()}, {"host-layout"})
+        self.assertNotIn("gid 5", json.dumps(it))
+        with self._audit_resolver(**{"hermes-app-ads-report": 991}), \
+                mock.patch.object(CE.HL, "check_app", side_effect=CE.HL.LayoutError("something else")):
+            it = self._item("D10.4")
+        self.assertEqual({e["layout_reason"] for e in it["data"]["apps"].values()}, {"other"})
+        self.assertNotIn("something else", json.dumps(it))
+
+    def test_the_job_sets_are_computed_once_per_collection(self):
+        host = self.host()
+        CE.collect(host, self.KEY)
+        self.assertEqual(len([c for c in host.calls if c[:2] == ["systemctl", "list-units"]]), 1)
+        with mock.patch.object(CE.A, "load_manifests", wraps=CE.A.load_manifests) as lm:
+            CE.collect(self.host(), self.KEY)
+        self.assertEqual(lm.call_count, 1)
+
+    def test_a_known_secret_in_the_second_job_s_journal_is_counted_under_that_job(self):
+        self._journal(app="ads-report", runner=f"debug: token is {TOKEN}\n")
+        b = CE.collect(self.host(), self.KEY)
+        d = b["items"]["D10.7"]["data"]["apps"]
+        self.assertEqual((d["ads-report"]["runner_journal"]["known_secret_hits"], d["ads-report"]["broker_journal"]["known_secret_hits"]), (1, 0))
+        self.assertEqual((d["ads-audit"]["runner_journal"]["known_secret_hits"], d["ads-audit"]["broker_journal"]["known_secret_hits"]), (0, 0))
+        self.assertNotIn(TOKEN, json.dumps(b))
 
     def test_no_constant_names_a_job(self):
         src = open(os.path.join(HERE, "collect-review-evidence.py")).read()
