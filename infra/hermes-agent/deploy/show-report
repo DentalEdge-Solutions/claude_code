@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed as /usr/local/sbin/show-audit (symlink, BRING-UP "Chat-triggered audits", part 1).
+# Root only: the vaults are uid 10000, 0700.
+[ "$(id -u)" = 0 ] || { echo "show-audit: run with sudo" >&2; exit 2; }
+exec python3 /opt/hermes-agent/bin/show-audit.py "$@"
