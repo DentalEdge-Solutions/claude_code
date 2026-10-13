@@ -1,6 +1,6 @@
 ---
 name: ads-reports
-description: Use when the operator asks to run, check, or list a client's Google Ads figures report. Calls the ads_report_run, ads_report_status and ads_report_list tools. Never reads or summarizes report content; the operator reads reports on the host.
+description: Use when the operator asks to run, check, or list a client's Google Ads figures report. Calls the ads_report_run, ads_report_status and ads_report_list tools. Never reads or summarizes report content; the operator reads reports on the host. Not for audits: an audit request goes to the ads-audits skill.
 ---
 
 # Client Google Ads figures reports
@@ -27,7 +27,7 @@ reports are read by the operator on the host.
 | `pending` | it is still running, and the `request_id` | check with `ads_report_status` once, only when the operator asks |
 | the tool call itself errors or times out (no `status` came back) | you got no answer; the figures report may still be running or may have finished | do NOT call `ads_report_run` again and do NOT suggest the manual command (it would start a second report). Call `ads_report_list` once and report the latest timestamp; the operator can read it with `sudo show-report <client>` |
 
-The result's `vault_path` is where the report was stored and a list's `audits` holds the reports' timestamps: the two labels are shared with the audit tools.
+The result's `vault_path` is where the report was stored and a list's `audits` holds the reports' timestamps: the two labels are shared with the audit tools. Report the timestamp `ts`; never open the path.
 
 ## Never
 

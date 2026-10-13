@@ -14,6 +14,10 @@ def service_block(compose, name):
     return m.group(1) if m else ""
 
 
+SKILL_MOUNT = re.compile(r"^- \./skills/([a-z0-9-]+):/opt/data/skills/\1:ro$")
+FORBIDDEN = ("vault", "report", "audit-data", "audit-logs", "draft-out", "app-state", "/etc/hermes")
+
+
 class T(unittest.TestCase):
     def test_claude_auth_init_is_gone(self):
         c = read("docker-compose.yml")
@@ -21,16 +25,43 @@ class T(unittest.TestCase):
         self.assertNotIn("bootstrap-claude-auth", read("Dockerfile"))
         self.assertFalse(os.path.exists(os.path.join(AGENT, "bootstrap-claude-auth.sh")))
 
-    def test_gateway_mounts_no_client_data(self):
-        gw_full = service_block(read("docker-compose.yml"), "hermes-agent")
-        gw = gw_full
+    def check_gateway_mounts(self, compose):
+        gw = service_block(compose, "hermes-agent")
         self.assertTrue(gw)
-        # the two skill mounts (ads-audits, ads-reports) are instruction files, not data: leave them out of the scan
-        gw = "\n".join(l for l in gw.splitlines() if not l.lstrip().startswith(("- ./skills/ads-audits:", "- ./skills/ads-reports:")))
-        for bad in ("vaults", "reports", "audit-data", "draft-out", "app-state", "/etc/hermes"):
-            self.assertNotIn(bad, gw)
-        self.assertIn("./skills/ads-audits:/opt/data/skills/ads-audits:ro", gw_full)
-        self.assertIn("./skills/ads-reports:/opt/data/skills/ads-reports:ro", gw_full)
+        skills = []
+        for raw in gw.splitlines():
+            line = raw.split("#", 1)[0].strip()          # a comment never counts
+            if not line:
+                continue
+            m = SKILL_MOUNT.match(line)
+            if m:
+                skills.append(m.group(1))
+                continue                                 # exact shape: no "..", no other path, read-only
+            self.assertFalse(line.startswith("- ./skills/"),
+                             "a skills mount must be exactly ./skills/<n>:/opt/data/skills/<n>:ro: " + raw)
+            for bad in FORBIDDEN:
+                self.assertNotIn(bad, line.lower(), raw)
+        self.assertTrue({"ads-audits", "ads-reports"} <= set(skills), skills)
+
+    def test_gateway_mounts_no_client_data(self):
+        c = read("docker-compose.yml")
+        self.check_gateway_mounts(c)
+        self.assertNotIn("report-archive", c)
+
+    def test_the_mount_check_rejects_bad_mounts(self):
+        c = read("docker-compose.yml")
+        anchor = "      - ./skills/ads-reports:/opt/data/skills/ads-reports:ro"
+        self.assertIn(anchor, c)
+        for bad in ("- ./skills/ads-reports:/opt/data/reports/claude_google_ads:rw",
+                    "- ./skills/ads-audits:/vaults:ro",
+                    "- ./skills/ads-reports/../../data/reports:/x:ro",
+                    "- ${HERMES_REPORTS_DIR}:/opt/data/reports",
+                    "- /var/lib/hermes/report-archive:/x:ro",
+                    "- /var/lib/hermes/vaults:/opt/data/vaults:ro",
+                    "- ./skills/other:/opt/data/skills/other:rw"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(AssertionError):
+                    self.check_gateway_mounts(c.replace(anchor, anchor + "\n      " + bad, 1))
 
     def test_mcp_server_config_is_exact(self):
         cfg = read("config.yaml.example")

@@ -1,6 +1,6 @@
 ---
 name: ads-audits
-description: Use when the operator asks to run, check, or list a client's Google Ads audit. Calls the ads_audit_run, ads_audit_status and ads_audit_list tools. Never reads or summarizes audit content; the operator reads drafts on the host.
+description: Use when the operator asks to run, check, or list a client's Google Ads audit. Calls the ads_audit_run, ads_audit_status and ads_audit_list tools. Never reads or summarizes audit content; the operator reads drafts on the host. Not for figures reports: a figures-report request goes to the ads-reports skill.
 ---
 
 # Client Google Ads audits
