@@ -4593,6 +4593,15 @@ class TestD46StartTimes(Base):
         self.assertIs(d["started_after_last_pass"]["systemd-journald"], False)
         self.assertNotIn("systemd-journald", d["files_newer_than_start"])
         self.assertEqual(set(d["started_at"]), set(CE.SERVICE_FILES) | set(CE.OTHER_STARTS))
+        self.assertNotIn("systemd-journald", d["files_checked"])
+
+    def test_a_journal_service_start_that_cannot_be_read_is_could_not_check_for_that_entry_only(self):
+        CE.LAST_PASS_COLLECTED_AT = "2026-10-07T10:00:00Z"
+        self._start("systemd-journald", "")
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["started_at"]["systemd-journald"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["started_after_last_pass"]["systemd-journald"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["started_at"]["hermes-broker"], self.START_ISO)         # control: the others stand
 
     def test_without_a_baseline_nothing_is_compared(self):
         d = CE.d4_6(self.host(), {})
