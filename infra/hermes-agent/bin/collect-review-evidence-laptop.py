@@ -113,6 +113,10 @@ def main(argv=None):
             items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": str(e)}
     else:
         items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": "no --package-* arguments"}
+    if not R.restrict_output(sys.stdout):
+        print("collect-review-evidence-laptop: the output file could not be made owner-only: nothing written",
+              file=sys.stderr)
+        return 2
     print(json.dumps({"schema": 1, "kind": "laptop", "collected_at": R.utc_now(),
                       "cid_fingerprint": "hmac-sha256/12", "cid_key_id": R.key_id(key), "items": items}, indent=2, sort_keys=True))
     return 0

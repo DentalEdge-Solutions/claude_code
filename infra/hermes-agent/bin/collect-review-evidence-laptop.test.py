@@ -119,6 +119,17 @@ class TestMain(unittest.TestCase):
             self.assertEqual(rc, 0, oct(mode))
             self.assertEqual(json.loads(out.getvalue())["cid_key_id"], R.key_id(bytes.fromhex(KEY_HEX)))
 
+    def test_an_output_file_that_cannot_be_made_owner_only_gets_nothing_written(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(L.subprocess, "run", return_value=fake), \
+                mock.patch.object(R, "restrict_output", return_value=False) as ro, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = L.main(["--customer", "1234567890", "--fp-key-file", self.keyfile])
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertIn("owner-only", err.getvalue())
+        ro.assert_called_once()
+
     def test_non_digit_customer_refused(self):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):

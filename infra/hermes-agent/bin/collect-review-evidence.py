@@ -2677,6 +2677,10 @@ def _main(a, host, read_key):
     R.assert_no_secret(json.dumps(out, indent=2, sort_keys=True), secrets)
     text = json.dumps(ctx["redactor"].obj(out), indent=2, sort_keys=True)
     R.assert_no_secret(text, secrets)
+    if not R.restrict_output(sys.stdout):
+        print("collect-review-evidence: the output file could not be made owner-only: nothing written",
+              file=sys.stderr)
+        return 2
     print(text)
     return rc
 

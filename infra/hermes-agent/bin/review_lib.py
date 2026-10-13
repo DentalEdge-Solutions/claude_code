@@ -4,7 +4,7 @@
 Nothing here judges. It makes evidence safe to hand to a reviewer: slugs and customer ids
 redacted, credentials reduced to fingerprints, and one canonical fingerprint hash.
 """
-import datetime, hashlib, hmac, json, os, re
+import datetime, hashlib, hmac, io, json, os, re, stat
 
 CLIENT = "<client>"
 OBSERVED = "observed"
@@ -297,3 +297,22 @@ def assert_no_secret(text, secrets):
         forms = {secret, json.dumps(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1]}
         if any(form in text for form in forms):
             raise RuntimeError("output would contain a credential value — refusing to print")
+
+
+def restrict_output(stream):
+    """A bundle redirected into a file (`> bundle-box.json`) is created by the shell with the
+    shell's umask: 0664 at review #10. Called before the first byte is written: when `stream` is
+    a regular file, it is set to 0600. True when there was nothing to do (a pipe, a terminal, a
+    stream without a descriptor) or the mode is now 0600; False when a regular file's mode could
+    not be set, and the caller then prints nothing."""
+    try:
+        fd = stream.fileno()
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
+    except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+        return True
+    try:
+        os.fchmod(fd, 0o600)
+        return stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+    except OSError:
+        return False

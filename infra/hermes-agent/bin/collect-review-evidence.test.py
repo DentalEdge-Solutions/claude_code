@@ -205,6 +205,24 @@ class TestBundle(Base):
             rc = CE.main(["--credentials-only"], host=self.host())
         self.assertEqual(rc, 0)                                          # control
 
+    def test_an_output_file_that_cannot_be_made_owner_only_gets_nothing_written(self):
+        with mock.patch.object(R, "restrict_output", return_value=False) as ro, \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = CE.main(["--credentials-only"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertIn("owner-only", err.getvalue())
+        ro.assert_called_once()
+
+    def test_the_output_is_restricted_before_it_is_written(self):
+        order = []
+        buf = io.StringIO()
+        buf.write = lambda text, w=buf.write: (order.append("write"), w(text))[1]
+        with mock.patch.object(R, "restrict_output", side_effect=lambda s: order.append("restrict") or True), \
+                contextlib.redirect_stdout(buf):
+            rc = CE.main(["--credentials-only"], host=self.host())
+        self.assertEqual((rc, order[0]), (0, "restrict"))
+        self.assertIn("write", order)
+
     def test_credentials_only_could_not_check_sweep_exits_2_no_traceback(self):
         self.outputs[("find",)] = (1, "", "boom\n")
         err = io.StringIO()

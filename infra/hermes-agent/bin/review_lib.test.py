@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import hashlib, json, os, sys, tempfile, unittest
+import hashlib, io, json, os, stat, sys, tempfile, unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import review_lib as R
@@ -413,6 +414,28 @@ class TestKeyedFingerprints(unittest.TestCase):
 
     def test_key_id(self):
         self.assertEqual(len(R.key_id(self.KEY)), 8)
+
+
+class TestRestrictOutput(unittest.TestCase):
+    def test_a_redirected_file_becomes_owner_only_before_anything_is_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "bundle.json")
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT, 0o664)
+            os.fchmod(fd, 0o664)                       # whatever the umask
+            with os.fdopen(fd, "w") as f:
+                self.assertTrue(R.restrict_output(f))
+                self.assertEqual(stat.S_IMODE(os.fstat(f.fileno()).st_mode), 0o600)
+                self.assertEqual(os.fstat(f.fileno()).st_size, 0)
+
+    def test_a_pipe_and_a_stream_without_a_descriptor_are_left_alone(self):
+        r, w = os.pipe()
+        with os.fdopen(r), os.fdopen(w, "w") as f:
+            self.assertTrue(R.restrict_output(f))
+        self.assertTrue(R.restrict_output(io.StringIO()))
+
+    def test_a_file_whose_mode_cannot_be_set_is_refused(self):
+        with tempfile.TemporaryFile("w") as f, mock.patch("os.fchmod", side_effect=PermissionError):
+            self.assertFalse(R.restrict_output(f))
 
 
 if __name__ == "__main__":
