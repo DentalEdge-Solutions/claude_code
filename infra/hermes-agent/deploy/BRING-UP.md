@@ -1312,7 +1312,7 @@ Requires part 1 on the box. A job is not live until the security review that fol
 Until checklist v1.21 this chapter was named "Chat-triggered audits — part 2: the chat trigger" and
 was written for `ads-audit` by name. Its step numbers have not changed: "part 2 step N", in the
 checklist, in a review report or in another section of this runbook, is step N of this chapter. The
-steps added since carry a letter (0, 3a, 3b, 7a).
+steps added since carry a letter (0, 1a, 3a, 3b, 7a).
 
 Every step is written for a job named `<job>`. The jobs are `ads-audit` (the audit: figures and an
 AI analysis, the draft kept in the client's vault) and `ads-report` (figures only, no AI analysis;
@@ -1324,7 +1324,8 @@ switch is set before the job's units exist and is taken off only at step 10, aft
 
 What is done once per box and what once per job. Steps 1 to 4, 8 to 11: once for each job. Steps 5
 and 7's sidecar lines: once per box, done when the first job was added; skip them for a second job.
-Step 6 is run again for each job added. Step 3b is for `ads-report` only. What part 1 installed for
+Step 6 is run again for each job added. Step 1a is for each job ALREADY installed, whenever a
+job is added to a box that has one. Step 3b is for `ads-report` only. What part 1 installed for
 the AI analysis (the Anthropic key file, the `egress-proxy`, the `ads-drafter`) is used by
 `ads-audit` only: a run of `ads-report` opens no Anthropic key and starts neither of the two; it
 needs part 1's `/var/lib/hermes/reports` parent, the read credential of "Ads audits on the box"
@@ -1403,7 +1404,33 @@ that was not there before: report it with its second column. With `loaded` there
 would count `ads-report` as an installed job from that line alone, before it is installed: do not
 start the rollout until that has been read.
 
-1. Record the current commit, then pull (the SHA is what a rollback checks out):
+1. Pull with every installed job's off switch ON, or when no job is running: a job that starts during the pull can read a mix of old and new files; it cannot be wrongly accepted, but it can fail and use up that day's count.
+   On a box that already has a job, set the switch of each installed job first (skip both blocks of
+   this step on a box with no job yet). The block acts on the jobs OTHER than `$JOB`, the job you
+   are adding: that one has no switch yet (step 3a sets it). Run `sudo -v` alone first.
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+for j in ads-audit ads-report; do [ "$j" = "${JOB:?}" ] && continue
+if ! sudo test -d "/var/lib/hermes/app-state/$j"; then echo "$j: not on this box | nothing to set"
+elif sudo test -e "/var/lib/hermes/app-state/$j/DISABLED"; then echo "$j: switch was ON already | left as it was"
+else sudo touch "/var/lib/hermes/app-state/$j/DISABLED"; echo "$j: switch set for the pull: $(sudo test -e "/var/lib/hermes/app-state/$j/DISABLED" && echo YES || echo no)"; fi; done
+echo "runs in flight: $(systemctl is-active hermes-app-runner@ads-audit.service hermes-app-runner@ads-report.service | grep -cE '^(active|activating)$')"
+)
+```
+
+Expected: one line for the installed job, `<job>: switch set for the pull: YES`, then
+`runs in flight: 0`. `switch set for the pull: no`: stop and report; do not pull. `<job>: switch was
+ON already | left as it was` on the FIRST paste: that job was off before this step, for a reason of
+its own; the pull may go on, and you do NOT paste the block that takes the switches off again
+(below): its switch stays on until that reason is settled. `<job>: not on this box | nothing to
+set`: there is no installed job other than the one you are adding; go on. `runs in flight:` a
+number other than `0`: the switch only refuses NEW requests, and a run that had started goes on;
+wait for it (minutes) and paste the block again until it reads `0` (on that second paste the job's
+line reads `switch was ON already`: that is this step's own switch, and you do paste the block
+below). `STOP: set JOB first`: nothing was done.
+
+   Record the current commit, then pull (the SHA is what a rollback checks out):
    `sudo git -C /opt/projects/claude_code log --oneline -1`
    `cd /opt/projects/claude_code && sudo git pull --ff-only`
    Then, before any service is restarted, check that the description files are ordinary files (the
@@ -1413,10 +1440,59 @@ start the rollout until that has been read.
    report.
    The pull that brings a new job's description file also changes files the installed jobs hold
    in memory: do step 7a now, for the jobs already installed (skip it on a server that has no job
-   yet).
+   yet). Once both of step 7a's blocks have printed what they expect, take off the switches this
+   step set, with the block below, and then do step 1a.
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+for j in ads-audit ads-report; do [ "$j" = "${JOB:?}" ] && continue
+if sudo test -d "/var/lib/hermes/app-state/$j"; then sudo rm -f "/var/lib/hermes/app-state/$j/DISABLED"; echo "$j: switch present: $(sudo test -e "/var/lib/hermes/app-state/$j/DISABLED" && echo YES || echo no)"; else echo "$j: not on this box | nothing to take off"; fi; done
+)
+```
+
+Expected: `<job>: switch present: no` for the installed job. `YES`: stop and report. `STOP: set JOB
+first`: nothing was done. The block never touches the switch of `$JOB`, the job you are adding, so
+pasting it later in the rollout cannot take that job's switch off before step 10. Do not paste it
+when the first block of this step said `switch was ON already` for a job on its FIRST paste.
+
    Do not collect for a real review between the pull and step 8: until step 8 shows two servers, D10.6 fails (the box's chat settings do not yet equal the template), and no closing line of the summary says so.
    From this pull until the job's step 4, the job is declared and not installed: a trial collection
    in that window reads as "A security review" step 2 says under "The rollout window".
+1a. Prove again each job ALREADY installed (skip on a box with no job yet). The pull changed the
+   code that job's broker and its command run, and step 7a has restarted the broker: what the box
+   showed for that job before the pull was produced by the code that ran then. The blocks below are
+   written for `ads-audit`, the job installed when `ads-report` is added; when it is the other way
+   round, the plan is step 10's figures plan.
+
+   First read the client in: paste the line "the client at a hidden prompt" of step 11 ALONE, type
+   the client, Enter. Then the plan of an audit, which changes nothing, starts no container and has
+   no AI fee. The block prints step names and an exit code only:
+
+```bash
+sudo run-client-audit "${C:?}" --dry-run 2>&1 | grep -oE '^would run \[[a-z0-9:_-]+\]'; echo "rc=${PIPESTATUS[0]}"
+```
+
+Expected: eleven `would run […]` lines in this order, then `rc=0`: four `would run [collect:…]`
+(`audit_discovery`, `negatives_audit`, `audit_assets_rsa`, `assess_supplemental`),
+`would run [snapshot]`, three `would run [read:…]` (`account_overview`, `audit_search_terms`,
+`audit_analyze`), `would run [proxy]`, `would run [draft]`, `would run [vault-write]`; and NO
+`would run [store]` line. A `[store]` line, a missing `[snapshot]`, `[proxy]`, `[draft]` or
+`[vault-write]` line, or another number of lines: stop and report the lines; do not go on to
+step 2. `rc=2` and no lines: a pre-check refused (the read credential, the AI key file, a parent
+folder or the installed package); read the refusal with the same command without the `| grep …`
+part, on the box only: it can name the client. Any other `rc`: stop and report. Nothing printed but
+a `C: parameter null or not set` message: the client was not read in; paste the hidden-prompt line
+first.
+
+   Then, on the rollout day, make ONE chat audit and repeat step 11's three live refusals with
+   `JOB=ads-audit`, even though older refusals and an older `ok` run may still be counted: the
+   broker's code changed, and the review must judge evidence produced by the code now running. The
+   chat run is step 10's "from chat" paragraph (the job's switch is off again since step 1's last
+   block). The audit's chat run costs an AI fee, and it is that client's one audit of the day. For
+   step 11's blocks type `JOB=ads-audit` and paste the check block of "the job's name"; do checks
+   a, b and c and the "afterwards" block; then type `JOB=` with the job you are adding and paste
+   the check block again BEFORE step 2 (every block from step 2 on acts on `$JOB`). When the job
+   already installed is `ads-report`, the same with `JOB=ads-report`: its chat run costs no AI fee.
 2. The app user (no login, no home, primary group of its own, member of hermes):
 
 ```bash
@@ -1490,6 +1566,7 @@ the link was made before; the `readlink` line decides. Any other owner, mode or 
 
 ```bash
 ( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+sudo test -e "/var/lib/hermes/app-state/${JOB:?}/DISABLED" || { echo "STOP: the off switch is not set"; exit 1; }
 echo "proxy line before: $(systemctl show hermes-docker-proxy -p ExecStart --no-pager | sha256sum | cut -c1-64)"
 sudo systemctl enable --now "hermes-app-broker@${JOB:?}" "hermes-app-runner@${JOB:?}.path"
 sleep 3; systemctl is-active "hermes-app-broker@${JOB:?}" "hermes-app-runner@${JOB:?}.path"
@@ -1500,8 +1577,10 @@ echo "proxy line after:  $(systemctl show hermes-docker-proxy -p ExecStart --no-
 Expected: `proxy line before:` and a hash of 64 characters, → `active active` (one word per line,
 read 3 seconds after the enable: a broker that dies at its start is started again 5 seconds later,
 so a word other than `active` here is a broker that did not stay up), then `proxy line after:` and a
-hash. Any word other than `active`: stop; paste the block's third line again after ten seconds, and
-report both outputs. The two hashes: write both into the operator evidence file. Different: the
+hash. `STOP: the off switch is not set` and nothing else: the block's second line did not find the
+job's switch (step 3a), so nothing was enabled; do step 3a, then paste the block again. Any word
+other than `active`: stop; paste the block's fifth line (the one that starts `sleep 3`) again after
+ten seconds, and report both outputs. The two hashes: write both into the operator evidence file. Different: the
 enable reloaded the manager, and D4.2 needs the statement named above. Equal: this systemd did not
 change the line; say so in the evidence, and D4.2 is then read as the collection shows it.
 
@@ -1521,7 +1600,24 @@ change the line; say so in the evidence, and D4.2 is then read as the collection
    first, outside the gateway-writable `data/`:
    `cd /opt/hermes-agent && sudo install -o root -g root -m 0600 data/config.yaml /root/config.yaml.pre-optb2`
    (it is your rollback copy), then `cd /opt/hermes-agent && sudo diff data/config.yaml config.yaml.example` (review anything
-   Hermes wrote itself), then `cd /opt/hermes-agent && sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
+   Hermes wrote itself). Then, BEFORE the line that installs the template, this block, which prints
+   an exit code and two numbers and nothing of either file:
+
+```bash
+( D=$(sudo diff /opt/hermes-agent/data/config.yaml /opt/hermes-agent/config.yaml.example); echo "diff rc=$? | lines in the live file and not in the template: $(printf '%s\n' "$D" | grep -c '^<') | lines in the template and not in the live file: $(printf '%s\n' "$D" | grep -c '^>')" )
+```
+
+Expected: `diff rc=1` (the files differ: the job's server is missing from the live file) and the
+two numbers. A server block that is only missing from the live file adds its lines to the SECOND
+number and none to the first, so the first number expected for the missing server block is the
+number of lines the gateway's own layout accounts for, and `0` when the gateway has rewritten
+nothing. Any number above the one expected for the missing server block means Hermes wrote
+something of its own there: stop and report before installing. The first number has not been
+measured on this box: on the first run report both numbers, and install nothing until they have
+been read. `diff rc=0`: the two files are equal and this step is not needed. `diff rc=2`: a file
+could not be read; stop and report.
+
+   Then `cd /opt/hermes-agent && sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
    The gateway rewrites `data/config.yaml` once it runs (its layout, and it may add keys of its own); review item D10.6 compares the
    parsed `mcp_servers` block with the template, so do not re-install the template to "fix" a layout difference.
    When a job is added to a box that already has one, the diff also shows the new job's server
@@ -1771,6 +1867,8 @@ wrote no such line; stop and report.
     attempts. Paste each block WHOLE, from its first line to its last. Report each block's output
     starting after the prompt line. Wait for each block to print its line (about 6 seconds) before
     pasting the next.
+
+    For `ads-report`: Do a, b and c in one sitting right after step 10's chat run, and not within an hour of 00:00 UTC (the daily counts turn over): a request that is admitted starts a real report, which erases that client's step logs.
 
     **VPS, the client at a hidden prompt (once per login).** Paste this line ALONE; it waits. Then type
     the client of step 10's chat run and press Enter. Nothing typed is shown.
@@ -2281,26 +2379,26 @@ gitignored `security-reviews/`; only the report is committed.
 
 1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
 2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker systemd-journald hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit hermes-app-broker@ads-report; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. The journal service is among them since checklist v1.20: an automatic update of systemd restarts it, and D4.6 fails a restart nobody explained. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is six lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so, except for `hermes-app-broker@ads-report` while that job is declared and not installed, where it is expected: say so and go on; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. The collector counts the sshd `Match` lines itself since v1.19, and reads how the running sshd was started (D1.7 `match_lines`, `include_elsewhere` and `daemon_options`): nothing is pasted by the operator for them. After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's (the collector run once with a throwaway key before the real collection, to see that every item is observed: `K=$(openssl rand -hex 32); echo "throwaway key: $K"` prints the key, 64 characters, which is typed or pasted at the collector's key prompt and discarded afterwards; pipe it into the summary tool, ALONE: `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty | python3 infra/hermes-agent/bin/summarize-review-bundle.py; echo "collector_rc=${PIPESTATUS[0]}"`. It lists every item with its status and ends with a list headed "Before the real collection": every line there should read `ok`, and a `LOOK` line says what to settle first (the twenty lines are listed under this step). It prints numbers, yes or no, times and words from fixed lists only (a name, a path or anything else shows as `<withheld>` or `<other>`), so its output can be pasted in full) D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit or a report run holds the lock: wait for it and run the probe again.
-   The trial collection's closing list has twenty lines. Each starts `ok` or `LOOK`. On this box some of them read `LOOK` on every trial, and more of them before the journal step ("The journal's retention", VPS 1 to VPS 3); compare line by line. BEFORE the journal step, five lines read `LOOK`: `nothing in the bundle is could-not-check` (with `(3 places)`, all three in D2.4's `drop_in`: our settings file is not installed yet, so its owner, group and mode cannot be read), `retention at least 30 days, …` (our file does not set it yet), `the journal reaches 30 days` (the journal holds 6 to 7 days), `no other journal directory and no missing days` (with `(1 other: needs your statement in the evidence)`) and `the proxy matches the last PASS`. AFTER the journal step, three lines read `LOOK`: `the journal reaches 30 days` (until about 23 days after the step), `no other journal directory and no missing days` (on every trial, see its line below) and `the proxy matches the last PASS` (on every trial); `nothing in the bundle is could-not-check` and the retention line must then read `ok`. Once "The leftover journal directory" has been done on this box, that directory is gone: `no other journal directory and no missing days` then reads `ok`, two lines read `LOOK`, and no statement about it is needed. Every other line should read `ok` both times. Five of the twenty lines read the jobs and are there since checklist v1.21: `every job is declared and installed`, `every job's folders are as designed and no container mounts the job state`, `the installed job units equal the repository's and every stored result is in whitelist`, `the credential probe matches the declared map and a figures run starts no AI service` and `the report store holds only owner-only client folders`; with both jobs installed all five read `ok`, the first ending `(2 jobs)`. Four older lines now need EVERY installed job: `the three live refusals are in the journal`, `at least one run/ok result`, `no leak count above 0 (D2.3, D10.7)` and `no service runs older code than the box holds`; one that does not hold for a job ends with a count such as `(not so for 1 of 2 jobs)`, and the item's own lines above it show which job. **The rollout window.** Between the pull that brings `ads-report`'s description file and that job's installation ("Add a chat-triggered job" steps 1 to 4), a trial collection shows the job as declared and not installed, and two more lines read `LOOK`: `nothing in the bundle is could-not-check (...)` (a number of places, all of them values of that job) and `every job is declared and installed (1 declared but not installed)`. Until step 3b of that chapter has created the report store, `the report store holds only owner-only client folders` reads `LOOK` as well, its first note `(the store is not there)`. That is expected in that window and not otherwise: with the job installed, each of them is a `LOOK` to settle. Do not collect for a real review between the pull and step 8: until step 8 shows two servers, D10.6 fails (the box's chat settings do not yet equal the template), and no closing line of the summary says so. A `LOOK` that is not in this list, a number of places other than 3 before the step, or a place outside D2.4's `drop_in`: do what its line below says. For a `LOOK`:
+   The trial collection's closing list has twenty lines. Each starts `ok` or `LOOK`. On this box some of them read `LOOK` on every trial, and more of them before the journal step ("The journal's retention", VPS 1 to VPS 3); compare line by line. BEFORE the journal step, five lines read `LOOK`: `nothing in the bundle is could-not-check` (with `(3 places)`, all three in D2.4's `drop_in`: our settings file is not installed yet, so its owner, group and mode cannot be read), `retention at least 30 days, …` (our file does not set it yet), `the journal reaches 30 days` (the journal holds 6 to 7 days), `no other journal directory and no missing days` (with `(1 other: needs your statement in the evidence)`) and `the proxy matches the last PASS`. AFTER the journal step, three lines read `LOOK`: `the journal reaches 30 days` (until about 23 days after the step), `no other journal directory and no missing days` (on every trial, see its line below) and `the proxy matches the last PASS` (on every trial); `nothing in the bundle is could-not-check` and the retention line must then read `ok`. Once "The leftover journal directory" has been done on this box, that directory is gone: `no other journal directory and no missing days` then reads `ok`, two lines read `LOOK`, and no statement about it is needed. Every other line should read `ok` both times. Five of the twenty lines read the jobs and are there since checklist v1.21: `every job is declared and installed`, `every job's folders are as designed and no container mounts the job state`, `the installed job units equal the repository's and every stored result is in whitelist`, `the credential probe matches the declared map and a figures run starts no AI service` and `the report store holds only owner-only client folders`; with both jobs installed all five read `ok`, the first ending `(2 jobs)`. Four older lines now need EVERY installed job: `the three live refusals are in the journal`, `at least one run/ok result`, `no leak count above 0 (D2.3, D10.7)` and `no service runs older code than the box holds`; one of the first three that does not hold for a job ends with a count of jobs such as `(not so for 1 of 2 jobs)`, and the item's own lines above it show which job; the fourth counts SERVICES, not jobs (the two fixed services, `hermes-broker` and `hermes-docker-proxy`, and the broker of every installed job: four with two jobs), so it ends `(not so for 1 of 4 services)`. A per-job line can also end `(no installed job)` (the lists hold no installed job: nothing was judged) or `(the jobs could not be checked)` (a list of jobs, or the per-job entries, are not there in the form the tool reads); when a value that was not read is why, the count ends `: a value could not be checked`, as in `(not so for 1 of 2 jobs: a value could not be checked)`. **The rollout window.** Between the pull that brings `ads-report`'s description file and that job's installation ("Add a chat-triggered job" steps 1 to 4), a trial collection shows the job as declared and not installed, and two more lines read `LOOK`: `nothing in the bundle is could-not-check (...)` (a number of places, all of them values of that job) and `every job is declared and installed (1 declared but not installed)`. Until step 3b of that chapter has created the report store, `the report store holds only owner-only client folders` reads `LOOK` as well, its first note `(the store is not there)`. That is expected in that window and not otherwise: with the job installed, each of them is a `LOOK` to settle. Do not collect for a real review between the pull and step 8: until step 8 shows two servers, D10.6 fails (the box's chat settings do not yet equal the template), and no closing line of the summary says so. A `LOOK` that is not in this list, a number of places other than 3 before the step, or a place outside D2.4's `drop_in`: do what its line below says. For a `LOOK`:
    - `every item observed (N items)`: it names the items that were not observed. Stop and report the summary.
    - `nothing in the bundle is could-not-check`: it gives the number of places. Find them in the items above it; for D2.4 see "Reading it later" under "The journal's retention". A collection run without `sudo` reads so in D2.3, D2.4 and D10.7. A run of the listener check that could not check, held in D4.5's `history_counts` under the key `could-not-check`, is a count of runs and is not a place: the line then ends `(not counted: N past listener-check runs in D4.5's history)` and stays `ok` (on this box N was 1 on 2026-10-12, the same run review #9's report shows; CHECKLIST D4.5 does not fail it).
-   - `every job is declared and installed`: with both jobs installed it reads `ok` and ends `(2 jobs)`. `(1 declared but not installed)`: expected in the rollout window only (above); at any other time finish that job's installation ("Add a chat-triggered job") or stop and report. `installed but not declared`, `on disk only`, `in no list`, `with a name that is not a job name`, `unit line not counted`, `entry on disk not counted`, `per-job entry disagrees with the lists` (one) or `per-job entries disagree with the lists` (several): stop and report the summary (something of a job is on the box that no description file names, or the unit listing is not in the form the collector reads).
-   - `every job's folders are as designed and no container mounts the job state`: read D10.4 in the summary and report it. `(not so for N of M jobs)`: a job's spool or state folder is not as `init-host-layout.py --app <job>` makes it. A `container mounts the job state` note is a failed review item: stop.
+   - `every job is declared and installed`: with both jobs installed it reads `ok` and ends `(2 jobs)`. `(1 declared but not installed)`: expected in the rollout window only (above); at any other time finish that job's installation ("Add a chat-triggered job") or stop and report. `installed but not declared`, `on disk only`, `in no list`, `with a name that is not a job name`, `unit line not counted`, `entry on disk not counted`, `per-job entry disagrees with the lists` (one) or `per-job entries disagree with the lists` (several): stop and report the summary (something of a job is on the box that no description file names, or the unit listing is not in the form the collector reads). `(no installed job)` or `(the jobs could not be checked)`: stop and report the summary (D10.3's three lists hold no installed job, or are not lists of job names).
+   - `every job's folders are as designed and no container mounts the job state`: read D10.4 in the summary and report it. `(not so for N of M jobs)`: a job's spool or state folder is not as `init-host-layout.py --app <job>` makes it. A `container mounts the job state` note is a failed review item: stop. `(1 container not inspected)`, `(N containers not inspected)` or `(containers not inspected: could not be checked)`: a running container's mounts could not be read, so nothing says that it does not mount the job state; collect again, and with the same note stop and report.
    - `the installed job units equal the repository's and every stored result is in whitelist`: read D10.3 `installed_equal_repo` and D10.8 `out_of_whitelist` in the summary. A unit file that differs or was not read: stop and report; copy nothing over it without asking. A result out of whitelist: stop and report; do not delete it.
    - `the credential probe matches the declared map and a figures run starts no AI service`: read D10.1 in the summary and report it. `a figures run does not start exactly the collector and the reader` is a failed review item (a report run would start a service it must not): stop. `(not in this bundle)`: the collector is older than checklist v1.21; pull first.
    - `sshd runs with its default settings file and no Match line`: read D1.7 in the summary. `match_lines`, `include_elsewhere`, `config_file_options` or `setting_options` above `0`: D1.7 then needs your statement in the evidence (step 6). `listeners` other than `1`, or `could-not-check` in `daemon_options`, `match_lines` or `include_elsewhere`: the item cannot pass and no statement changes that; stop and report.
    - `the three live refusals are in the journal`: every installed job needs all three. It names the missing ones (over all jobs together) and counts the jobs concerned, `(not so for N of M jobs)`; D10.7's lines above show which job. Run those live checks for that job first ("Add a chat-triggered job" step 11, with `JOB` set to it).
    - `at least one run/ok result`: every installed job needs one of its own, and `(not so for N of M jobs)` counts the jobs without; D10.8's lines above show which. Make a chat run of that job first ("Add a chat-triggered job" step 10; the report's costs no AI fee, the audit's does).
    - `retention at least 30 days, set by our file, the file equal to the repository's, no other file, root:root 0644`: "The journal's retention", VPS 1 and VPS 2. The last words are our settings file's owner, group and mode as D2.4 `drop_in` shows them (`owner_is_root`, `group_is_root`, `mode`): anything else is a failed review item, so install the file again as VPS 2 does.
-   - `the journal reaches 30 days`: expected until about 23 days after the retention was raised (the journal already held about 7 days). The evidence then needs the date and time of VPS 3 (step 6).
+   - `the journal reaches 30 days`: expected until about 23 days after the retention was raised (the journal already held about 7 days). The evidence then needs the date and time of VPS 3 (step 6). Two notes do not turn the line and are there to be read. `(1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry)` (with several, `(N jobs whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; each judged from its first entry)`): a job's first entry in the journal is later than the last PASS. For a job added since then, give its install date in the evidence (D10.7); for a job installed long before, it only means that the journal no longer holds entries that old, and that job is judged as any other. `(1 job installed since the last PASS and it has not logged yet)` (with several, `(N jobs installed since the last PASS and they have not logged yet)`): that job's broker has written no journal entry; make its chat run and its live checks first. `(not so for N of M jobs: a value could not be checked)` or `(the jobs could not be checked)` on this line: a job's D10.7 values or its oldest entry in D2.4 were not read; collect with `sudo`, and with the same note stop and report.
    - `the journal search read everything it was given`: read D2.3 in the summary and report it.
    - `no leak count above 0 (D2.3, D10.7)`: with `(a count is above 0: this is a FAIL, not a reminder)`, stop: this is a failed review item (credential text or a customer id is in the journal). Do not go on to the real collection. Report the summary, and do not paste any journal line anywhere. With `(a count was not read)`: read D2.3 and D10.7 in the summary and report them. D10.7's counts are read for every job, a job that is not installed included.
    - `the running journal service has read its settings`: "The journal's retention", "Reading it later" (VPS 1 first, then VPS 3), then collect again.
    - `the journal is being written to disk`: `sudo journalctl --flush`, then collect again; still `LOOK`: stop and report.
    - `no other journal directory and no missing days`: until "The leftover journal directory" has been done on this box, ONE other directory is expected (an old file from the machine the server image was built on), so this line reads `LOOK` with `(1 other: needs your statement in the evidence)`; the statement is the one step 6 describes, and it goes in the evidence file at any reach. After that section has been done the line reads `ok` and no statement is needed. A number other than the one expected for the box's state (1 before, 0 after), `(fewer files than days: needs explaining)` or `(not read)`: stop and report the summary.
    - `the proxy matches the last PASS`: this trial command names no last PASS, so the line always reads `LOOK` here. Step 3's real collection gives it; after a `systemctl daemon-reload` see step 3.
-   - `no service runs older code than the box holds`: restart the service that D4.6 `files_newer_than_start` counts (above), then collect again. The line reads the broker of every installed job: after a pull that changed a description file or `bin/app_lib.py`, "Add a chat-triggered job" step 7a restarts them all.
-   - `the report store holds only owner-only client folders`: with the report job installed it reads `ok` and ends with the number of client folders. `(the store is not there)`: expected in the rollout window only, until step 3b of "Add a chat-triggered job"; with `ads-report` installed, stop and report. `(not in this bundle)`: the collector is older than checklist v1.21; pull first. A count (`not a folder`, `not active`, `not listed`, `holding something that is not a file`, `not root 0700`, `with a file that is not root root 0600`), `the store is not root:root 0700`, or a `container mounts it` note: stop and report the summary. `not active` is a folder of a client that is no longer active: offboarding ("Ads audits on the box" step 8) removes it.
+   - `no service runs older code than the box holds`: restart the service that D4.6 `files_newer_than_start` counts (above), then collect again. Its count is of services, `(not so for N of M services)`, M being 2 plus the number of installed jobs; `(the jobs could not be checked)`: D4.6's lists of jobs were not read, stop and report. The line reads the broker of every installed job: after a pull that changed a description file or `bin/app_lib.py`, "Add a chat-triggered job" step 7a restarts them all.
+   - `the report store holds only owner-only client folders`: with the report job installed it reads `ok` and ends with the number of client folders. `(the store is not there)`: expected in the rollout window only, until step 3b of "Add a chat-triggered job"; with `ads-report` installed, stop and report. `(not in this bundle)`: the collector is older than checklist v1.21; pull first. A count (`not a folder`, `not active`, `not listed`, `holding something that is not a file`, `not root 0700`, `with a file that is not root root 0600`), `the store is not root:root 0700`, or a `container mounts it` note: stop and report the summary. `(the store was not listed)` (it is there and its listing failed), `(the store is a link)`, `(the store is not a directory)`, `(the store could not be checked)`, `(the store was not read)` or `(the folders were not read)`: stop and report the summary; a store that is a link is never followed, and it is a failed review item. `(1 entry of the store not read)` or `(N entries of the store not read)` (D7.1 `rows_not_read`): something is in the store that could not be examined and has no row. `(1 entry inside a folder not read)` or `(N entries inside a folder not read)` (the rows' `files_not_read`, added up): something inside a client's folder could not be examined. With either of them, or with `(1 container not inspected)`, `(N containers not inspected)` or `(containers not inspected: could not be checked)`, the review cannot verify the store: collect again with `sudo`, and with the same note stop and report. `not active` is a folder of a client that is no longer active: offboarding ("Ads audits on the box" step 8) removes it.
    - `fingerprint complete`: stop and report the summary.
    The command's last line is `collector_rc=0`. Another number, or `summarize-review-bundle: not a box bundle`: the collector stopped; read its own message and report it. First run on the box: the pipe was rehearsed in the stand-in, where most items cannot be observed.
 3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):

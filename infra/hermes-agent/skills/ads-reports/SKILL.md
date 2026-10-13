@@ -23,7 +23,7 @@ reports are read by the operator on the host.
 | `ok` | the figures report is done, its timestamp `ts`, and that they can read it with `sudo show-report <client>` | stop |
 | `refused` | it was refused, and the `reason` in plain words (`quota`: one report per client per day; `disabled`: reports are switched off; `inactive_client`: not an active client; `precheck`: the server refused before starting; `bad_request`, `duplicate`) | stop. **Never call the tool again for that client today.** |
 | `failed` | it failed at step `reason` (e.g. `collect`, `read`, `store`, `timeout`, `interrupted`) | suggest the manual command `sudo run-client-audit <client> --figures`; do not retry |
-| `busy` | another figures report is running on the server | offer to try later; do not loop |
+| `busy` | another run (an audit or a figures report) is in progress on the server | offer to try later; do not loop |
 | `pending` | it is still running, and the `request_id` | check with `ads_report_status` once, only when the operator asks |
 | the tool call itself errors or times out (no `status` came back) | you got no answer; the figures report may still be running or may have finished | do NOT call `ads_report_run` again and do NOT suggest the manual command (it would start a second report). Call `ads_report_list` once and report the latest timestamp; the operator can read it with `sudo show-report <client>` |
 

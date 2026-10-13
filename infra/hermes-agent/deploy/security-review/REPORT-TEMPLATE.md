@@ -13,7 +13,7 @@
 - **Proxy (D4.2):** `execstart_sha256` `<sha256>`, `execstart_argv_sha256` `<sha256>` (the next review gives the first to the collector as `--last-pass-execstart`; the public report may show it abbreviated, the full value being in the private box bundle, read with `bin/last-pass-execstart.py`)
 - **Listener check (D4.5):** `alert_log` `<as the bundle shows it>`
 - **D7.1 `records`:** `<number>`
-- **Report store (D7.1 `report_archive`):** `<number>` folders, `rows_listed` `<true/false>`, `containers_mounting` `<number>`
+- **Report store (D7.1 `report_archive`):** `<number>` folders, `rows_listed` `<true/false>`, `rows_not_read` `<number>`, `containers_mounting` `<number>`, `containers_not_inspected` `<number>`
 - **`cid_key_id`:** box `<8 hex>`, laptop `<8 hex>` — equal: yes|no (if not, no `cid:` fingerprint can be compared across the bundles)
 - **Authorised credential set:** (the box bundle's `credentials`, one line each: a Google row is role, refresh-token sha12, client-id sha12; a non-Google row is label and sha12, or label alone for the dashboard password)
 - **Measured-access digest:** `<sha256>`

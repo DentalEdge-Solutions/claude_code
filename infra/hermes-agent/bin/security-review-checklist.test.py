@@ -337,6 +337,44 @@ class TestChecklistSync(unittest.TestCase):
         self.assertIn("`rows_listed` `false` beside any other `parent`", rule)
         self.assertIn("A row `status` other than `active`, `retired` or `unregistered`", rule)
 
+    def test_the_final_review_s_rulings_keep_their_words(self):
+        b = blocks()
+        # D4.2: the reload a job's installation causes, typed or made by `systemctl enable`
+        d42 = part(b["D4.2"], "pass rule")
+        self.assertIn('BRING-UP "Add a chat-triggered job" step 4 reloads the manager for every job added: a typed '
+                      "`daemon-reload` when the first job's unit files are installed, and for a later job the reload "
+                      "`systemctl enable` makes itself (no `daemon-reload` is typed; step 4 prints the proxy line's hash "
+                      "before and after).", d42)
+        self.assertIn("the manager was reloaded (`systemctl daemon-reload`, or `systemctl enable` or `disable` of a unit)", d42)
+        self.assertNotIn("part 2 step 4", b["D4.2"])
+        # D7.1: an entry of the store that could not be examined is counted, and is CANNOT-VERIFY
+        expected, rule = part(b["D7.1"], "expected"), part(b["D7.1"], "pass rule")
+        self.assertIn("`rows_not_read` is `0`", expected)
+        self.assertIn("`files_not_read` `0`", expected)
+        self.assertIn("a `rows_not_read` or any row's `files_not_read` above `0` (an entry was there and could not be "
+                      "examined", rule)
+        self.assertRegex(rule, r"`files_not_read` above `0` \([^)]*\), is CANNOT-VERIFY for the report store and so for the item")
+        # D10 lead: a PASS under "declared and not installed" does not cover that job
+        lead = d10_lead()
+        self.assertIn("A PASS given under this statement does not cover that job: installing it is a change that needs "
+                      "a new review before its off switch is taken off.", lead)
+        self.assertIn("The same wording covers a job that was disabled and left declared", lead)
+        # D10.1: the two names and no other; the order carries no meaning
+        self.assertNotIn("another order", b["D10.1"])
+        self.assertIn("(these two names and no other; the order they come in carries no meaning)", part(b["D10.1"], "expected"))
+        # D10.3 and D10.7 are titled for every job
+        self.assertTrue(b["D10.3"].startswith("D10.3 — Every job's broker is sandboxed"), b["D10.3"][:80])
+        self.assertTrue(b["D10.7"].startswith("D10.7 — Every job's broker journal shows the live checks"), b["D10.7"][:80])
+        for item in ("D10.3", "D10.7"):
+            self.assertEqual([l.split(":**")[0] for l in b[item].split("\n") if l.startswith("- **")],
+                             ["- **source", "- **claim", "- **expected", "- **pass rule"], item)
+
+    def test_the_report_template_s_store_line_names_the_counts_the_checklist_judges(self):
+        line = next(l for l in open(os.path.join(os.path.dirname(CHECKLIST), "REPORT-TEMPLATE.md")).read().split("\n")
+                    if l.startswith("- **Report store (D7.1 `report_archive`):**"))
+        for key in ("rows_listed", "rows_not_read", "containers_mounting", "containers_not_inspected"):
+            self.assertIn(f"`{key}`", line, key)
+
     def test_d7_1_keeps_the_words_of_the_report_store_ruling(self):
         expected, rule = part(blocks()["D7.1"], "expected"), part(blocks()["D7.1"], "pass rule")
         for words in ("`parent` is a dict `owner` `root`, `group` `root`, `mode` `0o700`", "`rows_listed` is `true`",
