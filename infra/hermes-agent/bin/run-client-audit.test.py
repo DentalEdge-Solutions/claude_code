@@ -1383,10 +1383,11 @@ class TestProbeCli(Base):
         self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
 
     def test_the_app_runner_manifest_offers_no_probe(self):
-        with open(os.path.join(os.path.dirname(HERE), "registry/apps/ads-audit.json")) as f:
-            text = f.read()
-        self.assertEqual(sorted(json.loads(text)["ops"]), ["list", "run"])
-        self.assertNotIn("probe", text)
+        for app in ("ads-audit", "ads-report"):
+            with self.subTest(app=app), open(os.path.join(os.path.dirname(HERE), "registry/apps", app + ".json")) as f:
+                text = f.read()
+                self.assertEqual(sorted(json.loads(text)["ops"]), ["list", "run"])
+                self.assertNotIn("probe", text)
 
 
 if __name__ == "__main__":

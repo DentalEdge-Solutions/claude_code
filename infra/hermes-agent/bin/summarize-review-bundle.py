@@ -46,7 +46,7 @@ SECRET_STATES = frozenset({"matches-file", "differs-from-file", "unset"})
 JOURNAL_STATUSES = frozenset({"ok", "refused", "failed", "busy", "queued", "dropped", "-", "?"})
 JOURNAL_REASONS = frozenset({"bad_request", "duplicate", "inactive_client", "quota", "disabled", "timeout",
                              "interrupted", "internal", "precheck", "busy", "collect", "snapshot", "read",
-                             "proxy", "draft", "isolation", "vault-write", "expired", "-", "?"})
+                             "proxy", "draft", "isolation", "vault-write", "store", "expired", "-", "?"})
 NOTE_WORDS = frozenset({"warning", "error"})
 HISTORY_STATUSES = frozenset({"ok", "alert", CNC, "?"})                                  # check-gateway-listeners.py
 ALERT_LOG_KEYS = frozenset({"alert", "alert-cleared", "?", "first_ts", "last_ts"})

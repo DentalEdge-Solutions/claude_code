@@ -2496,6 +2496,10 @@ def d10_8(host, ctx):
     object (unreadable, not a regular file, too large, malformed) is a row and is out of
     whitelist, as is a result stored under a name that is not its own request id. Rows carry
     closed-set labels only: never the slug, the request id or a file name."""
+    try:
+        manifest = A.load_manifest(host.path(AGENT_DIR + "/registry/apps/" + APP + ".json"), APP)
+    except (OSError, ValueError):
+        raise CouldNotCheck("the job's manifest could not be loaded")
     d = host.path(APP_RESULTS)
     rows, bad = [], 0
     for n in sorted(os.listdir(d)):
@@ -2505,7 +2509,7 @@ def d10_8(host, ctx):
             obj = json.loads(A.read_capped(os.path.join(d, n), A.MAX_DONE_BYTES))
             if not isinstance(obj, dict):
                 raise ValueError("not an object")
-            keys_ok, values_ok = A.result_in_whitelist(obj)
+            keys_ok, values_ok = A.result_in_whitelist(obj, manifest)
             values_ok = values_ok and obj["request_id"] + ".json" == n
             row = {"op": _label(obj.get("op"), A.KNOWN_OPS),
                    "status": _label(obj.get("status"), A.STATUSES),

@@ -113,7 +113,8 @@ class T(unittest.TestCase):
         def boom(argv, timeout):
             raise OSError("exec failed")
         only_run = A.Manifest(MAN.app, MAN.user, MAN.command, {"run": MAN.ops["run"]},
-                              {"run": MAN.tools["run"], "status": MAN.tools["status"]}, {"run": 300})
+                              {"run": MAN.tools["run"], "status": MAN.tools["status"]}, {"run": 300},
+                              MAN.result, {k: MAN.descriptions[k] for k in ("run", "status")})
         cases = [
             ("valid", lambda: self.job(), MAN, self.execute),
             ("malformed", lambda: self.job(raw="junk"), MAN, self.execute),
@@ -147,7 +148,8 @@ class T(unittest.TestCase):
 
     def test_op_missing_from_manifest_is_not_executed(self):
         only_run = A.Manifest(MAN.app, MAN.user, MAN.command, {"run": MAN.ops["run"]},
-                              {"run": MAN.tools["run"], "status": MAN.tools["status"]}, {"run": 300})
+                              {"run": MAN.tools["run"], "status": MAN.tools["status"]}, {"run": 300},
+                              MAN.result, {k: MAN.descriptions[k] for k in ("run", "status")})
         self.job(op="list")
         R.run_all(only_run, self.state, execute=self.execute, owner=None)
         self.assertEqual(self.calls, [])

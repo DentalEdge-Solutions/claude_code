@@ -1084,6 +1084,8 @@ class TestD10(Base):
                              + BROKER + "request=y op=run client=acme-dental status=ok reason=-\n",
                       runner="Collecting...\nAudit complete.\n")
         self.res = os.path.join(self.root, CE.APP_RESULTS.lstrip("/")); os.makedirs(self.res)
+        man_dir = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "registry", "apps"); os.makedirs(man_dir, exist_ok=True)
+        shutil.copy(os.path.join(os.path.dirname(HERE), "registry", "apps", "ads-audit.json"), man_dir)
         self.good = {"request_id": RID_A, "op": "run", "client": "acme-dental",
                      "status": "ok", "reason": None, "exit_code": 0, "ts": "2026-10-01_12-00-00", "steps": [],
                      "vault_path": "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"}
@@ -2298,10 +2300,10 @@ class TestD10(Base):
     def test_d10_8_a_raise_from_the_whitelist_check_costs_one_row_never_the_item(self):
         real = CE.A.result_in_whitelist
 
-        def flaky(obj):
+        def flaky(obj, manifest):
             if obj["request_id"] == RID_A:
                 raise RecursionError("maximum recursion depth exceeded")
-            return real(obj)
+            return real(obj, manifest)
         with mock.patch.object(CE.A, "result_in_whitelist", side_effect=flaky):
             it = self._item("D10.8")
         self.assertEqual(it["status"], R.OBSERVED)

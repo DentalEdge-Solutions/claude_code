@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, stat, tempfile, unittest
+import json, os, shutil, stat, tempfile, unittest
 HERE = os.path.dirname(os.path.abspath(__file__)); import sys; sys.path.insert(0, HERE)
 from unittest import mock
 import app_lib as A
@@ -334,9 +334,9 @@ class TestWhitelist(unittest.TestCase):
 
     def test_result_in_whitelist(self):
         ok = A.refused_result("0f8e2c1a-1111-4222-8333-444455556666", "run", "acme", "quota")
-        self.assertEqual(A.result_in_whitelist(ok), (True, True))
-        self.assertEqual(A.result_in_whitelist(dict(ok, reason="free text")), (True, False))
-        self.assertEqual(A.result_in_whitelist(dict(ok, extra=1)), (False, False))
+        self.assertEqual(A.result_in_whitelist(ok, m()), (True, True))
+        self.assertEqual(A.result_in_whitelist(dict(ok, reason="free text"), m()), (True, False))
+        self.assertEqual(A.result_in_whitelist(dict(ok, extra=1), m()), (False, False))
 
     def test_everything_the_broker_writes_is_in_whitelist(self):
         step = {"name": "proxy", "rc": 1, "seconds": 2.5}
@@ -369,7 +369,7 @@ class TestWhitelist(unittest.TestCase):
         self.assertEqual([(r["status"], r["reason"]) for r in written], expect)   # the fixtures are what they claim
         for r in written:
             with self.subTest(r=r):
-                self.assertEqual(A.result_in_whitelist(json.loads(json.dumps(r))), (True, True))
+                self.assertEqual(A.result_in_whitelist(json.loads(json.dumps(r)), m()), (True, True))
 
     def test_what_the_broker_cannot_write_is_out(self):
         ok = A.map_done(REQ, done(), m())
@@ -409,7 +409,7 @@ class TestWhitelist(unittest.TestCase):
         ]
         for r in bad:
             with self.subTest(r=r):
-                self.assertEqual(A.result_in_whitelist(json.loads(json.dumps(r))), (True, False))
+                self.assertEqual(A.result_in_whitelist(json.loads(json.dumps(r)), m()), (True, False))
 
     def test_wrong_keys_and_non_objects(self):
         ok = A.map_done(REQ, done(), m())
@@ -417,7 +417,7 @@ class TestWhitelist(unittest.TestCase):
         both = dict(ok, audits=[])
         for r in (None, True, 0, 1.5, "ok", [], [ok], {}, missing, both, dict(ok, note="x"), {"status": "ok"}):
             with self.subTest(r=r):
-                self.assertEqual(A.result_in_whitelist(r), (False, False))
+                self.assertEqual(A.result_in_whitelist(r, m()), (False, False))
 
     def test_never_raises_on_any_json_value_in_any_field(self):
         hostile = (None, True, False, 0, -1, 1.5, 10 ** 30, "", "X y", "\n", [], [[]], [None], ["x"], {}, {"a": [1]},
@@ -430,7 +430,7 @@ class TestWhitelist(unittest.TestCase):
                 for v in hostile:
                     r = dict(base, **{k: v})
                     with self.subTest(k=k, v=v):
-                        keys_ok, values_ok = A.result_in_whitelist(r)
+                        keys_ok, values_ok = A.result_in_whitelist(r, m())
                         self.assertIs(keys_ok, True)
                         # Only the unchanged value is in whitelist (compared as JSON: False is not 0),
                         # plus the three substitutions that give another result the broker can write.
@@ -470,13 +470,109 @@ class TestWhitelist(unittest.TestCase):
                 for base in bases:
                     for k in base:
                         with self.subTest(kind=kind, depth=depth, k=k):
-                            self.assertEqual(A.result_in_whitelist(dict(base, **{k: v})), (True, False))
+                            self.assertEqual(A.result_in_whitelist(dict(base, **{k: v}), m()), (True, False))
 
     def test_a_recursion_error_from_the_checks_is_out_of_whitelist_not_a_raise(self):
         ok = A.map_done(REQ, done(), m())
         with mock.patch.object(A, "_broker_could_write", side_effect=RecursionError):
-            self.assertEqual(A.result_in_whitelist(ok), (True, False))
-        self.assertEqual(A.result_in_whitelist(ok), (True, True))                  # control
+            self.assertEqual(A.result_in_whitelist(ok, m()), (True, False))
+        self.assertEqual(A.result_in_whitelist(ok, m()), (True, True))                  # control
+
+
+REPORT_MANIFEST = os.path.join(os.path.dirname(HERE), "registry", "apps", "ads-report.json")
+
+
+def mr():
+    return A.load_manifest(REPORT_MANIFEST, "ads-report")
+
+
+class TestManifestResultAndDescriptions(unittest.TestCase):
+    def _load(self, change):
+        raw = json.load(open(MANIFEST))
+        change(raw)
+        d = tempfile.mkdtemp()
+        json.dump(raw, open(os.path.join(d, "ads-audit.json"), "w"))
+        return A.load_manifest(os.path.join(d, "ads-audit.json"), "ads-audit")
+
+    def test_both_committed_manifests_load_with_exactly_eight_keys(self):
+        self.assertEqual(m().result, {"root": "vaults", "subdir": "audits", "suffix": "-audit.md"})
+        self.assertEqual(mr().result, {"root": "report-archive", "subdir": "", "suffix": "-report.md"})
+        for man in (m(), mr()):
+            self.assertEqual(set(man.descriptions), set(man.tools))
+        self.assertEqual(set(json.load(open(REPORT_MANIFEST))),
+                         {"app", "user", "command", "ops", "tools", "wait_seconds", "result", "descriptions"})
+
+    def test_the_report_manifest_is_the_design_s(self):
+        r = mr()
+        self.assertEqual((r.user, r.command), ("hermes-app-ads-report", "/usr/local/sbin/run-client-audit"))
+        self.assertEqual(r.ops["run"], {"args": ["--figures", "--json"], "timeout": 5400,
+                                        "quota": {"per_client_day": 1, "per_box_day": 5}})
+        self.assertEqual(r.ops["list"], {"args": ["--figures", "--list", "--json"], "timeout": 60,
+                                         "quota": {"per_box_day": 60}})
+        self.assertEqual(r.tools, {"run": "ads_report_run", "status": "ads_report_status", "list": "ads_report_list"})
+        self.assertEqual(r.wait_seconds, {"run": 300, "list": 60})
+
+    def test_a_manifest_without_the_new_keys_or_with_a_bad_one_is_refused(self):
+        bad = [lambda d: d.pop("result"), lambda d: d.pop("descriptions"),
+               lambda d: d["result"].update(root="/var/lib/hermes/vaults"),      # a path, not a root's name
+               lambda d: d["result"].update(root="governance"),
+               lambda d: d["result"].update(subdir="../x"), lambda d: d["result"].update(subdir="a/b"),
+               lambda d: d["result"].update(suffix="audit.md"), lambda d: d["result"].update(suffix="-a.txt"),
+               lambda d: d["result"].update(suffix="-(.*)\\.md"), lambda d: d["result"].update(extra=1),
+               lambda d: d["descriptions"].pop("status"), lambda d: d["descriptions"].update(other="x"),
+               lambda d: d["descriptions"].update(run=""), lambda d: d["descriptions"].update(run="x" * 301),
+               lambda d: d["descriptions"].update(run="line\nbreak"), lambda d: d["descriptions"].update(run="caf\u00e9"),
+               lambda d: d["descriptions"].update(run=7)]
+        for i, change in enumerate(bad):
+            with self.subTest(i=i), self.assertRaises(ValueError):
+                self._load(change)
+
+    def test_load_manifests_finds_every_job_and_refuses_a_stray_file(self):
+        d = os.path.dirname(MANIFEST)
+        self.assertEqual(sorted(A.load_manifests(d)), ["ads-audit", "ads-report"])
+        t = tempfile.mkdtemp()
+        shutil.copy(MANIFEST, t)
+        open(os.path.join(t, "Bad Name.json"), "w").write("{}")
+        with self.assertRaises(ValueError):
+            A.load_manifests(t)
+
+
+class TestResultPathPerJob(unittest.TestCase):
+    TS = "2026-10-01_12-00-00"
+
+    def _ok(self, path):
+        return {"status": "ok", "reason": None, "exit_code": 0, "ts": self.TS,
+                "steps": [{"name": "collect", "rc": 0, "seconds": 1.0}, {"name": "store", "rc": 0, "seconds": 0.1}],
+                "vault_path": path}
+
+    AUDIT = "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"
+    REPORT = "/var/lib/hermes/report-archive/acme-dental/2026-10-01_12-00-00-report.md"
+
+    def test_each_job_accepts_its_own_location_and_refuses_the_other_s(self):
+        req = {"request_id": "0" * 8 + "-0000-4000-8000-" + "0" * 12, "op": "run", "client": "acme-dental"}
+        for man, good, bad in ((m(), self.AUDIT, self.REPORT), (mr(), self.REPORT, self.AUDIT)):
+            done = lambda p: {"job_id": "x", "rc": 0, "stdout": json.dumps(self._ok(p)), "timed_out": False, "interrupted": False}
+            self.assertEqual(A.map_done(req, done(good), man)["vault_path"], good)
+            r = A.map_done(req, done(bad), man)
+            self.assertEqual((r["status"], r["reason"], r["vault_path"]), ("failed", "internal", None))
+
+    def test_another_client_s_path_another_timestamp_and_a_deeper_path_are_refused(self):
+        req = {"request_id": "0" * 8 + "-0000-4000-8000-" + "0" * 12, "op": "run", "client": "acme-dental"}
+        for p in (self.REPORT.replace("acme-dental", "other-dental"), self.REPORT.replace("12-00-00", "12-00-01"),
+                  self.REPORT.replace("/acme-dental/", "/acme-dental/audits/"), self.REPORT + "x", "/tmp" + self.REPORT):
+            done = {"job_id": "x", "rc": 0, "stdout": json.dumps(self._ok(p)), "timed_out": False, "interrupted": False}
+            self.assertEqual(A.map_done(req, done, mr())["reason"], "internal", p)
+
+    def test_the_whitelist_re_check_needs_the_job_s_manifest(self):
+        req = {"request_id": "0" * 8 + "-0000-4000-8000-" + "0" * 12, "op": "run", "client": "acme-dental"}
+        done = {"job_id": "x", "rc": 0, "stdout": json.dumps(self._ok(self.REPORT)), "timed_out": False, "interrupted": False}
+        r = json.loads(json.dumps(A.map_done(req, done, mr())))
+        self.assertEqual(A.result_in_whitelist(r, mr()), (True, True))
+        self.assertEqual(A.result_in_whitelist(r, m()), (True, False))
+
+    def test_store_is_a_step_class_and_the_list_is_closed(self):
+        self.assertEqual(A.STEP_CLASSES, ("collect", "snapshot", "read", "proxy", "draft", "isolation", "vault-write", "store"))
+        self.assertIn("store", A.STATUS_REASONS["failed"])
 
 
 if __name__ == "__main__":
