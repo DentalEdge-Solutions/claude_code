@@ -1758,6 +1758,41 @@ and file limits. What to do for each thing it can show:
 
 ---
 
+## The leftover journal directory (once per box)
+
+A server image can leave, under `/var/log/journal`, the journal of the machine it was built on. The
+journal service never trims it and D2.3 never reads it; D2.4 counts it (`other_directories`) and asks
+the operator to state it at every review while it exists. Search it once, then remove it. Needs the
+checkout at checklist v1.20 or later. Each block is pasted ALONE; run `sudo -v` first.
+
+**VPS 1, search (reads only).**
+```bash
+cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --other-journals; echo "rc=$?"
+```
+Expected: one JSON object with `"kind": "other-journals"`, `directories` `1`, `files` `1`, the four leak
+counts in `search` (`pattern_hits`, `known_secret_hits`, `credential_text_lines`, `customer_id_lines`)
+all `0`, `known_secrets_checked` above `0`, then `rc=0`. STOP when a leak count is above `0` (a finding:
+decide it before anything is removed), when `rc=2` (the read was not whole: report the message), or when
+`directories` is not what review #10 recorded.
+
+**VPS 2, what would be removed (changes nothing).** Use the `files` and `bytes` VPS 1 printed.
+```bash
+cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files 1 --expect-bytes <bytes>; echo "rc=$?"
+```
+Expected: `found: ...` with the same three numbers twice, `would remove: directories 1 | files 1 | bytes <bytes>`, `rc=0`.
+
+**VPS 3, remove (cannot be undone; on the operator's word).**
+```bash
+cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files 1 --expect-bytes <bytes> --apply; echo "rc=$?"
+```
+Expected: `removed: directories 1 | files 1 | still there: 0`, `rc=0`. `STOPPED: nothing was removed`: report it.
+
+**VPS 4, verify.** `sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --other-journals | grep -o '"directories": [0-9]*'` → `"directories": 0`. The journal service is not restarted and the live journal is untouched: the next trial collection's D2.4 shows `other_directories: 0` and the same `oldest_entry.journal` as before.
+
+Record in the operator evidence file: the date, the counts of VPS 1 and the line of VPS 3.
+
+---
+
 ## Replace the OpenRouter key
 
 The gateway's OpenRouter key is the box's alone: created in the OpenRouter console for the box

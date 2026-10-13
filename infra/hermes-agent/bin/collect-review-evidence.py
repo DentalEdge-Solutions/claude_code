@@ -1711,6 +1711,36 @@ def _journal_usage(host, settings):
             "flushed_to_disk": flushed}
 
 
+def other_journals(host, ctx, secrets):
+    """The one-time search of what D2.3 never reads: every real directory under /var/log/journal
+    other than the machine's own (a server image can leave the journal of the machine it was
+    built on). Each is read with `journalctl -D` and every stored field is searched. Counts only:
+    the directories' names are machine ids and go into the command, never into the result.
+    Raises CouldNotCheck when a read is not whole, ValueError/OSError when the layout cannot be read."""
+    with open(host.path("/etc/machine-id")) as f:
+        mid = f.read(64).strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", mid):
+        raise ValueError("machine-id")
+    base = host.path(JOURNAL_DIR)
+    if not stat.S_ISDIR(os.lstat(base).st_mode):
+        raise ValueError("journal directory path")
+    names = sorted(n for n in os.listdir(base)
+                   if n != mid and stat.S_ISDIR(os.lstat(os.path.join(base, n)).st_mode))
+    known = sorted({s for s in secrets if len(s) >= 8})
+    total, files, size = dict.fromkeys(SEARCH_COUNTS, 0), 0, 0
+    for n in names:
+        for root, _, fs in os.walk(os.path.join(base, n)):
+            for name in fs:
+                files += 1
+                size += os.lstat(os.path.join(root, name)).st_size
+        c = _search_journal(host, ["journalctl", "-D", JOURNAL_DIR + "/" + n, *JOURNAL_ALL_FIELDS],
+                            known, ctx["redactor"], timeout=JOURNAL_SCAN_TIMEOUT)
+        for k in total:
+            total[k] += c[k]
+    return {"directories": len(names), "files": files, "bytes": size, "search": total,
+            "known_secrets_checked": len(known)}
+
+
 def _journald_drop_in(host):
     try:
         st = _stat(host, JOURNALD_DROP_IN)
@@ -2609,6 +2639,7 @@ def main(argv=None, host=None, read_key=_tty_key):
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--fingerprint-only", action="store_true")
     g.add_argument("--credentials-only", action="store_true")
+    g.add_argument("--other-journals", action="store_true")
     ap.add_argument("--fp-key-tty", action="store_true")
     ap.add_argument("--last-pass-execstart")
     ap.add_argument("--last-pass-collected-at")
@@ -2641,7 +2672,7 @@ def _main(a, host, read_key):
         except ValueError as e:
             print(f"collect-review-evidence: {e}", file=sys.stderr)
             return 2
-    if not (a.fingerprint_only or a.credentials_only) and fp_key is None:
+    if not (a.fingerprint_only or a.credentials_only or a.other_journals) and fp_key is None:
         print("collect-review-evidence: the full bundle needs --fp-key-tty (Option B §8: keyed cid fingerprints)",
               file=sys.stderr)
         return 2
@@ -2672,6 +2703,19 @@ def _main(a, host, read_key):
                   "installed set", file=sys.stderr)
             return 2
         out, secrets = R.credential_set(infos) + other, secrets + other_secrets
+    elif a.other_journals:
+        try:
+            infos, secrets, unparsed, unreadable = installed_credentials(host)
+            other, other_secrets, other_failed = other_credentials(host)
+            if other_failed or unparsed or unreadable:
+                raise CouldNotCheck("the installed secret values could not all be loaded")
+            secrets = secrets + other_secrets
+            out = {"schema": 1, "kind": "other-journals", "collected_at": R.utc_now(),
+                   **other_journals(host, ctx, secrets)}
+        except (CouldNotCheck, OSError, ValueError) as e:
+            reason = str(e) if isinstance(e, CouldNotCheck) else type(e).__name__
+            print(f"collect-review-evidence: other journals: {reason}", file=sys.stderr)
+            return 2
     else:
         out, secrets, _ = _collect(host, fp_key)
     secrets = secrets + ([fp_key.hex()] if fp_key else [])

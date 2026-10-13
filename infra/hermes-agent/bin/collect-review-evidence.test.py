@@ -4952,5 +4952,54 @@ class TestStream(unittest.TestCase):
         self.assertEqual((list(s), s.rc, s.err), (["a\n", "b\n"], 0, "w"))
 
 
+class TestOtherJournals(Base):
+    MID, OTHER = "a" * 32, "b" * 32
+
+    def setUp(self):
+        super().setUp()
+        self._w("/etc/machine-id", self.MID + "\n")
+        self._w(f"/var/log/journal/{self.MID}/system.journal", "x" * 10)
+        self._w(f"/var/log/journal/{self.OTHER}/system.journal", "y" * 4096)
+
+    def test_only_the_other_directory_is_searched_and_only_counts_come_back(self):
+        self.outputs[("journalctl", "-D", "/var/log/journal/" + self.OTHER)] = \
+            (0, _e(MESSAGE="boot", _CMDLINE="tool --customer 1234567890"), "")
+        host = self.host()
+        d = CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertEqual((d["directories"], d["files"], d["bytes"]), (1, 1, 4096))
+        self.assertEqual(d["search"]["customer_id_lines"], 1)
+        self.assertEqual(set(d["search"]), set(CE.SEARCH_COUNTS))
+        self.assertEqual([c[:3] for c in host.calls if c[0] == "journalctl"],
+                         [["journalctl", "-D", "/var/log/journal/" + self.OTHER]])
+        self.assertNotIn(self.OTHER, json.dumps(d)); self.assertNotIn(self.MID, json.dumps(d))
+
+    def test_no_other_directory_is_zero_and_nothing_is_read(self):
+        shutil.rmtree(os.path.join(self.root, "var/log/journal", self.OTHER))
+        host = self.host()
+        d = CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertEqual((d["directories"], d["files"], d["search"]["entries"]), (0, 0, 0))
+
+    def test_a_linked_directory_is_not_followed(self):
+        os.symlink("/etc", os.path.join(self.root, "var/log/journal", "c" * 32))
+        host = self.host()
+        self.outputs[("journalctl", "-D")] = (0, "", "")
+        self.assertEqual(CE.other_journals(host, CE.context(host, self.KEY), [])["directories"], 1)
+
+    def test_a_read_that_warns_is_could_not_check_without_the_directory_s_name(self):
+        self.outputs[("journalctl", "-D")] = (0, "", f"Journal file /var/log/journal/{self.OTHER}/x is truncated")
+        host = self.host()
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertNotIn(self.OTHER, str(cm.exception))
+
+    def test_the_other_journals_mode_prints_counts_and_needs_no_key(self):
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = CE.main(["--other-journals"], host=self.host())
+        d = json.loads(out.getvalue())
+        self.assertEqual((rc, d["kind"], d["directories"], d["search"]["entries"]), (0, "other-journals", 1, 1))
+        self.assertNotIn(self.OTHER, out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
