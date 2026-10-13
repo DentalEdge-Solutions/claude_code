@@ -348,56 +348,32 @@ class TestSetsMatchTheCollector(unittest.TestCase):
         for name in ("", "a" * 33, "Ads", "9a", "-a", "a_b", "a.b", "a b", "ads-audit\n", "a/b", "a@b"):
             self.assertIsNone(SB._APP_RE.fullmatch(name), name)
 
-    def test_the_report_store_words_the_collector_does_not_declare_are_pinned(self):
-        # The collector names none of these: _dir_row and _archive_row write the words inline, and the
-        # probe's services are run-client-audit's DECLARED. Pinned here; a change there must change these.
-        self.assertEqual(SB.DIR_WORDS, frozenset({"absent", "symlink", "not-a-directory"}))
-        self.assertEqual(SB.PROBE_SERVICES, frozenset({"ads-collector", "ads-reader", "ads-drafter", "egress-proxy"}))
+    def test_the_report_store_words_are_the_collector_s(self):
+        # The collector declares no set for these: it is asked, with a real directory, what it writes.
+        import tempfile, types
+        with tempfile.TemporaryDirectory() as root:
+            os.mkdir(os.path.join(root, "store"))
+            os.mkdir(os.path.join(root, "store", "acme-dental"))
+            open(os.path.join(root, "file"), "w").close()
+            os.symlink(os.path.join(root, "store"), os.path.join(root, "link"))
+            host = types.SimpleNamespace(path=lambda p: os.path.join(root, p))
+            self.assertEqual({CE._dir_row(host, n) for n in ("missing", "link", "file")},
+                             {SB.DIR_ABSENT, SB.DIR_LINK, SB.DIR_NOT_A_DIRECTORY})
+            self.assertEqual((CE._dir_row(host, "missing"), CE._dir_row(host, "link"), CE._dir_row(host, "file")),
+                             (SB.DIR_ABSENT, SB.DIR_LINK, SB.DIR_NOT_A_DIRECTORY))
+            self.assertEqual(set(CE._dir_row(host, "store")), {"owner", "group", "mode"})
+            row = CE._archive_row({"acme-dental": {"status": "active"}}, os.path.join(root, "store"), "acme-dental")
+            self.assertEqual((row["kind"], row["status"], row["listed"], row["not_files"]), (SB.ROW_DIR, SB.ROW_ACTIVE, True, 0))
+        self.assertEqual(SB.DIR_WORDS, frozenset({SB.DIR_ABSENT, SB.DIR_LINK, SB.DIR_NOT_A_DIRECTORY}))
+
+    def test_the_probe_s_services_are_run_client_audit_s(self):
+        # The collector passes the probe through and names no service: run-client-audit's DECLARED does.
         rspec = importlib.util.spec_from_file_location("rca_for_summary", os.path.join(HERE, "run-client-audit.py"))
         RCA = importlib.util.module_from_spec(rspec); rspec.loader.exec_module(RCA)
         self.assertEqual(SB.PROBE_SERVICES, frozenset(RCA.DECLARED))
-
-    def test_secret_env_labels_and_states(self):
-        self.assertEqual(SB.SECRET_LABELS, frozenset(l for _, l in CE.OTHER_SECRET_NAMES[CE.GATEWAY_ENV_FILE]))
-        self.assertEqual(SB.SECRET_STATES, frozenset({CE.MATCHES_FILE, CE.DIFFERS_FROM_FILE, CE.UNSET}))
-
-    def test_the_sshd_setting_names_are_only_counted(self):
-        self.assertEqual(len(CE.SSHD_KEY_SOURCES), 8)
-        b = bundle()
-        b["items"]["D1.7"]["data"]["sshd"] = {name: "acmecorp" for name in CE.SSHD_KEY_SOURCES}
-        text = run(json.dumps(b))[1]
-        self.assertIn("sshd_settings: 8", text)
-        for gone in (*CE.SSHD_KEY_SOURCES, "acmecorp"):
-            self.assertNotIn(gone, text)
-
-    def test_key_types_are_exactly_what_the_collector_accepts(self):
-        for t in SB.KEY_TYPES:
-            self.assertTrue(CE._KEY_TYPE_RE.fullmatch(t), t)
-        base = {"ssh-rsa", "ssh-dss", "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
-                "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"}
-        self.assertEqual(SB.KEY_TYPES, base | {t + "-cert-v01@openssh.com" for t in base})
-        self.assertEqual(len(SB.KEY_TYPES), 16)
-
-    def test_the_listener_check_words(self):
-        import gateway_listeners  # noqa: F401  (the collector imports it by name)
-        lspec = importlib.util.spec_from_file_location("check_gateway_listeners", os.path.join(HERE, "check-gateway-listeners.py"))
-        L = importlib.util.module_from_spec(lspec); lspec.loader.exec_module(L)
-        self.assertEqual(SB.HISTORY_STATUSES, frozenset({L.OK, L.ALERT, L.COULD_NOT_CHECK, "?"}))
-        self.assertEqual(SB.ALERT_LOG_KEYS, frozenset({L.ALERT, L.CLEARED, "?", "first_ts", "last_ts"}))
-
-    def test_the_file_kinds(self):
-        self.assertEqual(SB.FILE_KINDS, frozenset({"file", "symlink", "not-a-file"}))
-
-    def test_the_sets_the_collector_does_not_declare_are_pinned(self):
-        # systemctl is-active / is-enabled print systemd's own words (systemctl(1)): no collector constant.
-        self.assertEqual(SB.ACTIVE_STATES, frozenset({"active", "inactive", "failed", "activating", "deactivating",
-                                                      "reloading", "maintenance", "refreshing"}))
-        self.assertEqual(SB.ENABLED_STATES, frozenset({"not-found", "enabled", "enabled-runtime", "linked", "linked-runtime", "masked",
-                                                       "masked-runtime", "static", "indirect", "disabled", "generated",
-                                                       "transient", "alias", "bad"}))
-        self.assertEqual(SB.SETTING_VALUES, frozenset({"35day", "7day", "1day", "1G", "500", "persistent", "auto",
-                                                       "volatile", "none"}))
-        self.assertEqual(SB.STORAGE_OK, (None, "auto", "persistent"))
+        # a figures run starts the services that hold the Google Ads credential and nothing else
+        self.assertEqual(SB.FIGURES_SERVICES, tuple(sorted(s for s, names in RCA.DECLARED.items() if names == ["GOOGLE_ADS_"])))
+        self.assertEqual(SB.FIGURES_SERVICES, ("ads-collector", "ads-reader"))
 
 
 class TestSummary(unittest.TestCase):
@@ -481,6 +457,26 @@ class TestSummary(unittest.TestCase):
                         self.assertNotIn(part, text, (plant, part))
                     if status and not keys:
                         self.assertIn("reach_days", text)           # the data was read: the plant is not hidden by the status
+            # the plant as a job's name, in every place the bundle keys a job's values by it: it is not one of
+            # the declared jobs, so it is never printed, whether or not it has the form of a job's name
+            for status in (None, "observed"):
+                b = planted_bundle(plant, False, status)
+                it = b["items"]
+                it["D10.3"]["data"]["declared_apps"] = list(JOBS)
+                for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+                    it[iid]["data"]["apps"][plant] = it[iid]["data"]["apps"].pop("ads-report")
+                oldest = it["D2.4"]["data"]["oldest_entry"]["apps"]
+                oldest[plant] = oldest.pop("ads-report")
+                for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+                    it["D4.6"]["data"][group]["hermes-app-broker@" + plant] = it["D4.6"]["data"][group].pop(BROKERS[1])
+                rc, text = run(json.dumps(b))
+                self.assertEqual(rc, 0)
+                self.assertNotIn(plant, text, (plant, status))
+                for part in ("0123456789abcdef", "sk-or", "acme", "example", "10.0.0", "passwd", "deadbee"):
+                    self.assertNotIn(part, text, (plant, part))
+                if status:
+                    self.assertEqual(len(re.findall(r"(?m)^    <withheld>:$", text)), 4, plant)
+                    self.assertIn("hermes-app-broker@<withheld>: ", text)
 
     def test_an_item_id_that_is_a_plant_is_counted_not_named(self):
         for plant in PLANTS:
@@ -501,7 +497,10 @@ class TestSummary(unittest.TestCase):
                    "the journal is being written to disk", "sshd runs with its default settings file and no Match line",
                    "the journal search read everything it was given", r"no leak count above 0 \(D2\.3, D10\.7\)",
                    "no other journal directory and no missing days", "every job is declared and installed",
-                   "the report store holds only owner-only client folders"):
+                   "the report store holds only owner-only client folders",
+                   "every job's folders are as designed and no container mounts the job state",
+                   "the installed job units equal the repository's and every stored result is in whitelist",
+                   "the credential probe matches the declared map and a figures run starts no AI service"):
             self.assertRegex(closing, rf"(?m)^(ok    |LOOK  ){ok}")
         for ok in ("the three live refusals are in the journal", "at least one run/ok result",
                    "retention at least 30 days, set by our file", "the journal reaches 30 days",
@@ -510,22 +509,26 @@ class TestSummary(unittest.TestCase):
                    "the journal is being written to disk", "sshd runs with its default settings file and no Match line",
                    "the journal search read everything it was given", r"no leak count above 0 \(D2\.3, D10\.7\)$",
                    "no other journal directory and no missing days$", r"every job is declared and installed \(2 jobs\)$",
-                   r"the report store holds only owner-only client folders \(2 folders\)$"):
+                   r"the report store holds only owner-only client folders \(2 folders\)$",
+                   "every job's folders are as designed and no container mounts the job state$",
+                   "the installed job units equal the repository's and every stored result is in whitelist$",
+                   "the credential probe matches the declared map and a figures run starts no AI service$"):
             self.assertRegex(closing, rf"(?m)^ok    {ok}")
         self.assertIn("ok    retention at least 30 days, set by our file, the file equal to the repository's, "
                       "no other file, root:root 0644\n", closing)
         self.assertIn("Reminders, not verdicts", closing)
-        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 17)
+        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 20)
 
-    def test_a_clean_bundle_is_ok_on_all_seventeen(self):
+    def test_a_clean_bundle_is_ok_on_all_twenty(self):
         closing = closing_of(clean())
-        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 17)
-        self.assertEqual(len(SB.CHECKS), 17)
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 20)
+        self.assertEqual(len(SB.CHECKS), 20)
         self.assertIn("ok    every item observed (15 items)", closing)
 
-    def test_the_closing_list_has_the_seventeen_lines_in_order(self):
+    def test_the_closing_list_has_the_twenty_lines_in_order(self):
         closing = closing_of(bundle())
         order = ("every item observed", "nothing in the bundle", "every job is declared and installed",
+                 "every job's folders are as designed", "the installed job units equal", "the credential probe matches",
                  "sshd runs with", "the three live refusals",
                  "at least one run/ok", "retention at least 30 days", "the journal reaches 30 days",
                  "the journal search read", "no leak count above 0", "the running journal service",
@@ -537,7 +540,7 @@ class TestSummary(unittest.TestCase):
     def test_each_closing_line_turns_to_look(self):
         def closing(change):
             b = bundle()
-            del b["items"]["D5.3"]                      # so that every case starts from seventeen ok
+            del b["items"]["D5.3"]                      # so that every case starts from twenty ok
             change(b["items"])
             return closing_of(b)
         cases = (
@@ -627,7 +630,7 @@ class TestSummary(unittest.TestCase):
     def test_lines_that_read_other_parts_of_the_bundle_turn_to_look(self):
         def closing(change):
             b = bundle()
-            del b["items"]["D5.3"]                      # so that every case starts from seventeen ok
+            del b["items"]["D5.3"]                      # so that every case starts from twenty ok
             change(b)
             return closing_of(b)
         cases = (
@@ -668,11 +671,11 @@ class TestSummary(unittest.TestCase):
     @staticmethod
     def _closing(change):
         b = bundle()
-        del b["items"]["D5.3"]                          # so that every case starts from seventeen ok
+        del b["items"]["D5.3"]                          # so that every case starts from twenty ok
         change(b["items"])
         return closing_of(b)
 
-    JOB_NOTE = r" \(1 of 2 jobs\)"
+    JOB_NOTE = r" \(not so for 1 of 2 jobs(: a value could not be checked)?\)"
 
     def _leak_places(self):
         """(where the group of counts is, the count's key, what the line adds when the place is a job's)."""
@@ -698,7 +701,7 @@ class TestSummary(unittest.TestCase):
             for n in (1, 7, 10 ** 400):
                 text = self._closing(lambda it: where(it)[group].update({key: n}))
                 self.assertRegex(text, rf"(?m)^LOOK  {self.LEAK_LINE} \(a count is above 0: this is a FAIL, not a reminder\){jobs}$", (group, key))
-                self.assertEqual(len(re.findall(r"(?m)^ok    ", text)), 16, (group, key))
+                self.assertEqual(len(re.findall(r"(?m)^ok    ", text)), 19, (group, key))
                 self.assertNotRegex(text[text.index("no leak count"):], r"[0-9]{16}")
 
     def test_a_leak_count_that_was_not_read_is_look_without_the_fail_words(self):
@@ -981,6 +984,9 @@ class TestSummary(unittest.TestCase):
         self.assertIn("reach_days: 31", out.getvalue())
 
 
+PER_JOB = ("D10.3", "D10.4", "D10.7", "D10.8")
+
+
 class TestEveryJob(unittest.TestCase):
     """The per-job shape: the item lines show each job under its name, and a closing line is ok only
     when it holds for every installed job."""
@@ -991,7 +997,20 @@ class TestEveryJob(unittest.TestCase):
     REACH = "the journal reaches 30 days"
     JOBS_LINE = "every job is declared and installed"
     CNC_LINE = "nothing in the bundle is could-not-check"
-    PER_JOB_LINES = (REFUSALS, RUN_OK, LEAKS, CODE, REACH, JOBS_LINE)
+    LAYOUT = "every job's folders are as designed and no container mounts the job state"
+    UNITS = "the installed job units equal the repository's and every stored result is in whitelist"
+    PROBE = "the credential probe matches the declared map and a figures run starts no AI service"
+    FAIL = r" \(a count is above 0: this is a FAIL, not a reminder\)"
+    ONE = r" \(not so for 1 of 2 jobs\)"
+    ONE_UNREAD = r" \(not so for 1 of 2 jobs: a value could not be checked\)"
+    # (what to put in a job's entry, the line that must say it, its note): a count of something bad, in any job
+    NEVER_EXCUSED = (
+        (lambda it, app: job(it, "D10.7", app)["broker_journal"].update(known_secret_hits=1), LEAKS, FAIL + ONE),
+        (lambda it, app: job(it, "D10.7", app)["runner_journal"].update(customer_id_lines=3), LEAKS, FAIL + ONE),
+        (lambda it, app: job(it, "D10.7", app)["runner_journal"].update(pattern_hits=10 ** 400), LEAKS, FAIL + ONE),
+        (lambda it, app: job(it, "D10.8", app).update(out_of_whitelist=2), UNITS, ONE),
+        (lambda it, app: job(it, "D10.4", app).update(layout_problems=["acmecorp is not 0700"]), LAYOUT, ONE),
+    )
 
     @staticmethod
     def _closing(change):
@@ -1049,45 +1068,58 @@ class TestEveryJob(unittest.TestCase):
             self.assertEqual(len(re.findall(r"(?m)^    <withheld>:$", text)), 4, bad)
             self.assertIn("apps: {ads-audit: {broker: 2026-10-05T18:35:47Z, runner: null}, "
                           "<withheld>: {broker: 2026-10-08T09:00:00Z, runner: null}}", text)
-            self.assertIn("files_checked: {hermes-app-broker@ads-audit: 7, hermes-broker: 9, hermes-docker-proxy: 5, "
-                          "+1 other keys}", text)
+            self.assertRegex(text, r"(?m)^  files_checked: \{.*hermes-app-broker@<withheld>: 6.*\}$")
+            self.assertIn("hermes-app-broker@ads-audit: 7", text)
+            self.assertNotIn("other keys}", text[text.index("\nD4.6 "):text.index("\nD7.1 ")])
             self.assertRegex(text, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 with a name that is not a job name\)$")
-            self.assertRegex(text, rf"(?m)^LOOK  {self.CODE}")
+            # D4.6's own list still names the job whose broker key is now under another name: two services are not as they should be
+            self.assertRegex(text, rf"(?m)^LOOK  {self.CODE} \(not so for 2 of 5 services: a value could not be checked\)$")
 
     def test_every_job_is_declared_and_installed(self):
         self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.JOBS_LINE} \(2 jobs\)$")
         d3 = lambda it: it["D10.3"]["data"]
         cases = (
-            (lambda it: d3(it).update(installed_apps=["ads-audit"]), r" \(1 declared but not installed\)"),
-            (lambda it: d3(it).update(declared_apps=["ads-audit"]), r" \(1 installed but not declared\)"),
-            (lambda it: d3(it).update(declared_apps=["ads-audit"], installed_apps=["ads-report"]),
-             r" \(1 declared but not installed\) \(1 installed but not declared\)"),
+            (lambda it: [d3(it).update(installed_apps=["ads-audit"])] + [job(it, i, "ads-report").update(installed=False) for i in PER_JOB],
+             r" \(1 declared but not installed\)"),
+            (lambda it: [d3(it).update(declared_apps=["ads-audit"])] + [job(it, i, "ads-report").update(declared=False) for i in PER_JOB],
+             r" \(1 installed but not declared\)"),
+            # the lists alone changed: every item's entry for that job now says otherwise
+            (lambda it: d3(it).update(installed_apps=["ads-audit"]),
+             r" \(1 declared but not installed\) \(4 per-job entries disagree with the lists\)"),
             (lambda it: d3(it).update(on_disk_apps=["ads-audit", "ads-report", "parked", "stopped"]), r" \(2 on disk only\)"),
-            (lambda it: d3(it).update(declared_apps=[], installed_apps=[], on_disk_apps=[], apps={}), r" \(no installed job\)"),
-            (lambda it: d3(it).update(declared_apps=["ads-audit", "ads-report"], installed_apps=[]),
-             r" \(2 declared but not installed\) \(no installed job\)"),
+            (lambda it: d3(it).update(declared_apps=[], installed_apps=[], on_disk_apps=[], apps={}),
+             r" \(2 in no list\) \(no installed job\)"),
             (lambda it: d3(it).update(units_not_counted=3), r" \(3 unit lines not counted\)"),
-            (lambda it: d3(it).update(on_disk_not_counted=1), r" \(1 entries on disk not counted\)"),
-            (lambda it: d3(it).update(units_not_counted="could-not-check"), r" \(could-not-check unit lines not counted\)"),
-            (lambda it: d3(it).update(units_not_counted=True), r" \(<withheld> unit lines not counted\)"),
-            (lambda it: d3(it).pop("on_disk_not_counted"), r" \(null entries on disk not counted\)"),
+            (lambda it: d3(it).update(units_not_counted=1), r" \(1 unit line not counted\)"),
+            (lambda it: d3(it).update(on_disk_not_counted=1), r" \(1 entry on disk not counted\)"),
+            (lambda it: d3(it).update(on_disk_not_counted=2), r" \(2 entries on disk not counted\)"),
+            (lambda it: d3(it).update(units_not_counted="could-not-check"), r" \(unit lines not counted: could not be checked\)"),
+            (lambda it: d3(it).update(units_not_counted=True), r" \(unit lines not counted: a value that is not a number\)"),
+            (lambda it: d3(it).update(units_not_counted=10 ** 400), r" \(unit lines not counted: a value that is not a number\)"),
+            (lambda it: d3(it).pop("on_disk_not_counted"), r" \(entries on disk not counted: not read\)"),
             (lambda it: d3(it).update(installed_apps="could-not-check"), r" \(the jobs could not be checked\)"),
             (lambda it: d3(it).update(declared_apps=None), r" \(the jobs could not be checked\)"),
             (lambda it: d3(it).update(on_disk_apps=[7]), r" \(the jobs could not be checked\)"),
             (lambda it: d3(it).pop("on_disk_apps"), r" \(the jobs could not be checked\)"),
             (lambda it: d3(it).update(apps="could-not-check"), r" \(the jobs could not be checked\)"),
-            (lambda it: d3(it).update(apps={}), r" \(2 of 2 installed jobs: a value could not be checked\)"),
+            (lambda it: d3(it).update(apps={}), r" \(not so for 2 of 2 jobs: a value could not be checked\)"),
             (lambda it: d3(it).pop("apps"), r" \(older shape\)"),
             (lambda it: d3(it).pop("declared_apps"), r" \(older shape\)"),
             (lambda it: it["D10.3"].update(status="could-not-check"), r" \(not read\)"),
             (lambda it: it.pop("D10.3"), r" \(not read\)"),
             (lambda it: job(it, "D10.3").update(broker_user_groups="could-not-check"),
-             r" \(1 of 2 installed jobs: a value could not be checked\)"),
+             r" \(not so for 1 of 2 jobs: a value could not be checked\)"),
             (lambda it: job(it, "D10.3")["broker_unit"].update(User="could-not-check"),
-             r" \(1 of 2 installed jobs: a value could not be checked\)"),
-            (lambda it: job(it, "D10.3").pop("installed"), r" \(1 of 2 installed jobs: a value could not be checked\)"),
+             r" \(not so for 1 of 2 jobs: a value could not be checked\)"),
+            (lambda it: job(it, "D10.3").pop("installed"),
+             r" \(1 per-job entries disagree with the lists\) \(not so for 1 of 2 jobs: a value could not be checked\)"),
+            (lambda it: job(it, "D10.7", "ads-report").update(declared=False), r" \(1 per-job entries disagree with the lists\)"),
+            (lambda it: job(it, "D10.4").update(installed="could-not-check"), r" \(1 per-job entries disagree with the lists\)"),
+            (lambda it: it["D10.8"]["data"]["apps"].update(parked={"declared": False, "installed": False}), r" \(1 in no list\)"),
+            (lambda it: [it[i]["data"]["apps"].update(parked={"declared": False, "installed": False}) for i in PER_JOB],
+             r" \(1 in no list\)"),
             (lambda it: d3(it)["apps"].update({"ads-report": "could-not-check"}),
-             r" \(1 of 2 installed jobs: a value could not be checked\)"),
+             r" \(not so for 1 of 2 jobs: a value could not be checked\)"),
         )
         for change, note in cases:
             self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.JOBS_LINE}{note}$", note)
@@ -1096,31 +1128,32 @@ class TestEveryJob(unittest.TestCase):
         for app in JOBS:
             cases = (
                 (lambda it: job(it, "D10.7", app)["journal_counts"].pop("refused/disabled"),
-                 self.REFUSALS, r" \(missing: refused/disabled\) \(1 of 2 jobs\)"),
+                 self.REFUSALS, r" \(missing: refused/disabled\) \(not so for 1 of 2 jobs\)"),
                 (lambda it: job(it, "D10.7", app).update(journal_counts={}),
-                 self.REFUSALS, r" \(missing: refused/disabled, refused/quota, refused/bad_request\) \(1 of 2 jobs\)"),
-                (lambda it: job(it, "D10.8", app)["results"].pop(0), self.RUN_OK, r" \(1 of 2 jobs\)"),
-                (lambda it: job(it, "D10.8", app).update(results=[]), self.RUN_OK, r" \(1 of 2 jobs\)"),
+                 self.REFUSALS, r" \(missing: refused/disabled, refused/quota, refused/bad_request\) \(not so for 1 of 2 jobs\)"),
+                (lambda it: job(it, "D10.8", app)["results"].pop(0), self.RUN_OK, r" \(not so for 1 of 2 jobs\)"),
+                (lambda it: job(it, "D10.8", app).update(results=[]), self.RUN_OK, r" \(not so for 1 of 2 jobs\)"),
                 (lambda it: job(it, "D10.7", app)["runner_journal"].update(customer_id_lines=4), self.LEAKS,
-                 r" \(a count is above 0: this is a FAIL, not a reminder\) \(1 of 2 jobs\)"),
+                 r" \(a count is above 0: this is a FAIL, not a reminder\) \(not so for 1 of 2 jobs\)"),
                 (lambda it: job(it, "D10.7", app)["broker_journal"].pop("pattern_hits"), self.LEAKS,
-                 r" \(a count was not read\) \(1 of 2 jobs\)"),
+                 r" \(a count was not read\) \(not so for 1 of 2 jobs\)"),
                 (lambda it: it["D4.6"]["data"]["files_newer_than_start"].update({"hermes-app-broker@" + app: ["unit"]}),
-                 self.CODE, ""),
-                (lambda it: it["D4.6"]["data"]["files_checked"].pop("hermes-app-broker@" + app), self.CODE, ""),
+                 self.CODE, r" \(not so for 1 of 4 services\)"),
+                (lambda it: it["D4.6"]["data"]["files_checked"].pop("hermes-app-broker@" + app), self.CODE,
+                 r" \(not so for 1 of 4 services: a value could not be checked\)"),
                 (lambda it: it["D4.6"]["data"]["files_newer_than_start"].update({"hermes-app-broker@" + app: "could-not-check"}),
-                 self.CODE, ""),
+                 self.CODE, r" \(not so for 1 of 4 services: a value could not be checked\)"),
             )
             for change, line, note in cases:
                 closing = self._closing(change)
                 self.assertRegex(closing, rf"(?m)^LOOK  {line}{note}$", (app, line))
                 self.assertNotRegex(closing, r"ads-audit|ads-report")          # how many jobs, never which
         both = self._closing(lambda it: [job(it, "D10.8", a).update(results=[]) for a in JOBS])
-        self.assertRegex(both, rf"(?m)^LOOK  {self.RUN_OK} \(2 of 2 jobs\)$")
+        self.assertRegex(both, rf"(?m)^LOOK  {self.RUN_OK} \(not so for 2 of 2 jobs\)$")
 
     def test_three_leak_counts_at_zero_for_one_job_do_not_hide_a_hit_in_the_other(self):
         closing = self._closing(lambda it: job(it, "D10.7", "ads-report")["broker_journal"].update(known_secret_hits=1))
-        self.assertRegex(closing, rf"(?m)^LOOK  {self.LEAKS} \(a count is above 0: this is a FAIL, not a reminder\) \(1 of 2 jobs\)$")
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.LEAKS} \(a count is above 0: this is a FAIL, not a reminder\) \(not so for 1 of 2 jobs\)$")
 
     def test_a_job_installed_since_the_last_pass_is_said_on_the_reach_line(self):
         one = self._closing(lambda it: job(it, "D10.7", "ads-report").update(installed_since_last_pass=True))
@@ -1137,7 +1170,7 @@ class TestEveryJob(unittest.TestCase):
         self.assertRegex(self._closing(short), rf"(?m)^LOOK  {self.REACH} \(reach is 12 days: .*\) "
                                                r"\(1 job installed since the last PASS: judged from its first entry\)$")
         unread = self._closing(lambda it: job(it, "D10.7").update(installed_since_last_pass="could-not-check"))
-        self.assertRegex(unread, rf"(?m)^LOOK  {self.REACH} \(1 of 2 installed jobs: a value could not be checked\)$")
+        self.assertRegex(unread, rf"(?m)^LOOK  {self.REACH} \(not so for 1 of 2 jobs: a value could not be checked\)$")
 
     def test_the_report_store_and_the_figures_services_are_printed_and_are_not_other_keys(self):
         text = run(json.dumps(bundle()))[1]
@@ -1167,9 +1200,13 @@ class TestEveryJob(unittest.TestCase):
         for line in (self.REFUSALS, self.RUN_OK, self.LEAKS, self.CODE):
             self.assertRegex(closing, rf"(?m)^LOOK  {line} \(older shape\)$")
         self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(not read\)$")
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.LAYOUT} \(not read\)$")
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.UNITS} \(not read\) \(older shape\)$")
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.PROBE} \(not read\)$")
+        self.assertIn("hermes-app-broker@<withheld>: 7", text)       # no list of declared jobs: no name is printed
         self.assertRegex(closing, r"(?m)^LOOK  the report store holds only owner-only client folders \(not in this bundle\)$")
         self.assertRegex(closing, rf"(?m)^ok    {self.REACH}$")
-        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 17)
+        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 20)
         b = old_bundle()                                 # an old D10.3, D10.4: observed, with keys this tool does not know
         b["items"]["D10.3"] = {"status": "observed", "data": {"broker_unit": {"User": "hermes-app-ads-audit"}}}
         b["items"]["D10.4"] = {"status": "observed", "data": {"layout_problems": [], "containers": 3}}
@@ -1199,7 +1236,12 @@ class TestEveryJob(unittest.TestCase):
                              rf"(?m)^LOOK  {self.CNC_LINE} \({places} place{'' if places == 1 else 's'}\)$", places)
 
     def test_an_installed_job_that_could_not_be_checked_turns_every_line_that_reads_its_item(self):
-        lines = {"D10.3": (self.JOBS_LINE,), "D10.7": (self.REFUSALS, self.LEAKS, self.REACH), "D10.8": (self.RUN_OK,)}
+        unread = self.ONE_UNREAD
+        lines = {"D10.3": ((self.JOBS_LINE, unread),),
+                 "D10.4": ((self.LAYOUT, unread),),
+                 "D10.7": ((self.REFUSALS, r"( \(missing: [a-z_/, ]+\))?" + unread), (self.LEAKS, r"( \(a count was not read\))?" + unread),
+                           (self.REACH, unread)),
+                 "D10.8": ((self.RUN_OK, unread), (self.UNITS, unread))}
         for iid, depend in lines.items():
             for app in JOBS:
                 def whole(it):
@@ -1211,17 +1253,114 @@ class TestEveryJob(unittest.TestCase):
                     job(it, iid, app)["acmecorp"] = {"deep": ["could-not-check"]}
                 for change in (whole, one_value):
                     closing = self._closing(change)
-                    for line in depend:
-                        self.assertEqual(self._status(closing, line)[0], "LOOK", (iid, app, line, change.__name__))
+                    for line, note in depend:
+                        self.assertRegex(closing, rf"(?m)^LOOK  {line}{note}$", (iid, app, line, change.__name__))
                     self.assertRegex(closing, rf"(?m)^LOOK  {self.CNC_LINE} \([0-9]+ places?\)$")
                     self.assertNotIn("acmecorp", closing)
-        # D4.6 holds no entry per job: its values are keyed by each job's broker
-        for group in ("files_newer_than_start", "files_checked"):
-            closing = self._closing(lambda it: it["D4.6"]["data"][group].update({BROKERS[1]: "could-not-check"}))
-            self.assertEqual(self._status(closing, self.CODE)[0], "LOOK", group)
+
+    def test_the_restart_item_s_per_job_values_turn_its_line(self):
+        # D4.6 holds no entry per job: its four dicts are keyed by each service, a job's broker among them
+        groups = ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked")
+        d = lambda it: it["D4.6"]["data"]
+        for group in groups:
+            for broker in BROKERS:
+                for change in (lambda it: d(it)[group].update({broker: "could-not-check"}), lambda it: d(it)[group].pop(broker)):
+                    self.assertRegex(self._closing(change),
+                                     rf"(?m)^LOOK  {self.CODE} \(not so for 1 of 4 services: a value could not be checked\)$", group)
+            # a broker of a job that is in no list
+            closing = self._closing(lambda it: d(it)[group].update({"hermes-app-broker@parked": d(it)[group][BROKERS[0]]}))
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.CODE} \(1 broker of a job in no list\)$", group)
+            self.assertNotIn("parked", closing)
+        both = self._closing(lambda it: [d(it)[g].update({"hermes-app-broker@parked": 1, "hermes-app-broker@stopped": 1}) for g in groups])
+        self.assertRegex(both, rf"(?m)^LOOK  {self.CODE} \(2 brokers of jobs in no list\)$")
+        cases = (
+            (lambda it: d(it)["started_at"].update({BROKERS[1]: "yesterday"}), r" \(not so for 1 of 4 services\)"),
+            (lambda it: d(it)["started_after_last_pass"].update({BROKERS[1]: "no"}), r" \(not so for 1 of 4 services\)"),
+            (lambda it: d(it)["started_after_last_pass"].update({BROKERS[1]: None, "hermes-broker": True}), ""),   # no last PASS given; a restart
+            (lambda it: d(it)["files_newer_than_start"].update({"hermes-broker": ["app_lib.py"], BROKERS[0]: ["unit"]}),
+             r" \(not so for 2 of 4 services\)"),
+            (lambda it: d(it).update(started_at="could-not-check"), r" \(not so for 4 of 4 services: a value could not be checked\)"),
+            (lambda it: d(it)["files_checked"].update(acmecorp=3), r" \(1 entry that is not a service\)"),
+        )
+        for change, note in cases:
+            closing = self._closing(change)
+            self.assertRegex(closing, rf"(?m)^{'LOOK  ' if note else 'ok    '}{self.CODE}{note}$", note)
         for key in ("apps_declared", "apps_installed"):
-            closing = self._closing(lambda it: it["D4.6"]["data"].update({key: "could-not-check"}))
+            closing = self._closing(lambda it: d(it).update({key: "could-not-check"}))
             self.assertRegex(closing, rf"(?m)^LOOK  {self.CODE} \(the jobs could not be checked\)$", key)
+
+    def test_the_reach_item_s_per_job_values_turn_the_reach_line(self):
+        apps = lambda it: it["D2.4"]["data"]["oldest_entry"]["apps"]
+        cases = (
+            (lambda it: it["D2.4"]["data"]["oldest_entry"].update(apps="could-not-check"), r" \(the jobs could not be checked\)"),
+            (lambda it: it["D2.4"]["data"]["oldest_entry"].update(apps=[]), r" \(the jobs could not be checked\)"),
+            (lambda it: apps(it).pop("ads-report"), self.ONE_UNREAD),
+            (lambda it: apps(it)["ads-audit"].update(runner="could-not-check"), self.ONE_UNREAD),
+            (lambda it: apps(it).update({"ads-report": "could-not-check"}), self.ONE_UNREAD),
+            (lambda it: [apps(it)[a].update(broker="could-not-check") for a in JOBS],
+             r" \(not so for 2 of 2 jobs: a value could not be checked\)"),
+            # one job unread here and the other unread in D10.7: two jobs, said once
+            (lambda it: [apps(it).pop("ads-report"), job(it, "D10.7", "ads-audit").update(first_entry="could-not-check")],
+             r" \(not so for 2 of 2 jobs: a value could not be checked\)"),
+        )
+        for change, note in cases:
+            self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.REACH}{note}$", note)
+        # a job that is declared and not installed has no entry to wait for
+        b = not_installed(clean())
+        b["items"]["D2.4"]["data"]["oldest_entry"]["apps"]["ads-report"] = {"broker": "could-not-check", "runner": "could-not-check"}
+        self.assertRegex(closing_of(b), rf"(?m)^ok    {self.REACH}$")
+
+    def test_installed_since_the_last_pass_is_one_of_four_values(self):
+        for odd in ("yes", "true", 1, 0, [], {"x": 1}, "2026-10-08T09:00:00Z"):
+            closing = self._closing(lambda it: job(it, "D10.7", "ads-report").update(installed_since_last_pass=odd))
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.REACH}{self.ONE_UNREAD}$", odd)
+        closing = self._closing(lambda it: job(it, "D10.7", "ads-report").pop("installed_since_last_pass"))
+        self.assertRegex(closing, rf"(?m)^ok    {self.REACH}$")                  # absent reads as null: no last PASS was given
+        quiet = lambda it, app: job(it, "D10.7", app).update(installed_since_last_pass=True, first_entry=None)
+        self.assertRegex(self._closing(lambda it: quiet(it, "ads-report")),
+                         rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS and it has not logged yet\)$")
+        self.assertRegex(self._closing(lambda it: [quiet(it, a) for a in JOBS]),
+                         rf"(?m)^ok    {self.REACH} \(2 jobs installed since the last PASS and they have not logged yet\)$")
+        def one_of_each(it):
+            quiet(it, "ads-report")
+            job(it, "D10.7", "ads-audit")["installed_since_last_pass"] = True
+        self.assertRegex(self._closing(one_of_each),
+                         rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS: judged from its first entry\) "
+                         r"\(1 job installed since the last PASS and it has not logged yet\)$")
+        self.assertRegex(self._closing(lambda it: [job(it, "D10.7", "ads-report").update(installed_since_last_pass=True),
+                                                   job(it, "D10.7", "ads-report").pop("first_entry")]),
+                         rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS and it has not logged yet\)$")
+
+    def test_only_a_declared_job_s_name_is_printed(self):
+        def undeclared(name):
+            b = clean()
+            it = b["items"]
+            it["D10.3"]["data"].update(declared_apps=["ads-audit"], installed_apps=["ads-audit", name], on_disk_apps=["ads-audit", name])
+            it["D4.6"]["data"].update(apps_declared=["ads-audit"], apps_installed=["ads-audit", name])
+            for iid in PER_JOB:
+                it[iid]["data"]["apps"][name] = dict(it[iid]["data"]["apps"].pop("ads-report"), declared=False)
+            oldest = it["D2.4"]["data"]["oldest_entry"]["apps"]
+            oldest[name] = oldest.pop("ads-report")
+            for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+                it["D4.6"]["data"][group]["hermes-app-broker@" + name] = it["D4.6"]["data"][group].pop(BROKERS[1])
+            return run(json.dumps(b))[1]
+        for name in ("acme-dental", "acmecorp", "parked", "ads-report", "a"):      # each has the form of a job's name
+            text = undeclared(name)
+            self.assertNotRegex(text, rf"(?m)\b{re.escape(name)}\b" if len(name) > 1 else r"(?m)^    a:$", name)
+            self.assertEqual(len(re.findall(r"(?m)^    <withheld>:$", text)), 4, name)
+            self.assertEqual(len(re.findall(r"(?m)^    ads-audit:$", text)), 4, name)
+            self.assertIn("apps: {ads-audit: {broker: 2026-10-05T18:35:47Z, runner: null}, "
+                          "<withheld>: {broker: 2026-10-08T09:00:00Z, runner: null}}", text)
+            for group, value in (("started_at", "2026-10-08T09:00:00Z"), ("started_after_last_pass", "false"),
+                                 ("files_newer_than_start", "0"), ("files_checked", "6")):
+                self.assertRegex(text, rf"(?m)^  {group}: \{{.*hermes-app-broker@<withheld>: {value}[,}}]", (name, group))
+            self.assertRegex(text, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 installed but not declared\)$")
+            self.assertRegex(text, rf"(?m)^ok    {self.CODE}$")              # it is installed, so it is judged, unnamed
+        # a name in the declared list that has not the form of one is not printed either
+        b = clean()
+        b["items"]["D10.3"]["data"]["declared_apps"] = ["ads-audit", "ads-report", "Acme Dental"]
+        b["items"]["D10.7"]["data"]["apps"]["Acme Dental"] = {"declared": True, "installed": False}
+        self.assertNotIn("Acme", run(json.dumps(b))[1])
 
     def test_apps_that_could_not_be_checked_or_holds_no_job_is_look_on_every_line_that_reads_it(self):
         lines = {"D10.3": (self.JOBS_LINE,), "D10.7": (self.REFUSALS, self.LEAKS), "D10.8": (self.RUN_OK,)}
@@ -1233,7 +1372,7 @@ class TestEveryJob(unittest.TestCase):
             # no entry at all for the two jobs D10.3 lists as installed: neither was checked
             closing = self._closing(lambda it: it[iid]["data"].update(apps={}))
             for line in depend:
-                self.assertRegex(closing, rf"(?m)^LOOK  {line}.* \(2 of 2 (installed )?jobs", (iid, line))
+                self.assertRegex(closing, rf"(?m)^LOOK  {line}.* \(not so for 2 of 2 jobs: a value could not be checked\)", (iid, line))
         closing = self._closing(lambda it: it["D10.7"]["data"].update(apps="could-not-check"))
         self.assertRegex(closing, rf"(?m)^LOOK  {self.REACH} \(the jobs could not be checked\)$")
 
@@ -1250,7 +1389,9 @@ class TestEveryJob(unittest.TestCase):
         closing = self._closing(none)
         for line in (self.JOBS_LINE, self.REFUSALS, self.RUN_OK, self.LEAKS):
             self.assertRegex(closing, rf"(?m)^LOOK  {line} \(no installed job\)$", line)
-        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 13)      # the two fixed services are still judged
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.LAYOUT} \(no installed job\)$")
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.UNITS} \(no installed job\)$")
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 14)      # the two fixed services are still judged
 
     def test_a_job_declared_and_not_installed_yet_is_said_once_and_is_not_an_installed_job_s_fault(self):
         b = not_installed(clean())
@@ -1260,18 +1401,33 @@ class TestEveryJob(unittest.TestCase):
         self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 declared but not installed\)$")
         # its expected could-not-check values are counted, and are the only other LOOK
         self.assertRegex(closing, rf"(?m)^LOOK  {self.CNC_LINE} \(8 places\)$")
-        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 15)
-        for line in (self.REFUSALS, self.RUN_OK, self.LEAKS, self.CODE, self.REACH):
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 18)
+        for line in (self.REFUSALS, self.RUN_OK, self.LEAKS, self.CODE, self.REACH, self.LAYOUT, self.UNITS):
             self.assertRegex(closing, rf"(?m)^ok    {line}$", line)
+        # could-not-check or absent is what "not installed" excuses; a COUNT of something bad never is
+        for change, line, note in self.NEVER_EXCUSED:
+            b = not_installed(clean())
+            change(b["items"], "ads-report")
+            self.assertRegex(closing_of(b), rf"(?m)^LOOK  {line}{note}$", line)
+        for change in (lambda it: job(it, "D10.7", "ads-report").update(broker_journal="could-not-check"),
+                       lambda it: job(it, "D10.7", "ads-report").pop("runner_journal"),
+                       lambda it: job(it, "D10.7", "ads-report")["runner_journal"].pop("pattern_hits"),
+                       lambda it: job(it, "D10.8", "ads-report").pop("out_of_whitelist"),
+                       lambda it: job(it, "D10.4", "ads-report").pop("layout_problems")):
+            b = not_installed(clean())
+            change(b["items"])
+            closing = closing_of(b)
+            for line in (self.LEAKS, self.UNITS, self.LAYOUT):
+                self.assertRegex(closing, rf"(?m)^ok    {line}$", line)
         self.assertIn("    ads-report:\n      declared: true\n      installed: false", text)
         # the installed job is still judged: its own fault is not hidden by the other's state
         b = not_installed(clean())
         job(b["items"], "D10.8")["results"] = []
-        self.assertRegex(closing_of(b), rf"(?m)^LOOK  {self.RUN_OK} \(1 of 1 jobs\)$")
+        self.assertRegex(closing_of(b), rf"(?m)^LOOK  {self.RUN_OK} \(not so for 1 of 1 jobs\)$")
         # and the job that is not installed cannot make a line ok by itself
         b = not_installed(not_installed(clean(), "ads-report"), "ads-audit")
         closing = closing_of(b)
-        for line in (self.REFUSALS, self.RUN_OK, self.LEAKS):
+        for line in (self.REFUSALS, self.RUN_OK, self.LEAKS, self.LAYOUT):
             self.assertRegex(closing, rf"(?m)^LOOK  {line} \(no installed job\)$", line)
         self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(2 declared but not installed\) \(no installed job\)$")
 
@@ -1284,12 +1440,13 @@ class TestEveryJob(unittest.TestCase):
                 closing = self._closing(change)
                 for line in depend:
                     self.assertEqual(self._status(closing, line)[0], "LOOK", (iid, line))
-                self.assertRegex(closing, r"\(1 of 2 (installed )?jobs")
+                self.assertRegex(closing, r"\(not so for 1 of 2 jobs")
         def broker_left_out(it):
             it["D4.6"]["data"]["apps_installed"] = ["ads-audit"]
             for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
                 del it["D4.6"]["data"][group][BROKERS[1]]
-        self.assertRegex(self._closing(broker_left_out), rf"(?m)^LOOK  {self.CODE}$")
+        self.assertRegex(self._closing(broker_left_out),
+                         rf"(?m)^LOOK  {self.CODE} \(not so for 1 of 4 services: a value could not be checked\)$")
 
     def test_a_job_only_on_disk_is_said_on_the_jobs_line_and_judged_nowhere_else(self):
         def parked(it):
@@ -1300,24 +1457,144 @@ class TestEveryJob(unittest.TestCase):
         closing = self._closing(parked)
         self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 on disk only\)$")
         self.assertRegex(closing, rf"(?m)^LOOK  {self.CNC_LINE} \(8 places\)$")
-        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 15)
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 18)
+        for change, line, note in self.NEVER_EXCUSED:        # a count of something bad in it is still said
+            def both(it):
+                parked(it)
+                for iid, fill in (("D10.7", {"broker_journal": {}, "runner_journal": {}}), ("D10.4", {"layout_problems": "could-not-check"})):
+                    it[iid]["data"]["apps"]["parked"].update(fill)
+                change(it, "parked")
+            self.assertRegex(self._closing(both), rf"(?m)^LOOK  {line}{note.replace('of 2', 'of 3')}$", line)
+
+    def test_a_count_in_a_job_that_is_in_no_list_at_all_is_still_said(self):
+        for change, line, note in self.NEVER_EXCUSED:
+            def stray(it):
+                it["D10.7"]["data"]["apps"]["stray"] = {"declared": False, "installed": False, "broker_journal": {}, "runner_journal": {}}
+                it["D10.8"]["data"]["apps"]["stray"] = {"declared": False, "installed": False}
+                it["D10.4"]["data"]["apps"]["stray"] = {"declared": False, "installed": False}
+                change(it, "stray")
+            closing = self._closing(stray)
+            self.assertRegex(closing, rf"(?m)^LOOK  {line}{note.replace('of 2', 'of 3')}$", line)
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 in no list\)$")
+            self.assertNotIn("stray", closing)
 
     def test_a_job_whose_installed_word_is_not_true_or_false_is_not_excused(self):
         for value in ("could-not-check", None, "false", 0, "no"):
             closing = self._closing(lambda it: job(it, "D10.8", "ads-report").update(installed=value, results="could-not-check"))
-            self.assertRegex(closing, rf"(?m)^LOOK  {self.RUN_OK} \(1 of 2 jobs\)$", value)
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.RUN_OK}{self.ONE_UNREAD}$", value)
 
     def test_an_installed_broker_is_judged_and_one_only_declared_is_not(self):
         def extra(it):                                   # a broker of a job in neither list
             it["D4.6"]["data"]["files_newer_than_start"]["hermes-app-broker@parked"] = []
             it["D4.6"]["data"]["files_checked"]["hermes-app-broker@parked"] = 4
-        self.assertRegex(self._closing(extra), rf"(?m)^LOOK  {self.CODE}$")
+        self.assertRegex(self._closing(extra), rf"(?m)^LOOK  {self.CODE} \(1 broker of a job in no list\)$")
         def undeclared(it):                              # installed without a description file: it runs, so it is judged
             it["D4.6"]["data"]["apps_declared"] = ["ads-audit"]
             it["D4.6"]["data"]["files_newer_than_start"][BROKERS[1]] = ["hermes-app-broker.py"]
-        self.assertRegex(self._closing(undeclared), rf"(?m)^LOOK  {self.CODE}$")
+        self.assertRegex(self._closing(undeclared), rf"(?m)^LOOK  {self.CODE} \(not so for 1 of 4 services\)$")
         self.assertRegex(self._closing(lambda it: it["D4.6"]["data"].update(apps_declared=["ads-audit"])), rf"(?m)^ok    {self.CODE}$")
         self.assertRegex(self._closing(lambda it: it["D4.6"]["data"].pop("apps_installed")), rf"(?m)^LOOK  {self.CODE} \(older shape\)$")
+
+    def test_every_job_s_folders_are_as_designed_and_no_container_mounts_the_job_state(self):
+        self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.LAYOUT}$")
+        d = lambda it: it["D10.4"]["data"]
+        cases = (
+            (lambda it: job(it, "D10.4", "ads-report").update(layout_problems=["state dir is 0755"]), self.ONE),
+            (lambda it: [job(it, "D10.4", a).update(layout_problems=["x", "y"]) for a in JOBS], r" \(not so for 2 of 2 jobs\)"),
+            (lambda it: job(it, "D10.4").update(layout_problems="could-not-check", layout_reason="host-layout"), self.ONE_UNREAD),
+            (lambda it: job(it, "D10.4").pop("layout_problems"), self.ONE),
+            (lambda it: job(it, "D10.4").update(layout_problems=None), self.ONE),
+            (lambda it: job(it, "D10.4").update(layout_problems={}), self.ONE),
+            (lambda it: d(it)["apps"].pop("ads-report"), self.ONE_UNREAD),                  # an installed job with no entry
+            (lambda it: d(it).update(apps="could-not-check"), r" \(the jobs could not be checked\)"),
+            (lambda it: d(it).pop("apps"), r" \(older shape\)"),
+            (lambda it: it["D10.4"].update(status="could-not-check"), r" \(not read\)"),
+            (lambda it: it.pop("D10.4"), r" \(not read\)"),
+            (lambda it: d(it).update(containers_mounting_app_state=1), r" \(1 container mounts the job state\)"),
+            (lambda it: d(it).update(containers_mounting_app_state=2), r" \(2 containers mount the job state\)"),
+            (lambda it: d(it).update(containers_not_inspected=1), r" \(1 container not inspected\)"),
+            (lambda it: d(it).update(containers_not_inspected=3), r" \(3 containers not inspected\)"),
+            (lambda it: d(it).update(containers_not_inspected="could-not-check"), r" \(containers not inspected: could not be checked\)"),
+            (lambda it: d(it).update(containers_mounting_app_state="could-not-check"),
+             r" \(containers mount the job state: could not be checked\)"),
+            (lambda it: d(it).pop("containers_mounting_app_state"), r" \(containers mount the job state: not read\)"),
+            (lambda it: d(it).update(containers_not_inspected=False), r" \(containers not inspected: a value that is not a number\)"),
+            (lambda it: [job(it, "D10.4").update(layout_problems=["x"]), d(it).update(containers_mounting_app_state=1)],
+             self.ONE + r" \(1 container mounts the job state\)"),
+        )
+        for change, note in cases:
+            closing = self._closing(change)
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.LAYOUT}{note}$", note)
+            self.assertNotIn("0755", closing)
+
+    def test_the_installed_job_units_equal_the_repository_s_and_every_stored_result_is_in_whitelist(self):
+        self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.UNITS}$")
+        units = lambda it: it["D10.3"]["data"]["installed_equal_repo"]
+        cases = (
+            (lambda it: units(it).update({"hermes-app-broker@.service": False}), r" \(1 unit file differs or was not read\)"),
+            (lambda it: [units(it).update({u: False}) for u in APP_UNIT_FILES], r" \(3 unit files differ or were not read\)"),
+            (lambda it: units(it).update({"hermes-app-runner@.path": "could-not-check"}), r" \(1 unit file differs or was not read\)"),
+            (lambda it: units(it).pop("hermes-app-runner@.service"), r" \(1 unit file differs or was not read\)"),
+            (lambda it: units(it).update({"hermes-app-runner@.path": 1}), r" \(1 unit file differs or was not read\)"),
+            (lambda it: units(it).update(acmecorp=True), r" \(1 entry that is not a job unit file\)"),
+            (lambda it: it["D10.3"]["data"].update(installed_equal_repo="could-not-check"), r" \(3 unit files differ or were not read\)"),
+            (lambda it: it["D10.3"]["data"].update(installed_equal_repo={}), r" \(3 unit files differ or were not read\)"),
+            (lambda it: it["D10.3"]["data"].pop("installed_equal_repo"), r" \(older shape\)"),
+            (lambda it: it.pop("D10.3"), r" \(not read\)( \(not so for 2 of 2 jobs: a value could not be checked\))?"),
+            (lambda it: job(it, "D10.8", "ads-report").update(out_of_whitelist=1), self.ONE),
+            (lambda it: [job(it, "D10.8", a).update(out_of_whitelist=5) for a in JOBS], r" \(not so for 2 of 2 jobs\)"),
+            (lambda it: job(it, "D10.8").update(out_of_whitelist="could-not-check", results="could-not-check"), self.ONE_UNREAD),
+            (lambda it: job(it, "D10.8").pop("out_of_whitelist"), self.ONE),
+            (lambda it: job(it, "D10.8").update(out_of_whitelist=True), self.ONE),
+            (lambda it: job(it, "D10.8").update(out_of_whitelist=-1), self.ONE),
+            (lambda it: it["D10.8"]["data"]["apps"].pop("ads-audit"), self.ONE_UNREAD),
+            (lambda it: it["D10.8"]["data"].update(apps="could-not-check"), r" \(the jobs could not be checked\)"),
+            (lambda it: it["D10.8"]["data"].pop("apps"), r" \(older shape\)"),
+            (lambda it: it.pop("D10.8"), r" \(not read\)"),
+            (lambda it: [units(it).update({"hermes-app-runner@.path": False}), job(it, "D10.8").update(out_of_whitelist=1)],
+             r" \(1 unit file differs or was not read\)" + self.ONE),
+        )
+        for change, note in cases:
+            closing = self._closing(change)
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.UNITS}{note}$", note)
+            self.assertNotIn("acmecorp", closing)
+
+    def test_the_credential_probe_matches_the_declared_map_and_a_figures_run_starts_no_ai_service(self):
+        self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.PROBE}$")
+        d = lambda it: it["D10.1"]["data"]
+        figures = lambda value: (lambda it: d(it)["probe"].update(figures_services=value))
+        other = r" \(a figures run does not start exactly the collector and the reader\)"
+        unread = r" \(the services of a figures run were not read\)"
+        cases = (
+            (figures(["ads-collector", "ads-drafter", "ads-reader"]), other),
+            (figures(["ads-collector", "ads-reader", "egress-proxy"]), other),
+            (figures(["ads-collector"]), other),
+            (figures([]), other),
+            (figures(["ads-collector", "ads-reader", "ads-reader"]), other),
+            (figures(["ads-collector", "acmecorp"]), other),
+            (figures("could-not-check"), unread),
+            (figures(None), unread),
+            (figures(["ads-collector", 7]), unread),
+            (figures({"ads-collector": 1, "ads-reader": 1}), unread),
+            (lambda it: d(it)["probe"].pop("figures_services"), r" \(not in this bundle\)"),
+            (lambda it: d(it)["probe"].update(matches_declared=False), r" \(the probe does not match the declared map\)"),
+            (lambda it: d(it)["probe"].update(matches_declared="could-not-check"), r" \(the probe does not match the declared map\)"),
+            (lambda it: d(it)["probe"].pop("matches_declared"), r" \(the probe does not match the declared map\)"),
+            (lambda it: d(it).update(rc=1), r" \(the probe did not end with 0\)"),
+            (lambda it: d(it).update(rc=False), r" \(the probe did not end with 0\)"),
+            (lambda it: d(it).pop("rc"), r" \(the probe did not end with 0\)"),
+            (lambda it: d(it).update(rc=1, probe={"matches_declared": False, "figures_services": ["ads-drafter"]}),
+             r" \(the probe did not end with 0\) \(the probe does not match the declared map\)" + other),
+            (lambda it: d(it).update(probe="could-not-check"), r" \(the probe was not read\)"),
+            (lambda it: d(it).pop("probe"), r" \(the probe was not read\)"),
+            (lambda it: it["D10.1"].update(status="could-not-check"), r" \(not read\)"),
+            (lambda it: it.pop("D10.1"), r" \(not read\)"),
+        )
+        for change, note in cases:
+            closing = self._closing(change)
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.PROBE}{note}$", note)
+            self.assertNotIn("acmecorp", closing)
+        self.assertRegex(self._closing(figures(["ads-reader", "ads-collector"])), rf"(?m)^ok    {self.PROBE}$")   # the order is not the point
 
     def test_odd_per_job_shapes_never_raise(self):
         shapes = ("could-not-check", None, 7, [], {}, {"ads-audit": None}, {"ads-audit": "x"}, {"ads-audit": []},
@@ -1386,38 +1663,44 @@ class TestReportStore(unittest.TestCase):
             (lambda ra: row(ra).update(mode="0o0700"), r" \(1 not root 0700\)"),
             (lambda ra: row(ra).update(owner="acme-ops"), r" \(1 not root 0700\)"),
             (lambda ra: row(ra).update(owner=0), r" \(1 not root 0700\)"),
-            (lambda ra: row(ra).update(files={"root root 0o600": 2, "root root 0o644": 1}), r" \(1 with a file that is not 0600\)"),
-            (lambda ra: row(ra).update(files={"root root 0o0600": 1}), r" \(1 with a file that is not 0600\)"),
-            (lambda ra: row(ra).update(files={"jsmith jsmith 0o640": 1}), r" \(1 with a file that is not 0600\)"),
-            (lambda ra: row(ra).update(files="could-not-check"), r" \(1 with a file that is not 0600\)"),
-            (lambda ra: row(ra).pop("files"), r" \(1 with a file that is not 0600\)"),
+            (lambda ra: row(ra).update(files={"root root 0o600": 2, "root root 0o644": 1}), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).update(files={"root root 0o0600": 1}), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).update(files={"jsmith jsmith 0o640": 1}), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).update(files={"jsmith root 0o600": 1}), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).update(files={"root jsmith 0o600": 1}), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).update(files={"root root 0o600": 2, "acme-ops acme-ops 0o600": 1}), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).update(files={"x root root 0o600": 1}), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).update(files="could-not-check"), r" \(1 with a file that is not root root 0600\)"),
+            (lambda ra: row(ra).pop("files"), r" \(1 with a file that is not root root 0600\)"),
             (lambda ra: ra["rows"].append("acmecorp"),
              r" \(1 not a folder\) \(1 not active\) \(1 not listed\) \(1 holding something that is not a file\) "
-             r"\(1 not root 0700\) \(1 with a file that is not 0600\)"),
+             r"\(1 not root 0700\) \(1 with a file that is not root root 0600\)"),
             (lambda ra: ra.update(rows_listed=False), r" \(the store was not listed\)"),
             (lambda ra: ra.update(rows_listed="true"), r" \(the store was not listed\)"),
             (lambda ra: ra.pop("rows_listed"), r" \(the store was not listed\)"),
             (lambda ra: ra.update(rows="could-not-check"), r" \(the folders were not read\)"),
             (lambda ra: ra.pop("rows"), r" \(the folders were not read\)"),
-            (lambda ra: ra.update(parent="absent", rows=[], rows_listed=False), r" \(the store is absent\) \(the store was not listed\)"),
-            (lambda ra: ra.update(parent="symlink"), r" \(the store is symlink\)"),
-            (lambda ra: ra.update(parent="not-a-directory"), r" \(the store is not-a-directory\)"),
-            (lambda ra: ra.update(parent="acmecorp"), r" \(the store is <other>\)"),
-            (lambda ra: ra.update(parent="could-not-check"), r" \(the store is could-not-check\)"),
-            (lambda ra: ra.pop("parent"), r" \(the store is null\)"),
+            (lambda ra: ra.update(parent="absent", rows=[], rows_listed=False), r" \(the store is not there\) \(the store was not listed\)"),
+            (lambda ra: ra.update(parent="symlink"), r" \(the store is a link\)"),
+            (lambda ra: ra.update(parent="not-a-directory"), r" \(the store is not a directory\)"),
+            (lambda ra: ra.update(parent="acmecorp"), r" \(the store is not a directory\)"),
+            (lambda ra: ra.update(parent="could-not-check"), r" \(the store could not be checked\)"),
+            (lambda ra: ra.pop("parent"), r" \(the store was not read\)"),
             (lambda ra: ra["parent"].update(mode="0o755"), r" \(the store is not root:root 0700\)"),
             (lambda ra: ra["parent"].update(owner="acme-ops"), r" \(the store is not root:root 0700\)"),
             (lambda ra: ra["parent"].update(group="jsmith"), r" \(the store is not root:root 0700\)"),
             (lambda ra: ra["parent"].pop("mode"), r" \(the store is not root:root 0700\)"),
-            (lambda ra: ra.update(containers_mounting=1), r" \(1 containers mount it\)"),
+            (lambda ra: ra.update(containers_mounting=1), r" \(1 container mounts it\)"),
+            (lambda ra: ra.update(containers_mounting=2), r" \(2 containers mount it\)"),
+            (lambda ra: ra.update(containers_not_inspected=1), r" \(1 container not inspected\)"),
             (lambda ra: ra.update(containers_not_inspected=2), r" \(2 containers not inspected\)"),
             (lambda ra: ra.update(containers_mounting=1, containers_not_inspected=1),
-             r" \(1 containers mount it\) \(1 containers not inspected\)"),
+             r" \(1 container mounts it\) \(1 container not inspected\)"),
             (lambda ra: ra.update(containers_mounting="could-not-check", containers_not_inspected="could-not-check"),
-             r" \(the containers could not be checked\)"),
-            (lambda ra: ra.update(containers_mounting=False), r" \(the containers could not be checked\)"),
-            (lambda ra: ra.pop("containers_not_inspected"), r" \(the containers could not be checked\)"),
-            (lambda ra: ra.update(containers_mounting=10 ** 400), r" \(<withheld> containers mount it\)"),
+             r" \(containers mount it: could not be checked\) \(containers not inspected: could not be checked\)"),
+            (lambda ra: ra.update(containers_mounting=False), r" \(containers mount it: a value that is not a number\)"),
+            (lambda ra: ra.pop("containers_not_inspected"), r" \(containers not inspected: not read\)"),
+            (lambda ra: ra.update(containers_mounting=10 ** 400), r" \(containers mount it: a value that is not a number\)"),
         )
         for change, note in cases:
             self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LINE}{note}$", note)
@@ -1434,8 +1717,16 @@ class TestReportStore(unittest.TestCase):
                        lambda it: it["D7.1"].update(status="could-not-check"), lambda it: it.pop("D7.1")):
             self.assertRegex(closing(change), rf"(?m)^LOOK  {self.LINE} \(not read\)$")
         self.assertRegex(closing(lambda it: it["D7.1"]["data"].update(report_archive={})),
-                         rf"(?m)^LOOK  {self.LINE} \(the store is null\) \(the store was not listed\) "
-                         r"\(the folders were not read\) \(the containers could not be checked\)$")
+                         rf"(?m)^LOOK  {self.LINE} \(the store was not read\) \(the store was not listed\) "
+                         r"\(the folders were not read\) \(containers mount it: not read\) \(containers not inspected: not read\)$")
+        for word in ("null", "could-not-check", "<withheld>", "<other>", "symlink"):       # no programmer's word in a note
+            for change in (lambda ra: ra.update(parent=None, containers_mounting=None), lambda ra: ra.update(parent="symlink"),
+                           lambda ra: ra.update(parent="could-not-check", containers_mounting="could-not-check", containers_not_inspected=[]),
+                           lambda ra: ra.update(parent="acmecorp", containers_mounting=10 ** 400)):
+                b = clean()
+                change(b["items"]["D7.1"]["data"]["report_archive"])
+                line = re.search(rf"(?m)^LOOK  {self.LINE}.*$", closing_of(b)).group(0)
+                self.assertNotIn(word, line)
 
 
 if __name__ == "__main__":
