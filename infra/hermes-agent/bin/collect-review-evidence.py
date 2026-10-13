@@ -117,12 +117,14 @@ PSEUDO_FSTYPES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "deb
 CODE_PATHS = ("infra/hermes-agent/bin", "infra/hermes-agent/deploy", "infra/hermes-agent/registry",
               "infra/hermes-agent/docker-compose.yml", "infra/hermes-agent/Dockerfile")
 CHECKLIST = CHECKOUT + "/infra/hermes-agent/deploy/security-review/CHECKLIST.md"
-# The chat-triggered app (Option B spec 2026-09-30 §3, §6, §8.1): gateway MCP client -> broker
-# (unprivileged) -> runner (root) -> run-client-audit.
-APP = "ads-audit"
-APP_USER = "hermes-app-" + APP
+# The chat-triggered jobs (Option B spec 2026-09-30 §3, §6, §8.1): gateway MCP client -> broker
+# (unprivileged) -> runner (root) -> the job's command. No job is named here: the jobs are the
+# description files of the box's checkout (_declared_apps) and the units systemd knows
+# (_installed_apps), and every per-job check runs once for each.
+APPS_DIR = AGENT_DIR + "/registry/apps"
 APP_UNITS = ("hermes-app-broker@.service", "hermes-app-runner@.service", "hermes-app-runner@.path")
-APP_RESULTS = "/var/lib/hermes/spool/apps/" + APP + "/results"
+# A unit name is a job's only when what follows the `@` is an app name (app_lib.APP_RE).
+_APP_UNIT_RE = re.compile(r"hermes-app-(?:broker|runner)@([a-z][a-z0-9-]{0,31})\.(?:service|path)")
 # The probes start real containers: --probe-env's worst case is about 480 s, --probe-egress's 240 s.
 PROBE_TIMEOUT = 600
 # On a timeout the child gets SIGTERM and this long to clean up before SIGKILL: run-client-audit
@@ -137,7 +139,6 @@ BROKER_PROPS = ("User", "NoNewPrivileges", "CapabilityBoundingSet", "PrivateNetw
 # `queued` / `dropped`, which never become a result.
 JOURNAL_STATUSES = A.STATUSES + ("queued", "dropped")
 JOURNAL_REASONS = A.BROKER_REASONS + A.COMMAND_REASONS + ("expired", "-")
-_BROKER_LINE = "hermes-app-broker[" + APP + "]: "
 _SAY_RE = re.compile(r"request=\S+ op=\S+ client=\S+ status=(\S+) reason=(\S+)")
 _NOTE_RE = re.compile(r"(warning|error): ")
 WITHHELD = "<withheld>"
@@ -283,6 +284,54 @@ def _ok(host, argv, timeout=60):
     if rc != 0:
         raise CouldNotCheck(f"{argv[0]} exited {rc}: {(err or out).strip()[:200]}")
     return out
+
+
+def _declared_apps(host):
+    """{app: Manifest} for every job the box's checkout declares. A directory that cannot be read
+    whole declares nothing this collector trusts: could-not-check, in fixed words (never a file
+    name or what a file holds)."""
+    try:
+        return A.load_manifests(host.path(APPS_DIR))
+    except (OSError, ValueError):
+        raise CouldNotCheck("the jobs' description files could not all be loaded")
+
+
+def _installed_apps(host):
+    """The jobs systemd knows a broker or runner unit for, loaded or not: names only, sorted. A
+    unit whose instance name is not an app name is not a job and is not printed."""
+    out = _ok(host, ["systemctl", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
+                     "hermes-app-broker@*", "hermes-app-runner@*"])
+    found = set()
+    for line in out.splitlines():
+        cols = line.split()
+        m = _APP_UNIT_RE.fullmatch(cols[0]) if cols else None
+        if m:
+            found.add(m.group(1))
+    return sorted(found)
+
+
+def _jobs(host):
+    """(manifests, installed, names): the declared jobs, the installed ones, and the sorted union
+    the per-job items measure. A job systemd knows without a description file is still measured."""
+    manifests, installed = _declared_apps(host), _installed_apps(host)
+    return manifests, installed, sorted(set(manifests) | set(installed))
+
+
+def _app_user(app):
+    return "hermes-app-" + app
+
+
+def _app_broker_unit(app):
+    return "hermes-app-broker@" + app
+
+
+def _app_runner_unit(app):
+    return "hermes-app-runner@" + app
+
+
+def _journal_units(app):
+    """The two units whose journal a job writes, by the label the bundle uses."""
+    return {"broker": _app_broker_unit(app), "runner": _app_runner_unit(app)}
 
 
 def _owner(uid):
@@ -1547,7 +1596,6 @@ JOURNALD_DROP_IN_DIR = JOURNALD_DROP_IN_DIRS[0]
 JOURNALD_DROP_IN = JOURNALD_DROP_IN_DIR + "/50-hermes-retention.conf"
 JOURNALD_DROP_IN_REPO = CHECKOUT + "/infra/hermes-agent/deploy/journald-hermes-retention.conf"
 JOURNALD_DEFAULT_MAX_FILES = 100                # journald.conf(5), systemd 255: SystemMaxFiles= defaults to 100
-JOURNAL_UNITS = {"broker": "hermes-app-broker@" + APP, "runner": "hermes-app-runner@" + APP}
 # When the journal service's process now running was started, in UTC to the microsecond (measured,
 # systemd 255, record R7). The process reads its settings after this moment, never before it.
 # Second precision is not enough: BRING-UP installs our file and restarts the service at once,
@@ -1782,8 +1830,10 @@ def _journald_drop_in(host):
 
 def d2_4(host, ctx):
     """How far back the journal reaches and what decides it (F58: the box kept 7 days while the
-    leak checks assumed 30). Times, numbers, setting names and settings-file paths only: no
-    journal line, no machine id. Each part that cannot be read is could-not-check on its own."""
+    leak checks assumed 30). Times, numbers, setting names, job names and settings-file paths
+    only: no journal line, no machine id. Each part that cannot be read is could-not-check on its
+    own. `oldest_entry` holds the whole journal's oldest entry and, under `apps`, the oldest entry
+    of the broker and the runner of every declared job."""
     def oldest_entry(selector=()):
         try:
             return _oldest_entry(host, selector)
@@ -1791,8 +1841,13 @@ def d2_4(host, ctx):
             return R.COULD_NOT_CHECK
 
     oldest = {"journal": oldest_entry()}
-    for label, unit in JOURNAL_UNITS.items():
-        oldest[label] = oldest_entry(("-u", unit))
+    try:
+        # Per declared job. Description files that do not load cost this part alone: they must not
+        # hide the journal's retention.
+        oldest["apps"] = {app: {label: oldest_entry(("-u", unit)) for label, unit in _journal_units(app).items()}
+                          for app in sorted(_declared_apps(host))}
+    except CouldNotCheck:
+        oldest["apps"] = R.COULD_NOT_CHECK
     reach = R.COULD_NOT_CHECK
     if oldest["journal"] is None:
         reach = None
@@ -1958,10 +2013,11 @@ def d4_5(host, ctx):
 # D4.6: when each service started, and whether it runs older code than the box holds.
 LAST_PASS_COLLECTED_AT = None   # the last passing review's box-bundle collected_at, set by main()
 # Each long-running Hermes service: its unit file and the script its ExecStart runs (tested
-# against the repo's unit files). The files it loads are read from the script itself.
+# against the repo's unit files). The files it loads are read from the script itself. The two
+# fixed services are named here; every declared job adds its own broker (APP_BROKER_FILES).
 SERVICE_FILES = {"hermes-docker-proxy": ("hermes-docker-proxy.service", "docker-create-proxy.py"),
-                 "hermes-broker": ("hermes-broker.service", "hermes-broker.py"),
-                 "hermes-app-broker@" + APP: ("hermes-app-broker@.service", "hermes-app-broker.py")}
+                 "hermes-broker": ("hermes-broker.service", "hermes-broker.py")}
+APP_BROKER_FILES = ("hermes-app-broker@.service", "hermes-app-broker.py")
 # The other starts D4.6 reports. The journal service since v1.20 (review #10, entry 8): its restart
 # changes what the journal holds from then on, and an automatic update can cause one.
 OTHER_STARTS = ("boot", "docker", "systemd-journald", "gateway-container")
@@ -2035,13 +2091,14 @@ def _loaded_files(bin_dir, script):
     return sorted(seen)
 
 
-def _files_newer_than_start(host, unit, started_at):
+def _files_newer_than_start(host, service_files, started_at):
     """(names, count): the loaded files whose modification time is later than the service's
-    start, and how many files were looked at. `unit` stands for the unit file. The start has
-    second precision, so a file changed in that same second is not listed."""
+    start, and how many files were looked at. `service_files` is the service's (unit file,
+    script); `unit` stands for the unit file. The start has second precision, so a file changed
+    in that same second is not listed."""
     if started_at == R.COULD_NOT_CHECK:
         return R.COULD_NOT_CHECK, R.COULD_NOT_CHECK
-    unit_file, script = SERVICE_FILES[unit]
+    unit_file, script = service_files
     bin_dir = host.path(AGENT_DIR + "/bin")
     try:
         paths = {"unit": host.path("/etc/systemd/system/" + unit_file)}
@@ -2053,14 +2110,23 @@ def _files_newer_than_start(host, unit, started_at):
 
 
 def d4_6(host, ctx):
-    """When the host, Docker, the journal service (systemd-journald), the three long-running Hermes
-    services and the gateway container last started, each compared with the last PASS's collection time (given with
+    """When the host, Docker, the journal service (systemd-journald), the long-running Hermes
+    services (the two fixed ones and the broker of every declared job) and the gateway container
+    last started, each compared with the last PASS's collection time (given with
     --last-pass-collected-at), and which files each service loads that changed after it
     started. D4.2's hash is the same string after any daemon-reload, so it cannot show a
-    restart (review #8); this item can. Timestamps, unit names and file names only."""
+    restart (review #8); this item can. Timestamps, unit names, job names and file names only.
+    `apps_declared` is the sorted list of declared jobs: could-not-check when the description
+    files do not load, and then no job's broker is reported while everything else still is."""
+    services = dict(SERVICE_FILES)
+    try:
+        declared = sorted(_declared_apps(host))
+        services.update({_app_broker_unit(app): APP_BROKER_FILES for app in declared})
+    except CouldNotCheck:
+        declared = R.COULD_NOT_CHECK
     starts = {"boot": _boot_at(host), "docker": _unit_started_at(host, "docker"),
               "systemd-journald": _unit_started_at(host, "systemd-journald"),
-              **{u: _unit_started_at(host, u) for u in SERVICE_FILES},
+              **{u: _unit_started_at(host, u) for u in services},
               "gateway-container": _gateway_started_at(host)}
     base = LAST_PASS_COLLECTED_AT
 
@@ -2069,8 +2135,8 @@ def d4_6(host, ctx):
             return R.COULD_NOT_CHECK
         return None if base is None else ts > base       # one fixed-width UTC format: text order is time order
 
-    files = {u: _files_newer_than_start(host, u, starts[u]) for u in SERVICE_FILES}
-    return {"last_pass_collected_at": base, "started_at": starts,
+    files = {u: _files_newer_than_start(host, f, starts[u]) for u, f in services.items()}
+    return {"last_pass_collected_at": base, "apps_declared": declared, "started_at": starts,
             "started_after_last_pass": {k: after(v) for k, v in starts.items()},
             "files_newer_than_start": {u: f[0] for u, f in files.items()},
             "files_checked": {u: f[1] for u, f in files.items()}}
@@ -2337,21 +2403,32 @@ def _sudo_rules(host, user):
             "command_lines": 0 if grant is None else sum(1 for l in lines[grant + 1:] if l.strip())}
 
 
-def d10_3(host, ctx):
+def _app_units(host, app):
+    """One job's units, user and path unit, as systemd and the host answer for them."""
+    user = _app_user(app)
     # is-active exits non-zero for every state but `active`: the state is the answer, not a failure.
-    path_state = host.run(["systemctl", "is-active", f"hermes-app-runner@{APP}.path"])[1].strip()
+    path_state = host.run(["systemctl", "is-active", _app_runner_unit(app) + ".path"])[1].strip()
     # A missing app user is `id`'s non-zero exit: it costs this value, not the unit properties.
-    rc, groups, _ = host.run(["id", "-nG", APP_USER])
-    return {"broker_unit": _unit_props(host, f"hermes-app-broker@{APP}", BROKER_PROPS),
-            "runner_unit": _unit_props(host, f"hermes-app-runner@{APP}", ENV_PROPS),
+    rc, groups, _ = host.run(["id", "-nG", user])
+    return {"broker_unit": _unit_props(host, _app_broker_unit(app), BROKER_PROPS),
+            "runner_unit": _unit_props(host, _app_runner_unit(app), ENV_PROPS),
+            # The instances of the three templates: equal unit files prove nothing with a drop-in.
+            "drop_in_paths": {u: _drop_ins(host, u) for u in (t.replace("@.", f"@{app}.") for t in APP_UNITS)},
+            "broker_user_groups": groups.split() if rc == 0 else R.COULD_NOT_CHECK,
+            "sudo_rules": _sudo_rules(host, user),
+            "runner_path_active": path_state or R.COULD_NOT_CHECK}
+
+
+def d10_3(host, ctx):
+    """Which jobs there are (`declared_apps`: the description files of the box's checkout;
+    `installed_apps`: the units systemd knows), whether the three template unit files equal the
+    repository's, and each job's units, user and path unit, for every job in either list."""
+    manifests, installed, names = _jobs(host)
+    return {"declared_apps": sorted(manifests), "installed_apps": installed,
             "installed_equal_repo": {u: _same_file(host, "/etc/systemd/system/" + u,
                                                    CHECKOUT + "/infra/hermes-agent/deploy/" + u)
                                      for u in APP_UNITS},
-            # The instances of those three templates: equal unit files prove nothing with a drop-in.
-            "drop_in_paths": {u: _drop_ins(host, u) for u in (t.replace("@.", f"@{APP}.") for t in APP_UNITS)},
-            "broker_user_groups": groups.split() if rc == 0 else R.COULD_NOT_CHECK,
-            "sudo_rules": _sudo_rules(host, APP_USER),
-            "runner_path_active": path_state or R.COULD_NOT_CHECK}
+            "apps": {app: _app_units(host, app) for app in names}}
 
 
 def _exposes_app_state(source):
@@ -2360,12 +2437,21 @@ def _exposes_app_state(source):
     return s == root or s.startswith(root + "/") or root.startswith(s.rstrip("/") + "/")
 
 
-def d10_4(host, ctx):
+def _app_layout_problems(host, app):
+    """One job's layout problems. Any refusal (the job's account does not exist yet, which is the
+    ordinary state between pulling a checkout that declares a job and installing it; the `hermes`
+    group is not the executor's; a name the layout does not take) is could-not-check for this job
+    alone: the other jobs and the container counts are still reported. The refusal's text is not
+    carried."""
     try:
-        problems = HL.check_app(APP, host.path(HL.DEFAULT_APPS_ROOT), host.path(HL.DEFAULT_STATE_ROOT),
-                                HL.system_resolver(layout=HL.app_layout(APP)), ancestor_top=host.root)
-    except HL.LayoutError as e:
-        raise CouldNotCheck(f"layout: {e}")
+        return HL.check_app(app, host.path(HL.DEFAULT_APPS_ROOT), host.path(HL.DEFAULT_STATE_ROOT),
+                            HL.system_resolver(layout=HL.app_layout(app)), ancestor_top=host.root)
+    except HL.LayoutError:
+        return R.COULD_NOT_CHECK
+
+
+def d10_4(host, ctx):
+    apps = {app: {"layout_problems": _app_layout_problems(host, app)} for app in _jobs(host)[2]}
     ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
     mounting = not_inspected = 0
     for cid in ids:
@@ -2381,7 +2467,7 @@ def d10_4(host, ctx):
             not_inspected += 1
         elif any(_exposes_app_state(m["Source"]) for m in mounts):
             mounting += 1
-    return {"layout_problems": problems, "containers": len(ids),
+    return {"apps": apps, "containers": len(ids),
             "containers_mounting_app_state": mounting, "containers_not_inspected": not_inspected}
 
 
@@ -2456,25 +2542,38 @@ def _unit_search(host, unit, secrets, redactor, on_message=None):
                            secrets, redactor, on_message=on_message)
 
 
-def d10_7(host, ctx):
-    """Counts only, never a line or a field: the journal names clients and request ids by design. The
-    status/reason counts are the broker's; the leak counts cover the runner's journal too,
-    which is where run-client-audit's own output lands (its unit sets no StandardOutput)."""
-    # The non-Google values are loaded before the probes; D2.1 (it runs first) adds the Google
-    # ones and any other it finds. With none
-    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
-    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
+def _installed_since_last_pass(first_entry):
+    """Whether a job's first journal entry is later than the last PASS: None when no
+    --last-pass-collected-at was given, could-not-check when the first entry could not be read,
+    True when the job never logged or its first entry is later, else False. A journal that
+    reaches less far back than the last PASS makes every job read True: D2.4 says how far it reaches."""
+    base = LAST_PASS_COLLECTED_AT
+    if base is None:
+        return None
+    if first_entry == R.COULD_NOT_CHECK:
+        return R.COULD_NOT_CHECK
+    return first_entry is None or first_entry > base     # one fixed-width UTC format: text order is time order
+
+
+def _app_journal(host, ctx, app, secrets):
+    """One job's journal. The status/reason counts are its broker's lines, told by the prefix the
+    broker of THIS job writes (another job's line here is an `other` line); the leak counts cover
+    its runner's journal too, which is where the job's own output lands (the unit sets no
+    StandardOutput). `first_entry` is the broker's oldest entry in the whole journal, not only
+    in the 30 days searched."""
+    units, prefix = _journal_units(app), "hermes-app-broker[" + app + "]: "
     lines = []
-    broker = _unit_search(host, f"hermes-app-broker@{APP}", secrets, ctx["redactor"],
+    broker = _unit_search(host, units["broker"], secrets, ctx["redactor"],
                           on_message=lambda t: lines.extend(t.splitlines()))
-    runner = _unit_search(host, f"hermes-app-runner@{APP}", secrets, ctx["redactor"])
+    runner = _unit_search(host, units["runner"], secrets, ctx["redactor"])
     oldest = {label: _oldest_entry_or_unknown(host, ("-u", unit, "--since", "-30d"))
-              for label, unit in JOURNAL_UNITS.items()}
+              for label, unit in units.items()}
+    first = _oldest_entry_or_unknown(host, ("-u", units["broker"]))
     counts, notes, other = {}, {}, 0
     for line in lines:
         if not line.strip():
             continue
-        body = line[len(_BROKER_LINE):] if line.startswith(_BROKER_LINE) else ""
+        body = line[len(prefix):] if line.startswith(prefix) else ""
         say, note = _SAY_RE.fullmatch(body), _NOTE_RE.match(body)
         if say:
             k = f"{_label(say.group(1), JOURNAL_STATUSES)}/{_label(say.group(2), JOURNAL_REASONS)}"
@@ -2488,21 +2587,35 @@ def d10_7(host, ctx):
             "runner_journal": {k: runner[k] for k in LEAK_COUNTS},
             "journal_read": {"broker": {k: broker[k] for k in READ_COUNTS},
                              "runner": {k: runner[k] for k in READ_COUNTS}},
-            "known_secrets_checked": len(secrets), "oldest_entry_read": oldest}
+            "oldest_entry_read": oldest, "first_entry": first,
+            "installed_since_last_pass": _installed_since_last_pass(first)}
 
 
-def d10_8(host, ctx):
-    """One row per entry in results/, whatever it is. An entry that cannot be read as a JSON
-    object (unreadable, not a regular file, too large, malformed) is a row and is out of
-    whitelist, as is a result stored under a name that is not its own request id. Rows carry
-    closed-set labels only: never the slug, the request id or a file name."""
+def d10_7(host, ctx):
+    """Per job, counts and times only, never a line or a field: the journal names clients and
+    request ids by design. Every job in the description files or known to systemd is searched."""
+    # The non-Google values are loaded before the probes; D2.1 (it runs first) adds the Google
+    # ones and any other it finds. With none
+    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
+    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
+    return {"apps": {app: _app_journal(host, ctx, app, secrets) for app in _jobs(host)[2]},
+            "known_secrets_checked": len(secrets)}
+
+
+_UNJUDGED = {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK}
+
+
+def _app_results(host, app, manifest):
+    """One job's stored results, judged by that job's own rule (its description file). A results
+    directory that is not there or cannot be listed (a declared job not yet installed) is
+    could-not-check for this job alone."""
+    d = host.path(HL.DEFAULT_APPS_ROOT + "/" + app + "/results")
     try:
-        manifest = A.load_manifest(host.path(AGENT_DIR + "/registry/apps/" + APP + ".json"), APP)
-    except (OSError, ValueError):
-        raise CouldNotCheck("the job's manifest could not be loaded")
-    d = host.path(APP_RESULTS)
+        names = sorted(os.listdir(d))
+    except OSError:
+        return dict(_UNJUDGED)
     rows, bad = [], 0
-    for n in sorted(os.listdir(d)):
+    for n in names:
         # Everything done with one entry sits inside this guard: whatever a file holds, and
         # whatever goes wrong judging it, costs that entry's row and never the other rows.
         try:
@@ -2520,6 +2633,18 @@ def d10_8(host, ctx):
         rows.append(row)
         bad += not (row["keys_ok"] and row["values_ok"])
     return {"results": rows, "out_of_whitelist": bad}
+
+
+def d10_8(host, ctx):
+    """Per job, one row per entry in its results/, whatever it is. An entry that cannot be read
+    as a JSON object (unreadable, not a regular file, too large, malformed) is a row and is out
+    of whitelist, as is a result stored under a name that is not its own request id. Rows carry
+    closed-set labels only: never the slug, the request id or a file name. A job systemd knows
+    without a description file has no rule to be judged by, and a job without a results directory
+    has nothing to judge: its two values are could-not-check, and the other jobs are still shown."""
+    manifests, _installed, names = _jobs(host)
+    return {"apps": {app: _app_results(host, app, manifests[app]) if app in manifests else dict(_UNJUDGED)
+                     for app in names}}
 
 
 PROBES = {"D1.1": d1_1, "D1.2": d1_2, "D1.3": d1_3, "D1.4": d1_4, "D1.5": d1_5, "D1.6": d1_6, "D1.7": d1_7,
