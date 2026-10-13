@@ -931,7 +931,7 @@ with `show-audit`. Runbook: `deploy/BRING-UP.md`, "Chat-triggered audits — par
 - **MCP**: `bin/hermes-app-mcp.py` runs in the gateway and exposes the manifest's three tools (`ads_audit_run`, `ads_audit_status`, `ads_audit_list`). It carries no policy; it only writes requests to the spool and reads results.
 - **Broker**: `hermes-app-broker@<app>.service` runs unprivileged (`hermes-app-<app>`, no network): schema, replay, kill switch, client status, and the quota reserved before the job exists.
 - **Runner**: `hermes-app-runner@<app>.service`, a root oneshot started by `hermes-app-runner@<app>.path`, runs the fixed argv and never re-runs an interrupted job. Results carry only whitelisted enums, numbers, timestamps and a regex-checked vault path, never free text from a step.
-- **Kill switch**: `touch /var/lib/hermes/app-state/<app>/DISABLED` refuses new requests; remove it to resume. Runbook: `deploy/BRING-UP.md`, "Chat-triggered audits — part 2".
+- **Kill switch**: `touch /var/lib/hermes/app-state/<app>/DISABLED` refuses new requests; remove it to resume. Runbook: `deploy/BRING-UP.md`, "Add a chat-triggered job" (until checklist v1.21 named "Chat-triggered audits — part 2").
 
 A second job, `ads-report`, uses the same machinery for a figures-only report (no AI analysis). Its three tools are `ads_report_run`, `ads_report_status` and `ads_report_list`. Reports are stored in `/var/lib/hermes/report-archive`, which no container mounts, and the operator reads one with `sudo show-report <client>`. A job is a description file in `registry/apps/` plus the runbook chapter "Add a chat-triggered job".
 

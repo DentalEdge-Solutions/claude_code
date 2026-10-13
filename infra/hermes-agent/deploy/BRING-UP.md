@@ -1066,7 +1066,9 @@ sudo grep -rlsI -E 'GOOGLE_ADS_(REFRESH_TOKEN|CLIENT_SECRET|DEVELOPER_TOKEN)=|1/
 `sudo run-client-audit <client>` produces a client's Google Ads trend-audit draft on the box. It
 runs the collectors in the one-shot `ads-collector` container, the analyst in `ads-reader`, and
 writes the draft into the client's vault with `vault-write` (uid 10000). Exit codes: `0` draft
-written, `1` a step failed, `2` a pre-check refused, `3` another audit is running. The read
+written, `1` a step failed, `2` a pre-check refused, `3` another audit is running (or a report
+run: the same command with `--figures` is the `ads-report` job, "Add a chat-triggered job" step 10,
+and the two never run at once). The read
 credential lives at `/etc/hermes/.env.ga` (`root:root 0400`), is passed to the containers per run
 by variable name, and is never mounted. The orchestrator calls `docker compose` **without**
 `--env-file`, so compose reads `/opt/hermes-agent/.env` for interpolation; that file must keep
@@ -1225,11 +1227,13 @@ Two checks that have never run on real Docker; do them on this first run and wri
 `docs/scrub-client-ids` (commit `81103e1`), so the pin is reproducible from GitHub.
 
 **8. Offboarding.** When a client is retired, set its registry status to `retired`, then remove
-both trees and its logs. The review's D7.1 checks that no retired client has either tree.
+both trees, its logs and its stored reports (`/var/lib/hermes/report-archive/<client>`, the report
+job's store; `rm -rf` says nothing when a client never had one). The review's D7.1 checks that no
+retired client has either tree or a folder in the report store.
 
 ```bash
-sudo rm -rf /var/lib/hermes/audit-data/<client> /var/lib/hermes/audit-logs/<client> /var/lib/hermes/vaults/<client> /var/lib/hermes/reports/<client> /var/lib/hermes/draft-out/<client>
-sudo ls /var/lib/hermes/audit-data /var/lib/hermes/audit-logs /var/lib/hermes/vaults /var/lib/hermes/reports /var/lib/hermes/draft-out   # <client> no longer listed
+sudo rm -rf /var/lib/hermes/audit-data/<client> /var/lib/hermes/audit-logs/<client> /var/lib/hermes/vaults/<client> /var/lib/hermes/reports/<client> /var/lib/hermes/draft-out/<client> /var/lib/hermes/report-archive/<client>
+sudo ls /var/lib/hermes/audit-data /var/lib/hermes/audit-logs /var/lib/hermes/vaults /var/lib/hermes/reports /var/lib/hermes/draft-out /var/lib/hermes/report-archive   # <client> no longer listed (on a box without the report job, `ls` says the last folder does not exist)
 ```
 
 ## Chat-triggered audits — part 1: isolation and egress (spec 2026-09-30 §4–§6)
@@ -1282,7 +1286,9 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
 8. Registering a NEW client from now on also creates
    `sudo install -d -o 10000 -g 10000 -m 0700 /var/lib/hermes/vaults/<client>` (replaces the
    data/vaults step of "Ads audits on the box" step 5). Offboarding removes
-   `/var/lib/hermes/{vaults,reports,draft-out}/<client>` as well as `audit-data` and `audit-logs`.
+   `/var/lib/hermes/{vaults,reports,draft-out}/<client>` as well as `audit-data` and `audit-logs`,
+   and, since the report job, `/var/lib/hermes/report-archive/<client>` ("Ads audits on the box"
+   step 8 has both commands).
 9. Rollback (only if part 1 must be undone before part 2):
    `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
    Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>` (detached HEAD: later pulls fail until you return; once the issue is fixed: `cd /opt/projects/claude_code && sudo git checkout main && sudo git pull --ff-only`)
@@ -1297,86 +1303,398 @@ Breaks the review-#5 binding; nothing here is live for chat until part 2 and rev
 
 ---
 
-## Chat-triggered audits — part 2: the chat trigger (spec 2026-09-30 §3, §6)
+## Add a chat-triggered job (spec 2026-09-30 §3, §6; design 2026-10-13)
 
-Requires part 1 on the box. Still not live until review #6.
+Requires part 1 on the box. A job is not live until the security review that follows its installation.
+
+Until checklist v1.21 this chapter was named "Chat-triggered audits — part 2: the chat trigger" and
+was written for `ads-audit` by name. Its step numbers have not changed: "part 2 step N", in the
+checklist, in a review report or in another section of this runbook, is step N of this chapter. The
+steps added since carry a letter (0, 3a, 3b, 7a).
+
+Every step is written for a job named `<job>`. The jobs are `ads-audit` (the audit: figures and an
+AI analysis, the draft kept in the client's vault) and `ads-report` (figures only, no AI analysis;
+the report kept in the report store). A job is described by `registry/apps/<job>.json`; its account
+is `hermes-app-<job>`, its units are `hermes-app-broker@<job>.service`,
+`hermes-app-runner@<job>.service` and `hermes-app-runner@<job>.path`, and its off switch is
+`/var/lib/hermes/app-state/<job>/DISABLED`. A job is added with its off switch ON (step 3a): the
+switch is set before the job's units exist and is taken off only at step 10, after a run by hand.
+
+What is done once per box and what once per job. Steps 1 to 4, 8 to 11: once for each job. Steps 5
+and 7's sidecar lines: once per box, done when the first job was added; skip them for a second job.
+Step 6 is run again for each job added. Step 3b is for `ads-report` only. What part 1 installed for
+the AI analysis (the Anthropic key file, the `egress-proxy`, the `ads-drafter`) is used by
+`ads-audit` only: a run of `ads-report` opens no Anthropic key and starts neither of the two; it
+needs part 1's `/var/lib/hermes/reports` parent, the read credential of "Ads audits on the box"
+step 2, and the report store of step 3b.
+
+**VPS, the job's name (once per window).** The job's name is a blank you fill ONCE per terminal
+window. Type this line with the job's name in place of `<job>` (`JOB=ads-audit` or
+`JOB=ads-report`), then paste the check below it. A new window, or a new login, has no `JOB`: set it
+again.
+
+```bash
+JOB=<job>
+```
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; echo "JOB=$JOB" )
+```
+
+Expected: `JOB=ads-audit` or `JOB=ads-report`, the job you are adding. `STOP: set JOB first`: the
+name is empty or is not one of the two; type the first line again. Every block below that uses
+`$JOB` starts with the same check and prints `STOP: set JOB first` and nothing else when it fails;
+it runs inside `( … )`, so a refusal never closes your window. Whenever a block prints
+`STOP: set JOB first`: nothing was done; set `JOB` and paste the block again.
+
+0. Before a second job is added to a box (once per box; both blocks only read). Review items D10.3,
+   D4.6 and D10.7 read the job units through `systemctl` and `journalctl`, and what the box's
+   systemd answers for a job that is not installed has not been measured on a real box. Run the two
+   blocks BEFORE step 1's pull and report their output whole: they print unit names, states, byte
+   counts and exit codes, nothing else. First run on the box. Run `sudo -v` alone first.
+
+```bash
+systemctl list-units --all --plain --no-legend --no-pager 'hermes-app-broker@*' 'hermes-app-runner@*' | awk '{print NF " columns | " $1 " | " $2 " | " $3 " | " $4}'; echo "rc=${PIPESTATUS[0]}"
+```
+
+Expected: one line for each job unit systemd holds, then `rc=0`. Each line gives the number of
+columns (5 or more: UNIT, LOAD, ACTIVE, SUB and the words of the description), then the four
+columns UNIT, LOAD, ACTIVE and SUB, for example
+`7 columns | hermes-app-broker@ads-audit.service | loaded | active | running` and
+`… | hermes-app-runner@ads-audit.path | loaded | active | waiting`; a line for
+`hermes-app-runner@ads-audit.service` with `loaded | inactive | dead` may be there too. STOP and
+report when a line's first column is not a unit's name (a mark such as `●` in front of it), when
+the second column is not `loaded`, when a unit of a job other than `ads-audit` is listed, or when
+`rc` is not `0`: the collector counts a job as installed from the first two columns of exactly this
+output.
+
+```bash
+systemctl show hermes-app-broker@ads-report -p ActiveEnterTimestamp --value | wc -c; echo "show rc=${PIPESTATUS[0]}"
+sudo journalctl -q -u hermes-app-broker@ads-report --since -30d -o json --all --no-pager | wc -c; echo "journal rc=${PIPESTATUS[0]}"
+```
+
+Expected, for a job that is not installed and never logged: `1` (an empty line: the unit never
+became active), `show rc=0`, `0` (no entry and, with `-q`, no `-- No entries --` line),
+`journal rc=0`. These four values are what the collector was written for and are not yet measured:
+whatever the block prints, report it, and do not start the rollout on any other output until it has
+been read (a `journal rc` other than `0` would make the whole of D10.7 `could-not-check` in the
+window between the pull and the installation, the audit's evidence included).
 
 1. Record the current commit, then pull (the SHA is what a rollback checks out):
    `sudo git -C /opt/projects/claude_code log --oneline -1`
    `cd /opt/projects/claude_code && sudo git pull --ff-only`
+   Then, before any service is restarted, check that the description files are ordinary files (the
+   broker and the gateway's tool server read them without following a link):
+   `stat -c %F /opt/hermes-agent/registry/apps/*.json` → `regular file`, once for each job (two
+   lines). Any other words (`symbolic link`), or fewer lines than jobs: stop, restart nothing, and
+   report.
+   The pull that brings a new job's description file also changes files the installed jobs hold
+   in memory: do step 7a now, for the jobs already installed.
+   From this pull until the job's step 4, the job is declared and not installed: a trial collection
+   in that window reads as "A security review" step 2 says under "The rollout window".
 2. The app user (no login, no home, primary group of its own, member of hermes):
-   `sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin hermes-app-ads-audit`
-   `sudo usermod -aG hermes hermes-app-ads-audit`
-   `id hermes-app-ads-audit` → groups `hermes-app-ads-audit,hermes`, and NOT docker or sudo
-3. Layout: `cd /opt/hermes-agent && sudo python3 bin/init-host-layout.py --app ads-audit --apply; echo rc=$?` → `rc=0`
-   Registry readable by the broker: `sudo -u hermes-app-ads-audit test -r /var/lib/hermes/governance/registry/clients.json && echo REG_OK`
-4. Units:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin "hermes-app-$JOB"
+sudo usermod -aG hermes "hermes-app-$JOB"
+id "hermes-app-$JOB"
+)
+```
+
+Expected: the `id` line → groups `hermes-app-<job>,hermes`, and NOT docker or sudo. `useradd` saying
+the user already exists: the step was done before; the `id` line decides. Any other group, or no
+`hermes`: stop.
+
+3. Layout, and the registry readable by the broker:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+cd /opt/hermes-agent && sudo python3 bin/init-host-layout.py --app "$JOB" --apply; echo rc=$?
+sudo -u "hermes-app-$JOB" test -r /var/lib/hermes/governance/registry/clients.json && echo REG_OK
+)
+```
+
+Expected: `rc=0`, then `REG_OK`. Another `rc`, or no `REG_OK`: stop.
+
+3a. The off switch, ON, before the job's units exist:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+sudo touch "/var/lib/hermes/app-state/$JOB/DISABLED"
+echo "switch present: $(sudo test -e "/var/lib/hermes/app-state/$JOB/DISABLED" && echo YES || echo no)"
+)
+```
+
+Expected: `switch present: YES`. `no`, or an error from `touch` (step 3 did not create the folder):
+stop; do not go on to step 4.
+
+3b. For `ads-report` only, once per box: the report store and the command that reads it. Reports are
+   stored in `/var/lib/hermes/report-archive/<client>/<ts>-report.md`: the store and each client's
+   folder are `root:root 0700`, each file `0600`; no container mounts the store. `show-report` is
+   installed as a symlink, like `show-audit`. Skip this step for `ads-audit`.
+
+```bash
+( [ "$JOB" = ads-report ] || { echo "STOP: this block is for ads-report only"; exit 1; }
+sudo install -d -o root -g root -m 0700 /var/lib/hermes/report-archive && sudo stat -c '%U:%G %a' /var/lib/hermes/report-archive
+sudo ln -s /opt/hermes-agent/deploy/show-report /usr/local/sbin/show-report
+readlink /usr/local/sbin/show-report
+)
+```
+
+Expected: `root:root 700`, then `/opt/hermes-agent/deploy/show-report`. `ln` saying the file exists:
+the link was made before; the `readlink` line decides. Any other owner, mode or target: stop.
+
+4. Units. On a box with no job yet, install the three unit files and load them:
    `sudo cp deploy/hermes-app-broker@.service deploy/hermes-app-runner@.service deploy/hermes-app-runner@.path /etc/systemd/system/`
    `sudo systemctl daemon-reload`
-   `sudo systemctl enable --now hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path`
-   `systemctl is-active hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path` → `active active`
-5. OpenRouter: in the OpenRouter console create a dedicated key with limit $10, reset monthly. Set
+   On a box that already has a job the three files are installed and serve every job: do NOT copy
+   them again (a copy gives them a new date, and review item D4.6 would then count the running
+   broker as started before its unit file) and run no `daemon-reload`. Check instead that they are
+   the repository's:
+   `for f in hermes-app-broker@.service hermes-app-runner@.service hermes-app-runner@.path; do cmp -s /opt/hermes-agent/deploy/$f /etc/systemd/system/$f && echo same || echo DIFFERENT; done`
+   → `same` three times. `DIFFERENT`: stop and report; enable nothing.
+   Then enable the job's units (the off switch of step 3a is on, so nothing can be started from chat
+   yet):
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+sudo systemctl enable --now "hermes-app-broker@$JOB" "hermes-app-runner@$JOB.path"
+systemctl is-active "hermes-app-broker@$JOB" "hermes-app-runner@$JOB.path"
+)
+```
+
+Expected: → `active active` (one word per line). Any other word: stop; read
+`systemctl is-active` again after a few seconds, and report both outputs.
+
+5. OpenRouter (once per box: skip this step when a job is already installed, the gateway has its
+   key): in the OpenRouter console create a dedicated key with limit $10, reset monthly. Set
    Zero Data Retention in the OpenRouter ACCOUNT privacy settings (Hermes has no zdr key; the
    config sends `provider_routing.data_collection: "deny"`; spec §13), and deny data-collecting
    providers there too. Back up the gateway env first (the rollback copy):
    `sudo install -o root -g root -m 0600 /opt/hermes-agent/.env /opt/hermes-agent/.env.pre-optb2`
    Then, ALONE:
    `sudo python3 bin/install-env-secret.py set --file /opt/hermes-agent/.env --name OPENROUTER_API_KEY --prefix sk-or- --mode 0600`
-6. Gateway config: back up the live file first, outside the gateway-writable `data/`:
+6. Gateway config (the chat settings; run again for each job added, because the template
+   `config.yaml.example` holds every job's server: two servers, `ads_audit` and `ads_report`, with
+   three tools each, six tools). From `/opt/hermes-agent`: back up the live file first, outside the
+   gateway-writable `data/`:
    `sudo install -o root -g root -m 0600 data/config.yaml /root/config.yaml.pre-optb2`
    (it is your rollback copy), then `sudo diff data/config.yaml config.yaml.example` (review anything
    Hermes wrote itself), then `sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
    The gateway rewrites `data/config.yaml` once it runs (its layout, and it may add keys of its own); review item D10.6 compares the
    parsed `mcp_servers` block with the template, so do not re-install the template to "fix" a layout difference.
+   When a job is added to a box that already has one, the diff also shows the new job's server
+   missing from the live file: that difference is the reason for this step, and installing the
+   template is how it is settled.
    From Hermes v0.21.5 the template carries `platforms.api_server.enabled: false` (the API server stays off); a box whose `data/config.yaml` predates it gets that block appended once, as a top-level key, or `api_server: {enabled: false}` added under an existing top-level `platforms:` key (never a second `platforms:` key) (the gateway keeps it through its rewrites), then `sudo docker compose restart hermes-agent`; review item D4.1 `listeners` then shows no `8642`.
-7. Recreate the gateway without the retired sidecar:
+7. Recreate the gateway (on the first job's installation, without the retired sidecar):
    `sudo docker compose up -d --build --remove-orphans hermes-agent`
    `sudo docker compose ps -a` → no `claude-auth-init`
    `sudo test ! -e /opt/hermes-agent/data/home/.claude/settings.json && echo NO_CLAUDE_KEY_FILE`
    (if present, it holds the Anthropic key: `sudo shred -u /opt/hermes-agent/data/home/.claude/settings.json`, as part 1 step 5)
+   When a job is added to a box that already has one, add `--force-recreate` to the first line
+   (`sudo docker compose up -d --build --force-recreate --remove-orphans hermes-agent`): the gateway
+   starts one tool server per job, and each reads its description file and the settings of step 6
+   only when it starts.
    After any later pull that changes `bin/hermes-app-mcp.py` or a `bin/*_lib.py` it imports: `cd /opt/hermes-agent && sudo docker compose restart hermes-agent` (the gateway keeps the old tool server running until then).
-8. Tools visible: `sudo docker compose exec hermes-agent hermes mcp list` → `ads_audit` with 3 tools
-9. Kill switch (for the review and for emergencies):
-   on:  `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
-   off: `sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED`
+7a. After any later pull that changes a description file (`registry/apps/*.json`) or
+   `bin/app_lib.py`: every job's broker and the gateway's tool servers read the description files
+   when they START and hold them in memory, so restart EVERY job's broker and re-create the gateway.
+   First the check of step 1, before anything is restarted:
+   `stat -c %F /opt/hermes-agent/registry/apps/*.json` → `regular file` for each; anything else:
+   stop. Then:
+
+```bash
+for j in ads-audit ads-report; do sudo systemctl try-restart "hermes-app-broker@$j"; done; systemctl is-active hermes-app-broker@ads-audit hermes-app-broker@ads-report
+cd /opt/hermes-agent && sudo docker compose up -d --force-recreate hermes-agent && sudo docker compose ps hermes-agent
+```
+
+Expected: `active` for each installed job (a job that is not installed reads `inactive`:
+`try-restart` restarts a broker that runs and never starts one that does not, so it cannot start a
+job that was not added), then the gateway `running`. `failed`, or `inactive` for an installed job:
+stop and report. A run in flight is not cut off by this (the runner is another unit); a request sent
+from chat during the few seconds of the restart gets no answer and is asked again.
+
+8. Tools visible: `sudo docker compose exec hermes-agent hermes mcp list` → one server for each job,
+   with 3 tools each: `ads_audit` with 3 tools and `ads_report` with 3 tools (two servers, six
+   tools). A server missing, or a number other than 3: stop (step 6 or step 7 was not done for this
+   job).
+9. Kill switch (the job's off switch; for the review and for emergencies).
+   on:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo touch "/var/lib/hermes/app-state/$JOB/DISABLED"; echo "switch present: $(sudo test -e "/var/lib/hermes/app-state/$JOB/DISABLED" && echo YES || echo no)" )
+```
+
+   off:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo rm "/var/lib/hermes/app-state/$JOB/DISABLED"; echo "switch present: $(sudo test -e "/var/lib/hermes/app-state/$JOB/DISABLED" && echo YES || echo no)" )
+```
+
+   Expected: `switch present: YES` after on, `switch present: no` after off.
    The switch only refuses NEW requests: jobs already queued in `jobs/` and a run in flight
    still go ahead. To stop queued work too, stop the runner's path unit and the runner itself:
-   `sudo systemctl stop hermes-app-runner@ads-audit.path hermes-app-runner@ads-audit.service`
-   (an in-flight run is cut off and later reported `interrupted`, never re-run; queued jobs wait
-   in `jobs/` and run when `sudo systemctl start hermes-app-runner@ads-audit.path` is issued).
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo systemctl stop "hermes-app-runner@$JOB.path" "hermes-app-runner@$JOB.service"; systemctl is-active "hermes-app-runner@$JOB.path" "hermes-app-runner@$JOB.service" )
+```
+
+   Expected: `inactive` twice (an in-flight run is cut off and later reported `interrupted`, never
+   re-run; queued jobs wait in `jobs/` and run when the path unit is started again):
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo systemctl start "hermes-app-runner@$JOB.path"; systemctl is-active "hermes-app-runner@$JOB.path" )
+```
+
+   Expected: `active`.
    To discard the queued jobs instead, with both units stopped:
-   `sudo find /var/lib/hermes/app-state/ads-audit/jobs -mindepth 1 -delete` — the broker then
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo find "/var/lib/hermes/app-state/$JOB/jobs" -mindepth 1 -delete; echo "queued jobs left: $(sudo ls "/var/lib/hermes/app-state/$JOB/jobs" | wc -l)" )
+```
+
+   Expected: `queued jobs left: 0` — the broker then
    reports each one `interrupted` (its periodic recover, within about a minute).
-10. First chat audit: `cd /opt/hermes-agent && sudo docker compose exec -it hermes-agent hermes chat`, then ask
-    "Run the Google Ads audit for <client>." Expect `ok` within ~5 min (or `pending`; ask for its
-    status later). Journal: `sudo journalctl -u hermes-app-broker@ads-audit -n 20 --no-pager`.
+   The two jobs have a switch each: one job's switch does not stop the other. An audit and a report
+   never run at once on the box, whoever started them: the second is told `busy` and nothing starts.
+10. First run of the job: by hand, then from chat. The off switch of step 3a is still on.
+    First read the client in: paste the line "the client at a hidden prompt" of step 11 ALONE, type
+    the client, Enter. The blocks below use it as `$C` and print step names and exit codes only.
+
+    **`ads-audit`, by hand.** The by-hand run is part 1 step 7's (`sudo run-client-audit <client>
+    --dry-run`, then without `--dry-run`): it opens the Anthropic key and has an AI fee. Go on to
+    "from chat" below.
+
+    **`ads-report`, by hand.** The command is `sudo run-client-audit <client> --figures`. It opens no
+    Anthropic key, starts no `egress-proxy` and no `ads-drafter`, and has no AI fee. Three things to
+    know before the first one:
+
+    - A report run clears the client's working folders at its start: `audit-data`, `reports` and
+      `audit-logs` under `/var/lib/hermes/` (not `draft-out`). The step logs of the previous run for
+      that client are erased, INCLUDING a failed audit's logs and its `proxy.log`. The two jobs have
+      separate daily limits, so this can happen on the same day as the audit. Read a failed audit's
+      logs BEFORE running a report for that client.
+    - A run by hand does not count against the chat limits (one report per client per day, five per
+      box per day, counted separately from the audit's): those are the broker's, and a by-hand run
+      does not go through the broker.
+    - Before the first report on a box, check that the registry holds no placeholder customer id
+      (such as `1234567890` or `0000000000`) for a dormant or test client. The store step refuses a
+      report that shows another client's customer id; a placeholder id is a number an ordinary
+      report can hold by chance, so one would make false refusals likely. This block only reads and
+      prints four counts, never an id or a name:
+
+```bash
+sudo python3 -c 'import json,re; d=json.load(open("/var/lib/hermes/governance/registry/clients.json")).get("clients",{}); r=[v for v in d.values() if isinstance(v,dict)]; c=[str(v["customer_id"]).replace(" ","").replace("-","") for v in r if v.get("customer_id") not in (None,"")]; p=("1234567890","0123456789","9876543210"); print("records:",len(d),"| not an object:",len(d)-len(r),"| placeholder ids:",sum(1 for x in c if len(set(x))==1 or x in p),"| ids that are not ten digits:",sum(1 for x in c if not re.fullmatch("[0-9]{10}",x)))'
+```
+
+Expected: `records: <n> | not an object: 0 | placeholder ids: 0 | ids that are not ten digits: 0`,
+`<n>` the number of clients in the registry. A placeholder count above `0`: stop and decide that
+record first (give the dormant client its real id or retire it by the registry's own procedure;
+never edit the file by hand). A "not an object" or "ids that are not ten digits" count above `0`:
+stop and report it (the store step refuses every report while a record or its id cannot be read; a
+record with no id at all is not counted here and is not refused). The block counts as a placeholder
+an id of equal digits or one of three counting sequences; an id you know to be invented in another
+way is a placeholder too.
+
+    The plan, which changes nothing:
+
+```bash
+sudo run-client-audit "$C" --figures --dry-run 2>&1 | grep -oE '^would run \[[a-z0-9:_-]+\]'; echo "rc=${PIPESTATUS[0]}"
+```
+
+Expected: one `would run [collect:…]` line for each collector, three `would run [read:…]` lines,
+then `would run [store]`, then `rc=0`; and NO line with `[snapshot]`, `[proxy]`, `[draft]` or
+`[vault-write]`. A `[draft]` or `[proxy]` line: stop, this is not a figures run. `rc=2` and no
+lines: a pre-check refused (the read credential, the `reports` parent, the report store of step 3b
+or the installed package); read the refusal with the same command without the `| grep …` part, on
+the box only: it can name the client.
+
+    The run:
+
+```bash
+sudo run-client-audit "$C" --figures 2>&1 | grep -oE '^  [a-z0-9:_-]+ +rc=[0-9-]+|^run-client-audit: (ASSERTION FAIL|refused|step [a-z0-9:_-]+ failed)'; echo "rc=${PIPESTATUS[0]}"
+```
+
+Expected: one line for each step, every one `rc=0`, the last step `store`, then `rc=0`: the report
+is stored. `rc=1`: a step failed, its line shows which; the step's log is
+`/var/lib/hermes/audit-logs/<client>/<step>.stderr` (root only; read it on the box). `rc=2`: a
+pre-check refused, nothing ran. `rc=3`: an audit or another report holds the lock (`busy`); wait
+for it and run the block again. A line `isolation  rc=1` with `run-client-audit: ASSERTION FAIL`:
+the report was refused because it names another client; see "A report refused" below and do NOT
+run it again.
+
+    Then check that it is stored and readable:
+
+```bash
+echo "reports stored: $(sudo show-report "$C" --list | wc -l) | bytes in the latest: $(sudo show-report "$C" --latest | wc -c)"
+```
+
+Expected: `reports stored: 1` (or more, after later runs) and a byte count above `0`. To read a
+report: `sudo show-report <client>` prints the latest (`--latest` says so explicitly), `--ts <ts>` a
+given one, `--list` the timestamps. It prints the client's figures: read it in the terminal and
+paste it nowhere.
+
+    **A report refused because it names another client.** The store step prints only counts, in its
+    log: `the reports name another client (by name: <a>, by customer id: <b>); nothing stored`
+    (`<a>` clients found by name, `<b>` by customer id; the run itself prints
+    `run-client-audit: ASSERTION FAIL — the reports name another client; not stored`). Read the two
+    counts with:
+
+```bash
+sudo grep -oE 'by name: [0-9]+, by customer id: [0-9]+' "/var/lib/hermes/audit-logs/$C/store.stderr"
+```
+
+Nothing is stored. The reader's three files stay in `/var/lib/hermes/reports/<client>/` until the
+next run for that client. Report the two counts; do NOT run the report again (a second run erases
+those three files and the log, and would be refused the same way).
+
+    **From chat (both jobs).** Take the off switch off with step 9's `off:` block (→ `switch
+    present: no`). Then:
+    `cd /opt/hermes-agent && sudo docker compose exec -it hermes-agent hermes chat`, then ask
+    "Run the Google Ads audit for <client>." for `ads-audit`, or "Run the Google Ads figures report
+    for <client>." for `ads-report`. Expect `ok` within ~5 min (or `pending`; ask for its
+    status later). For `ads-report`, then read it: `sudo show-report <client> --latest`. This run
+    counts against the chat limits: no second one for that client that day. Journal (read it on the
+    box; report only its `status=` and `reason=` words):
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo journalctl -u "hermes-app-broker@$JOB" -n 20 --no-pager )
+```
+
     A reply of "MCP call timed out" while the journal shows `status=ok` for that request means the gateway is
     running a tool server from before the ping fix: pull, then `sudo docker compose restart hermes-agent`.
     Once it works, delete both rollback backups (they may hold provider keys; they MUST be gone
-    before review #6's evidence collection; keep them until then only if you still need to roll back):
+    before the review's evidence collection; keep them until then only if you still need to roll back):
     `sudo shred -u /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2`
     `sudo ls /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2` → both `No such file or directory`
-11. Live refusal checks (review D10.7 needs one each of `refused/disabled`, `refused/quota` and
-    `refused/bad_request` in the broker journal, 30 days back; with "The journal's retention" applied they
-    stay 35 days). They place a request file in the spool the way the gateway's MCP tool does and read the
-    journal line the broker writes for it (it polls every 2 s). None runs an audit. Each block is one paste
-    and prints only `status=… reason=…`, never the client; the client is typed once, at a hidden prompt.
-    These are the blocks used on the box on 2026-10-09; check a has one added guard around the same lines.
-    Check b needs a real chat audit for that client on the same UTC day (step 10) and places its request
-    only when the broker's own counter says exactly 1. Every block cleans up after itself: if the broker
-    does not answer, the test request is deleted, and in check a the kill switch is LEFT ON; say so and
-    stop.
+    (when step 5 was skipped there is no `.env.pre-optb2`: `shred` says so for that file and still
+    removes the other; the `ls` line decides.)
+11. Live refusal checks, for EACH job (review D10.7 needs, for every installed job, one each of
+    `refused/disabled`, `refused/quota` and `refused/bad_request` in that job's broker journal, 30 days
+    back; with "The journal's retention" applied they stay 35 days). They place a request file in the
+    job's spool the way the gateway's MCP tool does and read the journal line the broker writes for it
+    (it polls every 2 s). None runs the job. Each block is one paste and prints only
+    `status=… reason=…`, never the client; the client is typed once, at a hidden prompt.
+    The inner lines are those used on the box on 2026-10-09 for `ads-audit`, with the job's name
+    replaced by `$JOB` and the check on `JOB` added around them; in this form they have not run on the
+    box yet (say so in the report of their first run), and their rehearsal in the stand-in belongs to
+    the rollout. Check b needs a real chat run of that job for that client on the same UTC day
+    (step 10) and places its request only when the broker's own counter says exactly 1. Every block
+    cleans up after itself: if the broker does not answer, the test request is deleted, and in check a
+    the kill switch is LEFT ON; say so and stop.
 
-    How to run them. Do them on the day of step 10's chat audit, after it, in the order a, b, c. Run
-    `sudo -v` alone first, and again if more than a few minutes pass between two blocks, so that sudo's
-    password prompt cannot take the pasted lines that follow as password attempts. Paste each block
-    WHOLE, from its first line to its last. Report each block's output starting after the prompt line.
-    Wait for each block to print its line (about 6 seconds) before pasting the next. Off the box the
-    blocks were rehearsed only against a stand-in for the broker; b, c and the two others are written
-    here as they ran on the box on 2026-10-09.
+    How to run them. Do them on the day of step 10's chat run of that job, after it, in the order a,
+    b, c, with `JOB` set to that job; then set `JOB` to the other job and do them again on the day of
+    ITS chat run. Run `sudo -v` alone first, and again if more than a few minutes pass between two
+    blocks, so that sudo's password prompt cannot take the pasted lines that follow as password
+    attempts. Paste each block WHOLE, from its first line to its last. Report each block's output
+    starting after the prompt line. Wait for each block to print its line (about 6 seconds) before
+    pasting the next.
 
     **VPS, the client at a hidden prompt (once per login).** Paste this line ALONE; it waits. Then type
-    the client of step 10's chat audit and press Enter. Nothing typed is shown.
+    the client of step 10's chat run and press Enter. Nothing typed is shown.
 
 ```bash
 read -r -s -p "client (hidden): " C; echo; echo "length ${#C}"
@@ -1386,101 +1704,138 @@ Expected: `length ` and the number of characters you typed. Nothing else is prin
 paste the line again and type it again.
 
 **VPS, live check a, the kill switch.** Any `run` request is refused while the switch is set, before
-anything else is checked. The checks assume the kill switch is OFF when you start (they run after the
-day's chat audit). Check a takes the switch off again when it succeeds, so do not use it while the
-switch is on for another reason. First run on the box in this form (the inner lines are those used on
-2026-10-09): the block now places its request only after it has seen that the switch is set. Paste the
-block WHOLE: a paste that misses its first two lines is not protected.
+anything else is checked. The checks assume the job's kill switch is OFF when you start (they run
+after the day's chat run). Check a takes the switch off again when it succeeds, so do not use it
+while the switch is on for another reason. The block places its request only after it has seen that
+the switch is set. Paste the block WHOLE: a paste that misses its first two lines is not protected.
 
 ```bash
-sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED
-if sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED; then
-R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "%s", "op": "run", "request_id": "%s"}' "$C" "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6
-L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_]+')
-if [ "$L" = "status=refused reason=disabled" ]; then sudo rm /var/lib/hermes/app-state/ads-audit/DISABLED; echo "a: $L | switch off again: $(sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED && echo NO-STILL-ON || echo yes)"; else sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "a: UNEXPECTED [$L] | test request deleted | switch LEFT ON: stop"; fi
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo touch "/var/lib/hermes/app-state/$JOB/DISABLED"
+if sudo test -e "/var/lib/hermes/app-state/$JOB/DISABLED"; then
+R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "%s", "client": "%s", "op": "run", "request_id": "%s"}' "$JOB" "$C" "$R" | sudo -u "hermes-app-$JOB" tee "/var/lib/hermes/spool/apps/$JOB/requests/$R.json" >/dev/null; sleep 6
+L=$(sudo journalctl -u "hermes-app-broker@$JOB" --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_]+')
+if [ "$L" = "status=refused reason=disabled" ]; then sudo rm "/var/lib/hermes/app-state/$JOB/DISABLED"; echo "a: $L | switch off again: $(sudo test -e "/var/lib/hermes/app-state/$JOB/DISABLED" && echo NO-STILL-ON || echo yes)"; else sudo rm -f "/var/lib/hermes/spool/apps/$JOB/requests/$R.json"; echo "a: UNEXPECTED [$L] | test request deleted | switch LEFT ON: stop"; fi
 else echo "a: STOPPED, the switch is not set | nothing was placed"; fi
+)
 ```
 
 Expected: `a: status=refused reason=disabled | switch off again: yes`. Every other output:
 
+- `STOP: set JOB first`: nothing was done, the switch was not touched. Set `JOB` and paste again.
 - `a: STOPPED, the switch is not set | nothing was placed`: the block did not see the switch. Stop and
   report. Nothing was placed; run the "afterwards" block to see whether the switch is on.
-- Nothing printed and a `>` prompt: the paste lost its last line. Press Ctrl-C. The switch is ON and
-  nothing was placed: take it off with step 9's `off:` line, then paste the block whole.
+- Nothing printed and a `>` prompt: the paste lost its end. Press Ctrl-C. Nothing has run (the block
+  runs only once its last line, `)`, has arrived): the switch is as it was and nothing was placed.
+  Paste the block whole.
+- An error that names `)` and nothing else (`syntax error near unexpected token`): the paste lost its
+  first line, so the lines that ran were not checked for `JOB` and the switch was not set by this
+  block. What was printed above the error says what happened; with
+  `a: STOPPED, the switch is not set | nothing was placed` above it, nothing was placed. Run the
+  "afterwards" block and report both.
 - An error that names `else` (`syntax error near unexpected token`): the paste lost its first two
   lines, so the request was placed without the guard. Any `switch LEFT ON` text printed above the
   error is not true. Run the "afterwards" block to see the switch and the waiting requests, and report.
   The request was placed with the switch off, so the broker decided it as a real request: with the
-  day's audit already held it is refused for quota and nothing starts; with none held it is admitted
-  and a real, paid audit of that client starts. Which of the two happened is not known until the
-  outputs are read: do not run check b that day, and say so in the report.
+  day's run already held it is refused for quota and nothing starts; with none held it is admitted
+  and a real run of that job for that client starts (for `ads-audit` a paid audit; for `ads-report`
+  a report, with no AI fee, which clears that client's step logs as step 10 says). Which of the two
+  happened is not known until the outputs are read: do not run check b that day, and say so in the
+  report.
 - `a: UNEXPECTED […] | test request deleted | switch LEFT ON: stop`: the block has deleted the test
-  request and left the switch ON. Stop: read `systemctl is-active hermes-app-broker@ads-audit` and
+  request and left the switch ON. Stop: read `systemctl is-active hermes-app-broker@<job>` and
   report both outputs. Empty brackets (`[]`) can mean two things: the broker did not answer, or it
   answered with a line this block cannot read, such as `status=queued reason=-` (the request was
   admitted). With the switch set an admitted request is not expected; report it as it is.
-- While the switch is on, no audit can be started from chat. Take it off (step 9's `off` line) only
-  when the broker is `active` again and `sudo ls /var/lib/hermes/spool/apps/ads-audit/requests | wc -l`
-  prints `0`: a request still in `requests/` is decided afresh once the switch is gone, and could start
-  a real audit.
+- While the switch is on, that job cannot be started from chat. Take it off (step 9's `off` block)
+  only when the broker is `active` again and the "afterwards" block prints `requests waiting: 0`: a
+  request still in `requests/` is decided afresh once the switch is gone, and could start a real
+  run.
 
-**VPS, live check b, quota.** The manifest allows one `run` per client per UTC day.
+**VPS, live check b, quota.** The description file allows one `run` per client per UTC day, for each
+job separately.
 
 ```bash
-H=$(sudo python3 -c 'import sys; sys.path.insert(0, "/opt/hermes-agent/bin"); import app_lib as A; print(A.Ledger("/var/lib/hermes/app-state/ads-audit/state/ledger.jsonl").count(A.utcnow()[:10], "run", sys.argv[1]))' "$C"); echo "HELD_RUNS=$H"
-if [ "$H" = "1" ]; then R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "ads-audit", "client": "%s", "op": "run", "request_id": "%s"}' "$C" "$R" | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "b: NO ANSWER | test request deleted: stop"; else echo "b: $L"; fi; else echo "b: SKIPPED, nothing was placed"; fi
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+H=$(sudo python3 -c 'import sys; sys.path.insert(0, "/opt/hermes-agent/bin"); import app_lib as A; print(A.Ledger("/var/lib/hermes/app-state/" + sys.argv[2] + "/state/ledger.jsonl").count(A.utcnow()[:10], "run", sys.argv[1]))' "$C" "$JOB"); echo "HELD_RUNS=$H"
+if [ "$H" = "1" ]; then R=$(cat /proc/sys/kernel/random/uuid); printf '{"app": "%s", "client": "%s", "op": "run", "request_id": "%s"}' "$JOB" "$C" "$R" | sudo -u "hermes-app-$JOB" tee "/var/lib/hermes/spool/apps/$JOB/requests/$R.json" >/dev/null; sleep 6; L=$(sudo journalctl -u "hermes-app-broker@$JOB" --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f "/var/lib/hermes/spool/apps/$JOB/requests/$R.json"; echo "b: NO ANSWER | test request deleted: stop"; else echo "b: $L"; fi; else echo "b: SKIPPED, nothing was placed"; fi
+)
 ```
 
 Expected: `HELD_RUNS=1`, then `b: status=refused reason=quota`. The quota is counted only while a
-`run` for that client is held today: a `list` request, a `run` that ended `busy` and a run from
-another day do not count, and with none held the request would be admitted and start a real, paid
-audit. That is why the block places it only when the counter says exactly 1. Paste the block on the
-same UTC day as step 10's audit, not across midnight UTC. Every other output:
+`run` of that job for that client is held today: a `list` request, a `run` that ended `busy`, a run
+by hand, a run of the other job and a run from another day do not count, and with none held the
+request would be admitted and start a real run (for `ads-audit` a paid audit). That is why the block
+places it only when the counter says exactly 1. Paste the block on the same UTC day as step 10's
+chat run, not across midnight UTC. Every other output:
 
+- `STOP: set JOB first`: nothing was done. Set `JOB` and paste again.
 - `b: SKIPPED, nothing was placed` (the counter said something other than 1, or the first line printed
-  an error): skip the quota check for today and run it after the next day's first real audit.
+  an error): skip the quota check for today and run it after the next day's first real chat run of
+  that job.
 - `b: NO ANSWER | test request deleted: stop`: stop and report it.
 - Any other `b:` line: stop and report it. `b: status=queued reason=-` means the request was admitted
-  and an audit is running.
+  and a run of that job is under way.
+- Nothing printed and a `>` prompt: the paste lost its end. Press Ctrl-C; nothing has run. An error
+  that names `)`: the paste lost its first line; report what was printed above it.
 
 **VPS, live check c, a malformed request.** A well-named file (a fresh uuid) with content the broker
 rejects (`{}`: the keys are wrong).
 
 ```bash
-R=$(cat /proc/sys/kernel/random/uuid); printf '{}' | sudo -u hermes-app-ads-audit tee /var/lib/hermes/spool/apps/ads-audit/requests/$R.json >/dev/null; sleep 6; L=$(sudo journalctl -u hermes-app-broker@ads-audit --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f /var/lib/hermes/spool/apps/ads-audit/requests/$R.json; echo "c: NO ANSWER | test request deleted: stop"; else echo "c: $L"; fi
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; R=$(cat /proc/sys/kernel/random/uuid); printf '{}' | sudo -u "hermes-app-$JOB" tee "/var/lib/hermes/spool/apps/$JOB/requests/$R.json" >/dev/null; sleep 6; L=$(sudo journalctl -u "hermes-app-broker@$JOB" --since -2min -o cat --no-pager | grep "request=$R" | grep -oE 'status=[a-z]+ reason=[a-z_-]+'); if [ -z "$L" ]; then sudo rm -f "/var/lib/hermes/spool/apps/$JOB/requests/$R.json"; echo "c: NO ANSWER | test request deleted: stop"; else echo "c: $L"; fi )
 ```
 
 Expected: `c: status=refused reason=bad_request`. A badly named file (any other name) is only
 `dropped/bad_request`, which does not count; the block names its file correctly. Every other output:
 
+- `STOP: set JOB first`: nothing was done. Set `JOB` and paste again.
 - `c: NO ANSWER | test request deleted: stop`: stop and report it.
 - Any other `c:` line: stop and report it.
 
-**VPS, afterwards.** It confirms all three at once, and forgets the client.
+**VPS, afterwards.** It confirms all three at once for that job, and forgets the client.
 
 ```bash
-sudo journalctl -u hermes-app-broker@ads-audit --since -30d -o cat --no-pager | grep -oE 'status=refused reason=(disabled|quota|bad_request)' | sort | uniq -c
-echo "switch present: $(sudo test -e /var/lib/hermes/app-state/ads-audit/DISABLED && echo YES || echo no) | requests waiting: $(sudo ls /var/lib/hermes/spool/apps/ads-audit/requests | wc -l)"; unset C
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+sudo journalctl -u "hermes-app-broker@$JOB" --since -30d -o cat --no-pager | grep -oE 'status=refused reason=(disabled|quota|bad_request)' | sort | uniq -c
+echo "job: $JOB | switch present: $(sudo test -e "/var/lib/hermes/app-state/$JOB/DISABLED" && echo YES || echo no) | requests waiting: $(sudo ls "/var/lib/hermes/spool/apps/$JOB/requests" | wc -l)"
+); unset C
 ```
 
 Expected: three lines, each a count of 1 or more and one of `status=refused reason=bad_request`,
-`status=refused reason=disabled`, `status=refused reason=quota`; then `switch present: no | requests
-waiting: 0`. A missing line: that check did not happen; run it (the client must be read in again,
-because this block forgets it). `switch present: YES` or a number other than `0`: stop and report.
-Each refusal also leaves a result file in `results/` (the review's D10.8 lists them; they are in the
-whitelist).
+`status=refused reason=disabled`, `status=refused reason=quota`; then `job: <job> | switch present:
+no | requests waiting: 0`. A missing line: that check did not happen for that job; run it (the client
+must be read in again, because this block forgets it). `switch present: YES` or a number other than
+`0`: stop and report. `STOP: set JOB first`: nothing was read, and the client is forgotten all the
+same. Each refusal also leaves a result file in `results/` (the review's D10.8 lists them; they are
+in the whitelist). The three counts are one job's: the review needs them for EVERY installed job, so
+this block is run once with `JOB=ads-audit` and once with `JOB=ads-report` before a collection.
 
-12. Rollback (only if part 2 must be undone):
-    `sudo touch /var/lib/hermes/app-state/ads-audit/DISABLED`
-    `sudo systemctl disable --now hermes-app-broker@ads-audit hermes-app-runner@ads-audit.path`
-    `sudo systemctl stop hermes-app-runner@ads-audit.service` (stopping the path unit does not stop an in-flight runner)
+12. Rollback (only if the job must be undone). First the job itself:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+sudo touch "/var/lib/hermes/app-state/$JOB/DISABLED"
+sudo systemctl disable --now "hermes-app-broker@$JOB" "hermes-app-runner@$JOB.path"
+sudo systemctl stop "hermes-app-runner@$JOB.service"
+systemctl is-active "hermes-app-broker@$JOB" "hermes-app-runner@$JOB.path" "hermes-app-runner@$JOB.service"
+)
+```
+
+    Expected: `inactive` three times (stopping the path unit does not stop an in-flight runner, hence
+    the third line of the block). The other job is not touched by this block. Then, for the checkout
+    and the gateway (they are shared: returning the checkout takes EVERY job back to the recorded
+    commit):
     `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
     Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>` (detached HEAD: later pulls fail until you return; once the issue is fixed: `cd /opt/projects/claude_code && sudo git checkout main && sudo git pull --ff-only`)
     Restore the config: `sudo install -o 10000 -g 10000 -m 640 /root/config.yaml.pre-optb2 data/config.yaml`
-    Restore the gateway env: `sudo install -o root -g root -m 600 /opt/hermes-agent/.env.pre-optb2 /opt/hermes-agent/.env`
+    Restore the gateway env (only when step 5 was run for this job): `sudo install -o root -g root -m 600 /opt/hermes-agent/.env.pre-optb2 /opt/hermes-agent/.env`
     `cd /opt/hermes-agent && sudo docker compose up -d --build --force-recreate hermes-agent`
-    Revoke the dedicated OpenRouter key created in step 5, in its console. The app user and the
-    layout directories are left in place (harmless). Delete the backups as in step 10.
+    Restart the broker of every job that stays installed, as step 7a does (the checkout it reads
+    has changed).
+    Revoke the dedicated OpenRouter key created in step 5, in its console (only when step 5 was run
+    for this job). The app user, the layout directories and, for `ads-report`, the report store are
+    left in place (harmless; the reports already stored stay readable with `show-report`). Delete
+    the backups as in step 10.
 
 ---
 
@@ -1552,7 +1907,7 @@ server is back on: check that `platforms.api_server.enabled: false` is still in
 ## The journal's retention (finding F58)
 
 The server came with a journal that keeps 7 days. The security review's leak checks read the journal, and
-the review needs the live refusal checks of part 2 step 11 to be in it, so the box keeps 35 days (review
+the review needs the live refusal checks of "Add a chat-triggered job" step 11 to be in it, so the box keeps 35 days (review
 item D2.4 needs 30; a journal file is deleted whole, up to a day early). Until the journal is 30 days long,
 the review needs the date and time of VPS 3 (below) in its evidence. The setting lives in a file of our
 own; the server's `/etc/systemd/journald.conf` is not edited. Do it once, after a pull that brings
@@ -1710,7 +2065,7 @@ sudo journalctl --flush; echo "journal on disk: $([ -f /run/systemd/journal/flus
 
 Expected: `journal on disk: yes`.
 
-Then run live check c of part 2 step 11 (the malformed request). Its `c: status=refused
+Then run live check c of "Add a chat-triggered job" step 11 (the malformed request), with `JOB=ads-audit`. Its `c: status=refused
 reason=bad_request` shows that the audit broker, which was running through the restart, still writes to
 the journal. `hermes-broker` and `hermes-docker-proxy` have no harmless request to make them write; the
 rehearsal showed a long-running service logging through the restart.
@@ -1764,6 +2119,7 @@ A server image can leave, under `/var/log/journal`, the journal of the machine i
 journal service never trims it and D2.3 never reads it; D2.4 counts it (`other_directories`) and asks
 the operator to state it at every review while it exists. Search it once, then remove it. Needs the
 checkout at checklist v1.20 or later. Each block is pasted ALONE; run `sudo -v` first.
+Run the four blocks in one sitting. If anything else was done on the box between VPS 1 and VPS 3, start again at VPS 1: the removal checks the directory's counts and size, not that its content is what was searched.
 
 **VPS 1, search (reads only).**
 ```bash
@@ -1839,27 +2195,32 @@ of the old `.env` is made (the review's sweep reports one as `unlisted`, a FAIL)
 ## A security review
 
 Since checklist v1.17 it also needs the listener check installed and running ("The listener check"; D4.5), and reads the dashboard's secrets in whichever form Phase 7 left them (D2.1, D4.1); since v1.18 it also reads the accepted SSH keys (D1.7) and each service's start time (D4.6); since v1.19 it reads the journal's reach and settings (D2.4), which needs "The journal's retention" applied. Since v1.19 the collection MUST be run with `sudo`: the journal is read as root only, and D2.3, D10.7 and parts of D2.4 are `could-not-check` otherwise.
-Run it after parts 1 and 2 are applied and the rollback backups are shredded (part 2 step 10;
-the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). The three live refusal checks of part 2 step 11 must be in the journal, at most 30 days back (D10.7; read the three counts with the last line of step 11 before collecting, never assume them). The chat audit of part 2 step 10 must have returned `ok` within the last 7 days (D10.8: the broker deletes a result 7 days after writing it): collect the evidence within 7 days of that audit, or run another chat audit first. Raw bundles live in the
+Run it after part 1 and "Add a chat-triggered job" are applied and the rollback backups are shredded ("Add a chat-triggered job" step 10;
+the sweep reports a leftover `.env.pre-optb2` as `unlisted`, a FAIL). Before each review, for EACH installed job (`ads-audit` and `ads-report`): the three live refusal checks of "Add a chat-triggered job" step 11 (the off switch, a second run the same day, a malformed request) must be in that job's broker journal, at most 30 days back (D10.7; read the three counts with step 11's "afterwards" block, once for each job, before collecting, never assume them); and one chat run of that job (step 10) must have returned `ok` within the last 7 days (D10.8: the broker deletes a result 7 days after writing it): collect the evidence within 7 days of each job's `ok` run, or make another chat run of that job first. The report's `ok` run costs no AI fee; the audit's does. Raw bundles live in the
 gitignored `security-reviews/`; only the report is committed.
 
 1. Laptop, once: `python3 infra/hermes-agent/bin/review-fp-key.py init` (never overwrite; `show-id` prints its id).
-2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker systemd-journald hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. The journal service is among them since checklist v1.20: an automatic update of systemd restarts it, and D4.6 fails a restart nobody explained. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is five lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. The collector counts the sshd `Match` lines itself since v1.19, and reads how the running sshd was started (D1.7 `match_lines`, `include_elsewhere` and `daemon_options`): nothing is pasted by the operator for them. After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's (the collector run once with a throwaway key before the real collection, to see that every item is observed: `K=$(openssl rand -hex 32); echo "throwaway key: $K"` prints the key, 64 characters, which is typed or pasted at the collector's key prompt and discarded afterwards; pipe it into the summary tool, ALONE: `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty | python3 infra/hermes-agent/bin/summarize-review-bundle.py; echo "collector_rc=${PIPESTATUS[0]}"`. It lists every item with its status and ends with a list headed "Before the real collection": every line there should read `ok`, and a `LOOK` line says what to settle first (the fifteen lines are listed under this step). It prints numbers, yes or no, times and words from fixed lists only (a name, a path or anything else shows as `<withheld>` or `<other>`), so its output can be pasted in full) D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit holds the lock: wait for it and run the probe again.
-   The trial collection's closing list has fifteen lines. Each starts `ok` or `LOOK`. On this box some of them read `LOOK` on every trial, and more of them before the journal step ("The journal's retention", VPS 1 to VPS 3); compare line by line. BEFORE the journal step, five lines read `LOOK`: `nothing in the bundle is could-not-check` (with `(3 places)`, all three in D2.4's `drop_in`: our settings file is not installed yet, so its owner, group and mode cannot be read), `retention at least 30 days, …` (our file does not set it yet), `the journal reaches 30 days` (the journal holds 6 to 7 days), `no other journal directory and no missing days` (with `(1 other: needs your statement in the evidence)`) and `the proxy matches the last PASS`. AFTER the journal step, three lines read `LOOK`: `the journal reaches 30 days` (until about 23 days after the step), `no other journal directory and no missing days` (on every trial, see its line below) and `the proxy matches the last PASS` (on every trial); `nothing in the bundle is could-not-check` and the retention line must then read `ok`. Once "The leftover journal directory" has been done on this box, that directory is gone: `no other journal directory and no missing days` then reads `ok`, two lines read `LOOK`, and no statement about it is needed. Every other line should read `ok` both times. A `LOOK` that is not in this list, a number of places other than 3 before the step, or a place outside D2.4's `drop_in`: do what its line below says. For a `LOOK`:
+2. Box: `cd /opt/projects/claude_code && sudo git pull --ff-only`. First read each start time and the update log, and write any restart since the last PASS into the evidence (D4.6 asks): `for u in docker systemd-journald hermes-docker-proxy hermes-broker hermes-app-broker@ads-audit hermes-app-broker@ads-report; do echo "$u $(systemctl show $u -p ActiveEnterTimestamp --value)"; done; uptime -s; grep -E 'Start-Date|Commandline' /var/log/apt/history.log | tail -6`. The journal service is among them since checklist v1.20: an automatic update of systemd restarts it, and D4.6 fails a restart nobody explained. These lines only read, and they run for the first time on the box: the rehearsal's stand-in server has no systemd, so only `uptime -s` and the `grep` were run there. A healthy output is six lines, each a unit's name followed by a date and time (a name with nothing after it means that unit never became active since boot: stop and say so, except for `hermes-app-broker@ads-report` while that job is declared and not installed, where it is expected: say so and go on; the lines show when each unit last started, not that it is running now, which the collector's D4.2 and D10.3 report), then the box's boot time, then up to six lines of the update log. The collector counts the sshd `Match` lines itself since v1.19, and reads how the running sshd was started (D1.7 `match_lines`, `include_elsewhere` and `daemon_options`): nothing is pasted by the operator for them. After a pull that changed a file a service loads, restart that service before collecting (`sudo systemctl restart <unit>`): the trial collection's (the collector run once with a throwaway key before the real collection, to see that every item is observed: `K=$(openssl rand -hex 32); echo "throwaway key: $K"` prints the key, 64 characters, which is typed or pasted at the collector's key prompt and discarded afterwards; pipe it into the summary tool, ALONE: `cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --fp-key-tty | python3 infra/hermes-agent/bin/summarize-review-bundle.py; echo "collector_rc=${PIPESTATUS[0]}"`. It lists every item with its status and ends with a list headed "Before the real collection": every line there should read `ok`, and a `LOOK` line says what to settle first (the twenty lines are listed under this step). It prints numbers, yes or no, times and words from fixed lists only (a name, a path or anything else shows as `<withheld>` or `<other>`), so its output can be pasted in full) D4.6 `files_newer_than_start` names it. Then the probes: `sudo run-client-audit --probe-env; echo rc=$?` and `sudo run-client-audit --probe-egress; echo rc=$?` (both `rc=0`; the collector re-runs them). Each probe starts real containers: `--probe-env` can take about 8 minutes in the worst case and the collector allows 600 s per probe, so a slow run is not a hang. `rc=3` with no JSON on stdout (a line on stderr) means an audit or a report run holds the lock: wait for it and run the probe again.
+   The trial collection's closing list has twenty lines. Each starts `ok` or `LOOK`. On this box some of them read `LOOK` on every trial, and more of them before the journal step ("The journal's retention", VPS 1 to VPS 3); compare line by line. BEFORE the journal step, five lines read `LOOK`: `nothing in the bundle is could-not-check` (with `(3 places)`, all three in D2.4's `drop_in`: our settings file is not installed yet, so its owner, group and mode cannot be read), `retention at least 30 days, …` (our file does not set it yet), `the journal reaches 30 days` (the journal holds 6 to 7 days), `no other journal directory and no missing days` (with `(1 other: needs your statement in the evidence)`) and `the proxy matches the last PASS`. AFTER the journal step, three lines read `LOOK`: `the journal reaches 30 days` (until about 23 days after the step), `no other journal directory and no missing days` (on every trial, see its line below) and `the proxy matches the last PASS` (on every trial); `nothing in the bundle is could-not-check` and the retention line must then read `ok`. Once "The leftover journal directory" has been done on this box, that directory is gone: `no other journal directory and no missing days` then reads `ok`, two lines read `LOOK`, and no statement about it is needed. Every other line should read `ok` both times. Five of the twenty lines read the jobs and are there since checklist v1.21: `every job is declared and installed`, `every job's folders are as designed and no container mounts the job state`, `the installed job units equal the repository's and every stored result is in whitelist`, `the credential probe matches the declared map and a figures run starts no AI service` and `the report store holds only owner-only client folders`; with both jobs installed all five read `ok`, the first ending `(2 jobs)`. Four older lines now need EVERY installed job: `the three live refusals are in the journal`, `at least one run/ok result`, `no leak count above 0 (D2.3, D10.7)` and `no service runs older code than the box holds`; one that does not hold for a job ends with a count such as `(not so for 1 of 2 jobs)`, and the item's own lines above it show which job. **The rollout window.** Between the pull that brings `ads-report`'s description file and that job's installation ("Add a chat-triggered job" steps 1 to 4), a trial collection shows the job as declared and not installed, and two more lines read `LOOK`: `nothing in the bundle is could-not-check (...)` (a number of places, all of them values of that job) and `every job is declared and installed (1 declared but not installed)`. Until step 3b of that chapter has created the report store, `the report store holds only owner-only client folders` reads `LOOK` as well, its first note `(the store is not there)`. That is expected in that window and not otherwise: with the job installed, each of them is a `LOOK` to settle. A `LOOK` that is not in this list, a number of places other than 3 before the step, or a place outside D2.4's `drop_in`: do what its line below says. For a `LOOK`:
    - `every item observed (N items)`: it names the items that were not observed. Stop and report the summary.
    - `nothing in the bundle is could-not-check`: it gives the number of places. Find them in the items above it; for D2.4 see "Reading it later" under "The journal's retention". A collection run without `sudo` reads so in D2.3, D2.4 and D10.7. A run of the listener check that could not check, held in D4.5's `history_counts` under the key `could-not-check`, is a count of runs and is not a place: the line then ends `(not counted: N past listener-check runs in D4.5's history)` and stays `ok` (on this box N was 1 on 2026-10-12, the same run review #9's report shows; CHECKLIST D4.5 does not fail it).
+   - `every job is declared and installed`: with both jobs installed it reads `ok` and ends `(2 jobs)`. `(1 declared but not installed)`: expected in the rollout window only (above); at any other time finish that job's installation ("Add a chat-triggered job") or stop and report. `installed but not declared`, `on disk only`, `in no list`, `with a name that is not a job name`, `unit line not counted`, `entry on disk not counted` or `disagree with the lists`: stop and report the summary (something of a job is on the box that no description file names, or the unit listing is not in the form the collector reads).
+   - `every job's folders are as designed and no container mounts the job state`: read D10.4 in the summary and report it. `(not so for N of M jobs)`: a job's spool or state folder is not as `init-host-layout.py --app <job>` makes it. A `container mounts the job state` note is a failed review item: stop.
+   - `the installed job units equal the repository's and every stored result is in whitelist`: read D10.3 `installed_equal_repo` and D10.8 `out_of_whitelist` in the summary. A unit file that differs or was not read: stop and report; copy nothing over it without asking. A result out of whitelist: stop and report; do not delete it.
+   - `the credential probe matches the declared map and a figures run starts no AI service`: read D10.1 in the summary and report it. `a figures run does not start exactly the collector and the reader` is a failed review item (a report run would start a service it must not): stop. `(not in this bundle)`: the collector is older than checklist v1.21; pull first.
    - `sshd runs with its default settings file and no Match line`: read D1.7 in the summary. `match_lines`, `include_elsewhere`, `config_file_options` or `setting_options` above `0`: D1.7 then needs your statement in the evidence (step 6). `listeners` other than `1`, or `could-not-check` in `daemon_options`, `match_lines` or `include_elsewhere`: the item cannot pass and no statement changes that; stop and report.
-   - `the three live refusals are in the journal`: it names the missing ones. Run those live checks first (part 2 step 11).
-   - `at least one run/ok result`: run a chat audit first (part 2 step 10).
+   - `the three live refusals are in the journal`: every installed job needs all three. It names the missing ones (over all jobs together) and counts the jobs concerned, `(not so for N of M jobs)`; D10.7's lines above show which job. Run those live checks for that job first ("Add a chat-triggered job" step 11, with `JOB` set to it).
+   - `at least one run/ok result`: every installed job needs one of its own, and `(not so for N of M jobs)` counts the jobs without; D10.8's lines above show which. Make a chat run of that job first ("Add a chat-triggered job" step 10; the report's costs no AI fee, the audit's does).
    - `retention at least 30 days, set by our file, the file equal to the repository's, no other file, root:root 0644`: "The journal's retention", VPS 1 and VPS 2. The last words are our settings file's owner, group and mode as D2.4 `drop_in` shows them (`owner_is_root`, `group_is_root`, `mode`): anything else is a failed review item, so install the file again as VPS 2 does.
    - `the journal reaches 30 days`: expected until about 23 days after the retention was raised (the journal already held about 7 days). The evidence then needs the date and time of VPS 3 (step 6).
    - `the journal search read everything it was given`: read D2.3 in the summary and report it.
-   - `no leak count above 0 (D2.3, D10.7)`: with `(a count is above 0: this is a FAIL, not a reminder)`, stop: this is a failed review item (credential text or a customer id is in the journal). Do not go on to the real collection. Report the summary, and do not paste any journal line anywhere. With `(a count was not read)`: read D2.3 and D10.7 in the summary and report them.
+   - `no leak count above 0 (D2.3, D10.7)`: with `(a count is above 0: this is a FAIL, not a reminder)`, stop: this is a failed review item (credential text or a customer id is in the journal). Do not go on to the real collection. Report the summary, and do not paste any journal line anywhere. With `(a count was not read)`: read D2.3 and D10.7 in the summary and report them. D10.7's counts are read for every job, a job that is not installed included.
    - `the running journal service has read its settings`: "The journal's retention", "Reading it later" (VPS 1 first, then VPS 3), then collect again.
    - `the journal is being written to disk`: `sudo journalctl --flush`, then collect again; still `LOOK`: stop and report.
    - `no other journal directory and no missing days`: until "The leftover journal directory" has been done on this box, ONE other directory is expected (an old file from the machine the server image was built on), so this line reads `LOOK` with `(1 other: needs your statement in the evidence)`; the statement is the one step 6 describes, and it goes in the evidence file at any reach. After that section has been done the line reads `ok` and no statement is needed. A number other than the one expected for the box's state (1 before, 0 after), `(fewer files than days: needs explaining)` or `(not read)`: stop and report the summary.
    - `the proxy matches the last PASS`: this trial command names no last PASS, so the line always reads `LOOK` here. Step 3's real collection gives it; after a `systemctl daemon-reload` see step 3.
-   - `no service runs older code than the box holds`: restart the service that D4.6 `files_newer_than_start` counts (above), then collect again.
+   - `no service runs older code than the box holds`: restart the service that D4.6 `files_newer_than_start` counts (above), then collect again. The line reads the broker of every installed job: after a pull that changed a description file or `bin/app_lib.py`, "Add a chat-triggered job" step 7a restarts them all.
+   - `the report store holds only owner-only client folders`: with the report job installed it reads `ok` and ends with the number of client folders. `(the store is not there)`: expected in the rollout window only, until step 3b of "Add a chat-triggered job"; with `ads-report` installed, stop and report. `(not in this bundle)`: the collector is older than checklist v1.21; pull first. A count (`not a folder`, `not active`, `not listed`, `holding something that is not a file`, `not root 0700`, `with a file that is not root root 0600`), `the store is not root:root 0700`, or a `container mounts it` note: stop and report the summary. `not active` is a folder of a client that is no longer active: offboarding ("Ads audits on the box" step 8) removes it.
    - `fingerprint complete`: stop and report the summary.
    The command's last line is `collector_rc=0`. Another number, or `summarize-review-bundle: not a box bundle`: the collector stopped; read its own message and report it. First run on the box: the pipe was rehearsed in the stand-in, where most items cannot be observed.
 3. Box, ALONE (it prompts for the key on the tty; paste it from `pbcopy < ~/.config/hermes-review/fp.key`):
@@ -1868,13 +2229,13 @@ gitignored `security-reviews/`; only the report is committed.
    Once the key is pasted, clear the laptop's clipboard: `pbcopy < /dev/null`.
    A value that is pasted at a prompt on the box is copied in a SECOND laptop window, after the block is pasted and its prompt is waiting: copying the block itself replaces what the clipboard held.
    If the proxy's `ExecStart` hash will not match the last PASS (D4.2) because `systemctl daemon-reload` ran since
-   then (part 2 step 4 runs one, and so does "The listener check"; the line then shows `start_time=[n/a]` and `pid=0` for a running proxy), put this
+   then ("Add a chat-triggered job" step 4 runs one on a box that has no job yet, and so does "The listener check"; the line then shows `start_time=[n/a]` and `pid=0` for a running proxy), put this
    output in the operator evidence file. Its first hash is the bundle's `execstart_sha256`; its second puts the
    running process's start time and pid back, and equals the last PASS value when the command line is unchanged:
    `L=$(systemctl show hermes-docker-proxy -p ExecStart --no-pager); P=$(systemctl show hermes-docker-proxy -p MainPID --value); T=$(systemctl show hermes-docker-proxy -p ExecMainStartTimestamp --value); echo "pid=$P start=$T"; printf '%s\n' "$L" | sha256sum; printf '%s\n' "$L" | sed "s/start_time=\[n\/a\] ; stop_time=\[n\/a\] ; pid=0/start_time=[$T] ; stop_time=[n\/a] ; pid=$P/" | sha256sum`
 4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file, and refuses one with any group or other access: it is `0600`; the ads repo checked out at the pin, with `.claude/settings.json` stashed). Redirect its output into a file created under `umask 077` (for example `( umask 077; <the command above> > <the laptop bundle file> )`).
 5. Copy the box bundle to the laptop's `security-reviews/` (`chmod 600` the copy), and remove it from the box with `shred -u ~/bundle-box.json` (best effort on a virtual disk), then `ls ~/bundle-box.json` → `No such file or directory`. Check that both bundles show the same `cid_key_id`.
-6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of part 2 step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement that the `ok` run came from chat, D1.7's statement of whose each accepted key is (and of any `Match` block, `Include` of another place or daemon option, none expected; and, when `allowtcpforwarding` is `local`, of when it was set), D2.4's date the journal's retention was raised (while `reach_days` is under 30) with the time the journal service was restarted, D2.4's statement of the other directory under `/var/log/journal` (on this box there is one: an old file from the machine the server image was built on, outside the live journal; the operator decided on 2026-10-10 to leave it and state it; the statement is needed at any reach, whenever `other_directories` is above `0`; once "The leftover journal directory" has been done, the evidence states instead the date it was searched and removed, with that search's counts, and D2.4's `other_directories` is `0`), D2.4's explanation of `usage.files` lower than `reach_days` (whenever it is so, at any reach), the laptop keychain check below, D4.6's statement of each restart since the last PASS (what started, when, why). While `reach_days` is under 30 the report states the days D2.3's search covered and the days the two unit journals of D10.7 covered (REPORT-TEMPLATE has both lines). Every console screen and every pasted output is read in full before it goes into the evidence file: twice a paste turned out to be the day before's, and once a screen showed more than the statement said.
+6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of "Add a chat-triggered job" step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement, for each installed job, that its `ok` run came from chat, D10.3's statement of a job that is declared and not installed (in the rollout window only: that it is not yet installed, that this review is not a review of that job, and, when D7.1 shows the report store `absent`, that the store is not yet created), D1.7's statement of whose each accepted key is (and of any `Match` block, `Include` of another place or daemon option, none expected; and, when `allowtcpforwarding` is `local`, of when it was set), D2.4's date the journal's retention was raised (while `reach_days` is under 30) with the time the journal service was restarted, D2.4's statement of the other directory under `/var/log/journal` (on this box there is one: an old file from the machine the server image was built on, outside the live journal; the operator decided on 2026-10-10 to leave it and state it; the statement is needed at any reach, whenever `other_directories` is above `0`; once "The leftover journal directory" has been done, the evidence states instead the date it was searched and removed, with that search's counts, and D2.4's `other_directories` is `0`), D2.4's explanation of `usage.files` lower than `reach_days` (whenever it is so, at any reach), the laptop keychain check below, D4.6's statement of each restart since the last PASS (what started, when, why). While `reach_days` is under 30 the report states the days D2.3's search covered and the days the two unit journals of D10.7 covered (REPORT-TEMPLATE has both lines). Every console screen and every pasted output is read in full before it goes into the evidence file: twice a paste turned out to be the day before's, and once a screen showed more than the statement said.
 7. Laptop, for the evidence file: is the administrative key's passphrase still out of the keychain (step 7f
    took it out)? LAPTOP, one paste: one function and its call; it prints counts only. The first two lines
    only read. The third part asks the keychain to load what it holds, which is the only way to see what it
