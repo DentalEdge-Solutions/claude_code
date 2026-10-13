@@ -222,16 +222,14 @@ repository) needs a small adjustment for the new shape before review #11.
   escaping cannot hide a value. An entry that does not parse is counted (`unparsed_entries`); a count
   above 0 makes the item `could-not-check`.
 - Credential patterns and known secret values are searched in every field.
-- The customer-id count (D10.7) skips a fixed list of the journal's own clock, counter and address fields
-  (`__CURSOR`, `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP`, `__SEQNUM`, `_SOURCE_REALTIME_TIMESTAMP`,
-  `_SOURCE_MONOTONIC_TIMESTAMP`; the plan fixes the list from the box's field names). A ten-digit id can
-  match a long number there by chance. The checklist names the list; those fields are still searched for
-  credentials.
+- The customer-id count (D10.7) skips the fixed list of journal-written number and identifier fields
+  given under "Measurements" below. A ten-digit id can match a long number there by chance. The checklist
+  names the list; those fields are still searched for credentials.
 - `scanned_characters` now counts every field, so it jumps once between review #10 and review #11; the
   checklist says so.
 - Counts only, as today, plus the number of entries and fields read. D10.7 also reports
   `undecodable_characters`, as D2.3 already does.
-- The time limits are set from measurement M1 below.
+- The time limits are set from measurement M1 below: 300 s for the whole journal, 60 s per unit.
 - A hit is a finding. A credential is replaced before review #11. A customer id: the cause is fixed and the
   finding is decided on its own.
 
@@ -266,13 +264,31 @@ else. The runbook pipes it to the clipboard; it is never shown on screen.
 
 The other items of the handoff's "Deferred from the build" list, and the other private helper scripts.
 
-## Measurements on the box before the plan is written (read-only, by the operator, counts only)
+## Measurements on the box (2026-10-13, read-only, by the operator, counts only)
 
-- **M1:** the size in bytes and the seconds of one `journalctl -o json --all` read of the whole journal, and
-  the days the journal holds. The box holds about 8 days today, not 35: the limit is the measured seconds
-  scaled to 35 days, times ten, and never under 300 s.
-- **M2:** the journal's field names (names only), to fix the skip list.
-- **M3:** the number of other directories under `/var/log/journal` and of files in them.
+- **M1, the all-fields read.** `journalctl -o json --all` over the whole journal: 41,571 entries,
+  41,337,888 bytes, 4 s, no warning. The message text alone: 5,404,337 bytes, 1 s. The journal held 7.9
+  days (oldest entry `2026-10-05T16:53:19Z`, unchanged since review #10). Scaled to 35 days: about 185,000
+  entries, 184 MB, 18 s. The limit is the scaled seconds times ten and never under 300 s: **300 s**. The
+  audit's two unit journals are 21,352 and 45,136 bytes: their 60 s limit stays. Memory: 7.9 GB, 6.6 GB
+  available.
+- **M2, the field names.** 70 stored names, `_CMDLINE` and `COMMAND` among them (F59 is real on this
+  box), and `_HOSTNAME` and `_MACHINE_ID` on every entry (the search prints counts only).
+- **M3, the leftover directory.** One directory of the machine's own, one other, one file in it,
+  8,388,608 bytes. The removal block expects exactly these counts.
+
+**The skip list, fixed from M2.** The customer-id count skips a field only when the journal service writes
+it itself, no program can set it, and it holds a number or an identifier by construction:
+
+- address and clock: `__CURSOR`, `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP`, `__SEQNUM`,
+  `__SEQNUM_ID`, `_SOURCE_REALTIME_TIMESTAMP`, `_SOURCE_MONOTONIC_TIMESTAMP`;
+- identifiers: `_BOOT_ID`, `_MACHINE_ID`, `_STREAM_ID`, `_SYSTEMD_INVOCATION_ID`;
+- account and process numbers: `_PID`, `_UID`, `_GID`, `_AUDIT_LOGINUID`, `_AUDIT_SESSION`,
+  `_SYSTEMD_OWNER_UID`.
+
+Every field a program can write stays in the count: `MESSAGE`, `_CMDLINE`, `COMMAND`, and the size and
+usage figures (`CPU_USAGE_NSEC`, `MAX_USE` and the like), which leave a very small chance of a coincidental
+match that the report would explain. The skip list never applies to the credential search.
 
 ## Testing
 
@@ -288,7 +304,7 @@ The other items of the handoff's "Deferred from the build" list, and the other p
 
 ## Rollout and review #11
 
-**Before the box:** M1 to M3; the plan; the build; the rehearsal of "Add a chat-triggered job" for both
+**Before the box:** the plan; the build; the rehearsal of "Add a chat-triggered job" for both
 jobs; the operator's word before a push; the operator merges.
 
 **On the box, by the operator, block by block, each on the operator's word:**
