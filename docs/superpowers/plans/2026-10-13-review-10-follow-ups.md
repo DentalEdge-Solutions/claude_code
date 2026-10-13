@@ -16,7 +16,7 @@
 - Run `infra/hermes-agent/bin/run-bin-tests.sh` after every change under `infra/hermes-agent/bin/`; it must exit 0 before a commit.
 - No journal line, field value, host name, machine id, path under `/var/log/journal`, customer id, client name or credential value in any output, error reason, test name, commit message or document. Counts, times and fixed words only.
 - A `CouldNotCheck` reason is built from fixed words and `argv[0]`, never from stderr text.
-- The whole journal is read by ONE `journalctl` call (operator's decision, 2026-10-10).
+- The whole journal is read by ONE `journalctl` call (operator's decision, 2026-10-10), with `-o json --all --no-pager -q` (`-q`: as measured on the box; without it a unit that never logged prints a notice that is not an entry).
 - Time limits: 300 s for the whole journal (`JOURNAL_SCAN_TIMEOUT`), 60 s for a unit's journal.
 - The customer-id count skips exactly these 17 fields and no other: `__CURSOR`, `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP`, `__SEQNUM`, `__SEQNUM_ID`, `_SOURCE_REALTIME_TIMESTAMP`, `_SOURCE_MONOTONIC_TIMESTAMP`, `_BOOT_ID`, `_MACHINE_ID`, `_STREAM_ID`, `_SYSTEMD_INVOCATION_ID`, `_PID`, `_UID`, `_GID`, `_AUDIT_LOGINUID`, `_AUDIT_SESSION`, `_SYSTEMD_OWNER_UID`. The skip list never applies to the credential search.
 - The checklist goes to `version: 1.20` once, in Task 2. Later tasks of this plan and Plan B edit the checklist without raising it again while they are on the same branch.
@@ -58,7 +58,7 @@
 **Interfaces:**
 - Consumes: `CRED_TEXT_RE`, `R.looks_like_credential_text`, `Redactor.has_customer_id`, `_not_root_on_a_real_host`, `CouldNotCheck`, `TERM_GRACE`.
 - Produces:
-  - `JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager"]`
+  - `JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager", "-q"]`
   - `CID_SKIP_FIELDS: frozenset[str]` (the 17 names)
   - `SEARCH_COUNTS = ("pattern_hits", "known_secret_hits", "credential_text_lines", "customer_id_lines", "entries", "fields", "scanned_characters", "undecodable_characters")`
   - `Host.stream(argv, timeout=60)` → an iterable of text lines with `.rc` and `.err` set once the lines have ended
@@ -76,7 +76,7 @@ def _e(**fields):
 
 class TestSearchJournal(Base):
     SECRET = "sk-or-v1-" + "0123456789abcdef" * 4
-    ARGV = ["journalctl", "-o", "json", "--all", "--no-pager"]
+    ARGV = ["journalctl", "-o", "json", "--all", "--no-pager", "-q"]
 
     def _search(self, text, secrets=(), redactor=True, rc=0, err="", on_message=None):
         # A plain Host with a fake runner, not FakeHost: from Task 2 on FakeHost rewrites a line
@@ -86,7 +86,7 @@ class TestSearchJournal(Base):
         return CE._search_journal(host, self.ARGV, list(secrets), red, on_message=on_message)
 
     def test_the_constants_are_the_design_s(self):
-        self.assertEqual(CE.JOURNAL_ALL_FIELDS, ["-o", "json", "--all", "--no-pager"])
+        self.assertEqual(CE.JOURNAL_ALL_FIELDS, ["-o", "json", "--all", "--no-pager", "-q"])
         self.assertEqual(len(CE.CID_SKIP_FIELDS), 17)
         for name in ("MESSAGE", "_CMDLINE", "COMMAND", "_COMM", "_EXE", "CPU_USAGE_NSEC", "MAX_USE"):
             self.assertNotIn(name, CE.CID_SKIP_FIELDS)
@@ -283,7 +283,7 @@ After `_journal_read`, add:
 ```python
 # Every stored field of every entry (finding F59: `-o cat` prints the message alone, and a token in
 # a command line is stored in `_CMDLINE`). `--all`: without it a field over 4096 bytes prints as null.
-JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager"]
+JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager", "-q"]
 # The customer-id count skips a field only when the journal service writes it itself, no program
 # can set it, and it holds a number or an identifier by construction: a ten-digit id can match a
 # long number there by chance (design 2026-10-13, from the box's 70 field names). The credential
@@ -450,7 +450,7 @@ Add to `class TestJournalReach`:
         self.assertEqual(d["journal"], {"pattern_hits": 0, "known_secret_hits": 1})
         self.assertEqual((d["entries"], d["fields"]), (1, 2))
         searches = [c for c in host.calls if "--all" in c]
-        self.assertEqual(searches, [["journalctl", "-o", "json", "--all", "--no-pager"]])
+        self.assertEqual(searches, [["journalctl", "-o", "json", "--all", "--no-pager", "-q"]])
 
     def test_d2_3_at_the_35_day_size_finds_what_is_at_the_far_end(self):
         """185,000 entries of about 1,000 characters (M1 of 2026-10-13, scaled to 35 days), never held whole."""
@@ -493,7 +493,7 @@ Add to the class that holds `test_d10_7_reads_both_units_over_the_same_window` (
         host = self.host()
         CE.collect(host, self.KEY)
         calls = [c for c in host.calls if c[:2] == ["journalctl", "-u"] and "--all" in c]
-        self.assertEqual([c[3:] for c in calls], [["--since", "-30d", "-o", "json", "--all", "--no-pager"]] * 2)
+        self.assertEqual([c[3:] for c in calls], [["--since", "-30d", "-o", "json", "--all", "--no-pager", "-q"]] * 2)
 ```
 
 Run: `python3 infra/hermes-agent/bin/collect-review-evidence.test.py 2>&1 | tail -4`
@@ -611,6 +611,7 @@ Each fixture line `Started.` is now the 24-character line `{"MESSAGE": "Started.
 ```
 
   (`BAD_BYTE_CHILD` and `test_the_strict_runner_raises_on_a_byte_that_is_not_text_and_the_lossy_one_replaces_it` stay as they are.)
+- `test_d10_7_a_journal_read_that_ends_with_a_warning_is_could_not_check`: its fake runner tells the search from the oldest-entry call by `"-q" not in argv`. The search now ends with `-q` too (ruling of 2026-10-13: without `-q` a unit that never logged prints `-- No entries --`, which is not an entry). Change that condition to `"--all" in argv`.
 - `summarize-review-bundle.test.py`, `test_the_leak_keys_are_the_collectors`: `set(CE._journal_leaks("", [], NoIds))` becomes `set(CE.LEAK_COUNTS)`; delete the `NoIds` class there.
 
 A FAIL or ERROR outside this list, after these edits: STOP and report it with its name; do not edit that test.
