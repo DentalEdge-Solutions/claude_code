@@ -47,6 +47,9 @@ class T(unittest.TestCase):
         c = read("docker-compose.yml")
         self.check_gateway_mounts(c)
         self.assertNotIn("report-archive", c)
+        for raw in c.splitlines():                       # nor the parent that holds every store
+            line = raw.split("#", 1)[0]
+            self.assertNotIn("/var/lib/hermes", line, raw)
 
     def test_the_mount_check_rejects_bad_mounts(self):
         c = read("docker-compose.yml")

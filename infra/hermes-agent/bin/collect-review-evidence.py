@@ -46,6 +46,7 @@ GATEWAY_PROBE_PATHS = ("/opt/governance", "/var/lib/hermes/governance",
                        "/etc/hermes/.env" + ".ga",
                        "/var/lib/hermes/vaults", "/var/lib/hermes/reports", "/var/lib/hermes/draft-out",
                        "/var/lib/hermes/audit-data", "/var/lib/hermes/app-state",
+                       "/var/lib/hermes/report-archive",
                        "/etc/hermes/.env.anthropic", "/opt/data/vaults", "/opt/data/reports",
                        "/opt/data/home/.claude/settings.json")
 GATEWAY_CONTROL_PATH = "/opt/registry/projects.yaml"
@@ -2366,7 +2367,7 @@ def _audit_logs(host, reg):
 HERMES_VAR = "/var/lib/hermes"
 
 
-def _client_rows(host, reg, parent):
+def _client_rows(host, reg, parent, files=False):
     """One row per child of a client-data parent: registry status, owner, mode, never the name.
     A symlinked or non-directory parent is not listed; a child that vanishes is skipped."""
     root = host.path(parent)
@@ -2381,9 +2382,34 @@ def _client_rows(host, reg, parent):
                 st = os.lstat(os.path.join(root, name))
             except OSError:
                 continue
-            rows.append({"status": _reg_status(reg, name), "owner": _owner(st.st_uid),
-                         "mode": oct(stat.S_IMODE(st.st_mode))})
+            row = {"status": _reg_status(reg, name), "owner": _owner(st.st_uid),
+                   "mode": oct(stat.S_IMODE(st.st_mode))}
+            if files:                                  # counts by "owner group mode", never names
+                row["files"] = _file_modes(os.path.join(root, name), st)
+            rows.append(row)
     return rows
+
+
+def _report_archive(host, reg, ctx):
+    """The report store: its directory row, a row per client folder (status, owner, mode, file
+    counts, never a name), whether the listing could be had, and how many running containers
+    mount it, a path inside it or a directory above it. Every failure shows: a missing or
+    symlinked store is the parent row, an unlistable one is rows_listed false, and a container
+    listing that fails is could-not-check, never zero."""
+    path = HERMES_VAR + "/report-archive"
+    parent = _dir_row(host, path)
+    listed = True
+    if isinstance(parent, dict):
+        try:
+            os.listdir(host.path(path))
+        except OSError:
+            listed = False
+    try:
+        _, mounting, not_inspected = _containers_mounting(host, path)
+    except CouldNotCheck:
+        mounting = not_inspected = R.COULD_NOT_CHECK
+    return {"parent": parent, "rows": _client_rows(host, reg, path, files=True), "rows_listed": listed,
+            "containers_mounting": mounting, "containers_not_inspected": not_inspected}
 
 
 def d7_1(host, ctx):
@@ -2407,6 +2433,7 @@ def d7_1(host, ctx):
                          "data/reports": _dir_row(host, AGENT_DIR + "/data/reports")},
             "audit_data": audit,
             "audit_logs": _audit_logs(host, reg),
+            "report_archive": _report_archive(host, reg, ctx),
             "records": sum(len(fs) for _, _, fs in os.walk(records)) if os.path.isdir(records) else 0,
             "root_backups": [{"dir": b, "files": len(os.listdir(host.path("/root/" + b)))} for b in backups]}
 
@@ -2516,10 +2543,35 @@ def d10_3(host, ctx):
             "apps": _per_job(host, ctx, lambda app: _app_units(host, app))}
 
 
+def _exposes(source, tree):
+    """A mount whose host side is the tree, a path inside it, or a directory above it."""
+    s = os.path.normpath(source)
+    return s == tree or s.startswith(tree + "/") or tree.startswith(s.rstrip("/") + "/")
+
+
 def _exposes_app_state(source):
-    """A mount whose host side is app-state, a path inside it, or a directory above it."""
-    s, root = os.path.normpath(source), HL.DEFAULT_STATE_ROOT
-    return s == root or s.startswith(root + "/") or root.startswith(s.rstrip("/") + "/")
+    return _exposes(source, HL.DEFAULT_STATE_ROOT)
+
+
+def _containers_mounting(host, tree):
+    """(running containers, how many mount `tree`, how many could not be inspected). A container
+    that went away, or Mounts that are not what Docker prints, is counted as not inspected —
+    never allowed to fail the item or to pass as "mounts nothing". The container listing failing
+    raises CouldNotCheck."""
+    ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
+    mounting = not_inspected = 0
+    for cid in ids:
+        rc, out, _ = host.run(["docker", "inspect", "--format", "{{json .Mounts}}", cid])
+        try:
+            mounts = json.loads(out) if rc == 0 else None
+        except (ValueError, RecursionError):
+            mounts = None
+        if not isinstance(mounts, list) or not all(isinstance(m, dict) and isinstance(m.get("Source"), str)
+                                                   for m in mounts):
+            not_inspected += 1
+        elif any(_exposes(m["Source"], tree) for m in mounts):
+            mounting += 1
+    return ids, mounting, not_inspected
 
 
 LAYOUT_REASONS = ("no-account", "host-layout", "other")
@@ -2565,21 +2617,7 @@ def d10_4(host, ctx):
     checked costs that job alone; the item is could-not-check only when the job sets or the
     container listing cannot be had."""
     apps = _per_job(host, ctx, lambda app: _app_layout(host, app))
-    ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
-    mounting = not_inspected = 0
-    for cid in ids:
-        # A container that went away, or Mounts that are not what Docker prints, is counted —
-        # never allowed to fail the item or to pass as "mounts nothing".
-        rc, out, _ = host.run(["docker", "inspect", "--format", "{{json .Mounts}}", cid])
-        try:
-            mounts = json.loads(out) if rc == 0 else None
-        except (ValueError, RecursionError):
-            mounts = None
-        if not isinstance(mounts, list) or not all(isinstance(m, dict) and isinstance(m.get("Source"), str)
-                                                   for m in mounts):
-            not_inspected += 1
-        elif any(_exposes_app_state(m["Source"]) for m in mounts):
-            mounting += 1
+    ids, mounting, not_inspected = _containers_mounting(host, HL.DEFAULT_STATE_ROOT)
     return {"apps": apps, "containers": len(ids),
             "containers_mounting_app_state": mounting, "containers_not_inspected": not_inspected}
 

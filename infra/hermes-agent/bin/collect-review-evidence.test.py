@@ -1310,7 +1310,7 @@ class TestD10(JobBox):
         return mock.patch.object(CE.HL, "system_resolver", return_value=CE.HL.Resolver(names, names))
 
     def _containers(self, mounts):
-        del self.outputs[("docker", "ps")]
+        self.outputs.pop(("docker", "ps"), None)
         self.outputs[("docker", "ps", "-q", "--no-trunc", "--filter")] = (0, "", "")
         self.outputs[("docker", "ps", "-q", "--no-trunc")] = (0, "".join(c + "\n" for c in mounts), "")
         for cid, out in mounts.items():
@@ -1357,6 +1357,80 @@ class TestD10(JobBox):
                                               for a in APPS})
         self.assertEqual((it["data"]["containers"], it["data"]["containers_mounting_app_state"]), (1, 1))
         self.assertNotIn("gid 5", json.dumps(it))
+
+    # ---- Task 6: the report store (D4.1, D7.1) and the probe's figures line (D10.1) ----------
+    ARCH = "var/lib/hermes/report-archive"
+
+    def _arch_setup(self):
+        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {
+            "acme-dental": {"customer_id": "1234567890", "status": "active"}}}))
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        p = os.path.join(d, "2026-10-01_12-00-00-report.md"); open(p, "w").close(); os.chmod(p, 0o600)
+        os.makedirs(os.path.join(self.root, self.ARCH, "ghost-client"))
+
+    def test_d4_1_probes_the_report_store(self):
+        self.assertIn("/var/lib/hermes/report-archive", CE.GATEWAY_PROBE_PATHS)
+
+    def test_d7_1_report_archive_rows_by_status_without_names(self):
+        self._arch_setup()
+        out = CE.collect(self.host(), self.KEY)
+        ra = out["items"]["D7.1"]["data"]["report_archive"]
+        self.assertEqual(set(ra["parent"]), {"owner", "group", "mode"})
+        self.assertEqual([r["status"] for r in ra["rows"]], ["active", "unregistered"])
+        for r in ra["rows"]:
+            self.assertEqual(set(r), {"status", "owner", "mode", "files"})
+        self.assertEqual(sum(ra["rows"][0]["files"].values()), 1)
+        self.assertTrue(all(len(k.split()) == 3 for k in ra["rows"][0]["files"]))
+        self.assertEqual(ra["rows_listed"], True)
+        for name in ("acme-dental", "ghost-client", "report.md"):
+            self.assertNotIn(name, json.dumps(ra))
+
+    def test_d7_1_report_archive_missing_symlinked_or_unlistable_is_visible(self):
+        ra = self._item("D7.1")["data"]["report_archive"]
+        self.assertEqual((ra["parent"], ra["rows"]), ("absent", []))
+        link = os.path.join(self.root, self.ARCH); target = os.path.join(self.root, "elsewhere")
+        os.makedirs(os.path.join(target, "ghost-client")); os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+        out = CE.collect(self.host(), self.KEY)
+        self.assertEqual((out["items"]["D7.1"]["data"]["report_archive"]["parent"],
+                          out["items"]["D7.1"]["data"]["report_archive"]["rows"]), ("symlink", []))
+        self.assertNotIn("ghost-client", json.dumps(out))
+        os.remove(link); os.makedirs(link)
+        real = os.listdir
+        def deny(p, *a, **k):
+            if str(p).endswith("report-archive"):
+                raise PermissionError(p)
+            return real(p, *a, **k)
+        with mock.patch.object(CE.os, "listdir", deny):
+            ra = self._item("D7.1")["data"]["report_archive"]
+        self.assertEqual((ra["rows"], ra["rows_listed"]), ([], False))
+
+    def test_d7_1_report_archive_counts_containers_mounting_it(self):
+        def m(src):
+            return (0, json.dumps([{"Type": "bind", "Source": src}]), "")
+        for src, want in (("/var/lib/hermes/report-archive/acme-dental", 1), ("/var/lib/hermes/report-archive", 1),
+                          ("/var/lib/hermes", 1), ("/var", 1), ("/var/lib/hermes/reports", 0),
+                          ("/var/lib/hermes/report-archive-other", 0)):
+            with self.subTest(src=src):
+                self._containers({"c1": m(src)})
+                ra = self._item("D7.1")["data"]["report_archive"]
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), (want, 0))
+        self._containers({"c1": (1, "", "gone"), "c2": (0, "junk", "")})
+        ra = self._item("D7.1")["data"]["report_archive"]
+        self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), (0, 2))
+
+    def test_d7_1_a_container_listing_that_fails_is_visible_not_zero(self):
+        self.outputs[("docker", "ps")] = (1, "", "daemon down")
+        it = self._item("D7.1")
+        self.assertEqual(it["status"], R.OBSERVED)
+        ra = it["data"]["report_archive"]
+        self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]),
+                         (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_d10_1_carries_figures_services_unchanged(self):
+        fs = {"ads-report": {"anthropic_key": "absent", "proxy": "unused"}}
+        self.outputs[("run-client-audit", "--probe-env")] = (0, json.dumps({"matches_declared": True, "figures_services": fs}), "")
+        self.assertEqual(self._item("D10.1")["data"]["probe"]["figures_services"], fs)
 
     # ---- D10.6 -------------------------------------------------------------------------
     BLOCK = ("mcp_servers:\n"
