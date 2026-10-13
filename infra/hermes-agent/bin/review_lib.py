@@ -304,7 +304,9 @@ def restrict_output(stream):
     shell's umask: 0664 at review #10. Called before the first byte is written: when `stream` is
     a regular file, it is set to 0600. True when there was nothing to do (a pipe, a terminal, a
     stream without a descriptor) or the mode is now 0600; False when a regular file's mode could
-    not be set, or when the descriptor could not be examined, and the caller then prints nothing."""
+    not be set, or when the descriptor could not be examined, and the caller then prints nothing.
+    This cannot revoke a descriptor that another process opened before the mode was set: the runbook
+    therefore creates the file under `umask 077`, and this call is the backstop."""
     try:
         fd = stream.fileno()
     except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
