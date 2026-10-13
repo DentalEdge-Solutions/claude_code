@@ -1,6 +1,6 @@
 # Design 2026-10-13: a second chat-triggered job (`ads-report`), a job template that is a template, and the follow-ups of review #10
 
-Status: written for the operator's review on 2026-10-13, after five sections agreed in conversation. Nothing
+Status: approved by the operator on 2026-10-13, after five sections agreed in conversation. Nothing
 is built, pushed or changed on the box. Client names are written as `<client>`. This file carries no customer
 id, hostname, address, fingerprint or credential value.
 
@@ -218,12 +218,17 @@ repository) needs a small adjustment for the new shape before review #11.
   replacement.
 - **One call, consumed entry by entry.** This keeps the 2026-10-10 decision (one call, not several) and
   keeps memory flat whatever the size.
+- Each entry is parsed first and the search runs on the field values, not on the raw line, so JSON
+  escaping cannot hide a value. An entry that does not parse is counted (`unparsed_entries`); a count
+  above 0 makes the item `could-not-check`.
 - Credential patterns and known secret values are searched in every field.
 - The customer-id count (D10.7) skips a fixed list of the journal's own clock, counter and address fields
   (`__CURSOR`, `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP`, `__SEQNUM`, `_SOURCE_REALTIME_TIMESTAMP`,
   `_SOURCE_MONOTONIC_TIMESTAMP`; the plan fixes the list from the box's field names). A ten-digit id can
   match a long number there by chance. The checklist names the list; those fields are still searched for
   credentials.
+- `scanned_characters` now counts every field, so it jumps once between review #10 and review #11; the
+  checklist says so.
 - Counts only, as today, plus the number of entries and fields read. D10.7 also reports
   `undecodable_characters`, as D2.3 already does.
 - The time limits are set from measurement M1 below.
