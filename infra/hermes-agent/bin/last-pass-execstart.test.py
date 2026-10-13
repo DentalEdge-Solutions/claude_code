@@ -32,6 +32,20 @@ class T(unittest.TestCase):
             with self.subTest(args=args):
                 self.assertEqual(run(*args), (1, "", ""))
 
+    def _shell_stderr(self, tail):
+        b = self._bundle(VALUE)
+        err = tempfile.NamedTemporaryFile(delete=False); err.close()
+        self.addCleanup(os.unlink, err.name)
+        p = subprocess.run(["sh", "-c", 'python3 "$1" "$2" %s 2>"$3"' % tail, "sh", TOOL, b, err.name])
+        with open(err.name) as f:
+            return p.returncode, f.read()
+
+    def test_a_closed_stdout_fails_silently(self):
+        self.assertEqual(self._shell_stderr(">&-"), (1, ""))
+
+    def test_a_reader_that_exits_at_once_leaves_no_message(self):
+        self.assertEqual(self._shell_stderr("| true")[1], "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,8 +6,8 @@
 The collector takes that value as --last-pass-execstart. The public report shows it abbreviated;
 the full value is only in the private box bundle. Piped to the clipboard it is never shown on
 screen. Writes nothing, and exits 1, when the file cannot be read or the field is not exactly 64
-lowercase hex characters: no error text, so no path and no content. Stdlib only."""
-import json, re, sys
+lowercase hex characters, or when standard output cannot be written: no error text, so no path and no content. Stdlib only."""
+import json, os, re, sys
 
 
 def main(argv):
@@ -18,7 +18,15 @@ def main(argv):
         return 1
     if not (isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)):
         return 1
-    sys.stdout.write(value)
+    try:
+        sys.stdout.write(value)
+        sys.stdout.flush()
+    except BaseException:
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except BaseException:
+            pass
+        return 1
     return 0
 
 
