@@ -4648,7 +4648,7 @@ def _e(**fields):
 
 class TestSearchJournal(Base):
     SECRET = "sk-or-v1-" + "0123456789abcdef" * 4
-    ARGV = ["journalctl", "-o", "json", "--all", "--no-pager"]
+    ARGV = ["journalctl", "-o", "json", "--all", "--no-pager", "-q"]
 
     def _search(self, text, secrets=(), redactor=True, rc=0, err="", on_message=None):
         # A plain Host with a fake runner, not FakeHost: from Task 2 on FakeHost rewrites a line
@@ -4658,8 +4658,12 @@ class TestSearchJournal(Base):
         return CE._search_journal(host, self.ARGV, list(secrets), red, on_message=on_message)
 
     def test_the_constants_are_the_design_s(self):
-        self.assertEqual(CE.JOURNAL_ALL_FIELDS, ["-o", "json", "--all", "--no-pager"])
-        self.assertEqual(len(CE.CID_SKIP_FIELDS), 17)
+        self.assertEqual(CE.JOURNAL_ALL_FIELDS, ["-o", "json", "--all", "--no-pager", "-q"])
+        self.assertEqual(CE.CID_SKIP_FIELDS, frozenset({
+            "__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "__SEQNUM", "__SEQNUM_ID",
+            "_SOURCE_REALTIME_TIMESTAMP", "_SOURCE_MONOTONIC_TIMESTAMP", "_BOOT_ID", "_MACHINE_ID",
+            "_STREAM_ID", "_SYSTEMD_INVOCATION_ID", "_PID", "_UID", "_GID", "_AUDIT_LOGINUID",
+            "_AUDIT_SESSION", "_SYSTEMD_OWNER_UID"}))
         for name in ("MESSAGE", "_CMDLINE", "COMMAND", "_COMM", "_EXE", "CPU_USAGE_NSEC", "MAX_USE"):
             self.assertNotIn(name, CE.CID_SKIP_FIELDS)
         self.assertTrue(all(n.startswith("_") for n in CE.CID_SKIP_FIELDS))     # journald-written only
@@ -4734,6 +4738,37 @@ class TestSearchJournal(Base):
             self.assertIn(want, str(cm.exception))
             self.assertNotIn("/var/log", str(cm.exception))
 
+    def test_a_repeated_key_in_one_entry_makes_the_search_could_not_check(self):
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            self._search('{"MESSAGE": "a", "MESSAGE": "b"}\n')
+        self.assertIn("did not parse", str(cm.exception))
+
+    def test_a_line_longer_than_the_bound_makes_the_search_could_not_check(self):
+        code = "import json; print(json.dumps({'MESSAGE': 'x' * 1000}))"
+        with mock.patch.object(CE._RealStream, "MAX_LINE", 100):
+            host = CE.Host()
+            host._real = False          # past the root check; the stream is still the real one
+            host.stream = lambda argv, timeout=60: CE._RealStream([sys.executable, "-c", code], 30)
+            with self.assertRaises(CE.CouldNotCheck) as cm:
+                CE._search_journal(host, self.ARGV, [])
+        self.assertIn("did not parse", str(cm.exception))
+
+    def test_an_error_in_the_loop_stops_the_child(self):
+        code = "import sys, time\nwhile True:\n    sys.stdout.write('{\"MESSAGE\": \"m\"}\\n'); sys.stdout.flush(); time.sleep(0.01)"
+        stream = CE._RealStream([sys.executable, "-c", code], 60)
+        host = CE.Host()
+        host._real = False
+        host.stream = lambda argv, timeout=60: stream
+        procs = []
+        real_popen = CE.subprocess.Popen
+        def spy(*a, **k):
+            p = real_popen(*a, **k); procs.append(p); return p
+        def boom(_m):
+            raise RuntimeError("boom")
+        with mock.patch.object(CE.subprocess, "Popen", spy), self.assertRaises(RuntimeError):
+            CE._search_journal(host, self.ARGV, [], on_message=boom)
+        self.assertIsNotNone(procs[0].poll())
+
     def test_blank_lines_are_not_entries(self):
         self.assertEqual(self._search("\n" + _e(MESSAGE="ok") + "\n")["entries"], 1)
 
@@ -4752,7 +4787,7 @@ class TestStream(unittest.TestCase):
 
     def test_a_byte_that_is_not_text_becomes_one_replacement_character(self):
         s = self._real("import sys; sys.stdout.buffer.write(b'a\\xffb\\n')")
-        self.assertEqual((list(s), s.rc), (["a�b\n"], 0))
+        self.assertEqual((list(s), s.rc), (["a\ufffdb\n"], 0))
 
     def test_stderr_and_a_non_zero_exit_are_kept(self):
         s = self._real("import sys; print('out'); sys.stderr.write('warn'); sys.exit(3)")
@@ -4767,6 +4802,32 @@ class TestStream(unittest.TestCase):
         t0 = time.monotonic()
         self.assertEqual((list(s), s.rc), (["first\n"], 124))
         self.assertLess(time.monotonic() - t0, 30)
+
+    def test_a_child_that_ignores_sigterm_is_killed_after_the_grace(self):
+        code = ("import signal, time\nsignal.signal(signal.SIGTERM, lambda s, f: None)\n"
+                "print('first', flush=True)\ntime.sleep(60)")
+        s = self._real(code, timeout=1)
+        t0 = time.monotonic()
+        with mock.patch.object(CE._RealStream, "TERM_GRACE", 2):
+            self.assertEqual((list(s), s.rc), (["first\n"], 124))
+        self.assertLess(time.monotonic() - t0, 30)
+
+    def test_a_warning_after_a_lot_of_blank_stderr_is_not_blank(self):
+        s = self._real("import sys; sys.stderr.write(' ' * 70000 + 'warn')")
+        list(s)
+        self.assertTrue(s.err.strip())
+
+    def test_a_piece_of_a_long_line_is_yielded_without_a_newline(self):
+        with mock.patch.object(CE._RealStream, "MAX_LINE", 100):
+            s = self._real("print('x' * 1000)")
+            pieces = list(s)
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(pieces[0].endswith("x") and pieces[-1].endswith("\n"))
+
+    def test_only_a_newline_splits_a_fake_runner_s_text(self):
+        line = '{"MESSAGE": "a\u2028b\rc"}\n'
+        s = CE.Host("/", lambda argv, timeout=60: (0, line + line, "")).stream(["x"])
+        self.assertEqual(list(s), [line, line])
 
     def test_a_fake_runner_s_text_is_streamed_as_lines(self):
         s = CE.Host("/", lambda argv, timeout=60: (0, "a\nb\n", "w")).stream(["x"])

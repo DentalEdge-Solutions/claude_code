@@ -185,6 +185,8 @@ class _RealStream:
     end and rc is 124. stderr goes to an unnamed temporary file, so a child that writes a lot of
     it cannot block on a full pipe."""
     ERR_CAP = 65536
+    MAX_LINE = 64 * 1024 * 1024
+    TERM_GRACE = TERM_GRACE
 
     def __init__(self, argv, timeout):
         self._argv, self._timeout, self.rc, self.err = argv, timeout, None, ""
@@ -197,18 +199,28 @@ class _RealStream:
             errf.close()
             self.rc, self.err = 127, f"{self._argv[0]}: not found"
             return
+        except BaseException:
+            errf.close()
+            raise
         timed_out = threading.Event()
 
         def stop():
             timed_out.set()
             p.terminate()                       # not kill(): as _run_real
+            try:
+                p.wait(timeout=self.TERM_GRACE)
+            except subprocess.TimeoutExpired:
+                p.kill()
         timer = threading.Timer(self._timeout, stop)
         timer.start()
         try:
-            for raw in p.stdout:
+            while True:
+                raw = p.stdout.readline(self.MAX_LINE)      # a piece without a newline is yielded as it is
+                if not raw:
+                    break
                 yield raw.decode("utf-8", errors="replace")
             try:
-                p.wait(timeout=TERM_GRACE)
+                p.wait(timeout=self.TERM_GRACE)
             except subprocess.TimeoutExpired:
                 p.kill()
                 p.wait()
@@ -218,8 +230,11 @@ class _RealStream:
                 p.kill()
                 p.wait()
             p.stdout.close()
+            size = errf.seek(0, os.SEEK_END)
             errf.seek(0)
             err = errf.read(self.ERR_CAP).decode("utf-8", errors="replace")
+            if size > self.ERR_CAP:
+                err += " [more on stderr]"
             errf.close()
         self.rc, self.err = (124, f"{self._argv[0]}: timed out") if timed_out.is_set() else (p.returncode, err)
 
@@ -230,7 +245,8 @@ class _TextStream:
         self.rc, self._out, self.err = result
 
     def __iter__(self):
-        return iter(self._out.splitlines(keepends=True))
+        lines = self._out.split("\n")          # "\n" only, as the real stream (splitlines also splits on \r, U+2028...)
+        return iter([l + "\n" for l in lines[:-1]] + ([lines[-1]] if lines[-1] else []))
 
 
 class Host:
@@ -1172,7 +1188,8 @@ def _journal_read(host, argv, timeout=60):
 
 # Every stored field of every entry (finding F59: `-o cat` prints the message alone, and a token in
 # a command line is stored in `_CMDLINE`). `--all`: without it a field over 4096 bytes prints as null.
-JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager"]
+# `-q`: as the box measurement was made; without it journalctl prints "-- No entries --" for a unit that never logged, which is not an entry.
+JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager", "-q"]
 # The customer-id count skips a field only when the journal service writes it itself, no program
 # can set it, and it holds a number or an identifier by construction: a ten-digit id can match a
 # long number there by chance (design 2026-10-13, from the box's 70 field names). The credential
@@ -1211,6 +1228,13 @@ def _field_texts(value):
     return out
 
 
+def _no_repeated_key(pairs):
+    d = dict(pairs)
+    if len(d) != len(pairs):
+        raise ValueError("repeated key")
+    return d
+
+
 def _search_journal(host, argv, secrets, redactor=None, timeout=60, on_message=None):
     """One journalctl call (`argv` ends with JOURNAL_ALL_FIELDS), read entry by entry: every field
     value is parsed out of its JSON and searched for the credential patterns and the known secret
@@ -1226,35 +1250,41 @@ def _search_journal(host, argv, secrets, redactor=None, timeout=60, on_message=N
     known = [s for s in set(secrets) if len(s) >= 8]
     unparsed = unprinted = 0
     stream = host.stream(argv, timeout)
-    for line in stream:
-        c["scanned_characters"] += len(line)
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except (ValueError, RecursionError):
-            entry = None
-        if not isinstance(entry, dict):
-            unparsed += 1
-            continue
-        c["entries"] += 1
-        for name, value in entry.items():
-            texts = _field_texts(value)
-            if texts is None:
-                unprinted += 1
+    it = iter(stream)
+    try:
+        for line in it:
+            c["scanned_characters"] += len(line)
+            if not line.strip():
                 continue
-            c["fields"] += 1
-            for t in texts:
-                c["undecodable_characters"] += t.count("�")
-                c["pattern_hits"] += len(CRED_TEXT_RE.findall(t))
-                c["known_secret_hits"] += sum(t.count(s) for s in known)
-                if redactor is not None:
-                    for l in t.splitlines():
-                        c["credential_text_lines"] += 1 if R.looks_like_credential_text(l) else 0
-                        if name not in CID_SKIP_FIELDS and redactor.has_customer_id(l):
-                            c["customer_id_lines"] += 1
-                if on_message is not None and name == "MESSAGE":
-                    on_message(t)
+            try:
+                entry = json.loads(line, object_pairs_hook=_no_repeated_key)
+            except (ValueError, RecursionError):
+                entry = None
+            if not isinstance(entry, dict):
+                unparsed += 1
+                continue
+            c["entries"] += 1
+            for name, value in entry.items():
+                texts = _field_texts(value)
+                if texts is None:
+                    unprinted += 1
+                    continue
+                c["fields"] += 1
+                for t in texts:
+                    c["undecodable_characters"] += t.count("\ufffd")
+                    c["pattern_hits"] += len(CRED_TEXT_RE.findall(t))
+                    c["known_secret_hits"] += sum(t.count(s) for s in known)
+                    if redactor is not None:
+                        for l in t.splitlines():
+                            c["credential_text_lines"] += 1 if R.looks_like_credential_text(l) else 0
+                            if name not in CID_SKIP_FIELDS and redactor.has_customer_id(l):
+                                c["customer_id_lines"] += 1
+                    if on_message is not None and name == "MESSAGE":
+                        on_message(t)
+    finally:
+        close = getattr(it, "close", None)
+        if close is not None:
+            close()
     if stream.rc != 0:
         raise CouldNotCheck(f"{argv[0]} exited {stream.rc}")
     if stream.err.strip():
