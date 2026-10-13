@@ -131,14 +131,43 @@ class T(unittest.TestCase):
         self.put("own id 1234567890 and 123-456-7890\n")
         self.assertEqual(self.run_(self.args())[0], 0)
 
-    def test_a_registry_record_without_a_usable_id_is_skipped(self):
+    def test_a_registry_record_without_an_id_is_skipped_and_one_that_cannot_be_read_refuses(self):
         with open(self.registry, "w") as f:
             json.dump({"clients": {"acme-dental": {"customer_id": "1234567890"}, "no-id": {"status": "x"},
-                                   "short": {"customer_id": "12345"}, "odd": "not a record",
-                                   "num": {"customer_id": 5}}}, f)
+                                   "nul": {"customer_id": None}, "empty": {"customer_id": ""}}}, f)
         self.put("12345 and 5 and 999-888-7777\n")
         rc, _, err = self.run_(self.args())
         self.assertEqual(rc, 0, err)
+        for bad in ("12345", "abc"):
+            with self.subTest(bad=bad):
+                shutil.rmtree(os.path.join(self.archive, "acme-dental"), ignore_errors=True)
+                with open(self.registry, "w") as f:
+                    json.dump({"clients": {"acme-dental": {"customer_id": "1234567890"},
+                                           "o": {"customer_id": bad}}}, f)
+                rc, _, err = self.run_(self.args())
+                self.assertEqual(rc, 1); self.assertEqual(self.stored(), [])
+                self.assertIn("a registry record's customer id is not ten digits", err)
+                self.assertNotIn(bad + "\n", err.replace("digits", ""))
+
+    def test_one_client_found_by_name_and_by_id_counts_once(self):
+        self.put("other-dental, id 9998887777\n")
+        rc, _, err = self.run_(self.args())
+        self.assertEqual(rc, RL.ISOLATION_RC); self.assertIn("name 1 other client(s)", err)
+
+    def test_the_expansion_bound_refuses_with_rc_1_and_stores_nothing(self):
+        self.put("\ufdfa" * 5000 + "\n")
+        rc, _, err = self.run_(self.args())
+        self.assertEqual(rc, 1); self.assertEqual(self.stored(), [])
+        self.assertIn("expand too much", err)
+
+    def test_the_stored_document_is_the_original_byte_for_byte(self):
+        self.put("caf\u00e9 zero\u200bwidth \uff11\uff12 soft\u00adhyphen\n")
+        expected = RL.read_reports(self.reports, "acme-dental", READERS)
+        self.assertIn("zero\u200bwidth", expected)
+        rc, _, err = self.run_(self.args())
+        self.assertEqual(rc, 0, err)
+        with open(os.path.join(self.archive, "acme-dental", f"{TS}-report.md"), "rb") as f:
+            self.assertEqual(f.read(), expected.encode("utf-8"))
 
 
 if __name__ == "__main__":

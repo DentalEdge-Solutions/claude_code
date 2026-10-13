@@ -7,7 +7,7 @@ A figures run's three reader reports are written by a container (uid 10000) into
 never reaches the drafter of a later audit. Everything read here was written by a container: each
 name is opened below its folder without following a link, must be a regular file, is size-capped,
 and is copied, never parsed."""
-import os, re, stat
+import os, re, stat, sys, unicodedata
 
 import client_audit_lib as L
 import governance_lib
@@ -23,6 +23,97 @@ _REPORT_NAME_RE = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0
 
 class ReportError(Exception):
     pass
+
+
+# --- one text model for the isolation check and for the display (tables built once, at import) ---
+_CF, _PD, _ND = [], [], []
+for _cp in range(sys.maxunicode + 1):
+    _cat = unicodedata.category(chr(_cp))
+    if _cat == "Cf":
+        _CF.append(_cp)
+    elif _cat == "Pd":
+        _PD.append(_cp)
+    elif _cat == "Nd":
+        _ND.append(_cp)
+_INVISIBLE = [*range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0),
+              0x034F, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x17B4, 0x17B5, 0x2800]
+
+# what the operator sees: C0 controls except newline and tab, DEL, C1, every Cf, U+2028/U+2029
+_DISPLAY = dict.fromkeys([*range(0x00, 0x09), *range(0x0B, 0x20), *range(0x7F, 0xA0), *_CF, 0x2028, 0x2029])
+_N1 = {cp: None for cp in (*_CF, *_INVISIBLE)}
+_N1.update({cp: "-" for cp in (*_PD, 0x2212, 0x2043)})
+_N1.update({cp: str(unicodedata.decimal(chr(cp))) for cp in _ND})
+_N2 = dict(_N1)
+_N2[0x00AD] = "-"                    # a soft hyphen standing in for the hyphen
+_EXPAND_SLACK = 1024
+
+
+def display_text(text):
+    """Exactly what show-report prints."""
+    return text.translate(_DISPLAY)
+
+
+def isolation_texts(text):
+    """The copies the isolation check reads: the original, the display copy, and two normalised copies
+    (N1: soft hyphen dropped; N2: soft hyphen as a hyphen). The stored document stays the original."""
+    folded = unicodedata.normalize("NFKC", text)
+    if len(folded) > 2 * len(text) + _EXPAND_SLACK:
+        raise ReportError("the reports expand too much when normalised")
+    return (text, display_text(text), folded.translate(_N1), folded.translate(_N2))
+
+
+def _customer_id(rec):
+    """The record's ten digits, None when it has no id; ReportError when it has one that is unusable."""
+    cid = rec.get("customer_id") if isinstance(rec, dict) else None
+    if cid is None or cid == "":
+        return None
+    if isinstance(cid, int) and not isinstance(cid, bool):
+        cid = str(cid)
+    elif isinstance(cid, str):
+        cid = cid.replace(" ", "").replace("-", "")
+    if not isinstance(cid, str) or not re.fullmatch(r"[0-9]{10}", cid):
+        raise ReportError("a registry record's customer id is not ten digits")
+    return cid
+
+
+def _other_ids(registry, me):
+    try:
+        mine = _customer_id(registry.get(me))
+    except ReportError:
+        mine = None
+    out = {}
+    for slug, rec in registry.items():
+        if slug == me:
+            continue
+        cid = _customer_id(rec)
+        if cid is not None and cid != mine:
+            out[slug] = cid
+    return out
+
+
+def other_client_ids(registry, me):
+    """The ten-digit customer ids of the OTHER clients, leaving out any equal to mine."""
+    return list(_other_ids(registry, me).values())
+
+
+def isolation_hits(text, me, registry):
+    """How many DISTINCT other clients the text names: by slug in any of isolation_texts, or by
+    customer id in a normalised copy (digit boundaries, at most one separator between the groups of
+    3-3-4). A count only, never a name or an id; a client found twice counts once.
+    Known limits, shared with the audit's own check: a name written with a space, an underscore or a
+    line break in place of the hyphen; look-alike letters of another script; a combining mark inside
+    a name; an id grouped differently (for example with thousands separators)."""
+    ids = _other_ids(registry, me)
+    texts = isolation_texts(text)
+    named = set()
+    for t in texts:
+        named.update(L.others_named(t, me, list(registry)))
+    for slug, c in ids.items():
+        pat = re.compile(r"(?<![0-9])%s[^0-9A-Za-z\n]?%s[^0-9A-Za-z\n]?%s(?![0-9])" % (c[:3], c[3:6], c[6:]))
+        if any(pat.search(n) for n in texts[2:]):
+            named.add(slug)
+    named.discard(me)
+    return len(named)
 
 
 def _read_one(dir_fd, name):
@@ -80,7 +171,10 @@ def read_reports(reports_base, slug, readers):
 def _archive_fd(archive_base, owner_uid):
     # open first, judge the descriptor: no gap between the check and the use, and a trailing slash
     # (which makes some systems follow a final link) is stripped so O_NOFOLLOW sees the link.
-    fd = os.open(archive_base.rstrip("/") or "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    path = archive_base.rstrip("/") or ("/" if archive_base else "")
+    if not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise ReportError("the report store must be a real directory, owner-only")
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     st = os.fstat(fd)
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != owner_uid or stat.S_IMODE(st.st_mode) != 0o700:
         os.close(fd)
@@ -162,5 +256,5 @@ def is_stored(archive_base, slug, ts):
             return stat.S_ISREG(os.stat(f"{ts}-report.md", dir_fd=fd, follow_symlinks=False).st_mode)
         finally:
             os.close(fd)
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return False

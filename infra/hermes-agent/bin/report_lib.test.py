@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, stat, sys, tempfile, shutil, unittest
+import os, stat, sys, tempfile, shutil, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import report_lib as RL
@@ -102,6 +102,85 @@ class TestReadHardening(Base):
         self.assertEqual(str(cm.exception), "too many entries in the reports folder")
 
 
+REG = {"acme-dental": {"customer_id": "1234567890"}, "other-dental": {"customer_id": "9998887777"}}
+
+
+def hits(text, reg=REG):
+    return RL.isolation_hits(text, "acme-dental", reg)
+
+
+class TestDisplayText(unittest.TestCase):
+    def test_controls_format_characters_and_separators_go_text_newline_and_tab_stay(self):
+        self.assertEqual(RL.display_text("a\u202eb\u200bc\u2028d\u2029e\x1b[\x00\r\x7f\u009b \u00e9\n\tok\u00ad"),
+                         "abcde[ \u00e9\n\tok")
+
+
+class TestIsolation(unittest.TestCase):
+    def test_an_id_inside_a_longer_number_is_not_a_hit(self):
+        for text in ("219998887777", "99988877770000", "19998887777", "99988877771", "5999-888-77775",
+                     "1999-888-7777", "999-888-77775"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), 0)
+
+    def test_an_id_with_a_boundary_is_a_hit_in_every_common_form(self):
+        for text in ("customers/9998887777/x", "9998887777.0", "id:9998887777", "999-888-7777", "999 888 7777",
+                     "999.888.7777", "\uff19\uff19\uff19\uff18\uff18\uff18\uff17\uff17\uff17\uff17",
+                     "\u0669\u0669\u0669\u0668\u0668\u0668\u0667\u0667\u0667\u0667", "999\u2011888\u20117777"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), 1)
+
+    def test_registry_ids_as_numbers_or_dashed_are_checked_and_missing_ones_skipped(self):
+        reg = {"acme-dental": {"customer_id": "1234567890"}, "n": {"customer_id": 9998887777},
+               "none": {"status": "x"}, "nul": {"customer_id": None}, "empty": {"customer_id": ""}}
+        self.assertEqual(hits("9998887777", reg), 1)
+        self.assertEqual(hits("nothing here", reg), 0)
+        reg = {"acme-dental": {"customer_id": "1234567890"}, "d": {"customer_id": "999-888-7777"}}
+        self.assertEqual(hits("9998887777", reg), 1)
+
+    def test_an_id_that_cannot_be_read_refuses(self):
+        for bad in ("12345", "abc", 5, True, 1.5, ["x"], "12345678901"):
+            with self.subTest(bad=bad), self.assertRaises(RL.ReportError) as cm:
+                hits("x", {"acme-dental": {"customer_id": "1234567890"}, "o": {"customer_id": bad}})
+            self.assertEqual(str(cm.exception), "a registry record's customer id is not ten digits")
+
+    def test_another_slug_carrying_my_own_id_does_not_refuse_my_report(self):
+        reg = {"acme-dental": {"customer_id": "1234567890"}, "alias": {"customer_id": "123-456-7890"}}
+        self.assertEqual(hits("my id 1234567890", reg), 0)
+        self.assertEqual(RL.other_client_ids(reg, "acme-dental"), [])
+        self.assertEqual(RL.other_client_ids(REG, "acme-dental"), ["9998887777"])
+
+    def test_one_client_found_by_name_and_by_id_counts_once(self):
+        self.assertEqual(hits("other-dental 9998887777"), 1)
+
+    def test_hidden_characters_in_a_name_do_not_hide_it_and_a_space_still_does(self):
+        for text in ("other\u00addental", "other\u200b-dental", "other\u2011dental", "other\u2043dental",
+                     "\uff4f\uff54\uff48\uff45\uff52-\uff44\uff45\uff4e\uff54\uff41\uff4c", "oth\ufe0fer-dental",
+                     "other\u2212dental"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), 1)
+        self.assertEqual(hits("Other Dental"), 0)       # KNOWN LIMIT, pinned: no matching across a space
+
+    def test_a_text_that_expands_too_much_is_refused(self):
+        with self.assertRaises(RL.ReportError) as cm:
+            RL.isolation_texts("\ufdfa" * 1000)
+        self.assertEqual(str(cm.exception), "the reports expand too much when normalised")
+
+    def test_two_megabytes_of_ordinary_text_with_ten_clients_is_fast(self):
+        reg = {f"client-{i}": {"customer_id": f"{i:010d}"} for i in range(1, 10)}
+        reg["acme-dental"] = {"customer_id": "1234567890"}
+        text = ("Campaign A clicks 123 cost 45.67 conversions 8\n" * 50000)[: 2 * 1024 * 1024]
+        t0 = time.time()
+        RL.isolation_texts(text)
+        self.assertEqual(hits(text, reg), 0)
+        self.assertLess(time.time() - t0, 5)
+
+    def test_the_texts_are_the_original_the_display_copy_and_two_normalised_copies(self):
+        t = RL.isolation_texts("a\u200bb\u00ad-c")
+        self.assertEqual(len(t), 4)
+        self.assertEqual((t[0], t[1]), ("a\u200bb\u00ad-c", "ab-c"))
+        self.assertEqual((t[2], t[3]), ("ab-c", "ab--c"))
+
+
 class TestStore(Base):
     def store(self, text="DOC", ts=TS):
         return RL.store(self.archive, "acme-dental", ts, text, owner_uid=os.geteuid())
@@ -138,6 +217,31 @@ class TestStore(Base):
             with self.subTest(path=path), self.assertRaises((RL.ReportError, OSError)):
                 RL.store(path, "acme-dental", TS, "DOC", owner_uid=os.geteuid())
         self.assertEqual(os.listdir(self.archive), [])
+
+    def test_a_path_that_is_not_absolute_and_normal_is_refused(self):
+        link = os.path.join(self.root, "lnk"); os.symlink(self.archive, link)
+        for path in (link + "/.", link + "/../report-archive", "report-archive", "", self.archive + "/./",
+                     self.archive + "/../report-archive"):
+            with self.subTest(path=path), self.assertRaises(RL.ReportError):
+                RL.store(path, "acme-dental", TS, "DOC", owner_uid=os.geteuid())
+        self.assertEqual(os.listdir(self.archive), [])
+        self.assertEqual(RL.store(self.archive + "/", "acme-dental", TS, "DOC", owner_uid=os.geteuid()),
+                         f"acme-dental/{TS}-report.md")
+
+    def test_the_temporary_name_carries_the_process_id(self):
+        seen = []
+        real = os.link
+
+        def spy(src, dst, **kw):
+            seen.append(src)
+            return real(src, dst, **kw)
+        with mock.patch.object(RL.os, "getpid", lambda: 4242), mock.patch.object(RL.os, "link", spy):
+            self.store()
+        self.assertEqual(seen, [f".{TS}-report.4242.tmp"])
+
+    def test_is_stored_returns_false_for_a_non_string_base(self):
+        self.assertIs(RL.is_stored(None, "acme-dental", TS), False)
+        self.assertIs(RL.is_stored(5, "acme-dental", TS), False)
 
     def test_a_pre_existing_loose_client_folder_is_refused(self):
         d = os.path.join(self.archive, "acme-dental"); os.mkdir(d); os.chmod(d, 0o755)

@@ -77,6 +77,14 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 1); self.assertNotIn("Traceback", err)
 
 
+    def test_the_output_is_what_display_text_gives(self):
+        body = "x\u202ey\u200bz \u00e9\n\tq\x1b[0m\u2028"
+        with open(self.a + "/2026-10-01_00-00-00-report.md", "w", encoding="utf-8") as f:
+            f.write(body)
+        rc, out, _ = self.run_("acme", "--ts", "2026-10-01_00-00-00")
+        self.assertEqual((rc, out), (0, S.RL.display_text(body)))
+        self.assertEqual(S.safe_text(body), S.RL.display_text(body))
+
     def test_the_wrapper_runs_show_report_and_is_executable(self):
         p = os.path.join(HERE, "..", "deploy", "show-report")
         text = open(p).read()

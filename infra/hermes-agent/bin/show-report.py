@@ -5,24 +5,19 @@
 
 The report store is root's, but every name below it is still reached with open_dir_below and
 opened O_NOFOLLOW: a planted symlink is never followed."""
-import argparse, os, re, stat, sys, unicodedata
+import argparse, os, stat, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import client_audit_lib as L
 import report_lib as RL
 import vault_lib as V
 
 ARCHIVE = RL.ARCHIVE
-# A report quotes search terms, which an outsider controls: never let it drive the
-# operator's terminal. C0 controls except newline and tab (ESC, BEL, CR, BS, NUL...), DEL, and the
-# C1 range (U+0080-U+009F: some terminals take U+009B as CSI) are dropped.
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def safe_text(text):
-    """Also drops Unicode format characters (category Cf: bidi overrides, zero-width) and the line and
-    paragraph separators U+2028/U+2029; show-audit leaves them through, this one does not."""
-    return "".join(c for c in _CONTROL.sub("", text)
-                   if unicodedata.category(c) != "Cf" and c not in "\u2028\u2029")
+    """What the operator's terminal may receive: report_lib.display_text (controls, format characters
+    and line/paragraph separators dropped). A report quotes search terms, which an outsider controls."""
+    return RL.display_text(text)
 
 
 def main(argv=None, root="/"):
