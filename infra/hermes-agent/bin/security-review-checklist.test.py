@@ -324,7 +324,10 @@ class TestChecklistSync(unittest.TestCase):
                       "any `files` key other than `root root 0o600`", "a `containers_mounting` above `0`, is a FAIL",
                       "`rows_listed` `false`, a `dir` row with `listed: false`",
                       "is CANNOT-VERIFY for the report store and so for the item",
-                      "a bind reached through a symlinked host path is not resolved"):
+                      "a bind reached through a symlinked host path is not resolved",
+                      "While `ads-report` is declared and not installed (D10.3) and the operator states so, a `parent` "
+                      "of `absent` with no rows is expected and is not a FAIL",
+                      "once `ads-report` is installed, `absent` is a FAIL"):
             self.assertIn(words, rule, words)
 
     def test_d10_1_states_what_a_figures_run_starts(self):
@@ -419,7 +422,10 @@ class TestChecklistSync(unittest.TestCase):
             self.assertIn(one_job, text, where)
             self.assertIn("never judges the item by its status word alone", text, where)
             self.assertIn("`declared: true` and `installed: false`", text, where)
-        for words in ("a figures run (`ads-report`) starts `ads-collector` and `ads-reader` only and opens no Anthropic credential",
+        for words in ("the leftovers of a removed job",
+                      "values are then not judged; any count in its entry still is, as for a job that is declared and not installed",
+                      "Unexplained, it is a FAIL",
+                      "a figures run (`ads-report`) starts `ads-collector` and `ads-reader` only and opens no Anthropic credential",
                       "reads every job's entry",
                       "the normal state only between the pull that brings a job's description file and that job's installation",
                       "it is a FAIL unless the operator states that the job is not yet installed and that the review is "
