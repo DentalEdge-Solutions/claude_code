@@ -1713,33 +1713,50 @@ def _journal_usage(host, settings):
 
 def other_journals(host, ctx, secrets):
     """The one-time search of what D2.3 never reads: every real directory under /var/log/journal
-    other than the machine's own (a server image can leave the journal of the machine it was
-    built on). Each is read with `journalctl -D` and every stored field is searched. Counts only:
-    the directories' names are machine ids and go into the command, never into the result.
+    other than the machine's own whose name is a machine id (32 lowercase hex characters); a server
+    image can leave the journal of the machine it was built on. Each is read with `journalctl -D`
+    and every stored field is searched. Counts only: the directories' names are machine ids and go
+    into the command, never into the result. Anything else under the folder (a link, a file,
+    `remote`, `<id>.<namespace>`) is not searched and is counted in `skipped_entries`.
+    `journalctl -D` reads only `*.journal` and `*.journal~` files directly in a directory and with
+    -q may return nothing for a directory where it opened no file, so a directory that holds anything
+    else, or files but no entry read, is could-not-check: a clean count would prove nothing.
     Raises CouldNotCheck when a read is not whole, ValueError/OSError when the layout cannot be read."""
     with open(host.path("/etc/machine-id")) as f:
         mid = f.read(64).strip()
     if not re.fullmatch(r"[0-9a-f]{32}", mid):
         raise ValueError("machine-id")
     base = host.path(JOURNAL_DIR)
-    if not stat.S_ISDIR(os.lstat(base).st_mode):
-        raise ValueError("journal directory path")
-    names = sorted(n for n in os.listdir(base)
-                   if n != mid and stat.S_ISDIR(os.lstat(os.path.join(base, n)).st_mode))
+    for part in (base, os.path.dirname(base), os.path.dirname(os.path.dirname(base))):
+        if not stat.S_ISDIR(os.lstat(part).st_mode):
+            raise ValueError("journal directory path")
+    names, skipped = [], 0
+    for n in sorted(os.listdir(base)):
+        if n == mid:
+            continue
+        if re.fullmatch(r"[0-9a-f]{32}", n) and stat.S_ISDIR(os.lstat(os.path.join(base, n)).st_mode):
+            names.append(n)
+        else:
+            skipped += 1
     known = sorted({s for s in secrets if len(s) >= 8})
     total, files, size = dict.fromkeys(SEARCH_COUNTS, 0), 0, 0
     for n in names:
-        for root, _, fs in os.walk(os.path.join(base, n)):
-            for name in fs:
-                files += 1
-                size += os.lstat(os.path.join(root, name)).st_size
+        here = 0
+        for name in os.listdir(os.path.join(base, n)):
+            st = os.lstat(os.path.join(base, n, name))
+            if not stat.S_ISREG(st.st_mode) or not name.endswith((".journal", ".journal~")):
+                raise CouldNotCheck("a file journalctl does not read")
+            here += 1
+            size += st.st_size
+        files += here
         c = _search_journal(host, ["journalctl", "-D", JOURNAL_DIR + "/" + n, *JOURNAL_ALL_FIELDS],
                             known, ctx["redactor"], timeout=JOURNAL_SCAN_TIMEOUT)
+        if here and c["entries"] == 0:
+            raise CouldNotCheck("no entry was read from a directory that holds files")
         for k in total:
             total[k] += c[k]
-    return {"directories": len(names), "files": files, "bytes": size, "search": total,
-            "known_secrets_checked": len(known)}
-
+    return {"directories": len(names), "skipped_entries": skipped, "files": files, "bytes": size,
+            "search": total, "known_secrets_checked": len(known)}
 
 def _journald_drop_in(host):
     try:

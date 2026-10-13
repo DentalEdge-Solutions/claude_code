@@ -1771,23 +1771,29 @@ cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-revi
 ```
 Expected: one JSON object with `"kind": "other-journals"`, `directories` `1`, `files` `1`, the four leak
 counts in `search` (`pattern_hits`, `known_secret_hits`, `credential_text_lines`, `customer_id_lines`)
-all `0`, `known_secrets_checked` above `0`, then `rc=0`. STOP when a leak count is above `0` (a finding:
-decide it before anything is removed), when `rc=2` (the read was not whole: report the message), or when
-`directories` is not what review #10 recorded.
+all `0`, `search.entries` above `0`, `skipped_entries` `0`, `known_secrets_checked` above `0`, then `rc=0`.
+`rc=2` prints one line in fixed words on stderr and no JSON. STOP when a leak count is above `0` (a finding:
+decide it before anything is removed), when `search.entries` is `0` (nothing was read: the search proves
+nothing), when `skipped_entries` is not `0` (something else is in the journal folder: report it), when
+`rc=2` (the read was not whole: report the message), or when `directories` is not what review #10 recorded.
 
-**VPS 2, what would be removed (changes nothing).** Use the `files` and `bytes` VPS 1 printed.
+**VPS 2, what would be removed (changes nothing).** Use the `files` and `bytes` VPS 1 printed for both placeholders.
 ```bash
-cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files 1 --expect-bytes <bytes>; echo "rc=$?"
+cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files <files> --expect-bytes <bytes>; echo "rc=$?"
 ```
-Expected: `found: ...` with the same three numbers twice, `would remove: directories 1 | files 1 | bytes <bytes>`, `rc=0`.
+Expected: `found: ...` with the same three numbers twice, `would remove: directories 1 | files <files> | bytes <bytes>`, `rc=0`. STOP on `STOPPED: nothing was removed`: report the words in brackets.
 
 **VPS 3, remove (cannot be undone; on the operator's word).**
 ```bash
-cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files 1 --expect-bytes <bytes> --apply; echo "rc=$?"
+cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files <files> --expect-bytes <bytes> --apply; echo "rc=$?"
 ```
-Expected: `removed: directories 1 | files 1 | still there: 0`, `rc=0`. `STOPPED: nothing was removed`: report it.
+Expected: the `found:` line first, then `removed: directories 1 | files <files> | still there: 0`, `rc=0`. `STOPPED: nothing was removed`: report it. `STOPPED PART-WAY: ...`: some files are gone and the rest are not. Do not run it again; report the line.
 
-**VPS 4, verify.** `sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --other-journals | grep -o '"directories": [0-9]*'` → `"directories": 0`. The journal service is not restarted and the live journal is untouched: the next trial collection's D2.4 shows `other_directories: 0` and the same `oldest_entry.journal` as before.
+**VPS 4, verify.**
+```bash
+cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/collect-review-evidence.py --other-journals | grep -o '"directories": [0-9]*'; echo "rc=$?"
+```
+Expected: `"directories": 0`, `rc=0`. The journal service is not restarted and the live journal is untouched: the next trial collection's D2.4 shows `other_directories: 0` and the same `oldest_entry.journal` as before.
 
 Record in the operator evidence file: the date, the counts of VPS 1 and the line of VPS 3.
 

@@ -4982,8 +4982,9 @@ class TestOtherJournals(Base):
     def test_a_linked_directory_is_not_followed(self):
         os.symlink("/etc", os.path.join(self.root, "var/log/journal", "c" * 32))
         host = self.host()
-        self.outputs[("journalctl", "-D")] = (0, "", "")
-        self.assertEqual(CE.other_journals(host, CE.context(host, self.KEY), [])["directories"], 1)
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        d = CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertEqual((d["directories"], d["skipped_entries"]), (1, 1))
 
     def test_a_read_that_warns_is_could_not_check_without_the_directory_s_name(self):
         self.outputs[("journalctl", "-D")] = (0, "", f"Journal file /var/log/journal/{self.OTHER}/x is truncated")
@@ -4991,6 +4992,67 @@ class TestOtherJournals(Base):
         with self.assertRaises(CE.CouldNotCheck) as cm:
             CE.other_journals(host, CE.context(host, self.KEY), [])
         self.assertNotIn(self.OTHER, str(cm.exception))
+
+    def _search(self):
+        host = self.host()
+        return CE.other_journals(host, CE.context(host, self.KEY), []), host
+
+    def _refused(self, words):
+        host = self.host()
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertIn(words, str(cm.exception))
+        for text in (self.OTHER, self.MID, self.root):
+            self.assertNotIn(text, str(cm.exception))
+
+    def test_a_directory_with_a_sub_directory_a_link_or_a_foreign_file_is_could_not_check(self):
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        other = os.path.join(self.root, "var/log/journal", self.OTHER)
+        for make in (lambda: os.mkdir(os.path.join(other, "sub")),
+                     lambda: os.symlink("/etc/passwd", os.path.join(other, "l.journal")),
+                     lambda: open(os.path.join(other, "notes.txt"), "w").close()):
+            for n in os.listdir(other):
+                if n != "system.journal":
+                    p = os.path.join(other, n)
+                    os.rmdir(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+            make()
+            self._refused("a file journalctl does not read")
+
+    def test_a_directory_with_files_and_no_entry_read_is_could_not_check(self):
+        self.outputs[("journalctl", "-D")] = (0, "", "")
+        self._refused("no entry was read from a directory that holds files")
+
+    def test_only_machine_directories_are_searched_the_rest_are_counted(self):
+        j = os.path.join(self.root, "var/log/journal")
+        os.symlink("/etc", os.path.join(j, "c" * 32))
+        os.mkdir(os.path.join(j, "remote")); os.mkdir(os.path.join(j, self.MID + ".ns"))
+        self._w("/var/log/journal/stray.txt", "x")
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        d, host = self._search()
+        self.assertEqual((d["directories"], d["skipped_entries"]), (1, 4))
+        self.assertEqual([c[2] for c in host.calls if c[0] == "journalctl"], ["/var/log/journal/" + self.OTHER])
+
+    def test_a_link_above_the_journal_directory_is_a_value_error(self):
+        real = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, real, True)
+        shutil.move(os.path.join(self.root, "var/log"), os.path.join(real, "log"))
+        os.symlink(os.path.join(real, "log"), os.path.join(self.root, "var/log"))
+        with self.assertRaises(ValueError):
+            self._search()
+
+    def test_the_mode_prints_nothing_and_exits_2_when_the_secrets_cannot_be_loaded(self):
+        self.outputs[("find",)] = (0, CE.AGENT_DIR + "/.env.ghost\n", "")
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = CE.main(["--other-journals"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertNotIn(self.OTHER, err.getvalue())
+
+    def test_the_mode_prints_nothing_and_exits_2_when_the_search_raises(self):
+        self.outputs[("journalctl", "-D")] = (0, "", f"Journal file /var/log/journal/{self.OTHER}/x is truncated")
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = CE.main(["--other-journals"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertNotIn(self.OTHER, err.getvalue())
 
     def test_the_other_journals_mode_prints_counts_and_needs_no_key(self):
         self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
