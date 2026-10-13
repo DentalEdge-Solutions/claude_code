@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import importlib.util, os, re, sys, unittest
+import importlib.util, json, os, re, sys, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 CHECKLIST = os.path.join(os.path.dirname(HERE), "deploy", "security-review", "CHECKLIST.md")
@@ -37,9 +37,14 @@ def d10_lead():
 JOBS = ("ads-audit", "ads-report")
 
 
-def two_job_box(ce):
-    """A fake box that declares, has installed and holds on disk the two jobs of the repository's
-    description files, with one client folder in the report store and one stored result per job."""
+RESULT_PATHS = {"ads-audit": "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md",
+                "ads-report": "/var/lib/hermes/report-archive/acme-dental/2026-10-01_12-00-00-report.md"}
+
+
+def two_job_box(ce, installed=JOBS):
+    """A fake box that declares the two jobs of the repository's description files. The jobs in
+    `installed` are loaded by systemd, hold their directories and one well-formed `ok` result, and
+    the report store (one client folder, one file) exists only when `ads-report` is among them."""
     import shutil, tempfile
     root = tempfile.mkdtemp()
     shutil.copytree(os.path.join(os.path.dirname(HERE), "registry", "apps"), root + ce.APPS_DIR)
@@ -47,16 +52,19 @@ def two_job_box(ce):
     os.makedirs(os.path.dirname(reg))
     with open(reg, "w") as f:
         f.write('{"clients": {"acme-dental": {"status": "active"}}}')
-    folder = root + "/var/lib/hermes/report-archive/acme-dental"
-    os.makedirs(folder)
-    with open(folder + "/2026-10-01_08-00-00-report.md", "w") as f:
-        f.write("x")
-    for app in JOBS:
+    if "ads-report" in installed:
+        folder = root + "/var/lib/hermes/report-archive/acme-dental"
+        os.makedirs(folder)
+        with open(folder + "/2026-10-01_08-00-00-report.md", "w") as f:
+            f.write("x")
+    for app in installed:
+        rid = "0f8e2c1a-1111-4222-8333-444455556666"
         os.makedirs(root + ce.HL.DEFAULT_APPS_ROOT + "/" + app + "/results")
-        with open(root + ce.HL.DEFAULT_APPS_ROOT + "/" + app + "/results/x.json", "w") as f:
-            f.write("{")
+        with open(root + ce.HL.DEFAULT_APPS_ROOT + "/" + app + "/results/" + rid + ".json", "w") as f:
+            json.dump({"request_id": rid, "op": "run", "client": "acme-dental", "status": "ok", "reason": None,
+                       "exit_code": 0, "ts": "2026-10-01_12-00-00", "steps": [], "vault_path": RESULT_PATHS[app]}, f)
     units = "".join(f"hermes-app-{kind}@{app}.service loaded active running x\n"
-                    for app in JOBS for kind in ("broker", "runner"))
+                    for app in installed for kind in ("broker", "runner"))
     host = ce.Host(root, lambda argv, timeout=60: (0, units if argv[:2] == ["systemctl", "list-units"] else "", ""))
     return host, ce.context(host, b"\x11" * 32)
 
@@ -259,7 +267,8 @@ class TestChecklistSync(unittest.TestCase):
                       "declared with the jobs installed. A second job, `ads-report` (figures only). The report store "
                       "joins D4.1 and D7.1. D10.1 reports the services a figures run would start. D10.6: six tools.",
                       "A value that could not be checked for one installed job is CANNOT-VERIFY for the item. A job "
-                      "is declared, installed or on disk, and each per-job entry says which.)"):
+                      "is declared, installed or on disk, and each per-job entry says whether the job is declared and "
+                      "installed, and D10.3 lists the jobs on disk.)"):
             self.assertIn(words, text.split("**How to read an item.**")[0], words)
 
     def test_there_are_38_items(self):
@@ -312,6 +321,22 @@ class TestChecklistSync(unittest.TestCase):
         for kind in ("dir", "symlink", "file", "other"):
             self.assertIn(f"`{kind}`", b["D7.1"], kind)
 
+    def test_d7_1_says_what_the_store_shows_before_the_report_job_is_installed(self):
+        """Between the pull that declares `ads-report` and its installation there is no store: the
+        three values the exception names must be the ones the collector emits then."""
+        ce = _load("ce", "collect-review-evidence.py")
+        host, ctx = two_job_box(ce, installed=("ads-audit",))
+        job = ce.d10_3(host, ctx)["apps"]["ads-report"]
+        self.assertEqual((job["declared"], job["installed"]), (True, False))
+        archive = ce.d7_1(host, ctx)["report_archive"]
+        self.assertEqual((archive["parent"], archive["rows"], archive["rows_listed"]), ("absent", [], False))
+        rule = part(blocks()["D7.1"], "pass rule")
+        self.assertIn("While `ads-report` is declared and not installed (D10.3) and the operator states so, a `parent` of "
+                      "`absent` with no rows and `rows_listed` `false` is expected, and is neither a FAIL nor CANNOT-VERIFY; "
+                      "once `ads-report` is installed, `absent` is a FAIL.", rule)
+        self.assertIn("`rows_listed` `false` beside any other `parent`", rule)
+        self.assertIn("A row `status` other than `active`, `retired` or `unregistered`", rule)
+
     def test_d7_1_keeps_the_words_of_the_report_store_ruling(self):
         expected, rule = part(blocks()["D7.1"], "expected"), part(blocks()["D7.1"], "pass rule")
         for words in ("`parent` is a dict `owner` `root`, `group` `root`, `mode` `0o700`", "`rows_listed` is `true`",
@@ -322,11 +347,9 @@ class TestChecklistSync(unittest.TestCase):
         for words in ("A `report_archive.parent` other than `root`, `root`, `0o700`", "whose `kind` is not `dir`",
                       "whose `not_files` is above `0`", "(offboarding removes the folder)",
                       "any `files` key other than `root root 0o600`", "a `containers_mounting` above `0`, is a FAIL",
-                      "`rows_listed` `false`, a `dir` row with `listed: false`",
+                      "a `dir` row with `listed: false`",
                       "is CANNOT-VERIFY for the report store and so for the item",
                       "a bind reached through a symlinked host path is not resolved",
-                      "While `ads-report` is declared and not installed (D10.3) and the operator states so, a `parent` "
-                      "of `absent` with no rows is expected and is not a FAIL",
                       "once `ads-report` is installed, `absent` is a FAIL"):
             self.assertIn(words, rule, words)
 
@@ -381,7 +404,13 @@ class TestChecklistSync(unittest.TestCase):
                 self.assertRegex(b[item], "`" + re.escape(field) + "(`|: )", (item, field))   # `key` or `key: value`
         self.assertEqual({"declared_apps", "installed_apps", "on_disk_apps", "units_not_counted", "on_disk_not_counted",
                           "installed_equal_repo", "apps"}, set(d["D10.3"]))
-        for field in ("op", "status", "reason", "layout_problems", "layout_reason", "first_entry",
+        for app in JOBS:
+            self.assertEqual(d["D10.8"]["apps"][app], {"results": [{"op": "run", "status": "ok", "reason": "-", "keys_ok": True,
+                                                                     "values_ok": True}],
+                                                       "out_of_whitelist": 0, "declared": True, "installed": True}, app)
+        for field in ("op", "status", "reason", "keys_ok", "values_ok"):
+            self.assertRegex(b["D10.8"], "`" + field + "(`|: )", field)
+        for field in ("layout_problems", "layout_reason", "first_entry",
                       "installed_since_last_pass", "known_secrets_checked", "out_of_whitelist"):
             self.assertIn(field, " ".join(b[i] for i in d), field)
         for reason in ce.LAYOUT_REASONS:
@@ -409,7 +438,13 @@ class TestChecklistSync(unittest.TestCase):
                       "job's install date from the rollout record, the 30-day reach is not asked of it, and the three "
                       "live refusals and the one `ok` run are still required.",
                       "`null` (no `--last-pass-collected-at`) is CANNOT-VERIFY for that job's reach.",
-                      "for each installed job"):
+                      "for each installed job",
+                      "The new-job rule applies only to a job with `installed: true` that the operator states was installed "
+                      "since the last PASS, with its install date.",
+                      "`true` only says that the journal does not reach back to the last PASS: that job is judged as when the "
+                      "value is `false`, its reach read from `oldest_entry_read` and D2.4.",
+                      "a `first_entry` earlier than the stated install date is CANNOT-VERIFY unless explained",
+                      "a `first_entry` of `null` means the job has not logged yet"):
             self.assertIn(words, rule, words)
 
     def test_the_d10_area_keeps_the_words_that_carry_the_rulings_on_jobs(self):
@@ -433,8 +468,15 @@ class TestChecklistSync(unittest.TestCase):
                       "its expected `could-not-check` values are then not judged, but any count in its entry still is",
                       "a leak count above `0` or an `out_of_whitelist` above `0` is a FAIL whatever the job's state"):
             self.assertIn(words, lead, words)
+        for item in ("D10.4", "D10.7", "D10.8"):
+            self.assertIn(one_job + " (an installed job with no description file that the operator explains as the leftovers "
+                          "of a removed job is judged as the lead says)", part(b[item], "pass rule"), item)
+        self.assertIn("or the containers could not be listed", part(b["D10.4"], "pass rule"))
+        self.assertIn("There is no rollout exception here: the box's block must already hold both servers at the review",
+                      part(b["D10.6"], "pass rule"))
         rule = part(b["D10.3"], "pass rule")
-        for words in ("A job that is installed and not declared, or on disk only (`on_disk_apps` not equal to `declared_apps`)",
+        for words in ("A job that is installed and not declared, or on disk only (a job in `on_disk_apps` that is in neither "
+                      "`declared_apps` nor `installed_apps`)",
                       "a `units_not_counted` or `on_disk_not_counted` above `0`",
                       "is a FAIL unless the operator explains it (a job's leftovers after its removal; a mistyped unit name)",
                       "a stopped, disabled unit shows only through `on_disk_apps`"):
