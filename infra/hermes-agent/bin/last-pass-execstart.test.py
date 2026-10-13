@@ -43,7 +43,9 @@ class T(unittest.TestCase):
     def test_a_closed_stdout_fails_silently(self):
         self.assertEqual(self._shell_stderr(">&-"), (1, ""))
 
-    def test_a_reader_that_exits_at_once_leaves_no_message(self):
+    def test_a_reader_that_exits_at_once_leaves_nothing_on_stderr_guard_only(self):
+        # The value is too short to break the pipe reliably, so this does not prove the
+        # silent-failure code; the closed-stdout test does.
         self.assertEqual(self._shell_stderr("| true")[1], "")
 
 

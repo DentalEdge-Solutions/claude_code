@@ -325,6 +325,15 @@ class TestTighteningAfterReview3(Base):
         h = self.host()
         self.assertNotIn("collected_at", json.dumps(CE.box_fingerprint(h, CE.context(h))))
 
+    def test_the_git_status_call_takes_no_optional_lock(self):
+        h = self.host()
+        h.outputs[("git",)] = (0, "", "")
+        CE.box_fingerprint(h, CE.context(h))
+        status = [c for c in h.calls if c[0] == "git" and "status" in c]
+        self.assertTrue(status)
+        for c in status:
+            self.assertIn("--no-optional-locks", c[:c.index("status")])
+
     # ---- b: in-memory mounts are swept by the collector itself -------------------
     def test_memory_sweep_finds_credential_name_and_content_without_printing_the_value(self):
         self.outputs[("findmnt",)] = (0, "/ ext4\n/dev/shm tmpfs\n/run/user/1000 tmpfs\n/boot ext4\n", "")

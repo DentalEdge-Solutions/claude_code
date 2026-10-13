@@ -4,6 +4,7 @@
   sudo python3 bin/collect-review-evidence.py                    > bundle-box.json
   sudo python3 bin/collect-review-evidence.py --fingerprint-only
   sudo python3 bin/collect-review-evidence.py --credentials-only
+  sudo python3 bin/collect-review-evidence.py --other-journals   # searches the journal directories that are not this machine's own, in every stored field; counts only; needs no key
   sudo python3 bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <64 hex> --last-pass-collected-at <UTC time>
 
 It observes and reports; it never judges — CHECKLIST.md says what each item should show,
@@ -11,7 +12,7 @@ and the independent reviewer compares. It changes nothing a review looks at, but
 bundle is NOT read-only: D10.1 and D10.2 run `run-client-audit --probe-env` and
 `--probe-egress`, which take the audit lock, start the audit containers (and the egress
 proxy), create and remove `/var/lib/hermes/probe`, and make one outbound CONNECT to
-`api.anthropic.com` through the proxy. `--fingerprint-only` and `--credentials-only` run no
+`api.anthropic.com` through the proxy. `--fingerprint-only`, `--credentials-only` and `--other-journals` run no
 probe. Three rules, each tested:
   * nothing printed carries a credential value (Google, Anthropic, OpenRouter, the API server key or the dashboard password),
     a client slug or a customer id;
@@ -1184,6 +1185,9 @@ CID_SKIP_FIELDS = frozenset({
     "_PID", "_UID", "_GID", "_AUDIT_LOGINUID", "_AUDIT_SESSION", "_SYSTEMD_OWNER_UID"})
 SEARCH_COUNTS = ("pattern_hits", "known_secret_hits", "credential_text_lines", "customer_id_lines",
                  "entries", "fields", "scanned_characters", "undecodable_characters")
+SEARCH_HIT_COUNTS = ("pattern_hits", "known_secret_hits")
+LEAK_COUNTS = ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")
+READ_COUNTS = ("entries", "fields", "undecodable_characters")
 
 
 def _byte_list(v):
@@ -2049,8 +2053,8 @@ def _files_newer_than_start(host, unit, started_at):
 
 
 def d4_6(host, ctx):
-    """When the host, Docker, the three long-running Hermes services and the gateway container
-    last started, each compared with the last PASS's collection time (given with
+    """When the host, Docker, the journal service (systemd-journald), the three long-running Hermes
+    services and the gateway container last started, each compared with the last PASS's collection time (given with
     --last-pass-collected-at), and which files each service loads that changed after it
     started. D4.2's hash is the same string after any daemon-reload, so it cannot show a
     restart (review #8); this item can. Timestamps, unit names and file names only."""
@@ -2444,11 +2448,6 @@ def _label(value, allowed):
     return value if isinstance(value, str) and value in allowed else "?"
 
 
-SEARCH_HIT_COUNTS = ("pattern_hits", "known_secret_hits")
-LEAK_COUNTS = ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")
-READ_COUNTS = ("entries", "fields", "undecodable_characters")
-
-
 def _unit_search(host, unit, secrets, redactor, on_message=None):
     """What a unit's journal of the last 30 days must hold none of, in every stored field: lines
     of Google-credential-shaped text, lines with a registered customer id, credential patterns and
@@ -2555,7 +2554,7 @@ def box_fingerprint(host, ctx):
         return out
 
     def code():
-        base = ["git", "-c", f"safe.directory={CHECKOUT}", "-C", CHECKOUT]
+        base = ["git", "-c", f"safe.directory={CHECKOUT}", "-C", CHECKOUT, "--no-optional-locks"]
         trees = {p: _ok(host, base + ["rev-parse", f"HEAD:{p}"]).strip() for p in CODE_PATHS}
         dirty = _ok(host, base + ["status", "--porcelain", "--", *CODE_PATHS]).strip()
         return {"trees": trees, "dirty": bool(dirty)}

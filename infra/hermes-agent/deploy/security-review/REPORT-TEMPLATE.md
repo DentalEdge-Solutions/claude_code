@@ -9,7 +9,7 @@
 - **Journal (D2.4):** `oldest_entry.journal` `<UTC time>`, `reach_days` `<number>`; `MaxRetentionSec` `<value>` set by `<file>`; `Storage` `<value or null>`; `service.active` `<true/false>`, `config_changed_after_start` `<true/false>`; `usage.flushed_to_disk` `<true/false>`, `on_disk_age_seconds` `<number>`; `<bytes_percent_of_max_use>`% of the size limit, `<files_percent_of_max_files>`% of the file limit; `other_directories` `<number>`
 - **Journal search (D2.3):** `scanned_characters` `<number>`, `entries` `<number>`, `fields` `<number>`, `undecodable_characters` `<number>`, `oldest_entry_read` `<UTC time>`; days covered `<number>` (state it whenever D2.4's `reach_days` is under 30)
 - **Unit journals (D10.7):** `oldest_entry_read` `broker` `<UTC time or null>`, `runner` `<UTC time or null>`; `journal_read` `<as the bundle shows it>`; days covered `<number>` (state it whenever D2.4's `reach_days` is under 30)
-- **Proxy (D4.2):** `execstart_sha256` `<sha256>`, `execstart_argv_sha256` `<sha256>` (the next review gives the first to the collector as `--last-pass-execstart`)
+- **Proxy (D4.2):** `execstart_sha256` `<sha256>`, `execstart_argv_sha256` `<sha256>` (the next review gives the first to the collector as `--last-pass-execstart`; the public report may show it abbreviated, the full value being in the private box bundle, read with `bin/last-pass-execstart.py`)
 - **Listener check (D4.5):** `alert_log` `<as the bundle shows it>`
 - **D7.1 `records`:** `<number>`
 - **`cid_key_id`:** box `<8 hex>`, laptop `<8 hex>` — equal: yes|no (if not, no `cid:` fingerprint can be compared across the bundles)
