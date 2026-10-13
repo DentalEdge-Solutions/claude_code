@@ -5,7 +5,7 @@
 
 The report store is root's, but every name below it is still reached with open_dir_below and
 opened O_NOFOLLOW: a planted symlink is never followed."""
-import argparse, os, re, stat, sys
+import argparse, os, re, stat, sys, unicodedata
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import client_audit_lib as L
 import report_lib as RL
@@ -19,11 +19,14 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def safe_text(text):
-    return _CONTROL.sub("", text)
+    """Also drops Unicode format characters (category Cf: bidi overrides, zero-width) and the line and
+    paragraph separators U+2028/U+2029; show-audit leaves them through, this one does not."""
+    return "".join(c for c in _CONTROL.sub("", text)
+                   if unicodedata.category(c) != "Cf" and c not in "\u2028\u2029")
 
 
 def main(argv=None, root="/"):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     ap.add_argument("client")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--latest", action="store_true")
@@ -33,7 +36,7 @@ def main(argv=None, root="/"):
     root = root.rstrip("/")
     try:
         V.validate_slug(a.client)
-        if a.ts is not None and not L.TS_RE.match(a.ts):
+        if a.ts is not None and not L.TS_RE.fullmatch(a.ts):
             raise ValueError("invalid --ts")
     except ValueError as e:
         print(f"show-report: refused: {e}", file=sys.stderr); return 2

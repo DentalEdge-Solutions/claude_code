@@ -34,9 +34,13 @@ class T(unittest.TestCase):
         self.assertEqual(self.run_("acme", "--ts", "../../etc/passwd")[0], 2)
 
     def test_symlinked_report_not_followed(self):
-        os.symlink("/etc/hostname", self.a + "/2026-10-01_00-00-00-report.md")
-        rc, out, _ = self.run_("acme", "--ts", "2026-10-01_00-00-00")
-        self.assertEqual(rc, 1); self.assertEqual(out, "")
+        marker = os.path.join(self.root, "outside"); open(marker, "w").write("MARKER-OUTSIDE")
+        os.symlink(marker, self.a + "/2026-10-01_00-00-00-report.md")
+        # the listing already hides a link; make it list the name so the OPEN's own guards are what is tested
+        from unittest import mock
+        with mock.patch.object(S.RL, "list_report_ts", return_value=["2026-10-01_00-00-00"]):
+            rc, out, err = self.run_("acme", "--ts", "2026-10-01_00-00-00")
+        self.assertEqual(rc, 1); self.assertNotIn("MARKER-OUTSIDE", out + err); self.assertEqual(out, "")
 
     def test_no_reports(self):
         self.assertEqual(self.run_("other")[0], 1)
@@ -71,6 +75,28 @@ class T(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         rc, out, err = self.run_("acme")
         self.assertEqual(rc, 1); self.assertNotIn("Traceback", err)
+
+
+    def test_the_wrapper_runs_show_report_and_is_executable(self):
+        p = os.path.join(HERE, "..", "deploy", "show-report")
+        text = open(p).read()
+        self.assertIn("show-report.py", text); self.assertIn("show-report:", text)
+        self.assertNotIn("show-audit", text)
+        self.assertTrue(os.access(p, os.X_OK))
+
+    def test_ts_with_a_trailing_newline_and_abbreviated_options_are_refused(self):
+        self.assertEqual(self.run_("acme", "--ts", "2026-09-01_10-00-00\n")[0], 2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                S.main(["acme", "--lat"], root=self.root)
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_format_characters_are_dropped_but_text_newlines_and_tabs_stay(self):
+        evil = "a\u202eb\u200bc\u2028d\u2029e \u00e9\u00f1\n\tok\n"
+        with open(self.a + "/2026-10-01_00-00-00-report.md", "w", encoding="utf-8") as f:
+            f.write(evil)
+        rc, out, _ = self.run_("acme", "--ts", "2026-10-01_00-00-00")
+        self.assertEqual((rc, out), (0, "abcde \u00e9\u00f1\n\tok\n"))
 
 
 if __name__ == "__main__":
