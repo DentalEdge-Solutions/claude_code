@@ -1774,20 +1774,20 @@ counts in `search` (`pattern_hits`, `known_secret_hits`, `credential_text_lines`
 all `0`, `search.entries` above `0`, `skipped_entries` `0`, `known_secrets_checked` above `0`, then `rc=0`.
 `rc=2` prints one line in fixed words on stderr and no JSON. STOP when a leak count is above `0` (a finding:
 decide it before anything is removed), when `search.entries` is `0` (nothing was read: the search proves
-nothing), when `skipped_entries` is not `0` (something else is in the journal folder: report it), when
+nothing), when `skipped_entries` is not `0` (something else is in the journal folder: report it), when `files` is not `1` (more than one file: an entry count above 0 does not prove each was read; report it), when `known_secrets_checked` is `0` (the search looked for no installed value), when
 `rc=2` (the read was not whole: report the message), or when `directories` is not what review #10 recorded.
 
 **VPS 2, what would be removed (changes nothing).** Use the `files` and `bytes` VPS 1 printed for both placeholders.
 ```bash
 cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files <files> --expect-bytes <bytes>; echo "rc=$?"
 ```
-Expected: `found: ...` with the same three numbers twice, `would remove: directories 1 | files <files> | bytes <bytes>`, `rc=0`. STOP on `STOPPED: nothing was removed`: report the words in brackets.
+Expected: `found: ...` with the same three numbers twice, `would remove: directories 1 | files <files> | bytes <bytes>`, `rc=0`. STOP on `STOPPED: nothing was removed`: report the words in brackets. Any other line starting `STOPPED`: report it.
 
 **VPS 3, remove (cannot be undone; on the operator's word).**
 ```bash
 cd /opt/projects/claude_code && sudo python3 infra/hermes-agent/bin/remove-other-journal-dirs.py --expect-dirs 1 --expect-files <files> --expect-bytes <bytes> --apply; echo "rc=$?"
 ```
-Expected: the `found:` line first, then `removed: directories 1 | files <files> | still there: 0`, `rc=0`. `STOPPED: nothing was removed`: report it. `STOPPED PART-WAY: ...`: some files are gone and the rest are not. Do not run it again; report the line.
+Expected: the `found:` line first, then `removed: directories 1 | files <files> | still there: 0`, `rc=0`. `STOPPED: nothing was removed`: report it. Any other line starting `STOPPED`: report it. `STOPPED PART-WAY: ...`: the line says how many files and directories were removed out of how many. Do not run it again; report the line.
 
 **VPS 4, verify.**
 ```bash

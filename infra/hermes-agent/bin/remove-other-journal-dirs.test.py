@@ -38,9 +38,9 @@ class T(unittest.TestCase):
     def left(self):
         return sorted(os.listdir(self.j))
 
-    def no_ids(self):
+    def no_ids(self, root=None):
         for text in (self.out, self.err):
-            self.assertNotIn(MID, text); self.assertNotIn(OTHER, text); self.assertNotIn(self.root, text)
+            self.assertNotIn(MID, text); self.assertNotIn(OTHER, text); self.assertNotIn(root or self.root, text)
 
     def test_without_apply_it_only_says_what_it_would_do(self):
         rc, out = self.run_("--expect-dirs", "1", "--expect-files", "1", "--expect-bytes", "4096")
@@ -77,7 +77,7 @@ class T(unittest.TestCase):
             rc, _ = self.run_(*OK_ARGS, root=root)
             self.assertEqual((rc, sorted(os.listdir(j))), (1, [MID, OTHER]))
             self.assertTrue(os.path.exists(os.path.join(j, OTHER, "system.journal")))
-            self.no_ids()
+            self.no_ids(root)
 
     def test_a_linked_other_directory_removes_nothing_and_leaves_its_target(self):
         os.symlink(os.path.join(self.j, MID), os.path.join(self.j, "c" * 32))
@@ -134,11 +134,15 @@ class T(unittest.TestCase):
 
     # R4
     def test_only_a_machine_s_journal_directory_may_be_removed(self):
-        os.mkdir(os.path.join(self.j, MID + ".ns")); os.mkdir(os.path.join(self.j, "remote"))
-        rc, out = self.run_("--expect-dirs", "3", "--expect-files", "1", "--expect-bytes", "4096", "--apply")
-        self.assertEqual((rc, self.left()), (1, [MID, MID + ".ns", OTHER, "remote"]))
-        self.assertIn("STOPPED: nothing was removed", out)
-        self.no_ids()
+        for extra in (MID + ".ns", "remote"):
+            with self.subTest(extra=extra):
+                root, j = build(self.addCleanup)
+                os.mkdir(os.path.join(j, extra))
+                rc, out = self.run_("--expect-dirs", "2", "--expect-files", "1", "--expect-bytes", "4096",
+                                    "--apply", root=root)
+                self.assertEqual((rc, sorted(os.listdir(j))), (1, sorted([MID, OTHER, extra])))
+                self.assertIn("STOPPED: nothing was removed", out)
+                self.no_ids(root)
 
     # R5
     def test_a_directory_newer_than_the_machine_s_own_is_refused(self):
@@ -157,6 +161,7 @@ class T(unittest.TestCase):
         self.assertEqual((rc, self.left()), (1, [MID, OTHER]))
         self.assertIn("UnicodeDecodeError", out)
         self.assertNotIn("codec", out + self.err); self.assertNotIn("utf-8", out + self.err)
+        self.no_ids()
 
     def test_an_unexpected_exception_prints_no_traceback(self):
         with unittest.mock.patch.object(RM, "_plan", side_effect=RuntimeError("secret text")):
@@ -164,6 +169,70 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("STOPPED: an unexpected error (RuntimeError)", out)
         self.assertNotIn("secret text", out + self.err); self.assertNotIn("Traceback", self.err)
+
+    # each safeguard of the removal, pinned one at a time (the plan is patched, as in the swap test)
+    def _after_the_count(self, change):
+        real = RM._plan
+        def changing(root):
+            plan = real(root)
+            change()
+            return plan
+        with unittest.mock.patch.object(RM, "_plan", changing):
+            return self.run_(*OK_ARGS)
+
+    def test_a_different_directory_of_the_same_name_is_not_removed(self):
+        def change():
+            d = os.path.join(self.j, OTHER)
+            os.rename(d, os.path.join(self.root, "moved"))
+            os.mkdir(d)
+            with open(os.path.join(d, "system.journal"), "w") as f:
+                f.write("new")
+        rc, out = self._after_the_count(change)
+        self.assertEqual(rc, 1)
+        self.assertIn("STOPPED PART-WAY: files removed 0 of 1 | directories removed 0 of 1", out)
+        self.assertTrue(os.path.exists(os.path.join(self.j, OTHER, "system.journal")))
+        self.no_ids()
+
+    def test_a_planned_file_replaced_by_a_link_is_not_removed(self):
+        def change():
+            p = os.path.join(self.j, OTHER, "system.journal")
+            os.remove(p)
+            os.symlink(os.path.join(self.j, MID, "system.journal"), p)
+        rc, out = self._after_the_count(change)
+        self.assertEqual(rc, 1)
+        self.assertIn("STOPPED PART-WAY: files removed 0 of 1 | directories removed 0 of 1", out)
+        self.assertTrue(os.path.exists(os.path.join(self.j, MID, "system.journal")))
+        self.no_ids()
+
+    def test_the_part_way_line_counts_what_was_removed(self):
+        def change():
+            with open(os.path.join(self.j, OTHER, "added.journal"), "w") as f:
+                f.write("z")
+        rc, out = self._after_the_count(change)
+        self.assertEqual(rc, 1)
+        self.assertRegex(out, r"STOPPED PART-WAY: files removed 1 of 1 \| directories removed 0 of 1 \(OSError\)\n")
+        self.assertEqual(os.listdir(os.path.join(self.j, OTHER)), ["added.journal"])
+        self.no_ids()
+
+    def test_a_sub_directory_in_the_own_directory_does_not_hide_a_newer_leftover(self):
+        now = time.time()
+        os.utime(os.path.join(self.j, MID, "system.journal"), (now - 5000, now - 5000))
+        os.utime(os.path.join(self.j, OTHER, "system.journal"), (now - 100, now - 100))
+        os.mkdir(os.path.join(self.j, MID, "fresh"))
+        rc, out = self.run_(*OK_ARGS)
+        self.assertEqual((rc, self.left()), (1, [MID, OTHER]))
+        self.assertIn("another directory is newer than this machine's own", out)
+        self.no_ids()
+
+    def test_an_interrupt_during_removal_prints_the_part_way_line(self):
+        def interrupted(plan, done):
+            done[0] = 1
+            raise KeyboardInterrupt
+        with unittest.mock.patch.object(RM, "_remove", interrupted):
+            rc, out = self.run_(*OK_ARGS)
+        self.assertEqual(rc, 1)
+        self.assertIn("STOPPED PART-WAY: files removed 1 of 1 | directories removed 0 of 1 (KeyboardInterrupt)", out)
+        self.assertNotIn("Traceback", self.err)
 
     # R7
     def test_an_abbreviated_flag_is_a_usage_error(self):

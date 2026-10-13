@@ -7,10 +7,16 @@ A server image can leave the journal of the machine it was built on: the journal
 trims it and journalctl never reads it. Search it first (collect-review-evidence.py
 --other-journals), then remove it with this.
 
-All or nothing. Every entry under /var/log/journal other than the machine's own must be a real
-directory (not a link) holding regular files only, and their numbers and total size must equal
-the three expected values; otherwise nothing is removed. Without --apply it only says what it
-would do. Prints counts only: never a directory's name (a machine id) or a path. Stdlib only."""
+All or nothing. /var, /var/log and /var/log/journal must be real directories (not links). Every
+entry under /var/log/journal other than the machine's own must be NAMED exactly 32 lowercase hex
+characters (so `remote` and `<id>.<namespace>` are refused) and be a real directory holding regular
+files only; no file in it may be newer than the newest regular file of the machine's own directory
+(a stale /etc/machine-id must not point this at the live journal); and their numbers and total
+size must equal the three expected values. Otherwise nothing is removed. Without --apply it only
+says what it would do. Removal goes through a directory descriptor, checked against the directory
+counted. If it stops part-way (an error, or Ctrl-C) it prints one line, `STOPPED PART-WAY: files
+removed x of y | directories removed a of b (<exception type>)`, and returns 1. Prints counts only:
+never a directory's name (a machine id) or a path. Stdlib only."""
 import argparse, os, re, stat, sys
 
 
@@ -35,7 +41,8 @@ def _plan(root):
     own = os.path.join(base, mid)
     if not _is_dir(own):
         raise _Refuse("journal directory")
-    own_newest = max([os.lstat(os.path.join(own, n)).st_mtime_ns for n in os.listdir(own)] or [0])
+    own_files = [os.lstat(os.path.join(own, n)) for n in os.listdir(own)]
+    own_newest = max([st.st_mtime_ns for st in own_files if stat.S_ISREG(st.st_mode)] or [0])
     plan, size = [], 0
     for n in sorted(os.listdir(base)):
         if n == mid:
@@ -112,7 +119,7 @@ def _main(argv):
     done = [0, 0]
     try:
         _remove(plan, done)
-    except OSError as e:
+    except (OSError, KeyboardInterrupt) as e:
         print(f"STOPPED PART-WAY: files removed {done[0]} of {files} | directories removed {done[1]} of {dirs} "
               f"({type(e).__name__})")
         return 1

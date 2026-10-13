@@ -1758,6 +1758,7 @@ def other_journals(host, ctx, secrets):
     return {"directories": len(names), "skipped_entries": skipped, "files": files, "bytes": size,
             "search": total, "known_secrets_checked": len(known)}
 
+
 def _journald_drop_in(host):
     try:
         st = _stat(host, JOURNALD_DROP_IN)
