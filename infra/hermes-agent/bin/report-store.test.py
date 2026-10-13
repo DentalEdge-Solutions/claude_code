@@ -152,7 +152,27 @@ class T(unittest.TestCase):
     def test_one_client_found_by_name_and_by_id_counts_once(self):
         self.put("other-dental, id 9998887777\n")
         rc, _, err = self.run_(self.args())
-        self.assertEqual(rc, RL.ISOLATION_RC); self.assertIn("name 1 other client(s)", err)
+        self.assertEqual(rc, RL.ISOLATION_RC); self.assertIn("report-store: ASSERTION FAIL: the reports name another client (by name: 1, by customer id: 1); nothing stored", err)
+
+    def test_the_refusal_says_whether_a_name_or_an_id_was_found(self):
+        for text, want in (("other-dental\n", "by name: 1, by customer id: 0"), ("9998887777\n", "by name: 0, by customer id: 1")):
+            with self.subTest(text=text):
+                self.put(text)
+                rc, _, err = self.run_(self.args())
+                self.assertEqual(rc, RL.ISOLATION_RC); self.assertIn(want, err)
+                self.assertNotIn("9998887777", err); self.assertNotIn("other-dental", err)
+
+    def test_a_registry_record_that_is_not_an_object_refuses_the_store(self):
+        for bad in ("9998887777", 5):
+            with self.subTest(bad=bad):
+                with open(self.registry, "w") as f:
+                    json.dump({"clients": {"acme-dental": {"customer_id": "1234567890"}, "other-dental": bad}}, f)
+                rc, _, err = self.run_(self.args())
+                self.assertEqual(rc, 1); self.assertEqual(self.stored(), [])
+                self.assertIn("a registry record cannot be read", err)
+        with open(self.registry, "w") as f:
+            json.dump({"clients": {"acme-dental": "mine is odd", "other-dental": {"customer_id": "9998887777"}}}, f)
+        self.assertEqual(self.run_(self.args())[0], 0)
 
     def test_the_expansion_bound_refuses_with_rc_1_and_stores_nothing(self):
         self.put("\ufdfa" * 5000 + "\n")

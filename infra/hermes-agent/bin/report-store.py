@@ -27,10 +27,10 @@ def main(argv=None):
         ap.error("--reader given twice for one name")
     try:
         text = RL.read_reports(a.reports_dir, a.client, tuple(a.reader))
-        hits = RL.isolation_hits(text, a.client, V.load_registry(a.registry))
-        if hits:
-            print(f"report-store: ASSERTION FAIL: the reports name {hits} other client(s); nothing stored",
-                  file=sys.stderr)
+        by_name, by_id = RL.isolation_hits(text, a.client, V.load_registry(a.registry))
+        if by_name or by_id:
+            print(f"report-store: ASSERTION FAIL: the reports name another client "
+                  f"(by name: {by_name}, by customer id: {by_id}); nothing stored", file=sys.stderr)
             return RL.ISOLATION_RC
         rel = RL.store(a.archive, a.client, a.ts, text, owner_uid=OWNER_UID)
     except RL.ReportError as e:

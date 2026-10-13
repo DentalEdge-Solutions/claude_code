@@ -120,22 +120,22 @@ class TestIsolation(unittest.TestCase):
         for text in ("219998887777", "99988877770000", "19998887777", "99988877771", "5999-888-77775",
                      "1999-888-7777", "999-888-77775"):
             with self.subTest(text=text):
-                self.assertEqual(hits(text), 0)
+                self.assertEqual(hits(text), (0, 0))
 
     def test_an_id_with_a_boundary_is_a_hit_in_every_common_form(self):
         for text in ("customers/9998887777/x", "9998887777.0", "id:9998887777", "999-888-7777", "999 888 7777",
                      "999.888.7777", "\uff19\uff19\uff19\uff18\uff18\uff18\uff17\uff17\uff17\uff17",
                      "\u0669\u0669\u0669\u0668\u0668\u0668\u0667\u0667\u0667\u0667", "999\u2011888\u20117777"):
             with self.subTest(text=text):
-                self.assertEqual(hits(text), 1)
+                self.assertEqual(hits(text), (0, 1))
 
     def test_registry_ids_as_numbers_or_dashed_are_checked_and_missing_ones_skipped(self):
         reg = {"acme-dental": {"customer_id": "1234567890"}, "n": {"customer_id": 9998887777},
                "none": {"status": "x"}, "nul": {"customer_id": None}, "empty": {"customer_id": ""}}
-        self.assertEqual(hits("9998887777", reg), 1)
-        self.assertEqual(hits("nothing here", reg), 0)
+        self.assertEqual(hits("9998887777", reg), (0, 1))
+        self.assertEqual(hits("nothing here", reg), (0, 0))
         reg = {"acme-dental": {"customer_id": "1234567890"}, "d": {"customer_id": "999-888-7777"}}
-        self.assertEqual(hits("9998887777", reg), 1)
+        self.assertEqual(hits("9998887777", reg), (0, 1))
 
     def test_an_id_that_cannot_be_read_refuses(self):
         for bad in ("12345", "abc", 5, True, 1.5, ["x"], "12345678901"):
@@ -145,25 +145,77 @@ class TestIsolation(unittest.TestCase):
 
     def test_another_slug_carrying_my_own_id_does_not_refuse_my_report(self):
         reg = {"acme-dental": {"customer_id": "1234567890"}, "alias": {"customer_id": "123-456-7890"}}
-        self.assertEqual(hits("my id 1234567890", reg), 0)
+        self.assertEqual(hits("my id 1234567890", reg), (0, 0))
         self.assertEqual(RL.other_client_ids(reg, "acme-dental"), [])
         self.assertEqual(RL.other_client_ids(REG, "acme-dental"), ["9998887777"])
 
     def test_one_client_found_by_name_and_by_id_counts_once(self):
-        self.assertEqual(hits("other-dental 9998887777"), 1)
+        self.assertEqual(hits("other-dental 9998887777"), (1, 1))
 
     def test_hidden_characters_in_a_name_do_not_hide_it_and_a_space_still_does(self):
         for text in ("other\u00addental", "other\u200b-dental", "other\u2011dental", "other\u2043dental",
                      "\uff4f\uff54\uff48\uff45\uff52-\uff44\uff45\uff4e\uff54\uff41\uff4c", "oth\ufe0fer-dental",
                      "other\u2212dental"):
             with self.subTest(text=text):
-                self.assertEqual(hits(text), 1)
-        self.assertEqual(hits("Other Dental"), 0)       # KNOWN LIMIT, pinned: no matching across a space
+                self.assertEqual(hits(text), (1, 0))
+        self.assertEqual(hits("Other Dental"), (0, 0))       # KNOWN LIMIT, pinned: no matching across a space
+
+    def test_an_id_next_to_a_character_that_normalises_to_a_digit_is_still_a_hit(self):
+        for text in ("9998887777\u00b2", "\u24609998887777", "\u00b2\u00b29998887777\u00b9"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), (0, 1))
+        self.assertEqual(hits("29998887777"), (0, 0))
+
+    def test_a_registry_record_that_is_not_an_object_refuses_but_my_own_does_not(self):
+        for bad in ("9998887777", 5, None, ["x"]):
+            with self.subTest(bad=bad), self.assertRaises(RL.ReportError) as cm:
+                hits("x", {"acme-dental": {"customer_id": "1234567890"}, "o": bad})
+            self.assertEqual(str(cm.exception), "a registry record cannot be read")
+        self.assertEqual(hits("x", {"acme-dental": "not an object", "o": {"customer_id": "9998887777"}}), (0, 0))
+
+    def test_two_ids_on_one_line_are_both_found(self):
+        reg = {"acme-dental": {"customer_id": "1234567890"}, "a": {"customer_id": "9998887777"},
+               "b": {"customer_id": "1112223333"}}
+        self.assertEqual(hits("9998887777 1112223333", reg), (0, 2))
+        self.assertEqual(hits("999 888 7777 111 222 3333", reg), (0, 2))
+        self.assertEqual(hits("1112223333", reg), (0, 1))
+
+    def test_ids_not_separated_by_at_most_one_plain_character_are_not_hits(self):
+        for text in ("999\n888\n7777", "999a888b7777", "| 999 | 888 | 7777 |", "999  888  7777"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), (0, 0))
+
+    def test_the_expansion_bound_is_not_tighter_than_specified(self):
+        self.assertEqual(len(RL.isolation_texts("\u00bd" * 1000)), 4)          # 3x, within 2*len + 1024
+        self.assertEqual(len(RL.isolation_texts("a\u2122 b\u00bd c\u2122")), 4)
+        with self.assertRaises(RL.ReportError):
+            RL.isolation_texts("\u00bd" * 1200)
+
+    def test_other_invisible_characters_and_other_dashes_do_not_hide_a_name(self):
+        for text in ("oth\u2800er-dental", "oth\u3164er-dental", "other\uff0ddental", "other\u2e3adental",
+                     "oth\u034fer-dental", "other\u2014dental"):
+            with self.subTest(text=text):
+                self.assertEqual(hits(text), (1, 0))
+
+    def test_a_registry_id_written_with_spaces_is_read(self):
+        reg = {"acme-dental": {"customer_id": "1234567890"}, "o": {"customer_id": "999 888 7777"}}
+        self.assertEqual(hits("9998887777", reg), (0, 1))
+
+    def test_a_c1_control_other_than_csi_is_dropped_by_display_text(self):
+        self.assertEqual(RL.display_text("a\u0085b\u009bc\u0080d\u009fe"), "abcde")
 
     def test_a_text_that_expands_too_much_is_refused(self):
         with self.assertRaises(RL.ReportError) as cm:
             RL.isolation_texts("\ufdfa" * 1000)
         self.assertEqual(str(cm.exception), "the reports expand too much when normalised")
+
+    def test_two_megabytes_of_ordinary_text_with_a_hundred_clients_is_fast(self):
+        reg = {f"client-{i:03d}": {"customer_id": f"{i + 1:010d}"} for i in range(100)}
+        reg["acme-dental"] = {"customer_id": "1234567890"}
+        text = ("Campaign A clicks 123 cost 45.67 conversions 8\n" * 50000)[: 2 * 1024 * 1024]
+        t0 = time.time()
+        self.assertEqual(hits(text, reg), (0, 0))
+        self.assertLess(time.time() - t0, 5)
 
     def test_two_megabytes_of_ordinary_text_with_ten_clients_is_fast(self):
         reg = {f"client-{i}": {"customer_id": f"{i:010d}"} for i in range(1, 10)}
@@ -171,7 +223,7 @@ class TestIsolation(unittest.TestCase):
         text = ("Campaign A clicks 123 cost 45.67 conversions 8\n" * 50000)[: 2 * 1024 * 1024]
         t0 = time.time()
         RL.isolation_texts(text)
-        self.assertEqual(hits(text, reg), 0)
+        self.assertEqual(hits(text, reg), (0, 0))
         self.assertLess(time.time() - t0, 5)
 
     def test_the_texts_are_the_original_the_display_copy_and_two_normalised_copies(self):

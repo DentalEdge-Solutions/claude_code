@@ -63,8 +63,11 @@ def isolation_texts(text):
 
 
 def _customer_id(rec):
-    """The record's ten digits, None when it has no id; ReportError when it has one that is unusable."""
-    cid = rec.get("customer_id") if isinstance(rec, dict) else None
+    """The record's ten digits, None when it has no id; ReportError when the record is not an object
+    or its id is unusable."""
+    if not isinstance(rec, dict):
+        raise ReportError("a registry record cannot be read")
+    cid = rec.get("customer_id")
     if cid is None or cid == "":
         return None
     if isinstance(cid, int) and not isinstance(cid, bool):
@@ -96,24 +99,33 @@ def other_client_ids(registry, me):
     return list(_other_ids(registry, me).values())
 
 
+_ID_SCAN = re.compile(r"(?<![0-9])([0-9]{3})[^0-9A-Za-z\n]?([0-9]{3})[^0-9A-Za-z\n]?([0-9]{4})(?![0-9])")
+
+
 def isolation_hits(text, me, registry):
-    """How many DISTINCT other clients the text names: by slug in any of isolation_texts, or by
-    customer id in a normalised copy (digit boundaries, at most one separator between the groups of
-    3-3-4). A count only, never a name or an id; a client found twice counts once.
+    """(by_name, by_id): how many DISTINCT other clients the text names by slug, and how many by
+    customer id (a client found both ways counts in both). Names are looked for in every isolation
+    text, ids too (digit boundaries, at most one separator between the groups of 3-3-4). Counts only,
+    never a name or an id.
     Known limits, shared with the audit's own check: a name written with a space, an underscore or a
     line break in place of the hyphen; look-alike letters of another script; a combining mark inside
     a name; an id grouped differently (for example with thousands separators)."""
     ids = _other_ids(registry, me)
-    texts = isolation_texts(text)
-    named = set()
-    for t in texts:
-        named.update(L.others_named(t, me, list(registry)))
+    by_id_slugs = {}
     for slug, c in ids.items():
-        pat = re.compile(r"(?<![0-9])%s[^0-9A-Za-z\n]?%s[^0-9A-Za-z\n]?%s(?![0-9])" % (c[:3], c[3:6], c[6:]))
-        if any(pat.search(n) for n in texts[2:]):
-            named.add(slug)
-    named.discard(me)
-    return len(named)
+        by_id_slugs.setdefault(c, []).append(slug)
+    slugs = [x for x in registry if x != me]
+    by_name, by_id = set(), set()
+    for t in isolation_texts(text):
+        low = t.lower()
+        present = [x for x in slugs if x.lower() in low]          # a slug that is no substring cannot match
+        if present:
+            by_name.update(L.others_named(t, me, present))
+        for m in _ID_SCAN.finditer(t):
+            by_id.update(by_id_slugs.get("".join(m.groups()), ()))
+    by_name.discard(me)
+    by_id.discard(me)
+    return len(by_name), len(by_id)
 
 
 def _read_one(dir_fd, name):
