@@ -2391,13 +2391,14 @@ def _archive_row(reg, root, name):
     """One client folder of the report store, never its name: registry status, owner, mode, `kind`
     (dir | symlink | file | other, by lstat), `files` (regular files directly inside a dir, by
     "owner group mode"), `not_files` (entries inside that are not regular files, counted and
-    never followed) and `listed` (false when the folder could not be listed)."""
+    never followed), `files_not_read` (entries inside that could not be examined: counted, never
+    silently dropped) and `listed` (false when the folder could not be listed)."""
     full = os.path.join(root, name)
     st = os.lstat(full)
     kind = ("dir" if stat.S_ISDIR(st.st_mode) else "symlink" if stat.S_ISLNK(st.st_mode)
             else "file" if stat.S_ISREG(st.st_mode) else "other")
     row = {"status": _reg_status(reg, name), "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode)),
-           "kind": kind, "files": {}, "not_files": 0, "listed": False}
+           "kind": kind, "files": {}, "not_files": 0, "files_not_read": 0, "listed": False}
     if kind != "dir":
         return row
     try:
@@ -2411,6 +2412,7 @@ def _archive_row(reg, root, name):
         try:
             fst = os.lstat(os.path.join(full, fn))
         except OSError:
+            row["files_not_read"] += 1
             continue
         if stat.S_ISREG(fst.st_mode):
             k = f"{_owner(fst.st_uid)} {_group(fst.st_gid)} {oct(stat.S_IMODE(fst.st_mode))}"
@@ -2423,13 +2425,14 @@ def _archive_row(reg, root, name):
 
 def _report_archive(host, reg, ctx):
     """The report store: its directory row, a row per entry of it (see _archive_row), whether it
-    is a real directory that could be listed, and how many running containers mount it, a path
-    inside it or a directory above it. Every failure shows: a missing or symlinked store is the
-    parent row, an unlistable one is rows_listed false, and a container listing that fails is
-    could-not-check, never zero."""
+    is a real directory that could be listed, how many of its entries could not be examined
+    (rows_not_read: they have no row), and how many running containers mount it, a path inside
+    it or a directory above it. Every failure shows: a missing or symlinked store is the parent
+    row, an unlistable one is rows_listed false, an entry that could not be examined is counted,
+    and a container listing that fails is could-not-check, never zero."""
     path = HERMES_VAR + "/report-archive"
     parent = _dir_row(host, path)
-    rows, listed = [], False
+    rows, listed, not_read = [], False, 0
     if isinstance(parent, dict):
         root = host.path(path)
         try:
@@ -2441,12 +2444,12 @@ def _report_archive(host, reg, ctx):
             try:
                 rows.append(_archive_row(reg, root, name))
             except OSError:
-                continue
+                not_read += 1
     try:
         _, mounting, not_inspected = _containers_mounting(host, path)
     except CouldNotCheck:
         mounting = not_inspected = R.COULD_NOT_CHECK
-    return {"parent": parent, "rows": rows, "rows_listed": listed,
+    return {"parent": parent, "rows": rows, "rows_listed": listed, "rows_not_read": not_read,
             "containers_mounting": mounting, "containers_not_inspected": not_inspected}
 
 
@@ -2585,10 +2588,6 @@ def _exposes(source, tree):
     """A mount whose host side is the tree, a path inside it, or a directory above it."""
     s = os.path.normpath(source)
     return s == tree or s.startswith(tree + "/") or tree.startswith(s.rstrip("/") + "/")
-
-
-def _exposes_app_state(source):
-    return _exposes(source, HL.DEFAULT_STATE_ROOT)
 
 
 def _containers_mounting(host, tree):

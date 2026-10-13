@@ -374,7 +374,7 @@ class TestPrechecks(Base):
         with L.AuditLock(self.root + "/run/lock/hermes-client-audit.lock"):
             r = FakeRunner(self.root)
             rc, text = self.run_main(r)
-        self.assertEqual(rc, 3); self.assertEqual(r.calls, []); self.assertIn("another audit is running", text)
+        self.assertEqual(rc, 3); self.assertEqual(r.calls, []); self.assertIn("another run is in progress (an audit or a figures report)", text)
 
     def test_dry_run_prints_plan_runs_nothing_and_shows_no_secret(self):
         r = FakeRunner(self.root)
@@ -1392,7 +1392,7 @@ class TestProbeCli(Base):
             with L.AuditLock(self.root + RCA.LOCK):
                 rc, out, err, runs = self.call([flag], ENV_OK)
             self.assertEqual((rc, out, runs), (3, "", []))
-            self.assertIn("another audit is running", err)
+            self.assertIn("another run is in progress (an audit or a figures report)", err)
             self.assertEqual(self.proxy_stops, [])            # the running audit's proxy is not touched
             self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
 
@@ -1535,9 +1535,9 @@ class TestFigures(Base):
         self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "store"))
         arch = self.root + "/var/lib/hermes/report-archive"
         found = [os.path.join(b, f) for b, _, fs in os.walk(arch) for f in fs]
-        self.assertEqual(found, [])
-        for f in found:
-            self.assertNotIn("STALE-MARKER", open(f).read())
+        self.assertEqual(found, [])                 # no file at all in the store: the marker is in none
+        self.assertTrue(os.path.isdir(arch))        # ... and the walk above really walked the store
+        self.assertIsNone(j["vault_path"])
 
     def test_list_shows_the_archive_and_takes_no_lock(self):
         self.run_main(FakeRunner(self.root), "--figures")
@@ -1559,8 +1559,57 @@ class TestFigures(Base):
         self.assertEqual((rc, json.loads(text.splitlines()[0])["status"]), (3, "busy"))
 
     def test_figures_does_not_mix_with_the_probes(self):
-        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            RCA.main(["--probe-env", "--figures"], root=self.root)
+        for probe in ("--probe-env", "--probe-egress"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(err):
+                RCA.main([probe, "--figures"], root=self.root)
+            self.assertEqual(cm.exception.code, 2)                       # argparse's usage error
+            self.assertIn("no --figures", err.getvalue())                # the refusal is about --figures ...
+            self.assertNotIn("unrecognized arguments", err.getvalue())   # ... and not an option the parser does not know
+
+    def test_figures_with_a_client_is_accepted_by_the_parser(self):
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r, "--figures", "--dry-run")            # no SystemExit: the option is known
+        self.assertEqual((rc, r.calls), (0, []))
+        self.assertNotIn("usage:", text)
+
+
+class TestTheJobSLineUnderTheCommittedManifests(Base):
+    """The seam between the job and the contract: the ONE line a run prints with --json, given to
+    app_lib.map_done as a runner's done record, under the manifests the repository ships. A change
+    to the archive path, to a suffix or to a manifest's `result` cannot split the two unseen."""
+    APPS = os.path.join(os.path.dirname(HERE), "registry", "apps")
+    PATHS = {"ads-report": TestFigures.ARCHIVED,
+             "ads-audit": "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"}
+
+    def _line(self, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = RCA.main(["acme-dental", *extra], runner=FakeRunner(self.root), root=self.root, now="2026-10-01_12-00-00")
+        self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())
+        return rc, out.getvalue()
+
+    def _mapped(self, app, rc, stdout, manifest_dir=None):
+        import app_lib as A
+        m = A.load_manifest(os.path.join(manifest_dir or self.APPS, app + ".json"), app)
+        req = {"request_id": "0" * 32, "op": "run", "client": "acme-dental"}
+        return A.map_done(req, {"rc": rc, "stdout": stdout, "timed_out": False, "interrupted": False}, m)
+
+    def _both(self, args, own, other, manifest_dir=None):
+        rc, line = self._line(*args)
+        self.assertEqual(rc, 0, line)
+        r = self._mapped(own, rc, line, manifest_dir)
+        self.assertEqual((r["status"], r["reason"], r["vault_path"]), ("ok", None, self.PATHS[own]))
+        self.assertEqual((r["exit_code"], r["ts"], r["client"]), (0, "2026-10-01_12-00-00", "acme-dental"))
+        self.assertTrue(os.path.isfile(self.root + r["vault_path"]))        # the path named is the file written
+        r = self._mapped(other, rc, line, manifest_dir)
+        self.assertEqual((r["status"], r["reason"], r["vault_path"]), ("failed", "internal", None))
+
+    def test_a_figures_line_is_ok_under_the_report_manifest_and_internal_under_the_audit_s(self):
+        self._both(json.load(open(os.path.join(self.APPS, "ads-report.json")))["ops"]["run"]["args"], "ads-report", "ads-audit")
+
+    def test_an_audit_line_is_ok_under_the_audit_manifest_and_internal_under_the_report_s(self):
+        self._both(json.load(open(os.path.join(self.APPS, "ads-audit.json")))["ops"]["run"]["args"], "ads-audit", "ads-report")
 
 
 class TestStepNames(unittest.TestCase):

@@ -94,10 +94,10 @@ def _base():
                     "report_archive": {
                         "parent": {"owner": "root", "group": "root", "mode": "0o700"}, "rows_listed": True,
                         "rows": [{"status": "active", "owner": "root", "mode": "0o700", "kind": "dir",
-                                  "files": {"root root 0o600": 2}, "not_files": 0, "listed": True},
+                                  "files": {"root root 0o600": 2}, "not_files": 0, "files_not_read": 0, "listed": True},
                                  {"status": "active", "owner": "root", "mode": "0o700", "kind": "dir",
-                                  "files": {}, "not_files": 0, "listed": True}],
-                        "containers_mounting": 0, "containers_not_inspected": 0}}},
+                                  "files": {}, "not_files": 0, "files_not_read": 0, "listed": True}],
+                        "rows_not_read": 0, "containers_mounting": 0, "containers_not_inspected": 0}}},
                 "D10.1": {"status": "observed", "data": {"rc": 0, "probe": {
                     "services": {s: {"rc": 0, "env_names": ["GOOGLE_ADS_X"], "sentinel_env_names": [],
                                      "sentinel_in_files": False, "host_credential_files_visible": False}
@@ -364,6 +364,12 @@ class TestSetsMatchTheCollector(unittest.TestCase):
             self.assertEqual(set(CE._dir_row(host, "store")), {"owner", "group", "mode"})
             row = CE._archive_row({"acme-dental": {"status": "active"}}, os.path.join(root, "store"), "acme-dental")
             self.assertEqual((row["kind"], row["status"], row["listed"], row["not_files"]), (SB.ROW_DIR, SB.ROW_ACTIVE, True, 0))
+            self.assertEqual(set(row), SB.ROW_KEYS)                     # every key of a row is one this tool judges
+            self.assertEqual(row["files_not_read"], 0)
+            store = CE._report_archive(types.SimpleNamespace(path=lambda p: os.path.join(root, "nowhere"), run=lambda *a, **k: (1, "", "")), {}, None)
+            self.assertEqual(set(store), SB.STORE_KEYS)
+            self.assertEqual(set(store), set(bundle()["items"]["D7.1"]["data"]["report_archive"]))
+        self.assertEqual(SB.ROW_KEYS, set(bundle()["items"]["D7.1"]["data"]["report_archive"]["rows"][0]))
         self.assertEqual(SB.DIR_WORDS, frozenset({SB.DIR_ABSENT, SB.DIR_LINK, SB.DIR_NOT_A_DIRECTORY}))
 
     def test_the_probe_s_services_are_run_client_audit_s(self):
@@ -1201,9 +1207,9 @@ class TestEveryJob(unittest.TestCase):
 
     def test_a_job_installed_since_the_last_pass_is_said_on_the_reach_line(self):
         one = self._closing(lambda it: job(it, "D10.7", "ads-report").update(installed_since_last_pass=True))
-        self.assertRegex(one, rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS: judged from its first entry\)$")
+        self.assertRegex(one, rf"(?m)^ok    {self.REACH} \(1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry\)$")
         two = self._closing(lambda it: [job(it, "D10.7", a).update(installed_since_last_pass=True) for a in JOBS])
-        self.assertRegex(two, rf"(?m)^ok    {self.REACH} \(2 jobs installed since the last PASS: each judged from its first entry\)$")
+        self.assertRegex(two, rf"(?m)^ok    {self.REACH} \(2 jobs whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; each judged from its first entry\)$")
         self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.REACH}$")
         for none in (None, False):                       # no --last-pass-collected-at, or installed before it
             self.assertRegex(self._closing(lambda it: job(it, "D10.7").update(installed_since_last_pass=none)),
@@ -1212,14 +1218,15 @@ class TestEveryJob(unittest.TestCase):
             it["D2.4"]["data"]["reach_days"] = 12
             job(it, "D10.7", "ads-report")["installed_since_last_pass"] = True
         self.assertRegex(self._closing(short), rf"(?m)^LOOK  {self.REACH} \(reach is 12 days: .*\) "
-                                               r"\(1 job installed since the last PASS: judged from its first entry\)$")
+                                               r"\(1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry\)$")
         unread = self._closing(lambda it: job(it, "D10.7").update(installed_since_last_pass="could-not-check"))
         self.assertRegex(unread, rf"(?m)^LOOK  {self.REACH} \(not so for 1 of 2 jobs: a value could not be checked\)$")
 
     def test_the_report_store_and_the_figures_services_are_printed_and_are_not_other_keys(self):
         text = run(json.dumps(bundle()))[1]
         self.assertIn("  report_archive: {parent: {owner_is_root: true, group_is_root: true, mode: 0o700}, rows: 2, "
-                      "rows_listed: true, containers_mounting: 0, containers_not_inspected: 0}", text)
+                      "rows_listed: true, rows_not_read: 0, files_not_read: 0, containers_mounting: 0, "
+                      "containers_not_inspected: 0}", text)
         self.assertIn("D10.1  observed\n  rc: 0\n  probe: {matches_declared: true, services: 4, "
                       "figures_services: [ads-collector, ads-reader]}\n", text)
         for iid in ("D7.1", "D10.1"):
@@ -1231,6 +1238,18 @@ class TestEveryJob(unittest.TestCase):
         text = run(json.dumps(b))[1]
         self.assertIn("figures_services: [ads-collector, ads-drafter, <other>, <withheld>]", text)
         self.assertIn("report_archive: {parent: symlink, rows: 2", text)
+        b = bundle()
+        b["items"]["D7.1"]["data"]["report_archive"]["rows_not_read"] = 3
+        b["items"]["D7.1"]["data"]["report_archive"]["rows"][0]["files_not_read"] = 2
+        b["items"]["D7.1"]["data"]["report_archive"]["rows"][1]["files_not_read"] = 5
+        text = run(json.dumps(b))[1]
+        self.assertIn("rows_listed: true, rows_not_read: 3, files_not_read: 7, containers_mounting: 0", text)
+        self.assertNotIn("other keys", text[text.index("\nD7.1 "):].split("\nD", 2)[1])
+        for bad in ("acmecorp", None, True, -1, 10 ** 400):
+            b["items"]["D7.1"]["data"]["report_archive"]["rows"][0]["files_not_read"] = bad
+            text = run(json.dumps(b))[1]
+            self.assertIn("rows_not_read: 3, files_not_read: <withheld>, containers_mounting: 0", text, bad)
+            self.assertNotIn("acmecorp", text)
         self.assertNotIn("acmecorp", text)
 
     def test_the_previous_review_s_shape_prints_without_a_traceback(self):
@@ -1407,7 +1426,7 @@ class TestEveryJob(unittest.TestCase):
             quiet(it, "ads-report")
             job(it, "D10.7", "ads-audit")["installed_since_last_pass"] = True
         self.assertRegex(self._closing(one_of_each),
-                         rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS: judged from its first entry\) "
+                         rf"(?m)^ok    {self.REACH} \(1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry\) "
                          r"\(1 job installed since the last PASS and it has not logged yet\)$")
         self.assertRegex(self._closing(lambda it: [job(it, "D10.7", "ads-report").update(installed_since_last_pass=True),
                                                    job(it, "D10.7", "ads-report").pop("first_entry")]),
@@ -1698,10 +1717,10 @@ class TestEveryJob(unittest.TestCase):
             b["items"]["D7.1"]["data"]["report_archive"] = shape
             b["items"]["D10.1"]["data"]["probe"] = shape
             self.assertEqual(run(json.dumps(b))[0], 0, shape)
-            b["items"]["D7.1"]["data"]["report_archive"] = {"parent": shape, "rows": shape, "rows_listed": shape,
+            b["items"]["D7.1"]["data"]["report_archive"] = {"parent": shape, "rows": shape, "rows_listed": shape, "rows_not_read": shape,
                                                             "containers_mounting": shape, "containers_not_inspected": shape}
             self.assertEqual(run(json.dumps(b))[0], 0, shape)
-            b["items"]["D7.1"]["data"]["report_archive"] = {"rows": [shape, {"files": shape, "kind": shape}]}
+            b["items"]["D7.1"]["data"]["report_archive"] = {"rows": [shape, {"files": shape, "kind": shape, "files_not_read": shape}]}
             self.assertEqual(run(json.dumps(b))[0], 0, shape)
         b = clean()
         b["items"]["D10.7"]["data"]["apps"] = {str(i): {} for i in range(60)}
@@ -1756,7 +1775,22 @@ class TestReportStore(unittest.TestCase):
             (lambda ra: row(ra).pop("files"), r" \(1 with a file that is not root root 0600\)"),
             (lambda ra: ra["rows"].append("acmecorp"),
              r" \(1 not a folder\) \(1 not active\) \(1 not listed\) \(1 holding something that is not a file\) "
-             r"\(1 not root 0700\) \(1 with a file that is not root root 0600\)"),
+             r"\(1 not root 0700\) \(1 with a file that is not root root 0600\) \(entries inside a folder not read: not read\)"),
+            (lambda ra: ra.update(rows_not_read=1), r" \(1 entry of the store not read\)"),
+            (lambda ra: ra.update(rows_not_read=3), r" \(3 entries of the store not read\)"),
+            (lambda ra: ra.update(rows_not_read="could-not-check"), r" \(entries of the store not read: could not be checked\)"),
+            (lambda ra: ra.update(rows_not_read=True), r" \(entries of the store not read: a value that is not a number\)"),
+            (lambda ra: ra.update(rows_not_read=-1), r" \(entries of the store not read: a value that is not a number\)"),
+            (lambda ra: ra.pop("rows_not_read"), r" \(entries of the store not read: not read\)"),
+            (lambda ra: row(ra).update(files_not_read=1), r" \(1 entry inside a folder not read\)"),
+            (lambda ra: [r.update(files_not_read=2) for r in ra["rows"]], r" \(4 entries inside a folder not read\)"),
+            (lambda ra: row(ra).update(files_not_read="acmecorp"), r" \(entries inside a folder not read: a value that is not a number\)"),
+            (lambda ra: row(ra).update(files_not_read=1.0), r" \(entries inside a folder not read: a value that is not a number\)"),
+            (lambda ra: row(ra).update(files_not_read=-2), r" \(entries inside a folder not read: a value that is not a number\)"),
+            (lambda ra: row(ra).update(files_not_read="could-not-check"), r" \(entries inside a folder not read: could not be checked\)"),
+            (lambda ra: row(ra).pop("files_not_read"), r" \(entries inside a folder not read: not read\)"),
+            (lambda ra: (ra.update(rows_not_read=1), row(ra).update(files_not_read=1)),
+             r" \(1 entry of the store not read\) \(1 entry inside a folder not read\)"),
             (lambda ra: ra.update(rows_listed=False), r" \(the store was not listed\)"),
             (lambda ra: ra.update(rows_listed="true"), r" \(the store was not listed\)"),
             (lambda ra: ra.pop("rows_listed"), r" \(the store was not listed\)"),
@@ -1800,7 +1834,7 @@ class TestReportStore(unittest.TestCase):
             self.assertRegex(closing(change), rf"(?m)^LOOK  {self.LINE} \(not read\)$")
         self.assertRegex(closing(lambda it: it["D7.1"]["data"].update(report_archive={})),
                          rf"(?m)^LOOK  {self.LINE} \(the store was not read\) \(the store was not listed\) "
-                         r"\(the folders were not read\) \(containers mount it: not read\) \(containers not inspected: not read\)$")
+                         r"\(the folders were not read\) \(entries of the store not read: not read\) \(containers mount it: not read\) \(containers not inspected: not read\)$")
         for word in ("null", "could-not-check", "<withheld>", "<other>", "symlink"):       # no programmer's word in a note
             for change in (lambda ra: ra.update(parent=None, containers_mounting=None), lambda ra: ra.update(parent="symlink"),
                            lambda ra: ra.update(parent="could-not-check", containers_mounting="could-not-check", containers_not_inspected=[]),

@@ -1382,7 +1382,9 @@ class TestD10(JobBox):
         self.assertEqual(set(ra["parent"]), {"owner", "group", "mode"})
         self.assertEqual([r["status"] for r in ra["rows"]], ["active", "unregistered"])
         for r in ra["rows"]:
-            self.assertEqual(set(r), {"status", "owner", "mode", "kind", "files", "not_files", "listed"})
+            self.assertEqual(set(r), {"status", "owner", "mode", "kind", "files", "not_files", "files_not_read", "listed"})
+            self.assertEqual(r["files_not_read"], 0)
+        self.assertEqual(ra["rows_not_read"], 0)
         self.assertEqual(sum(ra["rows"][0]["files"].values()), 1)
         self.assertEqual((ra["rows"][0]["kind"], ra["rows"][0]["not_files"], ra["rows"][0]["listed"]), ("dir", 0, True))
         self.assertTrue(all(len(k.split()) == 3 for k in ra["rows"][0]["files"]))
@@ -1475,6 +1477,42 @@ class TestD10(JobBox):
         finally:
             os.chmod(d, 0o700)
         self.assertEqual((r["kind"], r["files"], r["not_files"], r["listed"]), ("dir", {}, R.COULD_NOT_CHECK, False))
+
+    def _lstat_failing_for(self, name):
+        real = os.lstat
+        def lstat(p, *a, **k):
+            if os.path.basename(str(p)) == name:
+                raise PermissionError(p)
+            return real(p, *a, **k)
+        return mock.patch.object(CE.os, "lstat", lstat)
+
+    def test_archive_entry_that_cannot_be_examined_is_counted_never_dropped(self):
+        self._reg_acme()
+        base = os.path.join(self.root, self.ARCH)
+        os.makedirs(os.path.join(base, "acme-dental")); os.makedirs(os.path.join(base, "ghost-client"))
+        with self._lstat_failing_for("ghost-client"):
+            ra = self._arch_rows()
+        self.assertEqual((len(ra["rows"]), ra["rows_listed"], ra["rows_not_read"]), (1, True, 1))
+        self.assertIs(type(ra["rows_not_read"]), int)
+        self.assertNotIn("ghost-client", json.dumps(ra))
+        self.assertEqual(self._arch_rows()["rows_not_read"], 0)
+
+    def test_archive_file_that_cannot_be_examined_is_counted_in_its_row(self):
+        self._reg_acme()
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        for n in ("a-report.md", "b-report.md"):
+            open(os.path.join(d, n), "w").close()
+        with self._lstat_failing_for("b-report.md"):
+            ra = self._arch_rows()
+        row = ra["rows"][0]
+        self.assertEqual((sum(row["files"].values()), row["not_files"], row["files_not_read"], row["listed"]), (1, 0, 1, True))
+        self.assertIs(type(row["files_not_read"]), int)
+        self.assertEqual(ra["rows_not_read"], 0)
+        self.assertNotIn("b-report.md", json.dumps(ra))
+
+    def test_archive_rows_not_read_is_zero_when_the_store_is_not_there(self):
+        ra = self._arch_rows()
+        self.assertEqual((ra["parent"], ra["rows_not_read"]), ("absent", 0))
 
     def test_archive_rows_listed_only_for_a_real_listed_directory(self):
         self.assertIs(self._arch_rows()["rows_listed"], False)              # absent

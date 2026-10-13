@@ -81,6 +81,9 @@ _READ_KEYS = ("entries", "fields", "undecodable_characters")                    
 DIR_ABSENT, DIR_LINK, DIR_NOT_A_DIRECTORY = "absent", "symlink", "not-a-directory"      # _dir_row: not a real directory
 DIR_WORDS = frozenset({DIR_ABSENT, DIR_LINK, DIR_NOT_A_DIRECTORY})
 ROW_DIR, ROW_ACTIVE = "dir", "active"                                                    # _archive_row: kind, status
+ROW_KEYS = frozenset({"status", "owner", "mode", "kind", "files", "not_files", "files_not_read", "listed"})   # _archive_row
+STORE_KEYS = frozenset({"parent", "rows", "rows_listed", "rows_not_read", "containers_mounting",
+                        "containers_not_inspected"})                                     # _report_archive
 STORE_FILE = "root root 0o600"                                                           # _archive_row: "owner group mode"
 PROBE_SERVICES = frozenset({"ads-collector", "ads-reader", "ads-drafter", "egress-proxy"})   # run-client-audit's DECLARED
 FIGURES_SERVICES = ("ads-collector", "ads-reader")      # of those, the ones that hold the Google Ads credential and no AI key
@@ -145,6 +148,22 @@ def when(v):
 
 def count(v):
     return _word(v) or (str(len(v)) if isinstance(v, (list, dict)) else WITHHELD)
+
+
+def _files_not_read(rows):
+    """The entries inside the store's folders that could not be examined, over every row: a
+    number, or None when a row does not hold a count that can be added."""
+    if not isinstance(rows, list):
+        return None
+    counts = [r.get("files_not_read") if isinstance(r, dict) else None for r in rows]
+    if not all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c < 10 ** MAX_DIGITS for c in counts):
+        return None
+    return sum(counts)
+
+
+def files_not_read(v):
+    total = _files_not_read(v)
+    return _word(v) or (num(total) if total is not None else WITHHELD)
 
 
 def member(allowed):
@@ -403,7 +422,8 @@ def schema(shown):
                  "files_newer_than_start": by_service(count, shown), "files_checked": by_service(num, shown)},
         "D7.1": {"records": num, "vaults": None, "reports_rows": None, "draft_out_rows": None, "parents": None,
                  "old_data": None, "audit_data": None, "audit_logs": None, "root_backups": None,
-                 "report_archive": fixed({"parent": dir_row, "rows": count, "rows_listed": flag,
+                 "report_archive": fixed({"parent": dir_row, "rows": count, "rows_listed": flag, "rows_not_read": num,
+                                          "files_not_read": ("rows", files_not_read),
                                           "containers_mounting": num, "containers_not_inspected": num})},
         "D10.1": {"rc": num, "probe": fixed({"matches_declared": flag, "services": count,
                                              "figures_services": listed(PROBE_SERVICES)})},
@@ -572,6 +592,12 @@ def _counted(value, one, many):
     if _int(value) and len(str(abs(value))) <= MAX_DIGITS:
         return f"{value} {one if value == 1 else many}"
     return f"{many}: {_plain(value)}"
+
+
+def _not_a_count(value):
+    """What _counted is given for a value that may not be printed as a count: the value when it is
+    not read or could not be checked (it has its own words), else something that is not a number."""
+    return value if value is None or (isinstance(value, str) and value == CNC) else False
 
 
 def _many(n, one, many):
@@ -774,7 +800,8 @@ def _broker_read(entry):
 
 
 def _reach(bundle, items):
-    """The journal's reach is D2.4's. A job installed since the last PASS has no 30 days of its
+    """The journal's reach is D2.4's. A job whose first journal entry is later than the last PASS
+    (a new job, or one whose older entries the journal no longer holds) has no 30 days of its
     own: it is said here (D10.7), and it does not turn the line. What does: an installed job
     whose D10.7 values, or whose oldest entries in D2.4, could not be checked or are not there."""
     d24 = _data(items, "D2.4")
@@ -789,8 +816,8 @@ def _reach(bundle, items):
     logged = sum(1 for e in new if is_time(e.get("first_entry")))
     quiet = sum(1 for e in new if e.get("first_entry") is None)
     if logged:
-        note += (" (1 job installed since the last PASS: judged from its first entry)" if logged == 1 else
-                 f" ({logged} jobs installed since the last PASS: each judged from its first entry)")
+        note += (" (1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry)" if logged == 1 else
+                 f" ({logged} jobs whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; each judged from its first entry)")
     if quiet:
         note += (" (1 job installed since the last PASS and it has not logged yet)" if quiet == 1 else
                  f" ({quiet} jobs installed since the last PASS and they have not logged yet)")
@@ -940,7 +967,8 @@ STORE_WORDS = {DIR_ABSENT: "the store is not there", DIR_LINK: "the store is a l
 def _report_store(bundle, items):
     """D7.1's report store: a root:root 0700 directory that was listed, holding only folders of
     active clients, each root-owned 0700, listed, with nothing inside but root:root 0600 files,
-    and mounted by no container. Every fault is a count."""
+    no entry of it or of a folder left unexamined, and mounted by no container. Every fault is
+    a count."""
     text = "the report store holds only owner-only client folders"
     why = _shape(items, "D7.1", "report_archive")
     if why:
@@ -975,6 +1003,15 @@ def _report_store(bundle, items):
         n = sum(1 for r in rows if not good(r))
         if n:
             notes.append(f"{n} {what}")
+    not_read = store.get("rows_not_read")                       # entries of the store that have no row
+    if not _is(not_read, 0):
+        notes.append(_counted(not_read if _int(not_read) and not_read > 0 else _not_a_count(not_read),
+                              "entry of the store not read", "entries of the store not read"))
+    inside = _files_not_read(rows)                              # entries inside a folder that were not examined
+    if inside != 0:
+        first = next((v for v in (r.get("files_not_read") for r in rows) if not (_int(v) and v >= 0)), False)
+        notes.append(_counted(inside if inside is not None else _not_a_count(first),
+                              "entry inside a folder not read", "entries inside a folder not read"))
     for key, one, many in (("containers_mounting", "container mounts it", "containers mount it"),
                            ("containers_not_inspected", "container not inspected", "containers not inspected")):
         if not _is(store.get(key), 0):

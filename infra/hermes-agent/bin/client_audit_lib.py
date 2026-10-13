@@ -155,7 +155,7 @@ class AuditLock:
         except OSError as e:
             os.close(self.fd)
             if e.errno in (errno.EAGAIN, errno.EACCES):
-                raise PrecheckError("another audit is running")
+                raise PrecheckError("another run is in progress (an audit or a figures report)")
             raise
         return self
 

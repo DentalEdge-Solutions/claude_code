@@ -24,7 +24,7 @@ this client's vault, reports and draft-out dirs) -> the check that the draft nam
 client -> vault-write. The proxy is stopped (its decision log kept as proxy.log first) and the
 transient draft removed on every exit, a SIGTERM from the host runner's timeout included (§7).
 Stops at the first failure. Exit, for both modes: 0 draft written (figures: report stored), 1 a
-step failed, 2 a pre-check refused, 3 another audit is running.
+step failed, 2 a pre-check refused, 3 another run (an audit or a figures report) is in progress.
 Nothing shown carries a customer id or credential value; each step's stdout and stderr go to
 /var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
 to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
