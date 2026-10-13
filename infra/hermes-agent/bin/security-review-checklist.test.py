@@ -108,10 +108,19 @@ class TestChecklistSync(unittest.TestCase):
                       "under two days"):
             self.assertIn(words, rule, words)
         self.assertIn("read as root only", block)
-        for words in ("replacement characters", "namespaces", "300 thousand", "can be stored"):
+        for words in ("replacement characters", "namespaces", "2.5 million", "EVERY STORED FIELD"):
             self.assertIn(words, block, words)
+        self.assertNotIn("-o cat", block)
+        self.assertIn("--all", block)
         self.assertNotIn("is can be", block)
         self.assertIn("not run as root", rule)
+
+    def test_d10_7_names_every_field_its_customer_id_count_skips(self):
+        ce = _load("ce", "collect-review-evidence.py")
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D10.7"]
+        for name in sorted(ce.CID_SKIP_FIELDS):
+            self.assertIn(f"`{name}`", block, name)
+        self.assertIn("journal_read", block)
 
     def test_d10_7_says_what_the_report_states_when_the_journal_is_short(self):
         block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D10.7"]
@@ -187,8 +196,8 @@ class TestChecklistSync(unittest.TestCase):
                     "port-forwarding", "restrict"):
             self.assertIn(f"`{opt}`", blocks["D1.7"], opt)
 
-    def test_the_version_is_1_19(self):
-        self.assertRegex(items()[0], r"(?m)^version: 1\.19$")
+    def test_the_version_is_1_20(self):
+        self.assertRegex(items()[0], r"(?m)^version: 1\.20$")
 
     def test_d10_6_states_the_committed_mcp_block(self):
         """D10.6 judges the box's `mcp_servers:` block by `equals_repo`, `reason` and the sha256 of

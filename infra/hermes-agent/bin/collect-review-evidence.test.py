@@ -16,6 +16,19 @@ def _four(two, new="unset"):
     return {**two, "dashboard-password-hash": new, "dashboard-session-secret": new}
 
 
+def _as_entries(text):
+    """A test's journal text as `journalctl -o json` prints it: one entry per line with the line
+    as MESSAGE. A line that is already a JSON object is left as it is."""
+    out = []
+    for line in text.splitlines():
+        try:
+            is_entry = isinstance(json.loads(line), dict)
+        except ValueError:
+            is_entry = False
+        out.append(line if is_entry else json.dumps({"MESSAGE": line}, ensure_ascii=False))
+    return "".join(l + "\n" for l in out)
+
+
 class FakeHost(CE.Host):
     def __init__(self, root, outputs):
         super().__init__(root=root, run=self._fake)
@@ -25,6 +38,8 @@ class FakeHost(CE.Host):
         self.calls.append(argv)
         for prefix, result in self.outputs.items():
             if tuple(argv[:len(prefix)]) == prefix:
+                if result[0] == 0 and argv[0] == "journalctl" and "--all" in argv:
+                    return (0, _as_entries(result[1]), result[2])
                 return result
         return (127, "", "not found")
 
@@ -190,6 +205,24 @@ class TestBundle(Base):
             rc = CE.main(["--credentials-only"], host=self.host())
         self.assertEqual(rc, 0)                                          # control
 
+    def test_an_output_file_that_cannot_be_made_owner_only_gets_nothing_written(self):
+        with mock.patch.object(R, "restrict_output", return_value=False) as ro, \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = CE.main(["--credentials-only"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertIn("owner-only", err.getvalue())
+        ro.assert_called_once()
+
+    def test_the_output_is_restricted_before_it_is_written(self):
+        order = []
+        buf = io.StringIO()
+        buf.write = lambda text, w=buf.write: (order.append("write"), w(text))[1]
+        with mock.patch.object(R, "restrict_output", side_effect=lambda s: order.append("restrict") or True), \
+                contextlib.redirect_stdout(buf):
+            rc = CE.main(["--credentials-only"], host=self.host())
+        self.assertEqual((rc, order[0]), (0, "restrict"))
+        self.assertIn("write", order)
+
     def test_credentials_only_could_not_check_sweep_exits_2_no_traceback(self):
         self.outputs[("find",)] = (1, "", "boom\n")
         err = io.StringIO()
@@ -291,6 +324,15 @@ class TestTighteningAfterReview3(Base):
     def test_collected_at_is_not_part_of_the_fingerprint(self):
         h = self.host()
         self.assertNotIn("collected_at", json.dumps(CE.box_fingerprint(h, CE.context(h))))
+
+    def test_the_git_status_call_takes_no_optional_lock(self):
+        h = self.host()
+        h.outputs[("git",)] = (0, "", "")
+        CE.box_fingerprint(h, CE.context(h))
+        status = [c for c in h.calls if c[0] == "git" and "status" in c]
+        self.assertTrue(status)
+        for c in status:
+            self.assertIn("--no-optional-locks", c[:c.index("status")])
 
     # ---- b: in-memory mounts are swept by the collector itself -------------------
     def test_memory_sweep_finds_credential_name_and_content_without_printing_the_value(self):
@@ -2166,6 +2208,20 @@ class TestD10(Base):
         d = self._item("D10.7")["data"]
         self.assertEqual((d["broker_journal"]["known_secret_hits"], d["runner_journal"]["known_secret_hits"]), (1, 0))
 
+    def test_d10_7_counts_a_customer_id_in_the_runner_s_command_line_field(self):
+        self._journal(runner=_e(MESSAGE="Audit complete.", _CMDLINE="python3 tool --customer 1234567890",
+                                __REALTIME_TIMESTAMP="1761234567890123"))
+        d = self._item("D10.7")["data"]
+        self.assertEqual(d["runner_journal"]["customer_id_lines"], 1)
+        self.assertEqual(d["journal_read"]["runner"], {"entries": 1, "fields": 3, "undecodable_characters": 0})
+        self.assertEqual(set(d["journal_read"]), {"broker", "runner"})
+
+    def test_d10_7_reads_each_unit_with_every_field(self):
+        host = self.host()
+        CE.collect(host, self.KEY)
+        calls = [c for c in host.calls if c[:2] == ["journalctl", "-u"] and "--all" in c]
+        self.assertEqual([c[3:] for c in calls], [["--since", "-30d", "-o", "json", "--all", "--no-pager", "-q"]] * 2)
+
     def test_d10_7_reads_both_units_over_the_same_window(self):
         host = self.host()
         CE.collect(host, self.KEY)
@@ -3295,13 +3351,48 @@ class TestJournalReach(Base):
     SECRET = "sk-or-v1-" + "0123456789abcdef" * 4
     M2_BYTES = 4630823                                  # the whole journal on the box, 2026-10-10 (7 days)
 
+    def test_d2_3_reads_every_field_in_one_call(self):
+        self.outputs[("journalctl", "-o")] = (0, _e(MESSAGE="Started.", _CMDLINE=f"tool {self.SECRET}"), "")
+        self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
+        host = self.host()
+        d = CE.d2_3(host, {"secrets": [self.SECRET]})
+        self.assertEqual(d["journal"], {"pattern_hits": 0, "known_secret_hits": 1})
+        self.assertEqual((d["entries"], d["fields"]), (1, 2))
+        searches = [c for c in host.calls if "--all" in c]
+        self.assertEqual(searches, [["journalctl", "-o", "json", "--all", "--no-pager", "-q"]])
+
+    def test_d2_3_at_the_35_day_size_finds_what_is_at_the_far_end(self):
+        """185,000 entries of about 1,000 characters (M1 of 2026-10-13, scaled to 35 days), never held whole."""
+        secret, n = self.SECRET, 185000
+        filler = _e(MESSAGE="x" * 600, _CMDLINE="/usr/bin/python3 " + "y" * 300, _PID="1234")
+
+        class Lines:
+            rc, err = 0, ""
+
+            def __iter__(self):
+                yield _e(MESSAGE="first", _CMDLINE=f"leak {secret}")
+                for _ in range(n):
+                    yield filler
+                yield _e(COMMAND=f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN}")
+
+        class Big(CE.Host):
+            def stream(self, argv, timeout=60):
+                return Lines()
+        host = Big(self.root, lambda argv, timeout=60: (0, _entry(1760000000), ""))
+        t0 = time.monotonic()
+        d = CE.d2_3(host, {"secrets": [secret]})
+        self.assertEqual(d["journal"], {"pattern_hits": 1, "known_secret_hits": 1})
+        self.assertEqual(d["entries"], n + 2)
+        self.assertGreater(d["scanned_characters"], 150 * 1000 * 1000)
+        self.assertLess(time.monotonic() - t0, CE.JOURNAL_SCAN_TIMEOUT / 3)
+
     def test_d2_3_reports_the_size_searched_and_the_oldest_entry_read_after_the_search(self):
         self.outputs[("journalctl", "-o")] = (0, "Started.\n" * 3, "")
         self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
         host = self.host()
         d = CE.d2_3(host, {"secrets": []})
-        self.assertEqual(d, {"journal": {"pattern_hits": 0, "known_secret_hits": 0},
-                             "scanned_characters": 27, "undecodable_characters": 0, "oldest_entry_read": "2025-10-09T08:53:20Z"})
+        self.assertEqual(d, {"journal": {"pattern_hits": 0, "known_secret_hits": 0}, "entries": 3, "fields": 3,
+                             "scanned_characters": 72, "undecodable_characters": 0, "oldest_entry_read": "2025-10-09T08:53:20Z"})
         self.assertEqual([c[1] for c in host.calls], ["-o", "-q"])      # the search first, then the oldest entry
 
     def test_d2_3_an_oldest_entry_that_cannot_be_read_is_could_not_check_and_the_search_still_counts(self):
@@ -3312,13 +3403,13 @@ class TestJournalReach(Base):
             with self.subTest(answer=answer):
                 self.outputs[_oldest_key()] = answer
                 d = CE.d2_3(self.host(), {"secrets": []})
-                self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (want, 9))
+                self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (want, 24))
         def run(argv, timeout=60):
             if argv[1] == "-q":
                 raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
-            return (0, "Started.\n", "")
+            return (0, _as_entries("Started.\n"), "")
         d = CE.d2_3(CE.Host(self.root, run), {"secrets": []})
-        self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (CN, 9))
+        self.assertEqual((d["oldest_entry_read"], d["scanned_characters"]), (CN, 24))
 
     # Measured (record R14, systemd 255): a truncated archived file is skipped with this on stderr and rc 0;
     # without rights journalctl says the second line, with rc 1 and nothing on stdout.
@@ -3351,16 +3442,18 @@ class TestJournalReach(Base):
         self.assertEqual((rc, err), (0, ""))
         self.assertEqual(out, "ok\n\ufffd GOOGLE_ADS_REFRESH_TOKEN=" + TOKEN + "\n")
 
+    BAD_BYTE_ENTRIES = ["-c", "import sys; sys.stdout.buffer.write(b'{\"MESSAGE\": \"ok\"}\\n"
+                              "{\"MESSAGE\": \"\\xff GOOGLE_ADS_REFRESH_TOKEN=" + TOKEN + "\"}\\n')"]
+
     def test_d2_3_searches_past_a_byte_that_is_not_text_and_says_how_many_were_replaced(self):
-        argv = [sys.executable, *self.BAD_BYTE_CHILD]
-        # the real runner is reached through Host(root) with no fake: patch only the program that is started
-        real = CE._run_real
-        with mock.patch.object(CE, "_run_real", lambda a, timeout=60, errors="strict": real(argv, timeout, errors=errors)), \
+        argv = [sys.executable, *self.BAD_BYTE_ENTRIES]
+        real = CE._RealStream
+        # the real stream is reached through Host(root) with no fake: patch only the program that is started
+        with mock.patch.object(CE, "_RealStream", lambda a, timeout: real(argv, timeout)), \
+                mock.patch.object(CE, "_run_real", lambda a, timeout=60, errors="strict": (0, "", "")), \
                 mock.patch.object(os, "geteuid", return_value=0):               # this host is the real one: root only
-            host = CE.Host(self.root)
-            d = CE.d2_3(host, {"secrets": []})
-        self.assertEqual(d["journal"]["pattern_hits"], 1)
-        self.assertEqual(d["undecodable_characters"], 1)
+            d = CE.d2_3(CE.Host(self.root), {"secrets": []})
+        self.assertEqual((d["journal"]["pattern_hits"], d["undecodable_characters"], d["entries"]), (1, 1, 2))
 
     def test_a_known_secret_beside_a_replaced_byte_is_still_counted(self):
         self.outputs[("journalctl", "-o")] = (0, "x \ufffd " + self.SECRET + "\n", "")
@@ -3397,7 +3490,10 @@ class TestJournalReach(Base):
         host = self.host()
         host._real = True
         fake = host._fake
-        return host, mock.patch.object(CE, "_run_real", lambda argv, timeout=60, errors="strict": fake(argv, timeout))
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(CE, "_run_real", lambda argv, timeout=60, errors="strict": fake(argv, timeout)))
+        stack.enter_context(mock.patch.object(CE, "_RealStream", lambda argv, timeout: CE._TextStream(fake(argv, timeout))))
+        return host, stack
 
     def test_the_journal_is_read_as_root_only_on_a_real_host(self):
         self.outputs[("journalctl", "-o")] = (0, "Started.\n", "")
@@ -3410,7 +3506,7 @@ class TestJournalReach(Base):
                 host, patch = self._real_host()
                 with patch, mock.patch.object(os, "geteuid", return_value=euid):
                     if ok:
-                        self.assertEqual(CE.d2_3(host, {"secrets": []})["scanned_characters"], 9)
+                        self.assertEqual(CE.d2_3(host, {"secrets": []})["scanned_characters"], 24)
                         self.assertEqual(CE.d10_7(host, CE.context(host, self.KEY))["oldest_entry_read"]["runner"], "2025-10-09T08:53:20Z")
                     else:
                         with self.assertRaises(CE.CouldNotCheck) as c:
@@ -3421,7 +3517,7 @@ class TestJournalReach(Base):
                         self.assertEqual(CE._oldest_entry(host), R.COULD_NOT_CHECK)
                         self.assertEqual([c for c in host.calls if c[0] == "journalctl"], [])    # nothing was run
         with mock.patch.object(os, "geteuid", return_value=1000):                   # a test host is unaffected
-            self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 9)
+            self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 24)
 
     def test_a_warning_on_stderr_at_rc_0_makes_an_oldest_entry_could_not_check(self):
         for answer in ((0, _entry(1760000000), self.TRUNCATED), (0, "", self.TRUNCATED)):
@@ -3449,18 +3545,18 @@ class TestJournalReach(Base):
     def test_d2_3_empty_stderr_at_rc_0_reads_as_before(self):
         self.outputs[("journalctl", "-o")] = (0, "Started.\n", "  \n")
         self.outputs[_oldest_key()] = (0, _entry(1760000000), "")
-        self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 9)
+        self.assertEqual(CE.d2_3(self.host(), {"secrets": []})["scanned_characters"], 24)
 
     def test_d10_7_a_journal_read_that_ends_with_a_warning_is_could_not_check(self):
         for unit in ("broker", "runner"):
-            for what, answer in (("truncated file, rc 0", (0, "x\n", self.TRUNCATED)),
+            for what, answer in (("truncated file, rc 0", (0, _as_entries("x\n"), self.TRUNCATED)),
                                  ("no rights, rc 0 (NOT produced in the measurement: rc 1 was; kept as the case the stderr rule exists for)", (0, "", self.NO_RIGHTS)),
                                  ("time-out", (124, "", "journalctl: timed out"))):
                 with self.subTest(unit=unit, what=what):
                     host = self.host()
                     ok = (0, "", "")
                     def run(argv, timeout=60):
-                        return answer if argv[:3] == ["journalctl", "-u", f"hermes-app-{unit}@ads-audit"] and "-q" not in argv else ok
+                        return answer if argv[:3] == ["journalctl", "-u", f"hermes-app-{unit}@ads-audit"] and "--all" in argv else ok
                     host = CE.Host(self.root, run)
                     with self.assertRaises(CE.CouldNotCheck):
                         CE.d10_7(host, CE.context(host, self.KEY))
@@ -3483,7 +3579,7 @@ class TestJournalReach(Base):
         d = CE.d2_3(self.host(), {"secrets": [self.SECRET]})
         took = time.monotonic() - t0
         self.assertEqual(d["journal"], {"pattern_hits": 1, "known_secret_hits": 1})
-        self.assertEqual(d["scanned_characters"], len(text))
+        self.assertEqual(d["scanned_characters"], len(_as_entries(text)))
         self.assertLess(took, 60, "the search of a 35-day journal must end far inside the 300 s limit")
 
     def test_d10_7_reports_the_oldest_entry_read_for_each_unit_inside_its_30_days(self):
@@ -4466,7 +4562,7 @@ class TestD46StartTimes(Base):
         super().setUp()
         self.addCleanup(setattr, CE, "LAST_PASS_COLLECTED_AT", None)
         CE.LAST_PASS_COLLECTED_AT = None
-        for unit in ("docker", *CE.SERVICE_FILES):
+        for unit in ("docker", "systemd-journald", *CE.SERVICE_FILES):
             self._start(unit, self.START)
         self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
         self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = (0, "2026-10-07T15:39:12.123456789Z\n", "")
@@ -4490,12 +4586,31 @@ class TestD46StartTimes(Base):
     def test_every_start_is_reported_in_utc(self):
         d = CE.d4_6(self.host(), {})
         self.assertEqual(sorted(d["started_at"]), sorted(["boot", "docker", "gateway-container", "hermes-broker",
-                                                          "hermes-docker-proxy", self.APP]))
+                                                          "hermes-docker-proxy", "systemd-journald", self.APP]))
         for unit in ("docker", "hermes-broker", "hermes-docker-proxy", self.APP):
             self.assertEqual(d["started_at"][unit], self.START_ISO)
         self.assertEqual(d["started_at"]["gateway-container"], "2026-10-07T15:39:12Z")
         self.assertEqual(d["started_at"]["boot"], CE._iso(self.BOOT))
         self.assertRegex(d["started_at"]["boot"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_the_journal_service_s_start_is_reported_and_compared_with_the_last_pass(self):
+        self.outputs[("systemctl", "show", "systemd-journald", "-p", "ActiveEnterTimestamp", "--value")] = \
+            (0, "Mon 2026-10-12 09:10:11 UTC\n", "")
+        with mock.patch.object(CE, "LAST_PASS_COLLECTED_AT", "2026-10-12T13:39:00Z"):
+            d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["started_at"]["systemd-journald"], "2026-10-12T09:10:11Z")
+        self.assertIs(d["started_after_last_pass"]["systemd-journald"], False)
+        self.assertNotIn("systemd-journald", d["files_newer_than_start"])
+        self.assertEqual(set(d["started_at"]), set(CE.SERVICE_FILES) | set(CE.OTHER_STARTS))
+        self.assertNotIn("systemd-journald", d["files_checked"])
+
+    def test_a_journal_service_start_that_cannot_be_read_is_could_not_check_for_that_entry_only(self):
+        CE.LAST_PASS_COLLECTED_AT = "2026-10-07T10:00:00Z"
+        self._start("systemd-journald", "")
+        d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["started_at"]["systemd-journald"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["started_after_last_pass"]["systemd-journald"], R.COULD_NOT_CHECK)
+        self.assertEqual(d["started_at"]["hermes-broker"], self.START_ISO)         # control: the others stand
 
     def test_without_a_baseline_nothing_is_compared(self):
         d = CE.d4_6(self.host(), {})
@@ -4507,8 +4622,8 @@ class TestD46StartTimes(Base):
         d = CE.d4_6(self.host(), {})
         self.assertEqual(d["last_pass_collected_at"], "2026-10-07T10:00:00Z")
         self.assertEqual(d["started_after_last_pass"],
-                         {"boot": False, "docker": False, "hermes-broker": False, "hermes-docker-proxy": False,
-                          self.APP: False, "gateway-container": True})
+                         {"boot": False, "docker": False, "systemd-journald": False, "hermes-broker": False,
+                          "hermes-docker-proxy": False, self.APP: False, "gateway-container": True})
         CE.LAST_PASS_COLLECTED_AT = self.START_ISO          # the same second is not "after"
         self.assertFalse(CE.d4_6(self.host(), {})["started_after_last_pass"]["hermes-broker"])
 
@@ -4639,6 +4754,322 @@ class TestD46StartTimes(Base):
         items = CE.collect(self.host(), self.KEY)["items"]
         self.assertEqual(items["D4.6"]["status"], R.OBSERVED)
         self.assertEqual(items["D1.7"]["status"], R.COULD_NOT_CHECK)      # no sshd in this fake host
+
+
+def _e(**fields):
+    """One journal entry as `journalctl -o json` prints it."""
+    return json.dumps(fields) + "\n"
+
+
+class TestSearchJournal(Base):
+    SECRET = "sk-or-v1-" + "0123456789abcdef" * 4
+    ARGV = ["journalctl", "-o", "json", "--all", "--no-pager", "-q"]
+
+    def _search(self, text, secrets=(), redactor=True, rc=0, err="", on_message=None):
+        # A plain Host with a fake runner, not FakeHost: from Task 2 on FakeHost rewrites a line
+        # that is not a JSON object into an entry, and these tests need the text as given.
+        host = CE.Host(self.root, lambda argv, timeout=60: (rc, text, err))
+        red = CE.context(host, self.KEY)["redactor"] if redactor else None
+        return CE._search_journal(host, self.ARGV, list(secrets), red, on_message=on_message)
+
+    def test_the_constants_are_the_design_s(self):
+        self.assertEqual(CE.JOURNAL_ALL_FIELDS, ["-o", "json", "--all", "--no-pager", "-q"])
+        self.assertEqual(CE.CID_SKIP_FIELDS, frozenset({
+            "__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "__SEQNUM", "__SEQNUM_ID",
+            "_SOURCE_REALTIME_TIMESTAMP", "_SOURCE_MONOTONIC_TIMESTAMP", "_BOOT_ID", "_MACHINE_ID",
+            "_STREAM_ID", "_SYSTEMD_INVOCATION_ID", "_PID", "_UID", "_GID", "_AUDIT_LOGINUID",
+            "_AUDIT_SESSION", "_SYSTEMD_OWNER_UID"}))
+        for name in ("MESSAGE", "_CMDLINE", "COMMAND", "_COMM", "_EXE", "CPU_USAGE_NSEC", "MAX_USE"):
+            self.assertNotIn(name, CE.CID_SKIP_FIELDS)
+        self.assertTrue(all(n.startswith("_") for n in CE.CID_SKIP_FIELDS))     # journald-written only
+
+    def test_a_secret_in_the_command_line_field_is_counted(self):
+        c = self._search(_e(MESSAGE="Started.", _CMDLINE=f"curl -H {self.SECRET}"), [self.SECRET])
+        self.assertEqual((c["known_secret_hits"], c["entries"], c["fields"]), (1, 1, 2))
+
+    def test_a_credential_pattern_in_sudo_s_command_field_is_counted(self):
+        c = self._search(_e(MESSAGE="x", COMMAND=f"/usr/bin/env GOOGLE_ADS_REFRESH_TOKEN={TOKEN} true"))
+        self.assertEqual((c["pattern_hits"], c["credential_text_lines"]), (1, 1))
+
+    def test_a_value_that_is_not_text_arrives_as_bytes_and_is_searched(self):
+        c = self._search(_e(MESSAGE=list(f"leak {self.SECRET} \xff".encode("latin-1"))), [self.SECRET])
+        self.assertEqual((c["known_secret_hits"], c["undecodable_characters"]), (1, 1))
+
+    def test_a_secret_at_the_end_of_a_very_long_field_is_counted(self):
+        c = self._search(_e(MESSAGE="x" * 100000 + self.SECRET), [self.SECRET])
+        self.assertEqual(c["known_secret_hits"], 1)
+
+    def test_a_field_set_twice_is_searched_in_both_values(self):
+        c = self._search(_e(MESSAGE=["a " + self.SECRET, list(("b " + self.SECRET).encode())]), [self.SECRET])
+        self.assertEqual((c["known_secret_hits"], c["fields"]), (2, 1))
+
+    def test_a_customer_id_in_a_clock_field_is_not_counted_and_in_the_command_line_is(self):
+        entry = dict(__REALTIME_TIMESTAMP="1760123456789000", _SOURCE_REALTIME_TIMESTAMP="1761234567890123",
+                     _AUDIT_LOGINUID="1234567890", MESSAGE="ok")
+        self.assertEqual(self._search(_e(**entry))["customer_id_lines"], 0)
+        self.assertEqual(self._search(_e(**entry, _CMDLINE="tool --customer 1234567890"))["customer_id_lines"], 1)
+        self.assertEqual(self._search(_e(**entry, MAX_USE="1234567890"))["customer_id_lines"], 1)   # a program can write it
+
+    def test_a_secret_in_a_skipped_field_is_still_counted(self):
+        c = self._search(_e(_STREAM_ID=self.SECRET, MESSAGE="ok"), [self.SECRET])
+        self.assertEqual(c["known_secret_hits"], 1)
+
+    def test_without_a_redactor_the_two_line_counts_stay_zero(self):
+        c = self._search(_e(MESSAGE=f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN} 1234567890"), redactor=False)
+        self.assertEqual((c["pattern_hits"], c["credential_text_lines"], c["customer_id_lines"]), (1, 0, 0))
+
+    def test_the_size_is_the_text_read_and_the_keys_are_closed(self):
+        text = _e(MESSAGE="Started.") * 3
+        c = self._search(text)
+        self.assertEqual(set(c), set(CE.SEARCH_COUNTS))
+        self.assertEqual((c["scanned_characters"], c["entries"], c["fields"]), (len(text), 3, 3))
+
+    def test_json_escaping_does_not_hide_a_value(self):
+        secret = 'pa"ss\\word/1234'
+        c = self._search(_e(MESSAGE="x " + secret), [secret])
+        self.assertEqual(c["known_secret_hits"], 1)
+
+    def test_each_message_is_handed_to_the_caller(self):
+        seen = []
+        self._search(_e(MESSAGE="one\ntwo", _COMM="x") + _e(MESSAGE="three"), on_message=seen.append)
+        self.assertEqual(seen, ["one\ntwo", "three"])
+
+    def test_an_entry_that_does_not_parse_makes_the_search_could_not_check(self):
+        for bad in ("not json\n", "[1, 2]\n", '{"MESSAGE": "cut\n'):
+            with self.subTest(bad=bad), self.assertRaises(CE.CouldNotCheck) as cm:
+                self._search(_e(MESSAGE="ok") + bad)
+            self.assertIn("did not parse", str(cm.exception))
+
+    def test_a_field_printed_as_null_makes_the_search_could_not_check(self):
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            self._search(_e(MESSAGE=None))
+        self.assertIn("not printed", str(cm.exception))
+
+    def test_a_failed_or_warned_read_is_could_not_check_in_fixed_words(self):
+        for rc, err, want in ((1, "Failed to open /var/log/journal/0123", "journalctl exited 1"),
+                              (0, "Journal file /var/log/journal/0123/x corrupted", "wrote a warning on stderr")):
+            with self.subTest(rc=rc), self.assertRaises(CE.CouldNotCheck) as cm:
+                self._search(_e(MESSAGE="ok"), rc=rc, err=err)
+            self.assertIn(want, str(cm.exception))
+            self.assertNotIn("/var/log", str(cm.exception))
+
+    def test_a_repeated_key_in_one_entry_makes_the_search_could_not_check(self):
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            self._search('{"MESSAGE": "a", "MESSAGE": "b"}\n')
+        self.assertIn("did not parse", str(cm.exception))
+
+    def test_a_line_longer_than_the_bound_makes_the_search_could_not_check(self):
+        code = "import json; print(json.dumps({'MESSAGE': 'x' * 1000}))"
+        with mock.patch.object(CE._RealStream, "MAX_LINE", 100):
+            host = CE.Host()
+            host._real = False          # past the root check; the stream is still the real one
+            host.stream = lambda argv, timeout=60: CE._RealStream([sys.executable, "-c", code], 30)
+            with self.assertRaises(CE.CouldNotCheck) as cm:
+                CE._search_journal(host, self.ARGV, [])
+        self.assertIn("did not parse", str(cm.exception))
+
+    def test_an_error_in_the_loop_closes_the_stream_at_once(self):
+        class Stream:
+            rc, err = 0, ""
+            closed = False
+            def __iter__(self):
+                def gen():
+                    try:
+                        yield _e(MESSAGE="one")
+                        yield _e(MESSAGE="two")
+                    finally:
+                        Stream.closed = True
+                self.gen = gen()            # the test keeps it: garbage collection cannot close it
+                return self.gen
+        stream = Stream()
+
+        class H(CE.Host):
+            def stream(self, argv, timeout=60):
+                return stream
+
+        def boom(_m):
+            raise RuntimeError("boom")
+        try:
+            CE._search_journal(H(self.root, lambda argv, timeout=60: (0, "", "")), self.ARGV, [], on_message=boom)
+        except RuntimeError:
+            self.assertTrue(Stream.closed)      # still inside the except block: the traceback is alive
+        else:
+            self.fail("no error")
+
+    def test_blank_lines_are_not_entries(self):
+        self.assertEqual(self._search("\n" + _e(MESSAGE="ok") + "\n")["entries"], 1)
+
+
+class TestStream(unittest.TestCase):
+    def _real(self, code, timeout=30):
+        return CE.Host().stream([sys.executable, "-c", code], timeout)
+
+    def test_the_35_day_size_passes_through_the_real_stream_line_by_line(self):
+        """185,000 lines of 1,000 characters: M1 of 2026-10-13 scaled to 35 days (about 184 MB)."""
+        s = self._real("import sys\nline = 'x' * 999 + '\\n'\nfor i in range(185000): sys.stdout.write(line)", timeout=120)
+        n = size = 0
+        for line in s:
+            n += 1; size += len(line)
+        self.assertEqual((n, size, s.rc, s.err), (185000, 185000000, 0, ""))
+
+    def test_a_byte_that_is_not_text_becomes_one_replacement_character(self):
+        s = self._real("import sys; sys.stdout.buffer.write(b'a\\xffb\\n')")
+        self.assertEqual((list(s), s.rc), (["a\ufffdb\n"], 0))
+
+    def test_stderr_and_a_non_zero_exit_are_kept(self):
+        s = self._real("import sys; print('out'); sys.stderr.write('warn'); sys.exit(3)")
+        self.assertEqual((list(s), s.rc, s.err), (["out\n"], 3, "warn"))
+
+    def test_a_command_that_does_not_exist_is_127(self):
+        s = CE.Host().stream(["/nonexistent/hermes-test-binary"], 5)
+        self.assertEqual((list(s), s.rc), ([], 127))
+
+    def test_a_timeout_ends_the_lines_and_reads_as_124(self):
+        s = self._real("import time; print('first', flush=True); time.sleep(60)", timeout=2)
+        t0 = time.monotonic()
+        self.assertEqual((list(s), s.rc), (["first\n"], 124))
+        self.assertLess(time.monotonic() - t0, 30)
+
+    def test_a_child_that_ignores_sigterm_is_killed_after_the_grace(self):
+        code = ("import signal, time\nsignal.signal(signal.SIGTERM, lambda s, f: None)\n"
+                "print('first', flush=True)\ntime.sleep(60)")
+        s = self._real(code, timeout=1)
+        t0 = time.monotonic()
+        with mock.patch.object(CE._RealStream, "TERM_GRACE", 2):
+            self.assertEqual((list(s), s.rc), (["first\n"], 124))
+        self.assertLess(time.monotonic() - t0, 30)
+
+    def test_a_warning_after_a_lot_of_blank_stderr_is_not_blank(self):
+        s = self._real("import sys; sys.stderr.write(' ' * 70000 + 'warn')")
+        list(s)
+        self.assertTrue(s.err.strip())
+
+    def test_a_piece_of_a_long_line_is_yielded_without_a_newline(self):
+        with mock.patch.object(CE._RealStream, "MAX_LINE", 100):
+            s = self._real("print('x' * 1000)")
+            pieces = list(s)
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(pieces[0].endswith("x") and pieces[-1].endswith("\n"))
+
+    def test_only_a_newline_splits_a_fake_runner_s_text(self):
+        line = '{"MESSAGE": "a\u2028b\rc"}\n'
+        s = CE.Host("/", lambda argv, timeout=60: (0, line + line, "")).stream(["x"])
+        self.assertEqual(list(s), [line, line])
+
+    def test_a_fake_runner_s_text_is_streamed_as_lines(self):
+        s = CE.Host("/", lambda argv, timeout=60: (0, "a\nb\n", "w")).stream(["x"])
+        self.assertEqual((list(s), s.rc, s.err), (["a\n", "b\n"], 0, "w"))
+
+
+class TestOtherJournals(Base):
+    MID, OTHER = "a" * 32, "b" * 32
+
+    def setUp(self):
+        super().setUp()
+        self._w("/etc/machine-id", self.MID + "\n")
+        self._w(f"/var/log/journal/{self.MID}/system.journal", "x" * 10)
+        self._w(f"/var/log/journal/{self.OTHER}/system.journal", "y" * 4096)
+
+    def test_only_the_other_directory_is_searched_and_only_counts_come_back(self):
+        self.outputs[("journalctl", "-D", "/var/log/journal/" + self.OTHER)] = \
+            (0, _e(MESSAGE="boot", _CMDLINE="tool --customer 1234567890"), "")
+        host = self.host()
+        d = CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertEqual((d["directories"], d["files"], d["bytes"]), (1, 1, 4096))
+        self.assertEqual(d["search"]["customer_id_lines"], 1)
+        self.assertEqual(set(d["search"]), set(CE.SEARCH_COUNTS))
+        self.assertEqual([c[:3] for c in host.calls if c[0] == "journalctl"],
+                         [["journalctl", "-D", "/var/log/journal/" + self.OTHER]])
+        self.assertNotIn(self.OTHER, json.dumps(d)); self.assertNotIn(self.MID, json.dumps(d))
+
+    def test_no_other_directory_is_zero_and_nothing_is_read(self):
+        shutil.rmtree(os.path.join(self.root, "var/log/journal", self.OTHER))
+        host = self.host()
+        d = CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertEqual((d["directories"], d["files"], d["search"]["entries"]), (0, 0, 0))
+
+    def test_a_linked_directory_is_not_followed(self):
+        os.symlink("/etc", os.path.join(self.root, "var/log/journal", "c" * 32))
+        host = self.host()
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        d = CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertEqual((d["directories"], d["skipped_entries"]), (1, 1))
+
+    def test_a_read_that_warns_is_could_not_check_without_the_directory_s_name(self):
+        self.outputs[("journalctl", "-D")] = (0, "", f"Journal file /var/log/journal/{self.OTHER}/x is truncated")
+        host = self.host()
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertNotIn(self.OTHER, str(cm.exception))
+
+    def _search(self):
+        host = self.host()
+        return CE.other_journals(host, CE.context(host, self.KEY), []), host
+
+    def _refused(self, words):
+        host = self.host()
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            CE.other_journals(host, CE.context(host, self.KEY), [])
+        self.assertIn(words, str(cm.exception))
+        for text in (self.OTHER, self.MID, self.root):
+            self.assertNotIn(text, str(cm.exception))
+
+    def test_a_directory_with_a_sub_directory_a_link_or_a_foreign_file_is_could_not_check(self):
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        other = os.path.join(self.root, "var/log/journal", self.OTHER)
+        for make in (lambda: os.mkdir(os.path.join(other, "sub")),
+                     lambda: os.symlink("/etc/passwd", os.path.join(other, "l.journal")),
+                     lambda: open(os.path.join(other, "notes.txt"), "w").close()):
+            for n in os.listdir(other):
+                if n != "system.journal":
+                    p = os.path.join(other, n)
+                    os.rmdir(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+            make()
+            self._refused("a file journalctl does not read")
+
+    def test_a_directory_with_files_and_no_entry_read_is_could_not_check(self):
+        self.outputs[("journalctl", "-D")] = (0, "", "")
+        self._refused("no entry was read from a directory that holds files")
+
+    def test_only_machine_directories_are_searched_the_rest_are_counted(self):
+        j = os.path.join(self.root, "var/log/journal")
+        os.symlink("/etc", os.path.join(j, "c" * 32))
+        os.mkdir(os.path.join(j, "remote")); os.mkdir(os.path.join(j, self.MID + ".ns"))
+        self._w("/var/log/journal/stray.txt", "x")
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        d, host = self._search()
+        self.assertEqual((d["directories"], d["skipped_entries"]), (1, 4))
+        self.assertEqual([c[2] for c in host.calls if c[0] == "journalctl"], ["/var/log/journal/" + self.OTHER])
+
+    def test_a_link_above_the_journal_directory_is_a_value_error(self):
+        real = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, real, True)
+        shutil.move(os.path.join(self.root, "var/log"), os.path.join(real, "log"))
+        os.symlink(os.path.join(real, "log"), os.path.join(self.root, "var/log"))
+        with self.assertRaises(ValueError):
+            self._search()
+
+    def test_the_mode_prints_nothing_and_exits_2_when_the_secrets_cannot_be_loaded(self):
+        self.outputs[("find",)] = (0, CE.AGENT_DIR + "/.env.ghost\n", "")
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = CE.main(["--other-journals"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertNotIn(self.OTHER, err.getvalue())
+
+    def test_the_mode_prints_nothing_and_exits_2_when_the_search_raises(self):
+        self.outputs[("journalctl", "-D")] = (0, "", f"Journal file /var/log/journal/{self.OTHER}/x is truncated")
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = CE.main(["--other-journals"], host=self.host())
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertNotIn(self.OTHER, err.getvalue())
+
+    def test_the_other_journals_mode_prints_counts_and_needs_no_key(self):
+        self.outputs[("journalctl", "-D")] = (0, _e(MESSAGE="boot"), "")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = CE.main(["--other-journals"], host=self.host())
+        d = json.loads(out.getvalue())
+        self.assertEqual((rc, d["kind"], d["directories"], d["search"]["entries"]), (0, "other-journals", 1, 1))
+        self.assertNotIn(self.OTHER, out.getvalue())
 
 
 if __name__ == "__main__":

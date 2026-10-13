@@ -4,6 +4,7 @@
   sudo python3 bin/collect-review-evidence.py                    > bundle-box.json
   sudo python3 bin/collect-review-evidence.py --fingerprint-only
   sudo python3 bin/collect-review-evidence.py --credentials-only
+  sudo python3 bin/collect-review-evidence.py --other-journals   # searches the journal directories that are not this machine's own, in every stored field; counts only; needs no key
   sudo python3 bin/collect-review-evidence.py --fp-key-tty --last-pass-execstart <64 hex> --last-pass-collected-at <UTC time>
 
 It observes and reports; it never judges — CHECKLIST.md says what each item should show,
@@ -11,14 +12,14 @@ and the independent reviewer compares. It changes nothing a review looks at, but
 bundle is NOT read-only: D10.1 and D10.2 run `run-client-audit --probe-env` and
 `--probe-egress`, which take the audit lock, start the audit containers (and the egress
 proxy), create and remove `/var/lib/hermes/probe`, and make one outbound CONNECT to
-`api.anthropic.com` through the proxy. `--fingerprint-only` and `--credentials-only` run no
+`api.anthropic.com` through the proxy. `--fingerprint-only`, `--credentials-only` and `--other-journals` run no
 probe. Three rules, each tested:
   * nothing printed carries a credential value (Google, Anthropic, OpenRouter, the API server key or the dashboard password),
     a client slug or a customer id;
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, ast, base64, calendar, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, time
+import argparse, ast, base64, calendar, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, tempfile, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import app_lib as A
@@ -178,6 +179,77 @@ def _run_real(argv, timeout=60, errors="strict"):
             raise
 
 
+class _RealStream:
+    """One command's stdout line by line, never held whole: `rc` and `err` are set once the lines
+    have ended. Each line is decoded as UTF-8 with one replacement character for each byte, or
+    cut-short sequence of bytes, that is not valid. On a timeout the child gets SIGTERM, the lines
+    end and rc is 124. stderr goes to an unnamed temporary file, so a child that writes a lot of
+    it cannot block on a full pipe."""
+    ERR_CAP = 65536
+    MAX_LINE = 64 * 1024 * 1024
+    TERM_GRACE = TERM_GRACE
+
+    def __init__(self, argv, timeout):
+        self._argv, self._timeout, self.rc, self.err = argv, timeout, None, ""
+
+    def __iter__(self):
+        errf = tempfile.TemporaryFile()
+        try:
+            p = subprocess.Popen(self._argv, stdout=subprocess.PIPE, stderr=errf)
+        except FileNotFoundError:
+            errf.close()
+            self.rc, self.err = 127, f"{self._argv[0]}: not found"
+            return
+        except BaseException:
+            errf.close()
+            raise
+        timed_out = threading.Event()
+
+        def stop():
+            timed_out.set()
+            p.terminate()                       # not kill(): as _run_real
+            try:
+                p.wait(timeout=self.TERM_GRACE)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        timer = threading.Timer(self._timeout, stop)
+        timer.start()
+        try:
+            while True:
+                raw = p.stdout.readline(self.MAX_LINE)      # a piece without a newline is yielded as it is
+                if not raw:
+                    break
+                yield raw.decode("utf-8", errors="replace")
+            try:
+                p.wait(timeout=self.TERM_GRACE)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
+        finally:
+            timer.cancel()
+            if p.poll() is None:                # the caller stopped early, or raised: never leave the child behind
+                p.kill()
+                p.wait()
+            p.stdout.close()
+            size = errf.seek(0, os.SEEK_END)
+            errf.seek(0)
+            err = errf.read(self.ERR_CAP).decode("utf-8", errors="replace")
+            if size > self.ERR_CAP:
+                err += " [more on stderr]"
+            errf.close()
+        self.rc, self.err = (124, f"{self._argv[0]}: timed out") if timed_out.is_set() else (p.returncode, err)
+
+
+class _TextStream:
+    """A fake runner's (rc, out, err) behind the same interface."""
+    def __init__(self, result):
+        self.rc, self._out, self.err = result
+
+    def __iter__(self):
+        lines = self._out.split("\n")          # "\n" only, as the real stream (splitlines also splits on \r, U+2028...)
+        return iter([l + "\n" for l in lines[:-1]] + ([lines[-1]] if lines[-1] else []))
+
+
 class Host:
     """Everything a probe touches, injectable for tests: the file root and the runner."""
     def __init__(self, root="/", run=None):
@@ -194,6 +266,12 @@ class Host:
         text (the journal): a byte that is not UTF-8 becomes U+FFFD instead of ending the read. A
         host built with a fake runner calls it unchanged."""
         return _run_real(argv, timeout, errors="replace") if self._real else self._run(argv, timeout)
+
+    def stream(self, argv, timeout=60):
+        """The same single command and limit as run_lossy(), read line by line instead of held
+        whole (the journal with every field is about 183 million characters at 35 days, measured 2026-10-13). A
+        host built with a fake runner streams that runner's text."""
+        return _RealStream(argv, timeout) if self._real else _TextStream(self._run(argv, timeout))
 
 
 class CouldNotCheck(Exception):
@@ -1079,8 +1157,9 @@ def d2_2(host, ctx):
     return {"histories": out}
 
 
-# The search of the whole journal measured 2 s at 7 days on the box (2026-10-10). Times 5 for 35 days,
-# times 10 for margin is 100 s; the limit is never under 300 s.
+# The search of the whole journal with every field measured 4 s at 7.9 days on the box (2026-10-13:
+# 41,571 entries, 41.3 MB). Scaled to 35 days that is 18 s; times 10 for margin is 180 s; the limit
+# is never under 300 s.
 JOURNAL_SCAN_TIMEOUT = 300
 
 
@@ -1091,31 +1170,128 @@ def _not_root_on_a_real_host(host):
     return host._real and os.geteuid() != 0
 
 
-def _journal_read(host, argv, timeout=60):
-    """The text of a journal read, or CouldNotCheck. A read that ends with anything on stderr is
-    not a whole read even at rc 0 (record R14: a truncated archived file is skipped with a
-    warning and rc 0; without rights journalctl prints a notice): what it covered is unknown.
-    The reason is in fixed words, never the stderr text (it can hold a path with the machine id).
-    The text is decoded with replacement: a replaced byte cannot turn text that is not a credential
-    into one, and a credential is ASCII, so it is still found beside a replaced byte; what could be
-    lost is a credential WITH an invalid byte inside it, which is not that credential."""
-    if _not_root_on_a_real_host(host):
-        raise CouldNotCheck("the journal is read as root only")
-    rc, out, err = host.run_lossy(argv, timeout)
-    if rc != 0:
-        raise CouldNotCheck(f"{argv[0]} exited {rc}")
-    if err.strip():
-        raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
+# Every stored field of every entry (finding F59: `-o cat` prints the message alone, and a token in
+# a command line is stored in `_CMDLINE`). `--all`: without it a field over 4096 bytes prints as null.
+# `-q`: as the box measurement was made; without it journalctl prints "-- No entries --" for a unit that never logged, which is not an entry.
+JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager", "-q"]
+# The customer-id count skips a field only when the journal service writes it itself, no program
+# can set it, and it holds a number or an identifier by construction: a ten-digit id can match a
+# long number there by chance (design 2026-10-13, from the box's 70 field names). The credential
+# search skips nothing.
+CID_SKIP_FIELDS = frozenset({
+    "__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "__SEQNUM", "__SEQNUM_ID",
+    "_SOURCE_REALTIME_TIMESTAMP", "_SOURCE_MONOTONIC_TIMESTAMP",
+    "_BOOT_ID", "_MACHINE_ID", "_STREAM_ID", "_SYSTEMD_INVOCATION_ID",
+    "_PID", "_UID", "_GID", "_AUDIT_LOGINUID", "_AUDIT_SESSION", "_SYSTEMD_OWNER_UID"})
+SEARCH_COUNTS = ("pattern_hits", "known_secret_hits", "credential_text_lines", "customer_id_lines",
+                 "entries", "fields", "scanned_characters", "undecodable_characters")
+SEARCH_HIT_COUNTS = ("pattern_hits", "known_secret_hits")
+LEAK_COUNTS = ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")
+READ_COUNTS = ("entries", "fields", "undecodable_characters")
+
+
+def _byte_list(v):
+    return isinstance(v, list) and all(isinstance(b, int) and not isinstance(b, bool) and 0 <= b <= 255 for b in v)
+
+
+def _field_texts(value):
+    """A journal field's value as the texts to search. systemd's JSON gives a string; a list of
+    byte numbers for a value that is not text; a list of those two for a field set more than once.
+    None for anything else (null: journalctl did not print the value), which the caller counts."""
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return None
+    if _byte_list(value):
+        return [bytes(value).decode("utf-8", errors="replace")]
+    out = []
+    for v in value:
+        if isinstance(v, str):
+            out.append(v)
+        elif _byte_list(v):
+            out.append(bytes(v).decode("utf-8", errors="replace"))
+        else:
+            return None
     return out
 
 
+def _no_repeated_key(pairs):
+    d = dict(pairs)
+    if len(d) != len(pairs):
+        raise ValueError("repeated key")
+    return d
+
+
+def _search_journal(host, argv, secrets, redactor=None, timeout=60, on_message=None):
+    """One journalctl call (`argv` ends with JOURNAL_ALL_FIELDS), read entry by entry: every field
+    value is parsed out of its JSON and searched for the credential patterns and the known secret
+    values; with a redactor, each line of each value is also counted when it looks like
+    Google-credential text or (outside CID_SKIP_FIELDS) holds a registered customer id.
+    `on_message` gets each MESSAGE text. Counts only (SEARCH_COUNTS), never a value.
+    CouldNotCheck, in fixed words: not root on a real host; a non-zero exit; anything on stderr
+    (record R14: a damaged file is skipped with a warning and rc 0); an entry that is not a JSON
+    object or a field printed as null (what was searched is then unknown)."""
+    if _not_root_on_a_real_host(host):
+        raise CouldNotCheck("the journal is read as root only")
+    c = dict.fromkeys(SEARCH_COUNTS, 0)
+    known = [s for s in set(secrets) if len(s) >= 8]
+    unparsed = unprinted = 0
+    stream = host.stream(argv, timeout)
+    it = iter(stream)
+    try:
+        for line in it:
+            c["scanned_characters"] += len(line)
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line, object_pairs_hook=_no_repeated_key)
+            except (ValueError, RecursionError):
+                entry = None
+            if not isinstance(entry, dict):
+                unparsed += 1
+                continue
+            c["entries"] += 1
+            for name, value in entry.items():
+                texts = _field_texts(value)
+                if texts is None:
+                    unprinted += 1
+                    continue
+                c["fields"] += 1
+                for t in texts:
+                    c["undecodable_characters"] += t.count("\ufffd")
+                    c["pattern_hits"] += len(CRED_TEXT_RE.findall(t))
+                    c["known_secret_hits"] += sum(t.count(s) for s in known)
+                    if redactor is not None:
+                        for l in t.splitlines():
+                            c["credential_text_lines"] += 1 if R.looks_like_credential_text(l) else 0
+                            if name not in CID_SKIP_FIELDS and redactor.has_customer_id(l):
+                                c["customer_id_lines"] += 1
+                    if on_message is not None and name == "MESSAGE":
+                        on_message(t)
+    finally:
+        close = getattr(it, "close", None)
+        if close is not None:
+            close()
+    if stream.rc != 0:
+        raise CouldNotCheck(f"{argv[0]} exited {stream.rc}")
+    if stream.err.strip():
+        raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
+    if unparsed or unprinted:
+        raise CouldNotCheck(f"{unparsed} journal entries did not parse and {unprinted} fields were not printed: "
+                            "what was searched is unknown")
+    return c
+
+
 def d2_3(host, ctx):
-    """The message text of every entry journalctl shows, as far back as it reaches (D2.4 judges how far). The oldest entry is
-    read AFTER the search: entries only ever leave, so the search reached at least that far.
-    An oldest entry that cannot be read is could-not-check; the counts of the search stay."""
-    text = _journal_read(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
-    return {"journal": _count_cred_text(text, ctx.get("secrets", [])), "scanned_characters": len(text),
-            "undecodable_characters": text.count("\ufffd"), "oldest_entry_read": _oldest_entry_or_unknown(host)}
+    """Every stored field of every entry journalctl shows, as far back as it reaches (D2.4 judges
+    how far). The oldest entry is read AFTER the search: entries only ever leave, so the search
+    reached at least that far. An oldest entry that cannot be read is could-not-check; the counts
+    of the search stay."""
+    c = _search_journal(host, ["journalctl", *JOURNAL_ALL_FIELDS], ctx.get("secrets", []),
+                        timeout=JOURNAL_SCAN_TIMEOUT)
+    return {"journal": {k: c[k] for k in SEARCH_HIT_COUNTS},
+            "entries": c["entries"], "fields": c["fields"], "scanned_characters": c["scanned_characters"],
+            "undecodable_characters": c["undecodable_characters"], "oldest_entry_read": _oldest_entry_or_unknown(host)}
 
 
 def _oldest_entry_or_unknown(host, selector=()):
@@ -1539,6 +1715,54 @@ def _journal_usage(host, settings):
             "flushed_to_disk": flushed}
 
 
+def other_journals(host, ctx, secrets):
+    """The one-time search of what D2.3 never reads: every real directory under /var/log/journal
+    other than the machine's own whose name is a machine id (32 lowercase hex characters); a server
+    image can leave the journal of the machine it was built on. Each is read with `journalctl -D`
+    and every stored field is searched. Counts only: the directories' names are machine ids and go
+    into the command, never into the result. Anything else under the folder (a link, a file,
+    `remote`, `<id>.<namespace>`) is not searched and is counted in `skipped_entries`.
+    `journalctl -D` reads only `*.journal` and `*.journal~` files directly in a directory and with
+    -q may return nothing for a directory where it opened no file, so a directory that holds anything
+    else, or files but no entry read, is could-not-check: a clean count would prove nothing.
+    Raises CouldNotCheck when a read is not whole, ValueError/OSError when the layout cannot be read."""
+    with open(host.path("/etc/machine-id")) as f:
+        mid = f.read(64).strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", mid):
+        raise ValueError("machine-id")
+    base = host.path(JOURNAL_DIR)
+    for part in (base, os.path.dirname(base), os.path.dirname(os.path.dirname(base))):
+        if not stat.S_ISDIR(os.lstat(part).st_mode):
+            raise ValueError("journal directory path")
+    names, skipped = [], 0
+    for n in sorted(os.listdir(base)):
+        if n == mid:
+            continue
+        if re.fullmatch(r"[0-9a-f]{32}", n) and stat.S_ISDIR(os.lstat(os.path.join(base, n)).st_mode):
+            names.append(n)
+        else:
+            skipped += 1
+    known = sorted({s for s in secrets if len(s) >= 8})
+    total, files, size = dict.fromkeys(SEARCH_COUNTS, 0), 0, 0
+    for n in names:
+        here = 0
+        for name in os.listdir(os.path.join(base, n)):
+            st = os.lstat(os.path.join(base, n, name))
+            if not stat.S_ISREG(st.st_mode) or not name.endswith((".journal", ".journal~")):
+                raise CouldNotCheck("a file journalctl does not read")
+            here += 1
+            size += st.st_size
+        files += here
+        c = _search_journal(host, ["journalctl", "-D", JOURNAL_DIR + "/" + n, *JOURNAL_ALL_FIELDS],
+                            known, ctx["redactor"], timeout=JOURNAL_SCAN_TIMEOUT)
+        if here and c["entries"] == 0:
+            raise CouldNotCheck("no entry was read from a directory that holds files")
+        for k in total:
+            total[k] += c[k]
+    return {"directories": len(names), "skipped_entries": skipped, "files": files, "bytes": size,
+            "search": total, "known_secrets_checked": len(known)}
+
+
 def _journald_drop_in(host):
     try:
         st = _stat(host, JOURNALD_DROP_IN)
@@ -1738,6 +1962,9 @@ LAST_PASS_COLLECTED_AT = None   # the last passing review's box-bundle collected
 SERVICE_FILES = {"hermes-docker-proxy": ("hermes-docker-proxy.service", "docker-create-proxy.py"),
                  "hermes-broker": ("hermes-broker.service", "hermes-broker.py"),
                  "hermes-app-broker@" + APP: ("hermes-app-broker@.service", "hermes-app-broker.py")}
+# The other starts D4.6 reports. The journal service since v1.20 (review #10, entry 8): its restart
+# changes what the journal holds from then on, and an automatic update can cause one.
+OTHER_STARTS = ("boot", "docker", "systemd-journald", "gateway-container")
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _ISO_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _SYSTEMD_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2}) UTC")
@@ -1826,12 +2053,13 @@ def _files_newer_than_start(host, unit, started_at):
 
 
 def d4_6(host, ctx):
-    """When the host, Docker, the three long-running Hermes services and the gateway container
-    last started, each compared with the last PASS's collection time (given with
+    """When the host, Docker, the journal service (systemd-journald), the three long-running Hermes
+    services and the gateway container last started, each compared with the last PASS's collection time (given with
     --last-pass-collected-at), and which files each service loads that changed after it
     started. D4.2's hash is the same string after any daemon-reload, so it cannot show a
     restart (review #8); this item can. Timestamps, unit names and file names only."""
     starts = {"boot": _boot_at(host), "docker": _unit_started_at(host, "docker"),
+              "systemd-journald": _unit_started_at(host, "systemd-journald"),
               **{u: _unit_started_at(host, u) for u in SERVICE_FILES},
               "gateway-container": _gateway_started_at(host)}
     base = LAST_PASS_COLLECTED_AT
@@ -2220,30 +2448,30 @@ def _label(value, allowed):
     return value if isinstance(value, str) and value in allowed else "?"
 
 
-def _journal(host, unit):
-    return _journal_read(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
-
-
-def _journal_leaks(text, secrets, redactor):
-    """What a unit's journal must hold none of: lines of Google-credential-shaped text, lines
-    with a registered customer id, and (as D2.3 counts them) credential patterns and the
-    installed secret values themselves. Counts only, never a line."""
-    lines = text.splitlines()
-    return {"credential_text_lines": sum(1 for l in lines if R.looks_like_credential_text(l)),
-            "customer_id_lines": sum(1 for l in lines if redactor.has_customer_id(l)),
-            **_count_cred_text(text, secrets)}
+def _unit_search(host, unit, secrets, redactor, on_message=None):
+    """What a unit's journal of the last 30 days must hold none of, in every stored field: lines
+    of Google-credential-shaped text, lines with a registered customer id, credential patterns and
+    the installed secret values themselves. Counts only, never a line."""
+    return _search_journal(host, ["journalctl", "-u", unit, "--since", "-30d", *JOURNAL_ALL_FIELDS],
+                           secrets, redactor, on_message=on_message)
 
 
 def d10_7(host, ctx):
-    """Counts only, never a line: the journal names clients and request ids by design. The
+    """Counts only, never a line or a field: the journal names clients and request ids by design. The
     status/reason counts are the broker's; the leak counts cover the runner's journal too,
     which is where run-client-audit's own output lands (its unit sets no StandardOutput)."""
-    broker = _journal(host, f"hermes-app-broker@{APP}")
-    runner = _journal(host, f"hermes-app-runner@{APP}")
+    # The non-Google values are loaded before the probes; D2.1 (it runs first) adds the Google
+    # ones and any other it finds. With none
+    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
+    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
+    lines = []
+    broker = _unit_search(host, f"hermes-app-broker@{APP}", secrets, ctx["redactor"],
+                          on_message=lambda t: lines.extend(t.splitlines()))
+    runner = _unit_search(host, f"hermes-app-runner@{APP}", secrets, ctx["redactor"])
     oldest = {label: _oldest_entry_or_unknown(host, ("-u", unit, "--since", "-30d"))
               for label, unit in JOURNAL_UNITS.items()}
     counts, notes, other = {}, {}, 0
-    for line in broker.splitlines():
+    for line in lines:
         if not line.strip():
             continue
         body = line[len(_BROKER_LINE):] if line.startswith(_BROKER_LINE) else ""
@@ -2255,13 +2483,11 @@ def d10_7(host, ctx):
             notes[note.group(1)] = notes.get(note.group(1), 0) + 1
         else:
             other += 1                                      # systemd's own lines, a traceback, anything else
-    # The non-Google values are loaded before the probes; D2.1 (it runs first) adds the Google
-    # ones and any other it finds. With none
-    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
-    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
     return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
-            "broker_journal": _journal_leaks(broker, secrets, ctx["redactor"]),
-            "runner_journal": _journal_leaks(runner, secrets, ctx["redactor"]),
+            "broker_journal": {k: broker[k] for k in LEAK_COUNTS},
+            "runner_journal": {k: runner[k] for k in LEAK_COUNTS},
+            "journal_read": {"broker": {k: broker[k] for k in READ_COUNTS},
+                             "runner": {k: runner[k] for k in READ_COUNTS}},
             "known_secrets_checked": len(secrets), "oldest_entry_read": oldest}
 
 
@@ -2328,7 +2554,7 @@ def box_fingerprint(host, ctx):
         return out
 
     def code():
-        base = ["git", "-c", f"safe.directory={CHECKOUT}", "-C", CHECKOUT]
+        base = ["git", "-c", f"safe.directory={CHECKOUT}", "-C", CHECKOUT, "--no-optional-locks"]
         trees = {p: _ok(host, base + ["rev-parse", f"HEAD:{p}"]).strip() for p in CODE_PATHS}
         dirty = _ok(host, base + ["status", "--porcelain", "--", *CODE_PATHS]).strip()
         return {"trees": trees, "dirty": bool(dirty)}
@@ -2430,6 +2656,7 @@ def main(argv=None, host=None, read_key=_tty_key):
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--fingerprint-only", action="store_true")
     g.add_argument("--credentials-only", action="store_true")
+    g.add_argument("--other-journals", action="store_true")
     ap.add_argument("--fp-key-tty", action="store_true")
     ap.add_argument("--last-pass-execstart")
     ap.add_argument("--last-pass-collected-at")
@@ -2462,7 +2689,7 @@ def _main(a, host, read_key):
         except ValueError as e:
             print(f"collect-review-evidence: {e}", file=sys.stderr)
             return 2
-    if not (a.fingerprint_only or a.credentials_only) and fp_key is None:
+    if not (a.fingerprint_only or a.credentials_only or a.other_journals) and fp_key is None:
         print("collect-review-evidence: the full bundle needs --fp-key-tty (Option B §8: keyed cid fingerprints)",
               file=sys.stderr)
         return 2
@@ -2493,6 +2720,19 @@ def _main(a, host, read_key):
                   "installed set", file=sys.stderr)
             return 2
         out, secrets = R.credential_set(infos) + other, secrets + other_secrets
+    elif a.other_journals:
+        try:
+            infos, secrets, unparsed, unreadable = installed_credentials(host)
+            other, other_secrets, other_failed = other_credentials(host)
+            if other_failed or unparsed or unreadable:
+                raise CouldNotCheck("the installed secret values could not all be loaded")
+            secrets = secrets + other_secrets
+            out = {"schema": 1, "kind": "other-journals", "collected_at": R.utc_now(),
+                   **other_journals(host, ctx, secrets)}
+        except (CouldNotCheck, OSError, ValueError) as e:
+            reason = str(e) if isinstance(e, CouldNotCheck) else type(e).__name__
+            print(f"collect-review-evidence: other journals: {reason}", file=sys.stderr)
+            return 2
     else:
         out, secrets, _ = _collect(host, fp_key)
     secrets = secrets + ([fp_key.hex()] if fp_key else [])
@@ -2502,6 +2742,10 @@ def _main(a, host, read_key):
     R.assert_no_secret(json.dumps(out, indent=2, sort_keys=True), secrets)
     text = json.dumps(ctx["redactor"].obj(out), indent=2, sort_keys=True)
     R.assert_no_secret(text, secrets)
+    if not R.restrict_output(sys.stdout):
+        print("collect-review-evidence: the output file could not be made owner-only: nothing written",
+              file=sys.stderr)
+        return 2
     print(text)
     return rc
 
