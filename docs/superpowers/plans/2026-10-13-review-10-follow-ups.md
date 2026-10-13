@@ -104,6 +104,10 @@ class TestSearchJournal(Base):
         c = self._search(_e(MESSAGE=list(f"leak {self.SECRET} \xff".encode("latin-1"))), [self.SECRET])
         self.assertEqual((c["known_secret_hits"], c["undecodable_characters"]), (1, 1))
 
+    def test_a_secret_at_the_end_of_a_very_long_field_is_counted(self):
+        c = self._search(_e(MESSAGE="x" * 100000 + self.SECRET), [self.SECRET])
+        self.assertEqual(c["known_secret_hits"], 1)
+
     def test_a_field_set_twice_is_searched_in_both_values(self):
         c = self._search(_e(MESSAGE=["a " + self.SECRET, list(("b " + self.SECRET).encode())]), [self.SECRET])
         self.assertEqual((c["known_secret_hits"], c["fields"]), (2, 1))
@@ -166,12 +170,13 @@ class TestStream(unittest.TestCase):
     def _real(self, code, timeout=30):
         return CE.Host().stream([sys.executable, "-c", code], timeout)
 
-    def test_the_real_stream_yields_every_line_and_then_the_exit_code(self):
-        s = self._real("import sys\nfor i in range(200000): sys.stdout.write('x' * 99 + '\\n')")
+    def test_the_35_day_size_passes_through_the_real_stream_line_by_line(self):
+        """185,000 lines of 1,000 characters: M1 of 2026-10-13 scaled to 35 days (about 184 MB)."""
+        s = self._real("import sys\nline = 'x' * 999 + '\\n'\nfor i in range(185000): sys.stdout.write(line)", timeout=120)
         n = size = 0
         for line in s:
             n += 1; size += len(line)
-        self.assertEqual((n, size, s.rc, s.err), (200000, 20000000, 0, ""))
+        self.assertEqual((n, size, s.rc, s.err), (185000, 185000000, 0, ""))
 
     def test_a_byte_that_is_not_text_becomes_one_replacement_character(self):
         s = self._real("import sys; sys.stdout.buffer.write(b'a\\xffb\\n')")
@@ -574,7 +579,39 @@ Each fixture line `Started.` is now the 24-character line `{"MESSAGE": "Started.
 - `test_d2_3_finds_a_secret_and_a_pattern_at_the_far_end_of_35_days_of_journal`: `self.assertEqual(d["scanned_characters"], len(text))` becomes `self.assertEqual(d["scanned_characters"], len(_as_entries(text)))`.
 - `test_d10_7_runner_journal_installed_secret_value_is_counted_under_the_runner_key`: unchanged (the four keys stay).
 - `test_d10_7_reads_both_units_over_the_same_window`: unchanged.
-- Any test that calls `CE._journal_read` or `CE._journal_leaks` directly: call `CE._search_journal(host, ["journalctl", *CE.JOURNAL_ALL_FIELDS], secrets)` and read the same count names.
+- `_real_host` (a host that counts as the real one): the real host now streams through `_RealStream`, so it must be patched too, or the test would start the machine's own `journalctl`. Replace it with:
+
+```python
+    def _real_host(self):
+        """A host that counts as the real one (built with the real runner) but whose commands are the fake's."""
+        host = self.host()
+        host._real = True
+        fake = host._fake
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(CE, "_run_real", lambda argv, timeout=60, errors="strict": fake(argv, timeout)))
+        stack.enter_context(mock.patch.object(CE, "_RealStream", lambda argv, timeout: CE._TextStream(fake(argv, timeout))))
+        return host, stack
+```
+
+- `test_d2_3_searches_past_a_byte_that_is_not_text_and_says_how_many_were_replaced`: the child must print entries, and the stream must be the patched one. Replace the test with:
+
+```python
+    BAD_BYTE_ENTRIES = ["-c", "import sys; sys.stdout.buffer.write(b'{\"MESSAGE\": \"ok\"}\\n"
+                              "{\"MESSAGE\": \"\\xff GOOGLE_ADS_REFRESH_TOKEN=" + TOKEN + "\"}\\n')"]
+
+    def test_d2_3_searches_past_a_byte_that_is_not_text_and_says_how_many_were_replaced(self):
+        argv = [sys.executable, *self.BAD_BYTE_ENTRIES]
+        real = CE._RealStream
+        # the real stream is reached through Host(root) with no fake: patch only the program that is started
+        with mock.patch.object(CE, "_RealStream", lambda a, timeout: real(argv, timeout)), \
+                mock.patch.object(CE, "_run_real", lambda a, timeout=60, errors="strict": (0, "", "")), \
+                mock.patch.object(os, "geteuid", return_value=0):               # this host is the real one: root only
+            d = CE.d2_3(CE.Host(self.root), {"secrets": []})
+        self.assertEqual((d["journal"]["pattern_hits"], d["undecodable_characters"], d["entries"]), (1, 1, 2))
+```
+
+  (`BAD_BYTE_CHILD` and `test_the_strict_runner_raises_on_a_byte_that_is_not_text_and_the_lossy_one_replaces_it` stay as they are.)
+- `summarize-review-bundle.test.py`, `test_the_leak_keys_are_the_collectors`: `set(CE._journal_leaks("", [], NoIds))` becomes `set(CE.LEAK_COUNTS)`; delete the `NoIds` class there.
 
 A FAIL or ERROR outside this list, after these edits: STOP and report it with its name; do not edit that test.
 
@@ -665,25 +702,35 @@ class TestRestrictOutput(unittest.TestCase):
             self.assertFalse(R.restrict_output(f))
 ```
 
-(add `io, stat, tempfile` and `from unittest import mock` to that file's imports if missing.)
+(`review_lib.test.py` imports `hashlib, json, os, sys, tempfile, unittest` today: add `io, stat` and `from unittest import mock`.)
 
-In `collect-review-evidence.test.py`, in the class that tests `main` with `--fingerprint-only`:
+In `collect-review-evidence.test.py`, directly after `test_clean_credential_control_credentials_only_exits_0` (same class, same fixture: that run exits 0):
 
 ```python
-    def test_a_bundle_redirected_into_a_file_is_owner_only_and_a_refused_mode_prints_nothing(self):
+    def test_an_output_file_that_cannot_be_made_owner_only_gets_nothing_written(self):
         with mock.patch.object(R, "restrict_output", return_value=False) as ro, \
                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = CE.main(["--fingerprint-only"], host=self.host())
+            rc = CE.main(["--credentials-only"], host=self.host())
         self.assertEqual((rc, out.getvalue()), (2, ""))
         self.assertIn("owner-only", err.getvalue())
         ro.assert_called_once()
+
+    def test_the_output_is_restricted_before_it_is_written(self):
+        order = []
+        buf = io.StringIO()
+        buf.write = lambda text, w=buf.write: (order.append("write"), w(text))[1]
+        with mock.patch.object(R, "restrict_output", side_effect=lambda s: order.append("restrict") or True), \
+                contextlib.redirect_stdout(buf):
+            rc = CE.main(["--credentials-only"], host=self.host())
+        self.assertEqual((rc, order[0]), (0, "restrict"))
+        self.assertIn("write", order)
 ```
 
 Run both test files → FAIL (`AttributeError: ... 'restrict_output'`).
 
 - [ ] **Step 2: Write the implementation**
 
-`review_lib.py` (add `io`, `stat` to its imports if missing):
+`review_lib.py` (its import line is `import datetime, hashlib, hmac, json, os, re`: add `io, stat`):
 
 ```python
 def restrict_output(stream):
@@ -925,7 +972,7 @@ Add a `main` test:
         self.assertNotIn(self.OTHER, out.getvalue())
 ```
 
-(If `Base`'s fixture makes `installed_credentials` or `other_credentials` report an unparsed file, give this test the same fixture the existing `--credentials-only` success test uses.)
+(`Base`'s fixture is the one `test_clean_credential_control_credentials_only_exits_0` passes with, so the secrets load.)
 
 - [ ] **Step 3: Write the failing tests (removal script)**
 
