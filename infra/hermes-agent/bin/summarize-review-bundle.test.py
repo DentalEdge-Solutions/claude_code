@@ -15,8 +15,17 @@ PLANTS = (PLANT, "acmecorp", "host.example.com", "10.0.0.5", "ops@acme.com", "12
 ACCOUNTS = ("jsmith", "acme-ops")
 
 
-def bundle():
-    setting = lambda v, f, n: {"value": v, "file": f, "number": n}
+JOBS = ("ads-audit", "ads-report")
+BROKERS = tuple("hermes-app-broker@" + j for j in JOBS)
+APP_UNIT_FILES = ("hermes-app-broker@.service", "hermes-app-runner@.service", "hermes-app-runner@.path")
+
+
+def _setting(v, f, n):
+    return {"value": v, "file": f, "number": n}
+
+
+def _base():
+    """What both shapes of the bundle hold alike: everything but the per-job items."""
     return {"schema": 1, "kind": "box", "collected_at": "2026-10-20T14:00:00Z",
             "fingerprint": {"complete": True, "sha256": "ab" * 32},
             "credentials": [{"role": "read", "refresh_token_sha12": "0123456789ab"},
@@ -38,13 +47,15 @@ def bundle():
                                                         "undecodable_characters": 0,
                                                         "oldest_entry_read": "2026-09-18T15:11:34Z"}},
                 "D2.4": {"status": "observed", "data": {
-                    "oldest_entry": {"journal": "2026-09-18T15:11:34Z", "broker": "2026-10-05T18:35:47Z", "runner": None},
+                    "oldest_entry": {"journal": "2026-09-18T15:11:34Z",
+                                     "apps": {"ads-audit": {"broker": "2026-10-05T18:35:47Z", "runner": None},
+                                              "ads-report": {"broker": "2026-10-08T09:00:00Z", "runner": None}}},
                     "reach_days": 31,
-                    "settings": {"MaxRetentionSec": setting("35day", OURS, 3024000),
-                                 "SystemMaxFiles": setting("500", OURS, 500),
-                                 "SystemMaxUse": setting("1G", "/etc/systemd/journald.conf", 1 << 30),
-                                 "MaxFileSec": setting("1day", "/etc/systemd/journald.conf", 86400),
-                                 "Storage": setting(None, None, None)},
+                    "settings": {"MaxRetentionSec": _setting("35day", OURS, 3024000),
+                                 "SystemMaxFiles": _setting("500", OURS, 500),
+                                 "SystemMaxUse": _setting("1G", "/etc/systemd/journald.conf", 1 << 30),
+                                 "MaxFileSec": _setting("1day", "/etc/systemd/journald.conf", 86400),
+                                 "Storage": _setting(None, None, None)},
                     "config_files": ["/etc/systemd/journald.conf", OURS],
                     "drop_in": {"equals_repo": True, "owner": "root", "group": "root", "mode": "0o644", "other_files": []},
                     "service": {"active": True, "started_at": "2026-10-14T16:00:00Z", "config_changed_after_start": False},
@@ -70,25 +81,116 @@ def bundle():
                                   "first_ts": "2026-09-01T10:00:00Z", "last_ts": "2026-09-02T10:00:00Z"}}},
                 "D4.6": {"status": "observed", "data": {
                     "last_pass_collected_at": "2026-10-09T14:01:23Z",
+                    "apps_declared": list(JOBS), "apps_installed": list(JOBS),
                     "started_at": {"boot": "2026-10-01T00:00:00Z", "hermes-broker": "2026-10-07T06:45:46Z",
-                                   "hermes-docker-proxy": "2026-10-07T06:45:40Z", "hermes-app-broker@ads-audit": "2026-10-07T06:45:50Z"},
-                    "started_after_last_pass": {"hermes-broker": False, "hermes-docker-proxy": False, "hermes-app-broker@ads-audit": False},
-                    "files_newer_than_start": {"hermes-broker": [], "hermes-docker-proxy": [], "hermes-app-broker@ads-audit": []},
-                    "files_checked": {"hermes-broker": 9, "hermes-docker-proxy": 5, "hermes-app-broker@ads-audit": 7}}},
-                "D7.1": {"status": "observed", "data": {"records": 412, "vaults": [{"client": "acmecorp"}], "root_backups": []}},
-                "D10.7": {"status": "observed", "data": {
+                                   "hermes-docker-proxy": "2026-10-07T06:45:40Z", BROKERS[0]: "2026-10-07T06:45:50Z",
+                                   BROKERS[1]: "2026-10-08T09:00:00Z"},
+                    "started_after_last_pass": {"hermes-broker": False, "hermes-docker-proxy": False, BROKERS[0]: False,
+                                                BROKERS[1]: False},
+                    "files_newer_than_start": {"hermes-broker": [], "hermes-docker-proxy": [], BROKERS[0]: [], BROKERS[1]: []},
+                    "files_checked": {"hermes-broker": 9, "hermes-docker-proxy": 5, BROKERS[0]: 7, BROKERS[1]: 6}}},
+                "D7.1": {"status": "observed", "data": {
+                    "records": 412, "vaults": [{"client": "acmecorp"}], "root_backups": [],
+                    "report_archive": {
+                        "parent": {"owner": "root", "group": "root", "mode": "0o700"}, "rows_listed": True,
+                        "rows": [{"status": "active", "owner": "root", "mode": "0o700", "kind": "dir",
+                                  "files": {"root root 0o600": 2}, "not_files": 0, "listed": True},
+                                 {"status": "active", "owner": "root", "mode": "0o700", "kind": "dir",
+                                  "files": {}, "not_files": 0, "listed": True}],
+                        "containers_mounting": 0, "containers_not_inspected": 0}}},
+                "D10.1": {"status": "observed", "data": {"rc": 0, "probe": {
+                    "services": {s: {"rc": 0, "env_names": ["GOOGLE_ADS_X"], "sentinel_env_names": [],
+                                     "sentinel_in_files": False, "host_credential_files_visible": False}
+                                 for s in ("ads-collector", "ads-reader", "ads-drafter", "egress-proxy")},
+                    "figures_services": ["ads-collector", "ads-reader"], "matches_declared": True}}},
+                "D10.3": {"status": "observed", "data": {
+                    "declared_apps": list(JOBS), "installed_apps": list(JOBS), "on_disk_apps": list(JOBS),
+                    "units_not_counted": 0, "on_disk_not_counted": 0,
+                    "installed_equal_repo": {u: True for u in APP_UNIT_FILES},
+                    "apps": {j: {"declared": True, "installed": True,
+                                 "broker_unit": {"User": "hermes-app-" + j, "NoNewPrivileges": "yes"},
+                                 "runner_unit": {"Environment": ["HOME"], "EnvironmentFiles": []},
+                                 "drop_in_paths": {u.replace("@.", "@" + j + "."): [] for u in APP_UNIT_FILES},
+                                 "broker_user_groups": ["hermes-app-" + j, "hermes"],
+                                 "sudo_rules": {"rc": 0, "not_allowed": False, "command_lines": 1},
+                                 "runner_path_active": "active"} for j in JOBS}}},
+                "D10.4": {"status": "observed", "data": {
+                    "apps": {j: {"declared": True, "installed": True, "layout_problems": [], "layout_reason": None}
+                             for j in JOBS},
+                    "containers": 3, "containers_mounting_app_state": 0, "containers_not_inspected": 0}},
+                "D10.7": {"status": "observed", "data": {"known_secrets_checked": 7, "apps": {j: {
+                    "declared": True, "installed": True,
                     "journal_counts": {"refused/disabled": 1, "refused/quota": 1, "refused/bad_request": 2, "ok/-": 3},
-                    "note_counts": {"warning": 2}, "other_lines": 4, "known_secrets_checked": 7,
+                    "note_counts": {"warning": 2}, "other_lines": 4,
                     "broker_journal": {"credential_text_lines": 0, "customer_id_lines": 0, "pattern_hits": 0, "known_secret_hits": 0},
                     "runner_journal": {"credential_text_lines": 0, "customer_id_lines": 0, "pattern_hits": 0, "known_secret_hits": 0},
                     "journal_read": {"broker": {"entries": 40, "fields": 900, "undecodable_characters": 0},
                                      "runner": {"entries": 90, "fields": 2000, "undecodable_characters": 0}},
-                    "oldest_entry_read": {"broker": "2026-10-05T18:35:47Z", "runner": None}}},
-                "D10.8": {"status": "observed", "data": {"out_of_whitelist": 0, "results": [
-                    {"op": "run", "status": "ok", "reason": "-", "keys_ok": True, "values_ok": True},
-                    {"op": "run", "status": "refused", "reason": "quota", "keys_ok": True, "values_ok": True}]}},
+                    "oldest_entry_read": {"broker": "2026-10-05T18:35:47Z", "runner": None},
+                    "first_entry": "2026-10-05T18:35:47Z", "installed_since_last_pass": False} for j in JOBS}}},
+                "D10.8": {"status": "observed", "data": {"apps": {j: {
+                    "declared": True, "installed": True, "out_of_whitelist": 0, "results": [
+                        {"op": "run", "status": "ok", "reason": "-", "keys_ok": True, "values_ok": True},
+                        {"op": "run", "status": "refused", "reason": "quota", "keys_ok": True, "values_ok": True}]}
+                    for j in JOBS}}},
                 "D5.3": {"status": "could-not-check", "reason": "OSError: /var/lib/hermes/x: denied"},
                 "D99.9": {"status": "observed", "data": {"anything": PLANT}}}}
+
+
+def bundle():
+    """A healthy box with both jobs declared, installed and on disk (the only fault: D5.3)."""
+    return _base()
+
+
+def old_bundle():
+    """The shape of the previous review's bundle: one job, no `apps` level, no report store, no job lists."""
+    b = _base()
+    it = b["items"]
+    for gone in ("D10.1", "D10.3", "D10.4"):
+        del it[gone]
+    del it["D7.1"]["data"]["report_archive"]
+    it["D2.4"]["data"]["oldest_entry"] = {"journal": "2026-09-18T15:11:34Z", "broker": "2026-10-05T18:35:47Z", "runner": None}
+    d46 = it["D4.6"]["data"]
+    del d46["apps_declared"], d46["apps_installed"]
+    for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+        del d46[group][BROKERS[1]]
+    job = it["D10.7"]["data"]["apps"]["ads-audit"]
+    for gone in ("declared", "installed", "first_entry", "installed_since_last_pass"):
+        del job[gone]
+    it["D10.7"]["data"] = {**job, "known_secrets_checked": 7}
+    it["D10.8"]["data"] = {k: it["D10.8"]["data"]["apps"]["ads-audit"][k] for k in ("out_of_whitelist", "results")}
+    return b
+
+
+def clean():
+    """bundle() without its one fault, so that every closing line starts from ok."""
+    b = bundle()
+    del b["items"]["D5.3"]
+    return b
+
+
+def job(items, iid, app="ads-audit"):
+    return items[iid]["data"]["apps"][app]
+
+
+def not_installed(b, app="ads-report"):
+    """`app` as the collector reports a job that is declared and not installed yet (between a pull and
+    the job's installation): no account, no results directory, a broker that never started."""
+    it = b["items"]
+    it["D10.3"]["data"]["installed_apps"].remove(app)
+    it["D10.3"]["data"]["on_disk_apps"].remove(app)
+    it["D4.6"]["data"]["apps_installed"].remove(app)
+    for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+        job(it, iid, app)["installed"] = False
+    job(it, "D10.3", app).update(broker_user_groups="could-not-check", runner_path_active="inactive")
+    job(it, "D10.4", app).update(layout_problems="could-not-check", layout_reason="no-account")
+    job(it, "D10.8", app).update(results="could-not-check", out_of_whitelist="could-not-check")
+    job(it, "D10.7", app).update(journal_counts={}, note_counts={}, other_lines=0, first_entry=None,
+                                 installed_since_last_pass=True, oldest_entry_read={"broker": None, "runner": None})
+    broker = "hermes-app-broker@" + app
+    for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+        it["D4.6"]["data"][group][broker] = "could-not-check"
+    return b
 
 
 def planted(value, plant=PLANT, keys=True, _n=[0]):
@@ -226,13 +328,34 @@ class TestSetsMatchTheCollector(unittest.TestCase):
         self.assertEqual(SB.SETTING_NAMES, frozenset(CE.JOURNALD_SETTINGS))
         self.assertEqual(SB.OUR_FILE, CE.JOURNALD_DROP_IN)
 
-    # Task 7 makes the summary tool follow the per-job shape and removes this mark
-    @unittest.expectedFailure
     def test_services_and_unit_labels(self):
-        self.assertEqual(SB.SERVICES, tuple(CE.SERVICE_FILES))
+        self.assertEqual(SB.SERVICES, tuple(CE.SERVICE_FILES))                       # the two fixed services
         self.assertEqual(SB.START_KEYS, frozenset(CE.SERVICE_FILES) | frozenset(CE.OTHER_STARTS))
-        self.assertEqual(SB.JOURNAL_LABELS, frozenset(CE.JOURNAL_UNITS) | {"journal"})
+        for app in JOBS:                                                             # a job's broker is built from its name
+            self.assertEqual(SB.BROKER_PREFIX + app, CE._app_broker_unit(app))
+            self.assertEqual(SB.UNIT_LABELS, tuple(CE._journal_units(app)))
+            self.assertEqual(CE._journal_units(app)["broker"], SB.BROKER_PREFIX + app)
         self.assertEqual(SB.LISTENER_UNITS, frozenset(CE.LISTENER_UNITS))
+        self.assertEqual(SB.APP_UNITS, frozenset(CE.APP_UNITS))
+        self.assertEqual(SB.APP_UNITS, frozenset(APP_UNIT_FILES))
+        self.assertEqual(SB.LAYOUT_REASONS, frozenset(CE.LAYOUT_REASONS))
+        self.assertEqual(tuple(SB._READ_KEYS), tuple(CE.READ_COUNTS))
+
+    def test_a_job_name_is_what_the_collector_calls_one(self):
+        self.assertEqual("^" + SB._APP_RE.pattern + "$", CE.A.APP_RE.pattern)
+        for name in JOBS + ("a", "a" * 32, "x9-y"):
+            self.assertTrue(SB._APP_RE.fullmatch(name) and CE.A.APP_RE.fullmatch(name), name)
+        for name in ("", "a" * 33, "Ads", "9a", "-a", "a_b", "a.b", "a b", "ads-audit\n", "a/b", "a@b"):
+            self.assertIsNone(SB._APP_RE.fullmatch(name), name)
+
+    def test_the_report_store_words_the_collector_does_not_declare_are_pinned(self):
+        # The collector names none of these: _dir_row and _archive_row write the words inline, and the
+        # probe's services are run-client-audit's DECLARED. Pinned here; a change there must change these.
+        self.assertEqual(SB.DIR_WORDS, frozenset({"absent", "symlink", "not-a-directory"}))
+        self.assertEqual(SB.PROBE_SERVICES, frozenset({"ads-collector", "ads-reader", "ads-drafter", "egress-proxy"}))
+        rspec = importlib.util.spec_from_file_location("rca_for_summary", os.path.join(HERE, "run-client-audit.py"))
+        RCA = importlib.util.module_from_spec(rspec); rspec.loader.exec_module(RCA)
+        self.assertEqual(SB.PROBE_SERVICES, frozenset(RCA.DECLARED))
 
     def test_secret_env_labels_and_states(self):
         self.assertEqual(SB.SECRET_LABELS, frozenset(l for _, l in CE.OTHER_SECRET_NAMES[CE.GATEWAY_ENV_FILE]))
@@ -283,7 +406,7 @@ class TestSummary(unittest.TestCase):
         self.assertEqual(rc, 0)
         for iid in bundle()["items"]:
             self.assertRegex(text, rf"(?m)^{re.escape(iid)} +(observed|could-not-check)\b")
-        self.assertRegex(text, r"(?m)^items 13 \| not observed: D5\.3$")
+        self.assertRegex(text, r"(?m)^items 16 \| not observed: D5\.3$")
         self.assertRegex(text, r"(?m)^other items: 0$")
         self.assertNotIn("anything", text)                       # an unknown item: its status alone
         self.assertNotIn("denied", text)                         # a reason is free text
@@ -305,7 +428,8 @@ class TestSummary(unittest.TestCase):
                      "dashboard-session-secret: differs-from-file, openrouter-key: matches-file}",
                      "listeners: 2", "docker_dns_listeners: 1", "active: active", "timer_enabled: enabled",
                      "history_counts: {?: 2, alert: 1, ok: 300}", "first_ts: 2026-09-01T10:00:00Z",
-                     "files_checked: {hermes-app-broker@ads-audit: 7, hermes-broker: 9, hermes-docker-proxy: 5}",
+                     "files_checked: {hermes-app-broker@ads-audit: 7, hermes-app-broker@ads-report: 6, hermes-broker: 9, "
+                     "hermes-docker-proxy: 5}",
                      "records: 412", "note_counts: {warning: 2}"):
             self.assertIn(want, text)
 
@@ -320,7 +444,7 @@ class TestSummary(unittest.TestCase):
         b["items"]["D2.3"]["data"]["acmecorp"] = 1
         b["items"]["D2.3"]["data"]["journal"]["10.0.0.5"] = 2
         b["items"]["D2.3"]["data"]["journal"]["ops@acme.com"] = 3
-        b["items"]["D10.7"]["data"]["journal_counts"]["ok/acmecorp"] = 3
+        job(b["items"], "D10.7")["journal_counts"]["ok/acmecorp"] = 3
         b["items"]["D4.5"]["data"]["history_counts"]["client-acme.json"] = 1
         text = run(json.dumps(b))[1]
         self.assertIn("journal: {pattern_hits: 0, known_secret_hits: 0, +2 other keys}", text)
@@ -334,7 +458,7 @@ class TestSummary(unittest.TestCase):
         b = bundle()
         b["items"]["D4.5"]["data"]["alert_log"]["zz"] = 1
         b["items"]["D2.4"]["data"]["oldest_entry"]["zz"] = "2026-10-01T00:00:00Z"
-        b["items"]["D10.7"]["data"]["oldest_entry_read"]["zz"] = "2026-10-01T00:00:00Z"
+        job(b["items"], "D10.7")["oldest_entry_read"]["zz"] = "2026-10-01T00:00:00Z"
         text = run(json.dumps(b))[1]
         self.assertNotIn("zz", text)
         self.assertEqual(text.count("+1 other keys"), 3)
@@ -369,14 +493,15 @@ class TestSummary(unittest.TestCase):
 
     def test_the_closing_list_says_what_to_look_at_before_the_real_collection(self):
         closing = closing_of(bundle())
-        self.assertIn("LOOK  every item observed (13 items) (not observed: D5.3)", closing)
+        self.assertIn("LOOK  every item observed (16 items) (not observed: D5.3)", closing)
         for ok in ("nothing in the bundle is could-not-check", "the three live refusals are in the journal",
                    "at least one run/ok result", "retention at least 30 days, set by our file",
                    "the journal reaches 30 days", "the running journal service has read its settings",
                    "the proxy matches the last PASS", "no service runs older code", "fingerprint complete",
                    "the journal is being written to disk", "sshd runs with its default settings file and no Match line",
                    "the journal search read everything it was given", r"no leak count above 0 \(D2\.3, D10\.7\)",
-                   "no other journal directory and no missing days"):
+                   "no other journal directory and no missing days", "every job is declared and installed",
+                   "the report store holds only owner-only client folders"):
             self.assertRegex(closing, rf"(?m)^(ok    |LOOK  ){ok}")
         for ok in ("the three live refusals are in the journal", "at least one run/ok result",
                    "retention at least 30 days, set by our file", "the journal reaches 30 days",
@@ -384,39 +509,40 @@ class TestSummary(unittest.TestCase):
                    "no service runs older code", "fingerprint complete",
                    "the journal is being written to disk", "sshd runs with its default settings file and no Match line",
                    "the journal search read everything it was given", r"no leak count above 0 \(D2\.3, D10\.7\)$",
-                   "no other journal directory and no missing days$"):
+                   "no other journal directory and no missing days$", r"every job is declared and installed \(2 jobs\)$",
+                   r"the report store holds only owner-only client folders \(2 folders\)$"):
             self.assertRegex(closing, rf"(?m)^ok    {ok}")
         self.assertIn("ok    retention at least 30 days, set by our file, the file equal to the repository's, "
                       "no other file, root:root 0644\n", closing)
         self.assertIn("Reminders, not verdicts", closing)
-        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 15)
+        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 17)
 
-    def test_a_clean_bundle_is_ok_on_all_fifteen(self):
-        b = bundle()
-        del b["items"]["D5.3"]
-        closing = closing_of(b)
-        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 15)
-        self.assertEqual(len(SB.CHECKS), 15)
-        self.assertIn("ok    every item observed (12 items)", closing)
+    def test_a_clean_bundle_is_ok_on_all_seventeen(self):
+        closing = closing_of(clean())
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 17)
+        self.assertEqual(len(SB.CHECKS), 17)
+        self.assertIn("ok    every item observed (15 items)", closing)
 
-    def test_the_closing_list_has_the_fifteen_lines_in_order(self):
+    def test_the_closing_list_has_the_seventeen_lines_in_order(self):
         closing = closing_of(bundle())
-        order = ("every item observed", "nothing in the bundle", "sshd runs with", "the three live refusals",
+        order = ("every item observed", "nothing in the bundle", "every job is declared and installed",
+                 "sshd runs with", "the three live refusals",
                  "at least one run/ok", "retention at least 30 days", "the journal reaches 30 days",
                  "the journal search read", "no leak count above 0", "the running journal service",
-                 "the journal is being written", "no other journal directory and no missing days", "the proxy matches", "no service runs older code", "fingerprint complete")
+                 "the journal is being written", "no other journal directory and no missing days", "the proxy matches", "no service runs older code",
+                 "the report store holds only", "fingerprint complete")
         positions = [closing.index(o) for o in order]
         self.assertEqual(positions, sorted(positions))
 
     def test_each_closing_line_turns_to_look(self):
         def closing(change):
             b = bundle()
-            del b["items"]["D5.3"]                      # so that every case starts from fifteen ok
+            del b["items"]["D5.3"]                      # so that every case starts from seventeen ok
             change(b["items"])
             return closing_of(b)
         cases = (
-            (lambda it: it["D10.7"]["data"]["journal_counts"].pop("refused/quota"), "the three live refusals"),
-            (lambda it: it["D10.8"]["data"]["results"].pop(0), "at least one run/ok result"),
+            (lambda it: job(it, "D10.7")["journal_counts"].pop("refused/quota"), "the three live refusals"),
+            (lambda it: job(it, "D10.8")["results"].pop(0), "at least one run/ok result"),
             (lambda it: it["D2.4"]["data"]["settings"]["MaxRetentionSec"].update(file="/etc/systemd/journald.conf"), "retention at least 30 days"),
             (lambda it: it["D2.4"]["data"]["drop_in"].update(other_files=["99-x.conf"]), "retention at least 30 days"),
             (lambda it: it["D2.4"]["data"].update(reach_days=12), "the journal reaches 30 days"),
@@ -468,12 +594,12 @@ class TestSummary(unittest.TestCase):
             (lambda it: it["D2.3"].update(status="could-not-check"), "the journal search read everything"),
             (lambda it: it.pop("D2.3"), "the journal search read everything"),
             # the brief's lines, against a bool where a number is expected or a wrong type
-            (lambda it: it["D10.7"]["data"]["journal_counts"].update({"refused/quota": True}), "the three live refusals"),
-            (lambda it: it["D10.7"]["data"].update(journal_counts="x"), "the three live refusals"),
+            (lambda it: job(it, "D10.7")["journal_counts"].update({"refused/quota": True}), "the three live refusals"),
+            (lambda it: job(it, "D10.7").update(journal_counts="x"), "the three live refusals"),
             (lambda it: it["D10.7"].update(status="could-not-check"), "the three live refusals"),
             (lambda it: it.pop("D10.7"), "the three live refusals"),
             (lambda it: it.pop("D10.8"), "at least one run/ok result"),
-            (lambda it: it["D10.8"]["data"].update(results={}), "at least one run/ok result"),
+            (lambda it: job(it, "D10.8").update(results={}), "at least one run/ok result"),
             (lambda it: it["D2.4"]["data"]["settings"]["MaxRetentionSec"].update(number=True), "retention at least 30 days"),
             (lambda it: it["D2.4"]["data"]["settings"]["MaxRetentionSec"].update(number="could-not-check"), "retention at least 30 days"),
             (lambda it: it["D2.4"]["data"]["settings"].update(MaxRetentionSec={}), "retention at least 30 days"),
@@ -501,7 +627,7 @@ class TestSummary(unittest.TestCase):
     def test_lines_that_read_other_parts_of_the_bundle_turn_to_look(self):
         def closing(change):
             b = bundle()
-            del b["items"]["D5.3"]                      # so that every case starts from fifteen ok
+            del b["items"]["D5.3"]                      # so that every case starts from seventeen ok
             change(b)
             return closing_of(b)
         cases = (
@@ -510,10 +636,10 @@ class TestSummary(unittest.TestCase):
             (lambda b: b["fingerprint"].update(complete=1), "fingerprint complete"),
             (lambda b: b.update(fingerprint=None), "fingerprint complete"),
             (lambda b: b.pop("fingerprint"), "fingerprint complete"),
-            (lambda b: b["items"]["D10.8"]["data"].update(results=[{"op": "?", "status": "ok", "keys_ok": True, "values_ok": True}]), "at least one run/ok result"),
-            (lambda b: b["items"]["D10.8"]["data"].update(results=[{"op": "run", "status": "ok", "keys_ok": False, "values_ok": True}]), "at least one run/ok result"),
-            (lambda b: b["items"]["D10.8"]["data"].update(results=[{"op": "run", "status": "ok", "keys_ok": True, "values_ok": False}]), "at least one run/ok result"),
-            (lambda b: b["items"]["D10.8"]["data"].update(results=[{"op": "run", "status": "ok"}]), "at least one run/ok result"),
+            (lambda b: job(b["items"], "D10.8").update(results=[{"op": "?", "status": "ok", "keys_ok": True, "values_ok": True}]), "at least one run/ok result"),
+            (lambda b: job(b["items"], "D10.8").update(results=[{"op": "run", "status": "ok", "keys_ok": False, "values_ok": True}]), "at least one run/ok result"),
+            (lambda b: job(b["items"], "D10.8").update(results=[{"op": "run", "status": "ok", "keys_ok": True, "values_ok": False}]), "at least one run/ok result"),
+            (lambda b: job(b["items"], "D10.8").update(results=[{"op": "run", "status": "ok"}]), "at least one run/ok result"),
             (lambda b: b["items"]["D4.6"]["data"]["files_newer_than_start"].pop("hermes-broker"), "no service runs older code"),
             (lambda b: b["items"]["D4.6"]["data"]["files_checked"].pop("hermes-app-broker@ads-audit"), "no service runs older code"),
             (lambda b: b["items"]["D4.6"]["data"]["files_checked"].update({"hermes-broker": 0}), "no service runs older code"),
@@ -542,19 +668,23 @@ class TestSummary(unittest.TestCase):
     @staticmethod
     def _closing(change):
         b = bundle()
-        del b["items"]["D5.3"]                          # so that every case starts from fifteen ok
+        del b["items"]["D5.3"]                          # so that every case starts from seventeen ok
         change(b["items"])
         return closing_of(b)
 
+    JOB_NOTE = r" \(1 of 2 jobs\)"
+
     def _leak_places(self):
-        return ([("D2.3", "journal", k) for k in ("pattern_hits", "known_secret_hits")]
-                + [("D10.7", j, k) for j in ("broker_journal", "runner_journal")
+        """(where the group of counts is, the count's key, what the line adds when the place is a job's)."""
+        return ([(lambda it: it["D2.3"]["data"], "journal", k, "") for k in ("pattern_hits", "known_secret_hits")]
+                + [(lambda it, app=app: job(it, "D10.7", app), j, k, self.JOB_NOTE) for app in JOBS
+                   for j in ("broker_journal", "runner_journal")
                    for k in ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")])
 
     def test_the_leak_keys_are_the_collectors(self):
         self.assertEqual(set(SB.SEARCH_KEYS), set(CE.SEARCH_HIT_COUNTS))
         self.assertEqual(set(SB.LEAK_KEYS), set(CE.LEAK_COUNTS))
-        self.assertEqual(len(self._leak_places()), len(SB.SEARCH_KEYS) + 2 * len(SB.LEAK_KEYS))
+        self.assertEqual(len(self._leak_places()), len(SB.SEARCH_KEYS) + len(JOBS) * 2 * len(SB.LEAK_KEYS))
 
     def test_the_all_fields_counts_are_printed(self):
         text = run(json.dumps(bundle()))[1]
@@ -564,37 +694,38 @@ class TestSummary(unittest.TestCase):
             self.assertIn(want, text)
 
     def test_every_leak_count_above_zero_turns_the_leak_line_to_look_in_fixed_words(self):
-        for item, group, key in self._leak_places():
+        for where, group, key, jobs in self._leak_places():
             for n in (1, 7, 10 ** 400):
-                text = self._closing(lambda it: it[item]["data"][group].update({key: n}))
-                self.assertRegex(text, rf"(?m)^LOOK  {self.LEAK_LINE} \(a count is above 0: this is a FAIL, not a reminder\)$", (item, group, key))
-                self.assertEqual(len(re.findall(r"(?m)^ok    ", text)), 14, (item, group, key))
+                text = self._closing(lambda it: where(it)[group].update({key: n}))
+                self.assertRegex(text, rf"(?m)^LOOK  {self.LEAK_LINE} \(a count is above 0: this is a FAIL, not a reminder\){jobs}$", (group, key))
+                self.assertEqual(len(re.findall(r"(?m)^ok    ", text)), 16, (group, key))
                 self.assertNotRegex(text[text.index("no leak count"):], r"[0-9]{16}")
 
     def test_a_leak_count_that_was_not_read_is_look_without_the_fail_words(self):
-        for item, group, key in self._leak_places():
+        for where, group, key, jobs in self._leak_places():
             for change in (lambda g: g.update({key: True}), lambda g: g.update({key: False}), lambda g: g.update({key: "0"}),
                            lambda g: g.update({key: "could-not-check"}), lambda g: g.update({key: None}),
                            lambda g: g.update({key: 0.0}), lambda g: g.update({key: -1}), lambda g: g.pop(key)):
-                text = self._closing(lambda it: change(it[item]["data"][group]))
-                self.assertRegex(text, rf"(?m)^LOOK  {self.LEAK_LINE} \(a count was not read\)$", (item, group, key))
+                text = self._closing(lambda it: change(where(it)[group]))
+                self.assertRegex(text, rf"(?m)^LOOK  {self.LEAK_LINE} \(a count was not read\){jobs}$", (group, key))
                 self.assertNotIn(self.ABOVE, text)
         for change in (lambda it: it["D2.3"].update(status="could-not-check"), lambda it: it.pop("D2.3"),
                        lambda it: it["D10.7"].update(status="could-not-check"), lambda it: it.pop("D10.7"),
-                       lambda it: it["D2.3"]["data"].update(journal="could-not-check"),
-                       lambda it: it["D10.7"]["data"].update(broker_journal="could-not-check"),
-                       lambda it: it["D10.7"]["data"].update(runner_journal=[]),
-                       lambda it: it["D10.7"]["data"].pop("runner_journal")):
+                       lambda it: it["D2.3"]["data"].update(journal="could-not-check")):
             self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LEAK_LINE} \(a count was not read\)$")
+        for change in (lambda it: job(it, "D10.7").update(broker_journal="could-not-check"),
+                       lambda it: job(it, "D10.7", "ads-report").update(runner_journal=[]),
+                       lambda it: job(it, "D10.7", "ads-report").pop("runner_journal")):
+            self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LEAK_LINE} \(a count was not read\){self.JOB_NOTE}$")
 
     def test_a_count_above_zero_is_said_even_beside_one_that_was_not_read(self):
         def change(it):
-            it["D10.7"]["data"]["runner_journal"]["customer_id_lines"] = 2
+            job(it, "D10.7", "ads-report")["runner_journal"]["customer_id_lines"] = 2
             it["D2.3"]["data"]["journal"].pop("pattern_hits")
-        self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LEAK_LINE} \(a count is above 0: this is a FAIL, not a reminder\)$")
+        self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LEAK_LINE} \(a count is above 0: this is a FAIL, not a reminder\){self.JOB_NOTE}$")
 
     def test_a_key_the_tool_does_not_name_changes_nothing_on_the_leak_line_and_is_never_printed(self):
-        text = self._closing(lambda it: it["D10.7"]["data"]["broker_journal"].update({"acmecorp": 9}))
+        text = self._closing(lambda it: job(it, "D10.7")["broker_journal"].update({"acmecorp": 9}))
         self.assertRegex(text, rf"(?m)^ok    {self.LEAK_LINE}$")
         self.assertNotIn("acmecorp", text)
 
@@ -761,14 +892,14 @@ class TestSummary(unittest.TestCase):
     def test_each_refusal_is_needed_with_a_count_above_zero(self):
         for key in ("refused/disabled", "refused/quota", "refused/bad_request"):
             for change in (lambda c: c.pop(key), lambda c: c.update({key: 0}), lambda c: c.update({key: -1})):
-                b = bundle()
-                del b["items"]["D5.3"]
-                change(b["items"]["D10.7"]["data"]["journal_counts"])
-                self.assertRegex(closing_of(b), rf"(?m)^LOOK  the three live refusals are in the journal \(missing: {key}\)", key)
+                for app in JOBS:
+                    b = clean()
+                    change(job(b["items"], "D10.7", app)["journal_counts"])
+                    self.assertRegex(closing_of(b), rf"(?m)^LOOK  the three live refusals are in the journal \(missing: {key}\)", key)
 
     def test_journal_counts_need_both_parts_in_the_label_sets(self):
         b = bundle()
-        counts = b["items"]["D10.7"]["data"]["journal_counts"]
+        counts = job(b["items"], "D10.7")["journal_counts"]
         counts.update({"acmecorp/quota": 4, "refused/acmecorp": 5, "10.0.0.5/-": 6})
         text = run(json.dumps(b))[1]
         self.assertIn("refused/quota: 1, +3 other keys}", text)
@@ -780,11 +911,11 @@ class TestSummary(unittest.TestCase):
         del b["items"]["D5.3"]
         b["items"]["acmecorp"] = {"status": "could-not-check"}
         text = run(json.dumps(b))[1]
-        self.assertRegex(text, r"(?m)^items 13 \| not observed: 1 other$")
-        self.assertIn("LOOK  every item observed (13 items) (not observed: 1 other)", text)
+        self.assertRegex(text, r"(?m)^items 16 \| not observed: 1 other$")
+        self.assertIn("LOOK  every item observed (16 items) (not observed: 1 other)", text)
         self.assertNotIn("acmecorp", text)
         b["items"]["D5.3"] = {"status": "could-not-check"}
-        self.assertRegex(run(json.dumps(b))[1], r"(?m)^items 14 \| not observed: D5\.3, 1 other$")
+        self.assertRegex(run(json.dumps(b))[1], r"(?m)^items 17 \| not observed: D5\.3, 1 other$")
 
     def test_the_limited_mark_needs_exactly_the_limited_options(self):
         b = bundle()
@@ -848,6 +979,463 @@ class TestSummary(unittest.TestCase):
         finally:
             os.unlink(f.name)
         self.assertIn("reach_days: 31", out.getvalue())
+
+
+class TestEveryJob(unittest.TestCase):
+    """The per-job shape: the item lines show each job under its name, and a closing line is ok only
+    when it holds for every installed job."""
+    REFUSALS = "the three live refusals are in the journal"
+    RUN_OK = "at least one run/ok result"
+    LEAKS = r"no leak count above 0 \(D2\.3, D10\.7\)"
+    CODE = "no service runs older code than the box holds"
+    REACH = "the journal reaches 30 days"
+    JOBS_LINE = "every job is declared and installed"
+    CNC_LINE = "nothing in the bundle is could-not-check"
+    PER_JOB_LINES = (REFUSALS, RUN_OK, LEAKS, CODE, REACH, JOBS_LINE)
+
+    @staticmethod
+    def _closing(change):
+        b = clean()
+        change(b["items"])
+        return closing_of(b)
+
+    def _status(self, closing, line):
+        m = re.search(rf"(?m)^(ok    |LOOK  ){line}(.*)$", closing)
+        self.assertIsNotNone(m, line)
+        return m.group(1).strip(), m.group(2)
+
+    def test_the_item_lines_print_each_job_s_values_under_its_name(self):
+        text = run(json.dumps(bundle()))[1]
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            block = text[text.index(f"\n{iid} "):].split("\nD", 2)[1]
+            self.assertRegex(block, r"(?m)^  apps: 2$", iid)
+            self.assertRegex(block, r"(?m)^    ads-audit:\n      declared: true\n      installed: true\n(      .*\n)*"
+                                    r"    ads-report:\n      declared: true\n      installed: true$", iid)
+        for want in ("      runner_path_active: active", "      broker_user_groups: 2",
+                     "      layout_problems: 0\n      layout_reason: null",
+                     "      journal_counts: {ok/-: 3, refused/bad_request: 2, refused/disabled: 1, refused/quota: 1}",
+                     "      first_entry: 2026-10-05T18:35:47Z\n      installed_since_last_pass: false",
+                     "      out_of_whitelist: 0\n      run/ok results: 1",
+                     "  declared_apps: 2\n  installed_apps: 2\n  on_disk_apps: 2\n  units_not_counted: 0\n  on_disk_not_counted: 0",
+                     "  installed_equal_repo: {hermes-app-broker@.service: true, hermes-app-runner@.path: true, "
+                     "hermes-app-runner@.service: true}",
+                     "  containers: 3\n  containers_mounting_app_state: 0\n  containers_not_inspected: 0",
+                     "  oldest_entry: {journal: 2026-09-18T15:11:34Z, apps: {ads-audit: {broker: 2026-10-05T18:35:47Z, "
+                     "runner: null}, ads-report: {broker: 2026-10-08T09:00:00Z, runner: null}}}",
+                     "  apps_declared: 2\n  apps_installed: 2",
+                     "started_at: {boot: 2026-10-01T00:00:00Z, hermes-app-broker@ads-audit: 2026-10-07T06:45:50Z, "
+                     "hermes-app-broker@ads-report: 2026-10-08T09:00:00Z, hermes-broker"):
+            self.assertIn(want, text)
+        self.assertEqual(text.count("      run/ok results: 1"), 2)
+        self.assertNotIn("older shape", text)
+        self.assertNotIn("hermes-app-ads", text)                 # an account name is still never printed
+
+    def test_a_job_name_that_is_not_a_job_name_is_withheld_wherever_it_is(self):
+        for bad in ("Acme-Dental", "acme_dental", "10.0.0.5", "ops@acme.com", "a" * 33, "9lives", PLANT, "acme dental", ""):
+            b = bundle()
+            it = b["items"]
+            for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+                it[iid]["data"]["apps"][bad] = it[iid]["data"]["apps"].pop("ads-report")
+            it["D2.4"]["data"]["oldest_entry"]["apps"][bad] = it["D2.4"]["data"]["oldest_entry"]["apps"].pop("ads-report")
+            for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+                it["D4.6"]["data"][group]["hermes-app-broker@" + bad] = it["D4.6"]["data"][group].pop(BROKERS[1])
+            for key in ("declared_apps", "installed_apps", "on_disk_apps"):
+                it["D10.3"]["data"][key] = ["ads-audit", bad]
+            rc, text = run(json.dumps(b))
+            self.assertEqual(rc, 0)
+            if bad:
+                self.assertNotIn(bad, text, bad)
+            self.assertNotIn("ads-report", text)
+            self.assertEqual(len(re.findall(r"(?m)^    <withheld>:$", text)), 4, bad)
+            self.assertIn("apps: {ads-audit: {broker: 2026-10-05T18:35:47Z, runner: null}, "
+                          "<withheld>: {broker: 2026-10-08T09:00:00Z, runner: null}}", text)
+            self.assertIn("files_checked: {hermes-app-broker@ads-audit: 7, hermes-broker: 9, hermes-docker-proxy: 5, "
+                          "+1 other keys}", text)
+            self.assertRegex(text, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 with a name that is not a job name\)$")
+            self.assertRegex(text, rf"(?m)^LOOK  {self.CODE}")
+
+    def test_every_job_is_declared_and_installed(self):
+        self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.JOBS_LINE} \(2 jobs\)$")
+        d3 = lambda it: it["D10.3"]["data"]
+        cases = (
+            (lambda it: d3(it).update(installed_apps=["ads-audit"]), r" \(1 declared but not installed\)"),
+            (lambda it: d3(it).update(declared_apps=["ads-audit"]), r" \(1 installed but not declared\)"),
+            (lambda it: d3(it).update(declared_apps=["ads-audit"], installed_apps=["ads-report"]),
+             r" \(1 declared but not installed\) \(1 installed but not declared\)"),
+            (lambda it: d3(it).update(on_disk_apps=["ads-audit", "ads-report", "parked", "stopped"]), r" \(2 on disk only\)"),
+            (lambda it: d3(it).update(declared_apps=[], installed_apps=[], on_disk_apps=[], apps={}), r" \(no installed job\)"),
+            (lambda it: d3(it).update(declared_apps=["ads-audit", "ads-report"], installed_apps=[]),
+             r" \(2 declared but not installed\) \(no installed job\)"),
+            (lambda it: d3(it).update(units_not_counted=3), r" \(3 unit lines not counted\)"),
+            (lambda it: d3(it).update(on_disk_not_counted=1), r" \(1 entries on disk not counted\)"),
+            (lambda it: d3(it).update(units_not_counted="could-not-check"), r" \(could-not-check unit lines not counted\)"),
+            (lambda it: d3(it).update(units_not_counted=True), r" \(<withheld> unit lines not counted\)"),
+            (lambda it: d3(it).pop("on_disk_not_counted"), r" \(null entries on disk not counted\)"),
+            (lambda it: d3(it).update(installed_apps="could-not-check"), r" \(the jobs could not be checked\)"),
+            (lambda it: d3(it).update(declared_apps=None), r" \(the jobs could not be checked\)"),
+            (lambda it: d3(it).update(on_disk_apps=[7]), r" \(the jobs could not be checked\)"),
+            (lambda it: d3(it).pop("on_disk_apps"), r" \(the jobs could not be checked\)"),
+            (lambda it: d3(it).update(apps="could-not-check"), r" \(the jobs could not be checked\)"),
+            (lambda it: d3(it).update(apps={}), r" \(2 of 2 installed jobs: a value could not be checked\)"),
+            (lambda it: d3(it).pop("apps"), r" \(older shape\)"),
+            (lambda it: d3(it).pop("declared_apps"), r" \(older shape\)"),
+            (lambda it: it["D10.3"].update(status="could-not-check"), r" \(not read\)"),
+            (lambda it: it.pop("D10.3"), r" \(not read\)"),
+            (lambda it: job(it, "D10.3").update(broker_user_groups="could-not-check"),
+             r" \(1 of 2 installed jobs: a value could not be checked\)"),
+            (lambda it: job(it, "D10.3")["broker_unit"].update(User="could-not-check"),
+             r" \(1 of 2 installed jobs: a value could not be checked\)"),
+            (lambda it: job(it, "D10.3").pop("installed"), r" \(1 of 2 installed jobs: a value could not be checked\)"),
+            (lambda it: d3(it)["apps"].update({"ads-report": "could-not-check"}),
+             r" \(1 of 2 installed jobs: a value could not be checked\)"),
+        )
+        for change, note in cases:
+            self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.JOBS_LINE}{note}$", note)
+
+    def test_one_job_failing_a_line_is_look_with_how_many_jobs(self):
+        for app in JOBS:
+            cases = (
+                (lambda it: job(it, "D10.7", app)["journal_counts"].pop("refused/disabled"),
+                 self.REFUSALS, r" \(missing: refused/disabled\) \(1 of 2 jobs\)"),
+                (lambda it: job(it, "D10.7", app).update(journal_counts={}),
+                 self.REFUSALS, r" \(missing: refused/disabled, refused/quota, refused/bad_request\) \(1 of 2 jobs\)"),
+                (lambda it: job(it, "D10.8", app)["results"].pop(0), self.RUN_OK, r" \(1 of 2 jobs\)"),
+                (lambda it: job(it, "D10.8", app).update(results=[]), self.RUN_OK, r" \(1 of 2 jobs\)"),
+                (lambda it: job(it, "D10.7", app)["runner_journal"].update(customer_id_lines=4), self.LEAKS,
+                 r" \(a count is above 0: this is a FAIL, not a reminder\) \(1 of 2 jobs\)"),
+                (lambda it: job(it, "D10.7", app)["broker_journal"].pop("pattern_hits"), self.LEAKS,
+                 r" \(a count was not read\) \(1 of 2 jobs\)"),
+                (lambda it: it["D4.6"]["data"]["files_newer_than_start"].update({"hermes-app-broker@" + app: ["unit"]}),
+                 self.CODE, ""),
+                (lambda it: it["D4.6"]["data"]["files_checked"].pop("hermes-app-broker@" + app), self.CODE, ""),
+                (lambda it: it["D4.6"]["data"]["files_newer_than_start"].update({"hermes-app-broker@" + app: "could-not-check"}),
+                 self.CODE, ""),
+            )
+            for change, line, note in cases:
+                closing = self._closing(change)
+                self.assertRegex(closing, rf"(?m)^LOOK  {line}{note}$", (app, line))
+                self.assertNotRegex(closing, r"ads-audit|ads-report")          # how many jobs, never which
+        both = self._closing(lambda it: [job(it, "D10.8", a).update(results=[]) for a in JOBS])
+        self.assertRegex(both, rf"(?m)^LOOK  {self.RUN_OK} \(2 of 2 jobs\)$")
+
+    def test_three_leak_counts_at_zero_for_one_job_do_not_hide_a_hit_in_the_other(self):
+        closing = self._closing(lambda it: job(it, "D10.7", "ads-report")["broker_journal"].update(known_secret_hits=1))
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.LEAKS} \(a count is above 0: this is a FAIL, not a reminder\) \(1 of 2 jobs\)$")
+
+    def test_a_job_installed_since_the_last_pass_is_said_on_the_reach_line(self):
+        one = self._closing(lambda it: job(it, "D10.7", "ads-report").update(installed_since_last_pass=True))
+        self.assertRegex(one, rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS: judged from its first entry\)$")
+        two = self._closing(lambda it: [job(it, "D10.7", a).update(installed_since_last_pass=True) for a in JOBS])
+        self.assertRegex(two, rf"(?m)^ok    {self.REACH} \(2 jobs installed since the last PASS: each judged from its first entry\)$")
+        self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.REACH}$")
+        for none in (None, False):                       # no --last-pass-collected-at, or installed before it
+            self.assertRegex(self._closing(lambda it: job(it, "D10.7").update(installed_since_last_pass=none)),
+                             rf"(?m)^ok    {self.REACH}$")
+        def short(it):
+            it["D2.4"]["data"]["reach_days"] = 12
+            job(it, "D10.7", "ads-report")["installed_since_last_pass"] = True
+        self.assertRegex(self._closing(short), rf"(?m)^LOOK  {self.REACH} \(reach is 12 days: .*\) "
+                                               r"\(1 job installed since the last PASS: judged from its first entry\)$")
+        unread = self._closing(lambda it: job(it, "D10.7").update(installed_since_last_pass="could-not-check"))
+        self.assertRegex(unread, rf"(?m)^LOOK  {self.REACH} \(1 of 2 installed jobs: a value could not be checked\)$")
+
+    def test_the_report_store_and_the_figures_services_are_printed_and_are_not_other_keys(self):
+        text = run(json.dumps(bundle()))[1]
+        self.assertIn("  report_archive: {parent: {owner_is_root: true, group_is_root: true, mode: 0o700}, rows: 2, "
+                      "rows_listed: true, containers_mounting: 0, containers_not_inspected: 0}", text)
+        self.assertIn("D10.1  observed\n  rc: 0\n  probe: {matches_declared: true, services: 4, "
+                      "figures_services: [ads-collector, ads-reader]}\n", text)
+        for iid in ("D7.1", "D10.1"):
+            block = text[text.index(f"\n{iid} "):].split("\nD", 2)[1]
+            self.assertNotIn("other keys", block, iid)
+        b = bundle()
+        b["items"]["D10.1"]["data"]["probe"]["figures_services"] = ["ads-collector", "ads-drafter", "acmecorp", 7]
+        b["items"]["D7.1"]["data"]["report_archive"]["parent"] = "symlink"
+        text = run(json.dumps(b))[1]
+        self.assertIn("figures_services: [ads-collector, ads-drafter, <other>, <withheld>]", text)
+        self.assertIn("report_archive: {parent: symlink, rows: 2", text)
+        self.assertNotIn("acmecorp", text)
+
+    def test_the_previous_review_s_shape_prints_without_a_traceback(self):
+        rc, text = run(json.dumps(old_bundle()))
+        self.assertEqual(rc, 0)
+        for iid in ("D4.6", "D10.7", "D10.8"):
+            self.assertRegex(text, rf"(?m)^{re.escape(iid)}  observed\n(  .*\n)*  \(older shape\)$", iid)
+        self.assertIn("  oldest_entry: {journal: 2026-09-18T15:11:34Z, +2 other keys} (older shape)", text)
+        self.assertNotIn("run/ok results", text)
+        closing = text[text.index("Before the real collection"):]
+        for line in (self.REFUSALS, self.RUN_OK, self.LEAKS, self.CODE):
+            self.assertRegex(closing, rf"(?m)^LOOK  {line} \(older shape\)$")
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(not read\)$")
+        self.assertRegex(closing, r"(?m)^LOOK  the report store holds only owner-only client folders \(not in this bundle\)$")
+        self.assertRegex(closing, rf"(?m)^ok    {self.REACH}$")
+        self.assertEqual(len(re.findall(r"(?m)^(?:ok   |LOOK) ", closing)), 17)
+        b = old_bundle()                                 # an old D10.3, D10.4: observed, with keys this tool does not know
+        b["items"]["D10.3"] = {"status": "observed", "data": {"broker_unit": {"User": "hermes-app-ads-audit"}}}
+        b["items"]["D10.4"] = {"status": "observed", "data": {"layout_problems": [], "containers": 3}}
+        b["items"]["D2.3"]["data"]["journal"]["pattern_hits"] = 2
+        rc, text = run(json.dumps(b))
+        self.assertEqual(rc, 0)
+        self.assertRegex(text, r"(?m)^D10\.3  observed\n  \+1 other keys\n  \(older shape\)$")
+        self.assertRegex(text, r"(?m)^D10\.4  observed\n  containers: 3\n  \+1 other keys\n  \(older shape\)$")
+        self.assertRegex(text, rf"(?m)^LOOK  {self.JOBS_LINE} \(older shape\)$")
+        self.assertRegex(text, rf"(?m)^LOOK  {self.LEAKS} \(a count is above 0: this is a FAIL, not a reminder\) \(older shape\)$")
+        self.assertNotIn("hermes-app-ads", text)
+
+    # ---- R-A: a job's could-not-check is as loud as an item's
+    def test_a_could_not_check_inside_a_job_is_counted_in_the_places(self):
+        cases = (
+            (lambda it: job(it, "D10.4").update(layout_problems="could-not-check", layout_reason="other"), 1),
+            (lambda it: job(it, "D10.8", "ads-report").update(results="could-not-check", out_of_whitelist="could-not-check"), 2),
+            (lambda it: job(it, "D10.7")["journal_read"]["runner"].update(entries="could-not-check"), 1),
+            (lambda it: it["D10.7"]["data"].update(apps="could-not-check"), 1),
+            (lambda it: it["D2.4"]["data"]["oldest_entry"].update(apps="could-not-check"), 1),
+            (lambda it: it["D2.4"]["data"]["oldest_entry"]["apps"]["ads-report"].update(broker="could-not-check"), 1),
+            (lambda it: it["D4.6"]["data"].update(apps_installed="could-not-check"), 1),
+            (lambda it: it["D10.3"]["data"]["apps"].update({"ads-report": "could-not-check"}), 1),
+        )
+        for change, places in cases:
+            self.assertRegex(self._closing(change),
+                             rf"(?m)^LOOK  {self.CNC_LINE} \({places} place{'' if places == 1 else 's'}\)$", places)
+
+    def test_an_installed_job_that_could_not_be_checked_turns_every_line_that_reads_its_item(self):
+        lines = {"D10.3": (self.JOBS_LINE,), "D10.7": (self.REFUSALS, self.LEAKS, self.REACH), "D10.8": (self.RUN_OK,)}
+        for iid, depend in lines.items():
+            for app in JOBS:
+                def whole(it):
+                    entry = job(it, iid, app)
+                    for key in entry:
+                        if key not in ("declared", "installed"):
+                            entry[key] = "could-not-check"
+                def one_value(it):                       # a value no line reads by itself
+                    job(it, iid, app)["acmecorp"] = {"deep": ["could-not-check"]}
+                for change in (whole, one_value):
+                    closing = self._closing(change)
+                    for line in depend:
+                        self.assertEqual(self._status(closing, line)[0], "LOOK", (iid, app, line, change.__name__))
+                    self.assertRegex(closing, rf"(?m)^LOOK  {self.CNC_LINE} \([0-9]+ places?\)$")
+                    self.assertNotIn("acmecorp", closing)
+        # D4.6 holds no entry per job: its values are keyed by each job's broker
+        for group in ("files_newer_than_start", "files_checked"):
+            closing = self._closing(lambda it: it["D4.6"]["data"][group].update({BROKERS[1]: "could-not-check"}))
+            self.assertEqual(self._status(closing, self.CODE)[0], "LOOK", group)
+        for key in ("apps_declared", "apps_installed"):
+            closing = self._closing(lambda it: it["D4.6"]["data"].update({key: "could-not-check"}))
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.CODE} \(the jobs could not be checked\)$", key)
+
+    def test_apps_that_could_not_be_checked_or_holds_no_job_is_look_on_every_line_that_reads_it(self):
+        lines = {"D10.3": (self.JOBS_LINE,), "D10.7": (self.REFUSALS, self.LEAKS), "D10.8": (self.RUN_OK,)}
+        for iid, depend in lines.items():
+            for value in ("could-not-check", None, []):
+                closing = self._closing(lambda it: it[iid]["data"].update(apps=value))
+                for line in depend:
+                    self.assertRegex(closing, rf"(?m)^LOOK  {line} \(the jobs could not be checked\)$", (iid, value, line))
+            # no entry at all for the two jobs D10.3 lists as installed: neither was checked
+            closing = self._closing(lambda it: it[iid]["data"].update(apps={}))
+            for line in depend:
+                self.assertRegex(closing, rf"(?m)^LOOK  {line}.* \(2 of 2 (installed )?jobs", (iid, line))
+        closing = self._closing(lambda it: it["D10.7"]["data"].update(apps="could-not-check"))
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.REACH} \(the jobs could not be checked\)$")
+
+    def test_a_box_with_no_job_at_all_is_look_on_every_line_that_needs_one(self):
+        def none(it):
+            it["D10.3"]["data"].update(declared_apps=[], installed_apps=[], on_disk_apps=[])
+            it["D4.6"]["data"].update(apps_declared=[], apps_installed=[])
+            for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+                it[iid]["data"]["apps"] = {}
+            it["D2.4"]["data"]["oldest_entry"]["apps"] = {}
+            for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+                for broker in BROKERS:
+                    del it["D4.6"]["data"][group][broker]
+        closing = self._closing(none)
+        for line in (self.JOBS_LINE, self.REFUSALS, self.RUN_OK, self.LEAKS):
+            self.assertRegex(closing, rf"(?m)^LOOK  {line} \(no installed job\)$", line)
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 13)      # the two fixed services are still judged
+
+    def test_a_job_declared_and_not_installed_yet_is_said_once_and_is_not_an_installed_job_s_fault(self):
+        b = not_installed(clean())
+        rc, text = run(json.dumps(b))
+        self.assertEqual(rc, 0)
+        closing = text[text.index("Before the real collection"):]
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 declared but not installed\)$")
+        # its expected could-not-check values are counted, and are the only other LOOK
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.CNC_LINE} \(8 places\)$")
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 15)
+        for line in (self.REFUSALS, self.RUN_OK, self.LEAKS, self.CODE, self.REACH):
+            self.assertRegex(closing, rf"(?m)^ok    {line}$", line)
+        self.assertIn("    ads-report:\n      declared: true\n      installed: false", text)
+        # the installed job is still judged: its own fault is not hidden by the other's state
+        b = not_installed(clean())
+        job(b["items"], "D10.8")["results"] = []
+        self.assertRegex(closing_of(b), rf"(?m)^LOOK  {self.RUN_OK} \(1 of 1 jobs\)$")
+        # and the job that is not installed cannot make a line ok by itself
+        b = not_installed(not_installed(clean(), "ads-report"), "ads-audit")
+        closing = closing_of(b)
+        for line in (self.REFUSALS, self.RUN_OK, self.LEAKS):
+            self.assertRegex(closing, rf"(?m)^LOOK  {line} \(no installed job\)$", line)
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(2 declared but not installed\) \(no installed job\)$")
+
+    def test_an_installed_job_an_item_has_no_entry_for_or_calls_not_installed_is_not_excused(self):
+        # D10.3 lists the installed jobs: an item that leaves one out, or says it is not installed, did not check it.
+        lines = {"D10.3": (self.JOBS_LINE,), "D10.7": (self.REFUSALS, self.LEAKS, self.REACH), "D10.8": (self.RUN_OK,)}
+        for iid, depend in lines.items():
+            for change in (lambda it: it[iid]["data"]["apps"].pop("ads-report"),
+                           lambda it: job(it, iid, "ads-report").update(installed=False)):
+                closing = self._closing(change)
+                for line in depend:
+                    self.assertEqual(self._status(closing, line)[0], "LOOK", (iid, line))
+                self.assertRegex(closing, r"\(1 of 2 (installed )?jobs")
+        def broker_left_out(it):
+            it["D4.6"]["data"]["apps_installed"] = ["ads-audit"]
+            for group in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+                del it["D4.6"]["data"][group][BROKERS[1]]
+        self.assertRegex(self._closing(broker_left_out), rf"(?m)^LOOK  {self.CODE}$")
+
+    def test_a_job_only_on_disk_is_said_on_the_jobs_line_and_judged_nowhere_else(self):
+        def parked(it):
+            it["D10.3"]["data"]["on_disk_apps"].append("parked")
+            for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+                it[iid]["data"]["apps"]["parked"] = {"declared": False, "installed": False, "results": "could-not-check",
+                                                     "out_of_whitelist": "could-not-check", "journal_counts": {}}
+        closing = self._closing(parked)
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.JOBS_LINE} \(1 on disk only\)$")
+        self.assertRegex(closing, rf"(?m)^LOOK  {self.CNC_LINE} \(8 places\)$")
+        self.assertEqual(len(re.findall(r"(?m)^ok    ", closing)), 15)
+
+    def test_a_job_whose_installed_word_is_not_true_or_false_is_not_excused(self):
+        for value in ("could-not-check", None, "false", 0, "no"):
+            closing = self._closing(lambda it: job(it, "D10.8", "ads-report").update(installed=value, results="could-not-check"))
+            self.assertRegex(closing, rf"(?m)^LOOK  {self.RUN_OK} \(1 of 2 jobs\)$", value)
+
+    def test_an_installed_broker_is_judged_and_one_only_declared_is_not(self):
+        def extra(it):                                   # a broker of a job in neither list
+            it["D4.6"]["data"]["files_newer_than_start"]["hermes-app-broker@parked"] = []
+            it["D4.6"]["data"]["files_checked"]["hermes-app-broker@parked"] = 4
+        self.assertRegex(self._closing(extra), rf"(?m)^LOOK  {self.CODE}$")
+        def undeclared(it):                              # installed without a description file: it runs, so it is judged
+            it["D4.6"]["data"]["apps_declared"] = ["ads-audit"]
+            it["D4.6"]["data"]["files_newer_than_start"][BROKERS[1]] = ["hermes-app-broker.py"]
+        self.assertRegex(self._closing(undeclared), rf"(?m)^LOOK  {self.CODE}$")
+        self.assertRegex(self._closing(lambda it: it["D4.6"]["data"].update(apps_declared=["ads-audit"])), rf"(?m)^ok    {self.CODE}$")
+        self.assertRegex(self._closing(lambda it: it["D4.6"]["data"].pop("apps_installed")), rf"(?m)^LOOK  {self.CODE} \(older shape\)$")
+
+    def test_odd_per_job_shapes_never_raise(self):
+        shapes = ("could-not-check", None, 7, [], {}, {"ads-audit": None}, {"ads-audit": "x"}, {"ads-audit": []},
+                  {"ads-audit": {"installed": True, "results": 3, "journal_counts": [], "broker_journal": "x",
+                                 "journal_read": 5, "oldest_entry_read": [], "layout_problems": 2, "broker_user_groups": {}}},
+                  {str(i): {} for i in range(60)})
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            for shape in shapes:
+                b = clean()
+                b["items"][iid]["data"]["apps"] = shape
+                rc, text = run(json.dumps(b))
+                self.assertEqual(rc, 0, (iid, shape))
+                self.assertIn("Reminders, not verdicts", text)
+        for shape in shapes:
+            b = clean()
+            b["items"]["D2.4"]["data"]["oldest_entry"]["apps"] = shape
+            b["items"]["D4.6"]["data"].update(apps_declared=shape, apps_installed=shape)
+            b["items"]["D10.3"]["data"].update(declared_apps=shape, installed_apps=shape, on_disk_apps=shape)
+            b["items"]["D7.1"]["data"]["report_archive"] = shape
+            b["items"]["D10.1"]["data"]["probe"] = shape
+            self.assertEqual(run(json.dumps(b))[0], 0, shape)
+            b["items"]["D7.1"]["data"]["report_archive"] = {"parent": shape, "rows": shape, "rows_listed": shape,
+                                                            "containers_mounting": shape, "containers_not_inspected": shape}
+            self.assertEqual(run(json.dumps(b))[0], 0, shape)
+            b["items"]["D7.1"]["data"]["report_archive"] = {"rows": [shape, {"files": shape, "kind": shape}]}
+            self.assertEqual(run(json.dumps(b))[0], 0, shape)
+        b = clean()
+        b["items"]["D10.7"]["data"]["apps"] = {str(i): {} for i in range(60)}
+        self.assertIn("  apps: 60 (not listed)", run(json.dumps(b))[1])
+
+
+class TestReportStore(unittest.TestCase):
+    """R-B: the report store holds only owner-only client folders."""
+    LINE = "the report store holds only owner-only client folders"
+
+    def _closing(self, change):
+        b = clean()
+        change(b["items"]["D7.1"]["data"]["report_archive"])
+        text = run(json.dumps(b))[1]
+        for gone in ("acmecorp", "acme-ops", "jsmith"):
+            self.assertNotIn(gone, text)
+        return text[text.index("Before the real collection"):]
+
+    def test_a_healthy_store_is_ok_with_its_number_of_folders(self):
+        self.assertRegex(closing_of(clean()), rf"(?m)^ok    {self.LINE} \(2 folders\)$")
+        self.assertRegex(self._closing(lambda ra: ra.update(rows=[])), rf"(?m)^ok    {self.LINE} \(0 folders\)$")
+        self.assertRegex(self._closing(lambda ra: ra["rows"].pop()), rf"(?m)^ok    {self.LINE} \(1 folder\)$")
+
+    def test_every_fault_is_look_with_a_count_and_never_a_name(self):
+        row = lambda ra: ra["rows"][0]
+        cases = (
+            (lambda ra: row(ra).update(kind="symlink", listed=False, mode="0o777"),
+             r" \(1 not a folder\) \(1 not listed\) \(1 not root 0700\)"),
+            (lambda ra: row(ra).update(kind="file", listed=False), r" \(1 not a folder\) \(1 not listed\)"),
+            (lambda ra: row(ra).update(kind="other", listed=False), r" \(1 not a folder\) \(1 not listed\)"),
+            (lambda ra: row(ra).update(kind="acmecorp"), r" \(1 not a folder\)"),
+            (lambda ra: row(ra).pop("kind"), r" \(1 not a folder\)"),
+            (lambda ra: [r.update(status="unregistered") for r in ra["rows"]], r" \(2 not active\)"),
+            (lambda ra: row(ra).update(status="retired"), r" \(1 not active\)"),
+            (lambda ra: row(ra).update(status="acmecorp"), r" \(1 not active\)"),
+            (lambda ra: row(ra).update(listed=False, not_files="could-not-check"),
+             r" \(1 not listed\) \(1 holding something that is not a file\)"),
+            (lambda ra: row(ra).update(not_files=2), r" \(1 holding something that is not a file\)"),
+            (lambda ra: row(ra).update(not_files=False), r" \(1 holding something that is not a file\)"),
+            (lambda ra: row(ra).update(mode="0o750"), r" \(1 not root 0700\)"),
+            (lambda ra: row(ra).update(mode="0o0700"), r" \(1 not root 0700\)"),
+            (lambda ra: row(ra).update(owner="acme-ops"), r" \(1 not root 0700\)"),
+            (lambda ra: row(ra).update(owner=0), r" \(1 not root 0700\)"),
+            (lambda ra: row(ra).update(files={"root root 0o600": 2, "root root 0o644": 1}), r" \(1 with a file that is not 0600\)"),
+            (lambda ra: row(ra).update(files={"root root 0o0600": 1}), r" \(1 with a file that is not 0600\)"),
+            (lambda ra: row(ra).update(files={"jsmith jsmith 0o640": 1}), r" \(1 with a file that is not 0600\)"),
+            (lambda ra: row(ra).update(files="could-not-check"), r" \(1 with a file that is not 0600\)"),
+            (lambda ra: row(ra).pop("files"), r" \(1 with a file that is not 0600\)"),
+            (lambda ra: ra["rows"].append("acmecorp"),
+             r" \(1 not a folder\) \(1 not active\) \(1 not listed\) \(1 holding something that is not a file\) "
+             r"\(1 not root 0700\) \(1 with a file that is not 0600\)"),
+            (lambda ra: ra.update(rows_listed=False), r" \(the store was not listed\)"),
+            (lambda ra: ra.update(rows_listed="true"), r" \(the store was not listed\)"),
+            (lambda ra: ra.pop("rows_listed"), r" \(the store was not listed\)"),
+            (lambda ra: ra.update(rows="could-not-check"), r" \(the folders were not read\)"),
+            (lambda ra: ra.pop("rows"), r" \(the folders were not read\)"),
+            (lambda ra: ra.update(parent="absent", rows=[], rows_listed=False), r" \(the store is absent\) \(the store was not listed\)"),
+            (lambda ra: ra.update(parent="symlink"), r" \(the store is symlink\)"),
+            (lambda ra: ra.update(parent="not-a-directory"), r" \(the store is not-a-directory\)"),
+            (lambda ra: ra.update(parent="acmecorp"), r" \(the store is <other>\)"),
+            (lambda ra: ra.update(parent="could-not-check"), r" \(the store is could-not-check\)"),
+            (lambda ra: ra.pop("parent"), r" \(the store is null\)"),
+            (lambda ra: ra["parent"].update(mode="0o755"), r" \(the store is not root:root 0700\)"),
+            (lambda ra: ra["parent"].update(owner="acme-ops"), r" \(the store is not root:root 0700\)"),
+            (lambda ra: ra["parent"].update(group="jsmith"), r" \(the store is not root:root 0700\)"),
+            (lambda ra: ra["parent"].pop("mode"), r" \(the store is not root:root 0700\)"),
+            (lambda ra: ra.update(containers_mounting=1), r" \(1 containers mount it\)"),
+            (lambda ra: ra.update(containers_not_inspected=2), r" \(2 containers not inspected\)"),
+            (lambda ra: ra.update(containers_mounting=1, containers_not_inspected=1),
+             r" \(1 containers mount it\) \(1 containers not inspected\)"),
+            (lambda ra: ra.update(containers_mounting="could-not-check", containers_not_inspected="could-not-check"),
+             r" \(the containers could not be checked\)"),
+            (lambda ra: ra.update(containers_mounting=False), r" \(the containers could not be checked\)"),
+            (lambda ra: ra.pop("containers_not_inspected"), r" \(the containers could not be checked\)"),
+            (lambda ra: ra.update(containers_mounting=10 ** 400), r" \(<withheld> containers mount it\)"),
+        )
+        for change, note in cases:
+            self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.LINE}{note}$", note)
+
+    def test_a_store_that_is_not_in_the_bundle_or_was_not_read_is_look(self):
+        def closing(change):
+            b = clean()
+            change(b["items"])
+            return closing_of(b)
+        self.assertRegex(closing(lambda it: it["D7.1"]["data"].pop("report_archive")), rf"(?m)^LOOK  {self.LINE} \(not in this bundle\)$")
+        for change in (lambda it: it["D7.1"]["data"].update(report_archive="could-not-check"),
+                       lambda it: it["D7.1"]["data"].update(report_archive=None),
+                       lambda it: it["D7.1"]["data"].update(report_archive=[]),
+                       lambda it: it["D7.1"].update(status="could-not-check"), lambda it: it.pop("D7.1")):
+            self.assertRegex(closing(change), rf"(?m)^LOOK  {self.LINE} \(not read\)$")
+        self.assertRegex(closing(lambda it: it["D7.1"]["data"].update(report_archive={})),
+                         rf"(?m)^LOOK  {self.LINE} \(the store is null\) \(the store was not listed\) "
+                         r"\(the folders were not read\) \(the containers could not be checked\)$")
 
 
 if __name__ == "__main__":

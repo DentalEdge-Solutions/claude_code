@@ -16,6 +16,16 @@ closed key set declared for that dict (the others are only counted: "+N other ke
 fixed words. Everything else prints as <withheld>. An account name, a path, a fingerprint, an
 option value, a reason and every unknown item or key are therefore never printed. The sets copied
 from the collector are checked against it by the test suite.
+
+ONE NAME IS PRINTED BY ITS FORM: a job's name, where the bundle keys a job's values by it (an
+`apps` dict, and the `hermes-app-broker@<job>` keys of D4.6), and only when it is what the
+collector calls a job name (`[a-z][a-z0-9-]{0,31}`). Any other key there prints as <withheld> or
+is counted. A LIST of job names is printed as its length.
+
+THE JOBS. The box runs several chat-triggered jobs; the collector finds them itself and reports
+six items per job. A closing line that reads such an item is `ok` only when it holds for EVERY
+installed job, and a value of an installed job that is could-not-check makes the line LOOK. A job
+that is declared and not installed yet is said once, on its own line.
 """
 import datetime
 import json
@@ -36,9 +46,13 @@ _ID_RE = re.compile(r"D([0-9]{1,2})\.([0-9]{1,2})")
 # ---- closed sets copied from collect-review-evidence.py (tests compare them with it) ----
 OUR_FILE = "/etc/systemd/journald.conf.d/50-hermes-retention.conf"      # JOURNALD_DROP_IN
 SETTING_NAMES = frozenset({"MaxRetentionSec", "SystemMaxUse", "SystemMaxFiles", "MaxFileSec", "Storage"})
-SERVICES = ("hermes-docker-proxy", "hermes-broker", "hermes-app-broker@ads-audit")     # SERVICE_FILES
-START_KEYS = frozenset(SERVICES) | {"boot", "docker", "systemd-journald", "gateway-container"}
-JOURNAL_LABELS = frozenset({"journal", "broker", "runner"})                             # JOURNAL_UNITS + journal
+SERVICES = ("hermes-docker-proxy", "hermes-broker")                                    # SERVICE_FILES: the two fixed ones
+START_KEYS = frozenset(SERVICES) | {"boot", "docker", "systemd-journald", "gateway-container"}     # + OTHER_STARTS
+BROKER_PREFIX = "hermes-app-broker@"                                                    # _app_broker_unit(app)
+_APP_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")                                           # app_lib.APP_RE
+UNIT_LABELS = ("broker", "runner")                                                      # _journal_units(app)
+APP_UNITS = frozenset({"hermes-app-broker@.service", "hermes-app-runner@.service", "hermes-app-runner@.path"})
+LAYOUT_REASONS = frozenset({"no-account", "host-layout", "other"})
 LISTENER_UNITS = frozenset({"hermes-listener-check.service", "hermes-listener-check.timer"})
 SECRET_LABELS = frozenset({"openrouter-key", "dashboard-password", "dashboard-password-hash",
                            "dashboard-session-secret"})
@@ -54,6 +68,10 @@ FILE_KINDS = frozenset({"file", "symlink", "not-a-file"})
 _KEY_BASES = ("ssh-rsa", "ssh-dss", "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
               "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
 KEY_TYPES = frozenset(_KEY_BASES) | {b + "-cert-v01@openssh.com" for b in _KEY_BASES}    # as _KEY_TYPE_RE reads them
+_READ_KEYS = ("entries", "fields", "undecodable_characters")                             # READ_COUNTS
+# ---- words the collector writes without declaring a set (pinned by the tests) ----
+DIR_WORDS = frozenset({"absent", "symlink", "not-a-directory"})                          # _dir_row: not a real directory
+PROBE_SERVICES = frozenset({"ads-collector", "ads-reader", "ads-drafter", "egress-proxy"})   # run-client-audit's DECLARED
 # ---- closed sets the collector does not declare (systemctl(1)'s own words, and the expected values) ----
 ACTIVE_STATES = frozenset({"active", "inactive", "failed", "activating", "deactivating", "reloading",
                            "maintenance", "refreshing"})
@@ -70,6 +88,9 @@ REFUSALS = ("refused/disabled", "refused/quota", "refused/bad_request")
 SEARCH_KEYS = ("pattern_hits", "known_secret_hits")                         # D2.3 `journal`, and D2.2's _count_cred_text
 LEAK_KEYS = ("credential_text_lines", "customer_id_lines") + SEARCH_KEYS    # LEAK_COUNTS: D10.7's two journals
 DEFAULT_DAEMON = {"listeners": 1, "config_file_options": 0, "setting_options": 0}
+# Why a closing line could not judge the jobs, in the tool's own words.
+NOT_READ, OLDER_SHAPE = " (not read)", " (older shape)"
+JOBS_NOT_READ, NO_INSTALLED_JOB = " (the jobs could not be checked)", " (no installed job)"
 
 
 # ------------------------------------------------------------------ the print rule
@@ -165,13 +186,90 @@ def fixed(spec):
 
 
 def keyed(keys, inner):
-    """A dict whose keys come from a closed set: those are printed, the others counted."""
+    """A dict whose keys come from a closed set (or pass `keys`, when it is a function): those are
+    printed, the others counted."""
+    known = keys if callable(keys) else keys.__contains__
+
     def fmt(v):
         if _word(v):
             return _word(v)
         if not isinstance(v, dict):
             return WITHHELD
-        return _braced([(k, inner(v[k])) for k in sorted(v) if k in keys], sum(1 for k in v if k not in keys))
+        return _braced([(k, inner(v[k])) for k in sorted(v) if known(k)], sum(1 for k in v if not known(k)))
+    return fmt
+
+
+def is_app(name):
+    return isinstance(name, str) and _APP_RE.fullmatch(name) is not None
+
+
+def _app_name(name):
+    """A job's name when it has the form of one; anything else is never printed."""
+    return name if is_app(name) else WITHHELD
+
+
+def is_service(key):
+    """A fixed service, or the broker of a job whose name has the form of one."""
+    return key in SERVICES or (key.startswith(BROKER_PREFIX) and is_app(key[len(BROKER_PREFIX):]))
+
+
+def is_start(key):
+    return key in START_KEYS or is_service(key)
+
+
+def _by_name(apps):
+    """The jobs in the order they are shown: those with a job's name first, by name."""
+    return sorted(apps, key=lambda k: (not is_app(k), k))
+
+
+def apps_inline(inner):
+    """{job: value} on one line: every job is shown, under its name or as <withheld>."""
+    def fmt(v):
+        if _word(v):
+            return _word(v)
+        if not isinstance(v, dict):
+            return WITHHELD
+        if len(v) > MAX_LISTED:
+            return f"{len(v)} (not listed)"
+        return _braced([(_app_name(k), inner(v[k])) for k in _by_name(v)], 0)
+    return fmt
+
+
+def per_app(spec):
+    """{job: {field: value}}: the number of jobs, then each job's name on its own line with its
+    fields under it, read by `spec` as `fixed` reads them."""
+    def fmt(v):
+        if _word(v):
+            return _word(v)
+        if not isinstance(v, dict):
+            return WITHHELD
+        if len(v) > MAX_LISTED:
+            return f"{len(v)} (not listed)"
+        out = [str(len(v))]
+        for app in _by_name(v):
+            entry = v[app]
+            if not isinstance(entry, dict):
+                out.append(f"    {_app_name(app)}: {_word(entry) or WITHHELD}")
+                continue
+            pairs, other = _fields(entry, spec)
+            out.append(f"    {_app_name(app)}:")
+            out += [f"      {name}: {text}" for name, text in pairs]
+            if other:
+                out.append(f"      +{other} other keys")
+        return "\n".join(out)
+    return fmt
+
+
+def listed(allowed):
+    """A list of words from a closed set, each printed by `member`."""
+    def fmt(v):
+        if _word(v):
+            return _word(v)
+        if not isinstance(v, list):
+            return WITHHELD
+        if len(v) > MAX_LISTED:
+            return f"{len(v)} (not listed)"
+        return "[" + ", ".join(member(allowed)(x) for x in v) + "]"
     return fmt
 
 
@@ -221,9 +319,26 @@ def key_files(v):
 
 # ------------------------------------------------------------------ what is printed for each item
 _SETTING = fixed({"number": num, "set_by": ("file", set_by), "value": member(SETTING_VALUES)})
-_BROKER_RUNNER = fixed({k: when for k in sorted(JOURNAL_LABELS - {"journal"})})
+_BROKER_RUNNER = fixed({k: when for k in UNIT_LABELS})
 _LEAKS = fixed({k: num for k in LEAK_KEYS})
-_READ = fixed({k: num for k in ("entries", "fields", "undecodable_characters")})
+_READ = fixed({k: num for k in _READ_KEYS})
+_JOB = {"declared": flag, "installed": flag}          # every per-job entry says both
+_DIR = fixed({"owner_is_root": ("owner", is_root), "group_is_root": ("group", is_root), "mode": mode})
+
+
+def dir_row(v):
+    """A directory's owner, group and mode, or the word for what is there instead of a directory."""
+    return _DIR(v) if isinstance(v, dict) else member(DIR_WORDS)(v)
+
+
+def oldest_entry(v):
+    text = fixed({"journal": when, "apps": apps_inline(_BROKER_RUNNER)})(v)
+    return text + (OLDER_SHAPE if isinstance(v, dict) and "apps" not in v else "")
+
+
+def run_ok_results(v):
+    return _word(v) or num(_run_ok({"results": v}))
+
 
 SCHEMA = {
     "D1.7": {"accounts_checked": num, "unprivileged_port_start": num, "match_lines": num, "include_elsewhere": num,
@@ -231,7 +346,7 @@ SCHEMA = {
              "sshd_settings": ("sshd", count), "files": key_files},
     "D2.3": {"journal": fixed({k: num for k in SEARCH_KEYS}), "scanned_characters": num,
              "entries": num, "fields": num, "undecodable_characters": num, "oldest_entry_read": when},
-    "D2.4": {"oldest_entry": fixed({k: when for k in sorted(JOURNAL_LABELS)}), "reach_days": num,
+    "D2.4": {"oldest_entry": oldest_entry, "reach_days": num,
              "settings": keyed(SETTING_NAMES, _SETTING), "config_files": None,
              "drop_in": fixed({"equals_repo": flag, "owner_is_root": ("owner", is_root),
                                "group_is_root": ("group", is_root), "mode": mode, "other_files": count}),
@@ -250,17 +365,32 @@ SCHEMA = {
              "max_age_seconds": None, "last": None, "last_age_seconds": num, "alert_present": flag, "alert": None,
              "history_counts": keyed(HISTORY_STATUSES, num),
              "alert_log": fixed({k: when if k.endswith("_ts") else num for k in sorted(ALERT_LOG_KEYS)})},
-    "D4.6": {"last_pass_collected_at": when, "started_at": keyed(START_KEYS, when),
-             "started_after_last_pass": keyed(START_KEYS, flag),
-             "files_newer_than_start": keyed(SERVICES, count), "files_checked": keyed(SERVICES, num)},
+    "D4.6": {"last_pass_collected_at": when, "apps_declared": count, "apps_installed": count,
+             "started_at": keyed(is_start, when), "started_after_last_pass": keyed(is_start, flag),
+             "files_newer_than_start": keyed(is_service, count), "files_checked": keyed(is_service, num)},
     "D7.1": {"records": num, "vaults": None, "reports_rows": None, "draft_out_rows": None, "parents": None,
-             "old_data": None, "audit_data": None, "audit_logs": None, "root_backups": None},
-    "D10.7": {"journal_counts": journal_counts, "note_counts": keyed(NOTE_WORDS, num), "other_lines": num,
-              "broker_journal": _LEAKS, "runner_journal": _LEAKS,
-              "journal_read": fixed({"broker": _READ, "runner": _READ}), "known_secrets_checked": num,
-              "oldest_entry_read": _BROKER_RUNNER},
-    "D10.8": {"out_of_whitelist": num, "results": None},
+             "old_data": None, "audit_data": None, "audit_logs": None, "root_backups": None,
+             "report_archive": fixed({"parent": dir_row, "rows": count, "rows_listed": flag,
+                                      "containers_mounting": num, "containers_not_inspected": num})},
+    "D10.1": {"rc": num, "probe": fixed({"matches_declared": flag, "services": count,
+                                         "figures_services": listed(PROBE_SERVICES)})},
+    "D10.3": {"declared_apps": count, "installed_apps": count, "on_disk_apps": count, "units_not_counted": num,
+              "on_disk_not_counted": num, "installed_equal_repo": keyed(APP_UNITS, flag),
+              "apps": per_app({**_JOB, "runner_path_active": member(ACTIVE_STATES), "broker_user_groups": count,
+                               "broker_unit": None, "runner_unit": None, "drop_in_paths": None, "sudo_rules": None})},
+    "D10.4": {"containers": num, "containers_mounting_app_state": num, "containers_not_inspected": num,
+              "apps": per_app({**_JOB, "layout_problems": count, "layout_reason": member(LAYOUT_REASONS)})},
+    "D10.7": {"known_secrets_checked": num,
+              "apps": per_app({**_JOB, "journal_counts": journal_counts, "note_counts": keyed(NOTE_WORDS, num),
+                               "other_lines": num, "broker_journal": _LEAKS, "runner_journal": _LEAKS,
+                               "journal_read": fixed({k: _READ for k in UNIT_LABELS}),
+                               "oldest_entry_read": _BROKER_RUNNER, "first_entry": when,
+                               "installed_since_last_pass": flag})},
+    "D10.8": {"apps": per_app({**_JOB, "out_of_whitelist": num, "run/ok results": ("results", run_ok_results)})},
 }
+# The key each per-job item holds since the collector finds the jobs itself: without it, the
+# bundle is an older one (one job, its values at the top of the item).
+PER_JOB = {"D4.6": "apps_installed", "D10.3": "apps", "D10.4": "apps", "D10.7": "apps", "D10.8": "apps"}
 
 
 # ------------------------------------------------------------------ reading the bundle
@@ -314,6 +444,65 @@ def _run_ok(data):
                and r.get("keys_ok") is True and r.get("values_ok") is True)
 
 
+def _shape(items, iid, key):
+    """"" when the item was observed and holds `key`; else why it cannot be judged."""
+    item = items.get(iid)
+    data = item.get("data") if isinstance(item, dict) and item.get("status") == "observed" else None
+    if not isinstance(data, dict):
+        return NOT_READ
+    return "" if key in data else OLDER_SHAPE
+
+
+def _names(value):
+    return isinstance(value, list) and all(isinstance(n, str) for n in value)
+
+
+def _installed(items):
+    """The jobs D10.3 lists as installed; none when that list was not read (the jobs' line says so)."""
+    names = _data(items, "D10.3").get("installed_apps")
+    return set(names) if _names(names) else set()
+
+
+def _judged(items, iid):
+    """(entries, why) for a per-job item. `entries`: one dict per job a closing line must judge:
+    every job D10.3 lists as installed (an empty dict when this item has no entry for it, so it
+    reads as not checked), and every other entry of this item but those that say the job is not
+    installed (`installed` exactly false: declared, not installed yet; `every job is declared and
+    installed` says so). `why`: the reason there is nothing to judge, in fixed words; "" when
+    there is."""
+    why = _shape(items, iid, "apps")
+    if why:
+        return [], why
+    apps = _data(items, iid)["apps"]
+    if not isinstance(apps, dict):
+        return [], JOBS_NOT_READ
+    must = _installed(items)
+    entries = [e if isinstance(e, dict) else {} for app, e in apps.items()
+               if app in must or not (isinstance(e, dict) and e.get("installed") is False)]
+    entries += [{} for app in must if app not in apps]
+    return entries, "" if entries else NO_INSTALLED_JOB
+
+
+def _unchecked(entry):
+    """A judged job with a value that is could-not-check, at any depth, or that does not say it is
+    installed: no line may read ok over it."""
+    return entry.get("installed") is not True or cnc_places(entry) > 0
+
+
+def _each_job(items, iid, passes):
+    """(ok, note, entries): ok only when there is a job to judge and every one of them was checked
+    whole and passes; the note says how many do not, never which."""
+    entries, why = _judged(items, iid)
+    bad = sum(1 for e in entries if _unchecked(e) or not passes(e))
+    note = (f" ({bad} of {len(entries)} jobs)" if bad else "") + why
+    return not note, note, entries
+
+
+def _unchecked_note(entries):
+    n = sum(1 for e in entries if _unchecked(e))
+    return f" ({n} of {len(entries)} installed jobs: a value could not be checked)" if n else ""
+
+
 # ------------------------------------------------------------------ the closing list: one function per line
 def _all_observed(bundle, items):
     bad = sorted(((int(m.group(1)), int(m.group(2)), i) for i, it in items.items()
@@ -349,16 +538,50 @@ def _sshd_default(bundle, items):
     return ok, "sshd runs with its default settings file and no Match line"
 
 
+def _jobs_line(bundle, items):
+    """The three lists of D10.3 agree: every job is declared and installed, none is only on disk,
+    and nothing in the two listings was left uncounted."""
+    text = "every job is declared and installed"
+    why = _shape(items, "D10.3", "declared_apps")
+    if why:
+        return False, text + why
+    d = _data(items, "D10.3")
+    lists = [d.get(k) for k in ("declared_apps", "installed_apps", "on_disk_apps")]
+    if not all(_names(names) for names in lists):
+        return False, text + JOBS_NOT_READ
+    declared, installed, on_disk = (set(names) for names in lists)
+    entries, why = _judged(items, "D10.3")
+    apps = d.get("apps")
+    named = declared | installed | on_disk | (set(apps) if isinstance(apps, dict) else set())
+    counts = ((len(declared - installed), "declared but not installed"),
+              (len(installed - declared), "installed but not declared"),
+              (len(on_disk - declared - installed), "on disk only"),
+              (sum(1 for n in named if not is_app(n)), "with a name that is not a job name"))
+    note = "".join(f" ({n} {what})" for n, what in counts if n) + _unchecked_note(entries)
+    for key, what in (("units_not_counted", "unit lines not counted"), ("on_disk_not_counted", "entries on disk not counted")):
+        if not _is(d.get(key), 0):
+            note += f" ({num(d.get(key))} {what})"
+    note += why if installed or why != NO_INSTALLED_JOB else ""
+    note += "" if installed else NO_INSTALLED_JOB
+    return not note, text + (note or f" ({len(installed)} {'job' if len(installed) == 1 else 'jobs'})")
+
+
 def _refusals(bundle, items):
-    counts = _data(items, "D10.7").get("journal_counts")
-    counts = counts if isinstance(counts, dict) else {}
-    missing = [k for k in REFUSALS if not (_int(counts.get(k)) and counts.get(k) > 0)]
-    return not missing, "the three live refusals are in the journal" + (f" (missing: {', '.join(missing)})" if missing else "")
+    def missing(entry):
+        counts = entry.get("journal_counts")
+        counts = counts if isinstance(counts, dict) else {}
+        return [k for k in REFUSALS if not (_int(counts.get(k)) and counts.get(k) > 0)]
+    ok, note, entries = _each_job(items, "D10.7", lambda e: not missing(e))
+    absent = [k for k in REFUSALS if any(k in missing(e) for e in entries)]
+    return ok, "the three live refusals are in the journal" + (f" (missing: {', '.join(absent)})" if absent else "") + note
 
 
 def _run_ok_line(bundle, items):
-    n = _run_ok(_data(items, "D10.8"))
-    return _int(n) and n > 0, "at least one run/ok result"
+    def has_one(entry):
+        n = _run_ok(entry)
+        return _int(n) and n > 0
+    ok, note, _ = _each_job(items, "D10.8", has_one)
+    return ok, "at least one run/ok result" + note
 
 
 def _retention(bundle, items):
@@ -381,13 +604,22 @@ def _retention(bundle, items):
 
 
 def _reach(bundle, items):
+    """The journal's reach is D2.4's. A job installed since the last PASS has no 30 days of its
+    own: it is said here (D10.7), and it does not turn the line. A job whose D10.7 values could
+    not be checked does: whether it is new is one of them."""
     reach = _data(items, "D2.4").get("reach_days")
     ok = _int(reach) and reach >= 30
     note = ""
     if not ok:
         note = (f" (reach is {num(reach)} days: the evidence needs the date the retention was raised)"
                 if _int(reach) else " (not read)")
-    return ok, "the journal reaches 30 days" + note
+    entries, why = _judged(items, "D10.7")
+    new = sum(1 for e in entries if e.get("installed_since_last_pass") is True)
+    if new:
+        note += (" (1 job installed since the last PASS: judged from its first entry)" if new == 1 else
+                 f" ({new} jobs installed since the last PASS: each judged from its first entry)")
+    unread = _unchecked_note(entries) + (why if why == JOBS_NOT_READ else "")
+    return ok and not unread, "the journal reaches 30 days" + note + unread
 
 
 def _search(bundle, items):
@@ -400,17 +632,23 @@ def _search(bundle, items):
 def _no_leaks(bundle, items):
     """Every leak count the checklist fails on, each read by the tool's own key names: a key the tool
     does not name is not read here (the item line counts it as an other key)."""
-    d107 = _data(items, "D10.7")
-    groups = ((_data(items, "D2.3").get("journal"), SEARCH_KEYS), (d107.get("broker_journal"), LEAK_KEYS),
-              (d107.get("runner_journal"), LEAK_KEYS))
-    counts = [group.get(key) if isinstance(group, dict) else None for group, keys in groups for key in keys]
-    ok = all(_is(c, 0) for c in counts)
+    def read(group, keys):
+        return [group.get(key) if isinstance(group, dict) else None for key in keys]
+
+    def of_job(entry):
+        return read(entry.get("broker_journal"), LEAK_KEYS) + read(entry.get("runner_journal"), LEAK_KEYS)
+    search = read(_data(items, "D2.3").get("journal"), SEARCH_KEYS)
+    ok, jobs, entries = _each_job(items, "D10.7", lambda e: all(_is(c, 0) for c in of_job(e)))
+    counts = search + [c for e in entries for c in of_job(e)]
+    if jobs == NOT_READ:                                # the item itself: every count of it was not read
+        counts, jobs = counts + [None], ""
+    ok = ok and all(_is(c, 0) for c in counts)
     note = ""
     if any(_int(c) and c > 0 for c in counts):
         note = " (a count is above 0: this is a FAIL, not a reminder)"
-    elif not ok:
+    elif not all(_is(c, 0) for c in counts):
         note = " (a count was not read)"
-    return ok, "no leak count above 0 (D2.3, D10.7)" + note
+    return ok, "no leak count above 0 (D2.3, D10.7)" + note + jobs
 
 
 def _service(bundle, items):
@@ -447,19 +685,78 @@ def _proxy(bundle, items):
 
 
 def _code(bundle, items):
+    """The two fixed services and the broker of every INSTALLED job (by this item's list and by
+    D10.3's): each with files checked and none newer than its start. The broker of a job that is declared and not installed has never
+    started: it may be there, and is not judged. Any other key is not a service this tool knows."""
+    text = "no service runs older code than the box holds"
+    why = _shape(items, "D4.6", "apps_installed")
+    if why:
+        return False, text + why
     d = _data(items, "D4.6")
+    declared, installed = d.get("apps_declared"), d.get("apps_installed")
+    if not (_names(declared) and _names(installed)):
+        return False, text + JOBS_NOT_READ
+    judged = set(SERVICES) | {BROKER_PREFIX + app for app in set(installed) | _installed(items)}
+    allowed = judged | {BROKER_PREFIX + app for app in declared}
     newer, checked = d.get("files_newer_than_start"), d.get("files_checked")
-    ok = (isinstance(newer, dict) and isinstance(checked, dict) and set(newer) <= set(SERVICES)
-          and all(newer.get(s) == [] and _int(checked.get(s)) and checked[s] > 0 for s in SERVICES))
-    return ok, "no service runs older code than the box holds"
+    ok = (isinstance(newer, dict) and isinstance(checked, dict) and set(newer) <= allowed and set(checked) <= allowed
+          and all(is_service(s) for s in judged)
+          and all(newer.get(s) == [] and _int(checked.get(s)) and checked[s] > 0 for s in judged))
+    return ok, text
+
+
+def _report_store(bundle, items):
+    """D7.1's report store: a root:root 0700 directory that was listed, holding only folders of
+    active clients, each root-owned 0700, listed, with nothing inside but 0600 files, and mounted
+    by no container. Every fault is a count."""
+    text = "the report store holds only owner-only client folders"
+    why = _shape(items, "D7.1", "report_archive")
+    if why:
+        return False, text + (" (not in this bundle)" if why == OLDER_SHAPE else why)
+    store = _data(items, "D7.1")["report_archive"]
+    if not isinstance(store, dict):
+        return False, text + NOT_READ
+    notes = []
+    parent = store.get("parent")
+    if not isinstance(parent, dict):
+        notes.append(f"the store is {member(DIR_WORDS)(parent)}")
+    elif not (parent.get("owner") == "root" and parent.get("group") == "root" and parent.get("mode") == "0o700"):
+        notes.append("the store is not root:root 0700")
+    if store.get("rows_listed") is not True:
+        notes.append("the store was not listed")
+    rows = store.get("rows")
+    if not isinstance(rows, list):
+        notes.append("the folders were not read")
+        rows = []
+    rows = [r if isinstance(r, dict) else {} for r in rows]
+    faults = (("not a folder", lambda r: r.get("kind") == "dir"),
+              ("not active", lambda r: r.get("status") == "active"),
+              ("not listed", lambda r: r.get("listed") is True),
+              ("holding something that is not a file", lambda r: _is(r.get("not_files"), 0)),
+              ("not root 0700", lambda r: r.get("owner") == "root" and r.get("mode") == "0o700"),
+              ("with a file that is not 0600", lambda r: isinstance(r.get("files"), dict)
+               and all(k.endswith(" 0o600") for k in r["files"])))
+    for what, good in faults:
+        n = sum(1 for r in rows if not good(r))
+        if n:
+            notes.append(f"{n} {what}")
+    mounting, not_inspected = store.get("containers_mounting"), store.get("containers_not_inspected")
+    if _int(mounting) and _int(not_inspected):
+        notes += [f"{num(n)} {what}" for n, what in ((mounting, "containers mount it"),
+                                                     (not_inspected, "containers not inspected")) if n != 0]
+    else:
+        notes.append("the containers could not be checked")
+    return not notes, text + ("".join(f" ({n})" for n in notes)
+                              or f" ({len(rows)} {'folder' if len(rows) == 1 else 'folders'})")
 
 
 def _fingerprint(bundle, items):
     return _get(bundle, "fingerprint", "complete") is True, "fingerprint complete"
 
 
-CHECKS = (_all_observed, _no_could_not_check, _sshd_default, _refusals, _run_ok_line, _retention, _reach, _search,
-          _no_leaks, _service, _on_disk, _no_other_directory_no_missing_days, _proxy, _code, _fingerprint)
+CHECKS = (_all_observed, _no_could_not_check, _jobs_line, _sshd_default, _refusals, _run_ok_line, _retention, _reach,
+          _search, _no_leaks, _service, _on_disk, _no_other_directory_no_missing_days, _proxy, _code, _report_store,
+          _fingerprint)
 
 
 # ------------------------------------------------------------------ the summary
@@ -491,9 +788,8 @@ def summary(bundle):
         lines += [f"  {name}: {text}" for name, text in pairs]
         if other:
             lines.append(f"  +{other} other keys")
-        if iid == "D10.8":
-            run_ok = _run_ok(data)
-            lines.append(f"  run/ok results: {num(run_ok)}")
+        if iid in PER_JOB and _shape(items, iid, PER_JOB[iid]) == OLDER_SHAPE:
+            lines.append(" " + OLDER_SHAPE)
     creds = bundle.get("credentials")
     lines += ["", f"credentials: {len(creds) if isinstance(creds, list) else WITHHELD}", "",
               "Before the real collection (ok = as expected, LOOK = look at it first):"]
