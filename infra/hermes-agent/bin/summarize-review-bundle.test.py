@@ -375,6 +375,48 @@ class TestSetsMatchTheCollector(unittest.TestCase):
         self.assertEqual(SB.FIGURES_SERVICES, tuple(sorted(s for s, names in RCA.DECLARED.items() if names == ["GOOGLE_ADS_"])))
         self.assertEqual(SB.FIGURES_SERVICES, ("ads-collector", "ads-reader"))
 
+    def test_secret_env_labels_and_states(self):
+        self.assertEqual(SB.SECRET_LABELS, frozenset(l for _, l in CE.OTHER_SECRET_NAMES[CE.GATEWAY_ENV_FILE]))
+        self.assertEqual(SB.SECRET_STATES, frozenset({CE.MATCHES_FILE, CE.DIFFERS_FROM_FILE, CE.UNSET}))
+
+    def test_the_sshd_setting_names_are_only_counted(self):
+        self.assertEqual(len(CE.SSHD_KEY_SOURCES), 8)
+        b = bundle()
+        b["items"]["D1.7"]["data"]["sshd"] = {name: "acmecorp" for name in CE.SSHD_KEY_SOURCES}
+        text = run(json.dumps(b))[1]
+        self.assertIn("sshd_settings: 8", text)
+        for gone in (*CE.SSHD_KEY_SOURCES, "acmecorp"):
+            self.assertNotIn(gone, text)
+
+    def test_key_types_are_exactly_what_the_collector_accepts(self):
+        for t in SB.KEY_TYPES:
+            self.assertTrue(CE._KEY_TYPE_RE.fullmatch(t), t)
+        base = {"ssh-rsa", "ssh-dss", "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"}
+        self.assertEqual(SB.KEY_TYPES, base | {t + "-cert-v01@openssh.com" for t in base})
+        self.assertEqual(len(SB.KEY_TYPES), 16)
+
+    def test_the_listener_check_words(self):
+        import gateway_listeners  # noqa: F401  (the collector imports it by name)
+        lspec = importlib.util.spec_from_file_location("check_gateway_listeners", os.path.join(HERE, "check-gateway-listeners.py"))
+        L = importlib.util.module_from_spec(lspec); lspec.loader.exec_module(L)
+        self.assertEqual(SB.HISTORY_STATUSES, frozenset({L.OK, L.ALERT, L.COULD_NOT_CHECK, "?"}))
+        self.assertEqual(SB.ALERT_LOG_KEYS, frozenset({L.ALERT, L.CLEARED, "?", "first_ts", "last_ts"}))
+
+    def test_the_file_kinds(self):
+        self.assertEqual(SB.FILE_KINDS, frozenset({"file", "symlink", "not-a-file"}))
+
+    def test_the_sets_the_collector_does_not_declare_are_pinned(self):
+        # systemctl is-active / is-enabled print systemd's own words (systemctl(1)): no collector constant.
+        self.assertEqual(SB.ACTIVE_STATES, frozenset({"active", "inactive", "failed", "activating", "deactivating",
+                                                      "reloading", "maintenance", "refreshing"}))
+        self.assertEqual(SB.ENABLED_STATES, frozenset({"not-found", "enabled", "enabled-runtime", "linked", "linked-runtime", "masked",
+                                                       "masked-runtime", "static", "indirect", "disabled", "generated",
+                                                       "transient", "alias", "bad"}))
+        self.assertEqual(SB.SETTING_VALUES, frozenset({"35day", "7day", "1day", "1G", "500", "persistent", "auto",
+                                                       "volatile", "none"}))
+        self.assertEqual(SB.STORAGE_OK, (None, "auto", "persistent"))
+
 
 class TestSummary(unittest.TestCase):
     def test_every_item_is_listed_with_its_status_known_to_the_tool_or_not(self):
@@ -1112,9 +1154,11 @@ class TestEveryJob(unittest.TestCase):
             (lambda it: job(it, "D10.3")["broker_unit"].update(User="could-not-check"),
              r" \(not so for 1 of 2 jobs: a value could not be checked\)"),
             (lambda it: job(it, "D10.3").pop("installed"),
-             r" \(1 per-job entries disagree with the lists\) \(not so for 1 of 2 jobs: a value could not be checked\)"),
-            (lambda it: job(it, "D10.7", "ads-report").update(declared=False), r" \(1 per-job entries disagree with the lists\)"),
-            (lambda it: job(it, "D10.4").update(installed="could-not-check"), r" \(1 per-job entries disagree with the lists\)"),
+             r" \(1 per-job entry disagrees with the lists\) \(not so for 1 of 2 jobs: a value could not be checked\)"),
+            (lambda it: job(it, "D10.7", "ads-report").update(declared=False), r" \(1 per-job entry disagrees with the lists\)"),
+            (lambda it: job(it, "D10.4").update(installed="could-not-check"), r" \(1 per-job entry disagrees with the lists\)"),
+            (lambda it: [job(it, i, "ads-report").update(declared=False) for i in ("D10.7", "D10.8")],
+             r" \(2 per-job entries disagree with the lists\)"),
             (lambda it: it["D10.8"]["data"]["apps"].update(parked={"declared": False, "installed": False}), r" \(1 in no list\)"),
             (lambda it: [it[i]["data"]["apps"].update(parked={"declared": False, "installed": False}) for i in PER_JOB],
              r" \(1 in no list\)"),
@@ -1288,6 +1332,44 @@ class TestEveryJob(unittest.TestCase):
         for key in ("apps_declared", "apps_installed"):
             closing = self._closing(lambda it: d(it).update({key: "could-not-check"}))
             self.assertRegex(closing, rf"(?m)^LOOK  {self.CODE} \(the jobs could not be checked\)$", key)
+
+    def test_a_job_that_is_not_installed_excuses_only_an_absent_or_unread_value_on_the_layout_and_whitelist_lines(self):
+        def closing(change):
+            b = not_installed(clean())
+            change(b["items"])
+            return closing_of(b)
+        for iid, key, line, odd in (("D10.8", "out_of_whitelist", self.UNITS, (1.0, True, None, "0", -1, 2)),
+                                    ("D10.4", "layout_problems", self.LAYOUT, (0, True, None, "", {}, ["x"]))):
+            for value in odd:
+                self.assertRegex(closing(lambda it: job(it, iid, "ads-report").update({key: value})),
+                                 rf"(?m)^LOOK  {line} .*not so for 1 of 2 jobs.*$", (key, value))
+            for good in ("could-not-check", "absent"):
+                def change(it):
+                    if good == "absent":
+                        job(it, iid, "ads-report").pop(key, None)
+                    else:
+                        job(it, iid, "ads-report")[key] = good
+                self.assertRegex(closing(change), rf"(?m)^ok    {line}$", (key, good))
+
+    def test_the_reach_line_reads_every_installed_job_s_oldest_entry_and_first_entry(self):
+        oldest = lambda it: it["D2.4"]["data"]["oldest_entry"]
+        cases = (
+            (lambda it: oldest(it)["apps"].update({"ads-report": {}}), self.ONE_UNREAD),
+            (lambda it: oldest(it)["apps"].update({"ads-report": {"broker": 5, "runner": None}}), self.ONE_UNREAD),
+            (lambda it: oldest(it)["apps"].update({"ads-report": {"broker": "yesterday", "runner": None}}), self.ONE_UNREAD),
+            (lambda it: oldest(it)["apps"].update({"ads-report": {"broker": True}}), self.ONE_UNREAD),
+            (lambda it: it["D2.4"]["data"].update(oldest_entry="could-not-check"), r" \(the jobs could not be checked\)"),
+            (lambda it: it["D2.4"]["data"].update(oldest_entry=None), r" \(the jobs could not be checked\)"),
+            (lambda it: oldest(it).pop("apps"), r" \(the jobs could not be checked\)"),
+            (lambda it: job(it, "D10.7", "ads-report").update(installed_since_last_pass=True, first_entry="yesterday"), self.ONE_UNREAD),
+            (lambda it: job(it, "D10.7", "ads-report").update(installed_since_last_pass=True, first_entry=7), self.ONE_UNREAD),
+            (lambda it: job(it, "D10.7", "ads-report").update(installed_since_last_pass=True, first_entry={}), self.ONE_UNREAD),
+        )
+        for change, note in cases:
+            self.assertRegex(self._closing(change), rf"(?m)^LOOK  {self.REACH}.*{note}$", note)
+        for good in (None, "2026-10-08T09:00:00Z"):                          # a null broker is a job that has not logged
+            self.assertRegex(self._closing(lambda it: oldest(it)["apps"].update({"ads-report": {"broker": good, "runner": None}})),
+                             rf"(?m)^ok    {self.REACH}$")
 
     def test_the_reach_item_s_per_job_values_turn_the_reach_line(self):
         apps = lambda it: it["D2.4"]["data"]["oldest_entry"]["apps"]

@@ -653,7 +653,7 @@ def _jobs_line(bundle, items):
               (len(on_disk - declared - installed), "on disk only"),
               (sum(1 for n in known | stray if not is_app(n)), "with a name that is not a job name"),
               (len(stray), "in no list"),
-              (differ, "per-job entries disagree with the lists"))
+              (differ, "per-job entry disagrees with the lists" if differ == 1 else "per-job entries disagree with the lists"))
     note = "".join(f" ({n} {what})" for n, what in counts if n) + _unchecked_note(jobs)
     for key, one, many in (("units_not_counted", "unit line not counted", "unit lines not counted"),
                            ("on_disk_not_counted", "entry on disk not counted", "entries on disk not counted")):
@@ -670,7 +670,8 @@ def _layout_line(bundle, items):
     bad: it is said for a job that is not installed too."""
     text = "every job's folders are as designed and no container mounts the job state"
     _, note, _, _ = _each_job(items, "D10.4", lambda e: e.get("layout_problems") == [],
-                              never=lambda e: isinstance(e.get("layout_problems"), list) and e["layout_problems"] != [])
+                              never=lambda e: "layout_problems" in e and e["layout_problems"] != CNC
+                              and e["layout_problems"] != [])
     notes = [note]
     if _shape(items, "D10.4", "apps") != NOT_READ:
         d = _data(items, "D10.4")
@@ -696,7 +697,8 @@ def _units_and_results(bundle, items):
         notes = [_many(differ, "unit file differs or was not read", "unit files differ or were not read") if differ else "",
                  _many(other, "entry that is not a job unit file", "entries that are not a job unit file") if other else ""]
     notes.append(_each_job(items, "D10.8", lambda e: _is(e.get("out_of_whitelist"), 0),
-                           never=lambda e: _int(e.get("out_of_whitelist")) and e["out_of_whitelist"] != 0)[1])
+                           never=lambda e: "out_of_whitelist" in e and e["out_of_whitelist"] != CNC
+                           and not _is(e["out_of_whitelist"], 0))[1])
     notes = _once(notes)
     return not notes, text + notes
 
@@ -766,6 +768,11 @@ def _retention(bundle, items):
 SINCE_LAST_PASS = (True, False, None)      # what a comparison with the last PASS may be, when it could be made
 
 
+def _broker_read(entry):
+    """A job's oldest broker entry in D2.4: a time or null (the broker has not logged); the key is there."""
+    return "broker" in entry and (entry["broker"] is None or is_time(entry["broker"]))
+
+
 def _reach(bundle, items):
     """The journal's reach is D2.4's. A job installed since the last PASS has no 30 days of its
     own: it is said here (D10.7), and it does not turn the line. What does: an installed job
@@ -789,17 +796,22 @@ def _reach(bundle, items):
                  f" ({quiet} jobs installed since the last PASS and they have not logged yet)")
     # by name, so that a job unread in both items is one job
     unread = {app for app, e in jobs.items()
-              if _unchecked(e) or not any(e.get("installed_since_last_pass") is v for v in SINCE_LAST_PASS)}
+              if _unchecked(e) or not any(e.get("installed_since_last_pass") is v for v in SINCE_LAST_PASS)
+              or (e.get("installed_since_last_pass") is True and e.get("first_entry") is not None
+                  and not is_time(e.get("first_entry")))}
     names, not_read = set(jobs), why == JOBS_NOT_READ
     oldest = d24.get("oldest_entry")
+    installed = _job_list(items, "installed_apps")
     if isinstance(oldest, dict) and "apps" in oldest:
-        installed = _job_list(items, "installed_apps")
         names |= installed
         if isinstance(oldest["apps"], dict):
             unread |= {app for app in installed if not isinstance(oldest["apps"].get(app), dict)
-                       or cnc_places(oldest["apps"][app]) > 0}
+                       or cnc_places(oldest["apps"][app]) > 0 or not _broker_read(oldest["apps"][app])}
         else:
             not_read = True
+    elif names or installed:                  # per-job data elsewhere, and no per-job oldest entries here
+        names |= installed
+        not_read = True
     tail = _not_so(len(unread), len(names), True) + (JOBS_NOT_READ if not_read else "")
     return ok and not tail, "the journal reaches 30 days" + note + tail
 
