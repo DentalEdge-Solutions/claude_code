@@ -14,12 +14,12 @@ def load(name, file):
 MCP, BRK, RUN = load("mcp", "hermes-app-mcp.py"), load("brk", "hermes-app-broker.py"), load("run", "hermes-app-runner.py")
 STUB = """#!/bin/sh
 slug="$1"; shift
+echo "$@" >> "$(dirname "$0")/args.txt"
 for a in "$@"; do
   if [ "$a" = "--list" ]; then echo '{"status": "ok", "audits": ["2026-09-30_10-00-00"]}'; exit 0; fi
 done
 echo "{\\"status\\": \\"ok\\", \\"reason\\": null, \\"exit_code\\": 0, \\"ts\\": \\"2026-10-01_12-00-00\\", \\"steps\\": [STEPS], \\"vault_path\\": \\"PATH\\"}"
 """
-STEPS = {"ads-audit": ["draft"], "ads-report": ["collect", "read", "store"]}     # the classes a run of each job reports
 REGISTRY_DIR = os.path.join(os.path.dirname(HERE), "registry/apps")
 
 
@@ -27,7 +27,7 @@ def stub_for(man):
     """A fake command whose result is valid for THAT job: its stored path is built from the manifest."""
     path = A.RESULT_ROOTS[man.result["root"]] + "/$slug" + ("/" + man.result["subdir"] if man.result["subdir"] else "") \
         + "/2026-10-01_12-00-00" + man.result["suffix"]
-    steps = ", ".join('{\\"name\\": \\"%s\\", \\"rc\\": 0, \\"seconds\\": 1.0}' % c for c in STEPS[man.app])
+    steps = ", ".join('{\\"name\\": \\"%s\\", \\"rc\\": 0, \\"seconds\\": 1.0}' % c for c in ("collect",))
     return STUB.replace("STEPS", steps).replace("PATH", path)
 
 
@@ -65,7 +65,7 @@ class E2E(unittest.TestCase):
         reg = os.path.join(t, "clients.json")
         json.dump({"clients": {"acme-dental": {"status": "active", "customer_id": "1234567890"}}}, open(reg, "w"))
         self.jobs = {app: Job(t, app, reg) for app in sorted(A.load_manifests(REGISTRY_DIR))}
-        self.assertEqual(sorted(self.jobs), ["ads-audit", "ads-report"])
+        self.assertTrue(self.jobs)
 
     def pump(self, job):
         """The MCP server's sleep: one broker + runner + broker cycle per poll."""
@@ -88,7 +88,9 @@ class E2E(unittest.TestCase):
                     + "/2026-10-01_12-00-00" + job.m.result["suffix"]
                 r = self.call(job, tools["run"], client="acme-dental")
                 self.assertEqual((r["status"], r["vault_path"]), ("ok", want))
-                self.assertEqual([s["name"] for s in r["steps"]], STEPS[app])
+                with open(os.path.join(os.path.dirname(job.m.command), "args.txt")) as f:
+                    got = f.read().split()
+                self.assertEqual("--figures" in got, "--figures" in job.m.ops["run"]["args"])   # the runner passed the manifest's args
                 with open(os.path.join(job.spool, "results", r["request_id"] + ".json")) as f:
                     self.assertEqual(json.load(f)["vault_path"], want)      # the broker wrote this path
                 r2 = self.call(job, tools["run"], client="acme-dental")

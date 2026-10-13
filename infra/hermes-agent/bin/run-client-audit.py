@@ -8,7 +8,11 @@
   sudo run-client-audit --probe-env | --probe-egress
 
 --json: exactly one JSON line on stdout (the broker's contract, Option B §3.5), every human line
-on stderr. --list: this client's audit timestamps (newest 24), no lock taken.
+on stderr. --list: this client's audit timestamps (newest 24), no lock taken; with --figures it
+lists the report archive's timestamps instead.
+--figures (the ads-report job): collect -> readers -> store (root; the three reports as one
+document in the report archive). No snapshot, no proxy, no draft, no vault; the Anthropic key
+file is never opened.
 --probe-env / --probe-egress (security review; no client, not an app-runner op): one JSON object
 on stdout measuring which audit container holds which credential NAME, and what the drafter can
 reach. Sentinel values and throwaway empty dirs: no credential file and no client data is read.
@@ -19,8 +23,8 @@ ads-reader) -> egress-proxy up -> draft (claude -p in the one-shot ads-drafter, 
 this client's vault, reports and draft-out dirs) -> the check that the draft names no other
 client -> vault-write. The proxy is stopped (its decision log kept as proxy.log first) and the
 transient draft removed on every exit, a SIGTERM from the host runner's timeout included (§7).
-Stops at the first failure. Exit: 0 draft written, 1 a step failed, 2 a pre-check refused,
-3 another audit is running.
+Stops at the first failure. Exit, for both modes: 0 draft written (figures: report stored), 1 a
+step failed, 2 a pre-check refused, 3 another audit is running.
 Nothing shown carries a customer id or credential value; each step's stdout and stderr go to
 /var/lib/hermes/audit-logs/<client>/<step>.{stdout,stderr} (root 0600; snapshot.stdout is handed
 to uid 10000 for vault-write). The logs are OUTSIDE the tree the collector mounts rw, and every
@@ -559,7 +563,7 @@ def main(argv=None, runner=None, root="/", now=None):
         ap.error("--list requires --json")
     probe = a.probe_env or a.probe_egress
     if probe and (a.client is not None or a.dry_run or a.figures):
-        ap.error("--probe-env / --probe-egress take no client and no --dry-run")
+        ap.error("--probe-env / --probe-egress take no client, no --dry-run and no --figures")
     if not probe and a.client is None:
         ap.error("a client is required")
     root = root.rstrip("/")
@@ -694,10 +698,10 @@ def _run(steps, rec, ts, root, runner, say, state, figures=False):
                 bad = L.error_files(data)
                 if bad:
                     state["reason"] = "collect"
-                    say(f"run-client-audit: collector errors, no draft: {bad}"); return _summary(results, 1, say)
+                    say(f"run-client-audit: collector errors, no {'report' if figures else 'draft'}: {bad}"); return _summary(results, 1, say)
                 if L.json_count(data) == 0:
                     state["reason"] = "collect"
-                    say("run-client-audit: collectors wrote no data, no draft"); return _summary(results, 1, say)
+                    say(f"run-client-audit: collectors wrote no data, no {'report' if figures else 'draft'}"); return _summary(results, 1, say)
             if key == "vault-write":                  # isolation check BEFORE anything reaches the vault
                 named = L.others_named(read_transient(root, slug, ts), slug, list(L.V.load_registry(root + REGISTRY)))
                 if named:
