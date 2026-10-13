@@ -339,8 +339,6 @@ class TestChecklistSync(unittest.TestCase):
                       "not a job known only from its directories"):
             self.assertIn(words, rule, words)
 
-    # the second commit of Task 8 rewrites D10.3, D10.4, D10.7 and D10.8 and removes this mark
-    @unittest.expectedFailure
     def test_the_per_job_items_name_no_single_job_as_the_job(self):
         b = blocks()
         for item in ("D10.3", "D10.4", "D10.7", "D10.8"):
@@ -359,8 +357,6 @@ class TestChecklistSync(unittest.TestCase):
             self.assertIn(words, b["D10.3"], words)
         self.assertIn("`init-host-layout.py --app <app> --check`", b["D10.4"])
 
-    # the second commit of Task 8 rewrites D10.3, D10.4, D10.7 and D10.8 and removes this mark
-    @unittest.expectedFailure
     def test_the_per_job_items_name_every_key_the_collector_reports(self):
         ce = _load("ce", "collect-review-evidence.py")
         b = blocks()
@@ -390,8 +386,6 @@ class TestChecklistSync(unittest.TestCase):
         for count in (*ce.LEAK_COUNTS, *ce.READ_COUNTS):
             self.assertIn(f"`{count}`", b["D10.7"], count)
 
-    # the second commit of Task 8 rewrites D10.3, D10.4, D10.7 and D10.8 and removes this mark
-    @unittest.expectedFailure
     def test_d10_7_and_d10_8_name_every_step_class(self):
         import app_lib
         b = blocks()
@@ -402,8 +396,6 @@ class TestChecklistSync(unittest.TestCase):
         self.assertIn("`failed/store`", b["D10.7"])
         self.assertIn("`failed/store`", b["D10.8"])
 
-    # the second commit of Task 8 rewrites D10.3, D10.4, D10.7 and D10.8 and removes this mark
-    @unittest.expectedFailure
     def test_d10_7_judges_a_job_installed_since_the_last_pass_from_its_first_entry(self):
         b = blocks()["D10.7"]
         self.assertIn("installed since the last PASS", b)
@@ -417,8 +409,6 @@ class TestChecklistSync(unittest.TestCase):
                       "for each installed job"):
             self.assertIn(words, rule, words)
 
-    # the second commit of Task 8 rewrites D10.3, D10.4, D10.7 and D10.8 and removes this mark
-    @unittest.expectedFailure
     def test_the_d10_area_keeps_the_words_that_carry_the_rulings_on_jobs(self):
         """A job that could not be checked, a job declared and not installed, a job installed and not
         declared: each ruling answered a route to a wrong PASS, and an edit must not drop one quietly."""
