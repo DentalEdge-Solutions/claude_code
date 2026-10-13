@@ -3522,7 +3522,7 @@ class TestJournalReach(Base):
 
     def test_d10_7_a_journal_read_that_ends_with_a_warning_is_could_not_check(self):
         for unit in ("broker", "runner"):
-            for what, answer in (("truncated file, rc 0", (0, "x\n", self.TRUNCATED)),
+            for what, answer in (("truncated file, rc 0", (0, _as_entries("x\n"), self.TRUNCATED)),
                                  ("no rights, rc 0 (NOT produced in the measurement: rc 1 was; kept as the case the stderr rule exists for)", (0, "", self.NO_RIGHTS)),
                                  ("time-out", (124, "", "journalctl: timed out"))):
                 with self.subTest(unit=unit, what=what):

@@ -67,8 +67,8 @@ THIRTY_DAYS = 30 * 86400
 LIMITED_OPTIONS = ['command="/bin/false"', 'permitlisten="127.0.0.1:1"', 'permitopen="127.0.0.1:9119"',
                    "port-forwarding", "restrict"]
 REFUSALS = ("refused/disabled", "refused/quota", "refused/bad_request")
-SEARCH_KEYS = ("pattern_hits", "known_secret_hits")                         # _count_cred_text: D2.3 `journal`
-LEAK_KEYS = ("credential_text_lines", "customer_id_lines") + SEARCH_KEYS    # _journal_leaks: D10.7's two journals
+SEARCH_KEYS = ("pattern_hits", "known_secret_hits")                         # D2.3 `journal`, and D2.2's _count_cred_text
+LEAK_KEYS = ("credential_text_lines", "customer_id_lines") + SEARCH_KEYS    # LEAK_COUNTS: D10.7's two journals
 DEFAULT_DAEMON = {"listeners": 1, "config_file_options": 0, "setting_options": 0}
 
 

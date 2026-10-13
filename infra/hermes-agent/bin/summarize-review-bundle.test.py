@@ -550,7 +550,7 @@ class TestSummary(unittest.TestCase):
                    for k in ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")])
 
     def test_the_leak_keys_are_the_collectors(self):
-        self.assertEqual(set(SB.SEARCH_KEYS), set(CE._count_cred_text("", [])))
+        self.assertEqual(set(SB.SEARCH_KEYS), set(CE.SEARCH_HIT_COUNTS))
         self.assertEqual(set(SB.LEAK_KEYS), set(CE.LEAK_COUNTS))
         self.assertEqual(len(self._leak_places()), len(SB.SEARCH_KEYS) + 2 * len(SB.LEAK_KEYS))
 

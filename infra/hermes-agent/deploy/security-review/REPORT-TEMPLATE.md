@@ -7,7 +7,7 @@
 - **Accepted SSH keys (D1.7):** (one line per key: account, `sha12`, and `no options` or `limited to the forward`)
 - **sshd as it runs (D1.7):** `match_lines` `<number>`, `include_elsewhere` `<number>`, `daemon_options` `listeners` `<number>` / `config_file_options` `<number>` / `setting_options` `<number>`
 - **Journal (D2.4):** `oldest_entry.journal` `<UTC time>`, `reach_days` `<number>`; `MaxRetentionSec` `<value>` set by `<file>`; `Storage` `<value or null>`; `service.active` `<true/false>`, `config_changed_after_start` `<true/false>`; `usage.flushed_to_disk` `<true/false>`, `on_disk_age_seconds` `<number>`; `<bytes_percent_of_max_use>`% of the size limit, `<files_percent_of_max_files>`% of the file limit; `other_directories` `<number>`
-- **Journal search (D2.3):** `scanned_characters` `<number>`, `entries` `<number>`, `undecodable_characters` `<number>`, `oldest_entry_read` `<UTC time>`; days covered `<number>` (state it whenever D2.4's `reach_days` is under 30)
+- **Journal search (D2.3):** `scanned_characters` `<number>`, `entries` `<number>`, `fields` `<number>`, `undecodable_characters` `<number>`, `oldest_entry_read` `<UTC time>`; days covered `<number>` (state it whenever D2.4's `reach_days` is under 30)
 - **Unit journals (D10.7):** `oldest_entry_read` `broker` `<UTC time or null>`, `runner` `<UTC time or null>`; `journal_read` `<as the bundle shows it>`; days covered `<number>` (state it whenever D2.4's `reach_days` is under 30)
 - **Proxy (D4.2):** `execstart_sha256` `<sha256>`, `execstart_argv_sha256` `<sha256>` (the next review gives the first to the collector as `--last-pass-execstart`)
 - **Listener check (D4.5):** `alert_log` `<as the bundle shows it>`

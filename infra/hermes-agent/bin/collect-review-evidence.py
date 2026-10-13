@@ -268,7 +268,7 @@ class Host:
 
     def stream(self, argv, timeout=60):
         """The same single command and limit as run_lossy(), read line by line instead of held
-        whole (the journal with every field is about 184 MB at 35 days, measured 2026-10-13). A
+        whole (the journal with every field is about 183 million characters at 35 days, measured 2026-10-13). A
         host built with a fake runner streams that runner's text."""
         return _RealStream(argv, timeout) if self._real else _TextStream(self._run(argv, timeout))
 
@@ -1285,7 +1285,7 @@ def d2_3(host, ctx):
     of the search stay."""
     c = _search_journal(host, ["journalctl", *JOURNAL_ALL_FIELDS], ctx.get("secrets", []),
                         timeout=JOURNAL_SCAN_TIMEOUT)
-    return {"journal": {k: c[k] for k in ("pattern_hits", "known_secret_hits")},
+    return {"journal": {k: c[k] for k in SEARCH_HIT_COUNTS},
             "entries": c["entries"], "fields": c["fields"], "scanned_characters": c["scanned_characters"],
             "undecodable_characters": c["undecodable_characters"], "oldest_entry_read": _oldest_entry_or_unknown(host)}
 
@@ -2392,6 +2392,7 @@ def _label(value, allowed):
     return value if isinstance(value, str) and value in allowed else "?"
 
 
+SEARCH_HIT_COUNTS = ("pattern_hits", "known_secret_hits")
 LEAK_COUNTS = ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")
 READ_COUNTS = ("entries", "fields", "undecodable_characters")
 
