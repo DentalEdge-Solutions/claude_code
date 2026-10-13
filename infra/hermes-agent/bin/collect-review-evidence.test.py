@@ -4753,21 +4753,33 @@ class TestSearchJournal(Base):
                 CE._search_journal(host, self.ARGV, [])
         self.assertIn("did not parse", str(cm.exception))
 
-    def test_an_error_in_the_loop_stops_the_child(self):
-        code = "import sys, time\nwhile True:\n    sys.stdout.write('{\"MESSAGE\": \"m\"}\\n'); sys.stdout.flush(); time.sleep(0.01)"
-        stream = CE._RealStream([sys.executable, "-c", code], 60)
-        host = CE.Host()
-        host._real = False
-        host.stream = lambda argv, timeout=60: stream
-        procs = []
-        real_popen = CE.subprocess.Popen
-        def spy(*a, **k):
-            p = real_popen(*a, **k); procs.append(p); return p
+    def test_an_error_in_the_loop_closes_the_stream_at_once(self):
+        class Stream:
+            rc, err = 0, ""
+            closed = False
+            def __iter__(self):
+                def gen():
+                    try:
+                        yield _e(MESSAGE="one")
+                        yield _e(MESSAGE="two")
+                    finally:
+                        Stream.closed = True
+                self.gen = gen()            # the test keeps it: garbage collection cannot close it
+                return self.gen
+        stream = Stream()
+
+        class H(CE.Host):
+            def stream(self, argv, timeout=60):
+                return stream
+
         def boom(_m):
             raise RuntimeError("boom")
-        with mock.patch.object(CE.subprocess, "Popen", spy), self.assertRaises(RuntimeError):
-            CE._search_journal(host, self.ARGV, [], on_message=boom)
-        self.assertIsNotNone(procs[0].poll())
+        try:
+            CE._search_journal(H(self.root, lambda argv, timeout=60: (0, "", "")), self.ARGV, [], on_message=boom)
+        except RuntimeError:
+            self.assertTrue(Stream.closed)      # still inside the except block: the traceback is alive
+        else:
+            self.fail("no error")
 
     def test_blank_lines_are_not_entries(self):
         self.assertEqual(self._search("\n" + _e(MESSAGE="ok") + "\n")["entries"], 1)
