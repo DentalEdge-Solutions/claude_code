@@ -34,7 +34,8 @@ def bundle():
                                          "options": ['command="/bin/false"', 'permitlisten="127.0.0.1:1"',
                                                      'permitopen="127.0.0.1:9119"', "port-forwarding", "restrict"]}]}]}},
                 "D2.3": {"status": "observed", "data": {"journal": {"pattern_hits": 0, "known_secret_hits": 0},
-                                                        "scanned_characters": 23000000, "undecodable_characters": 0,
+                                                        "scanned_characters": 23000000, "entries": 185000, "fields": 5000000,
+                                                        "undecodable_characters": 0,
                                                         "oldest_entry_read": "2026-09-18T15:11:34Z"}},
                 "D2.4": {"status": "observed", "data": {
                     "oldest_entry": {"journal": "2026-09-18T15:11:34Z", "broker": "2026-10-05T18:35:47Z", "runner": None},
@@ -80,6 +81,8 @@ def bundle():
                     "note_counts": {"warning": 2}, "other_lines": 4, "known_secrets_checked": 7,
                     "broker_journal": {"credential_text_lines": 0, "customer_id_lines": 0, "pattern_hits": 0, "known_secret_hits": 0},
                     "runner_journal": {"credential_text_lines": 0, "customer_id_lines": 0, "pattern_hits": 0, "known_secret_hits": 0},
+                    "journal_read": {"broker": {"entries": 40, "fields": 900, "undecodable_characters": 0},
+                                     "runner": {"entries": 90, "fields": 2000, "undecodable_characters": 0}},
                     "oldest_entry_read": {"broker": "2026-10-05T18:35:47Z", "runner": None}}},
                 "D10.8": {"status": "observed", "data": {"out_of_whitelist": 0, "results": [
                     {"op": "run", "status": "ok", "reason": "-", "keys_ok": True, "values_ok": True},
@@ -547,11 +550,16 @@ class TestSummary(unittest.TestCase):
                    for k in ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")])
 
     def test_the_leak_keys_are_the_collectors(self):
-        class NoIds:
-            has_customer_id = staticmethod(lambda line: False)
         self.assertEqual(set(SB.SEARCH_KEYS), set(CE._count_cred_text("", [])))
-        self.assertEqual(set(SB.LEAK_KEYS), set(CE._journal_leaks("", [], NoIds)))
+        self.assertEqual(set(SB.LEAK_KEYS), set(CE.LEAK_COUNTS))
         self.assertEqual(len(self._leak_places()), len(SB.SEARCH_KEYS) + 2 * len(SB.LEAK_KEYS))
+
+    def test_the_all_fields_counts_are_printed(self):
+        text = run(json.dumps(bundle()))[1]
+        for want in ("entries: 185000", "fields: 5000000",
+                     "journal_read: {broker: {entries: 40, fields: 900, undecodable_characters: 0}, "
+                     "runner: {entries: 90, fields: 2000, undecodable_characters: 0}}"):
+            self.assertIn(want, text)
 
     def test_every_leak_count_above_zero_turns_the_leak_line_to_look_in_fixed_words(self):
         for item, group, key in self._leak_places():

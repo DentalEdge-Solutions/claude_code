@@ -1156,8 +1156,9 @@ def d2_2(host, ctx):
     return {"histories": out}
 
 
-# The search of the whole journal measured 2 s at 7 days on the box (2026-10-10). Times 5 for 35 days,
-# times 10 for margin is 100 s; the limit is never under 300 s.
+# The search of the whole journal with every field measured 4 s at 7.9 days on the box (2026-10-13:
+# 41,571 entries, 41.3 MB). Scaled to 35 days that is 18 s; times 10 for margin is 180 s; the limit
+# is never under 300 s.
 JOURNAL_SCAN_TIMEOUT = 300
 
 
@@ -1166,24 +1167,6 @@ def _not_root_on_a_real_host(host):
     on stderr (record R14, item 7). The real host (built with the real runner) refuses; a host
     built with a fake runner (tests) is not asked."""
     return host._real and os.geteuid() != 0
-
-
-def _journal_read(host, argv, timeout=60):
-    """The text of a journal read, or CouldNotCheck. A read that ends with anything on stderr is
-    not a whole read even at rc 0 (record R14: a truncated archived file is skipped with a
-    warning and rc 0; without rights journalctl prints a notice): what it covered is unknown.
-    The reason is in fixed words, never the stderr text (it can hold a path with the machine id).
-    The text is decoded with replacement: a replaced byte cannot turn text that is not a credential
-    into one, and a credential is ASCII, so it is still found beside a replaced byte; what could be
-    lost is a credential WITH an invalid byte inside it, which is not that credential."""
-    if _not_root_on_a_real_host(host):
-        raise CouldNotCheck("the journal is read as root only")
-    rc, out, err = host.run_lossy(argv, timeout)
-    if rc != 0:
-        raise CouldNotCheck(f"{argv[0]} exited {rc}")
-    if err.strip():
-        raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
-    return out
 
 
 # Every stored field of every entry (finding F59: `-o cat` prints the message alone, and a token in
@@ -1296,12 +1279,15 @@ def _search_journal(host, argv, secrets, redactor=None, timeout=60, on_message=N
 
 
 def d2_3(host, ctx):
-    """The message text of every entry journalctl shows, as far back as it reaches (D2.4 judges how far). The oldest entry is
-    read AFTER the search: entries only ever leave, so the search reached at least that far.
-    An oldest entry that cannot be read is could-not-check; the counts of the search stay."""
-    text = _journal_read(host, ["journalctl", "-o", "cat", "--no-pager"], timeout=JOURNAL_SCAN_TIMEOUT)
-    return {"journal": _count_cred_text(text, ctx.get("secrets", [])), "scanned_characters": len(text),
-            "undecodable_characters": text.count("\ufffd"), "oldest_entry_read": _oldest_entry_or_unknown(host)}
+    """Every stored field of every entry journalctl shows, as far back as it reaches (D2.4 judges
+    how far). The oldest entry is read AFTER the search: entries only ever leave, so the search
+    reached at least that far. An oldest entry that cannot be read is could-not-check; the counts
+    of the search stay."""
+    c = _search_journal(host, ["journalctl", *JOURNAL_ALL_FIELDS], ctx.get("secrets", []),
+                        timeout=JOURNAL_SCAN_TIMEOUT)
+    return {"journal": {k: c[k] for k in ("pattern_hits", "known_secret_hits")},
+            "entries": c["entries"], "fields": c["fields"], "scanned_characters": c["scanned_characters"],
+            "undecodable_characters": c["undecodable_characters"], "oldest_entry_read": _oldest_entry_or_unknown(host)}
 
 
 def _oldest_entry_or_unknown(host, selector=()):
@@ -2406,30 +2392,34 @@ def _label(value, allowed):
     return value if isinstance(value, str) and value in allowed else "?"
 
 
-def _journal(host, unit):
-    return _journal_read(host, ["journalctl", "-u", unit, "--since", "-30d", "-o", "cat", "--no-pager"])
+LEAK_COUNTS = ("credential_text_lines", "customer_id_lines", "pattern_hits", "known_secret_hits")
+READ_COUNTS = ("entries", "fields", "undecodable_characters")
 
 
-def _journal_leaks(text, secrets, redactor):
-    """What a unit's journal must hold none of: lines of Google-credential-shaped text, lines
-    with a registered customer id, and (as D2.3 counts them) credential patterns and the
-    installed secret values themselves. Counts only, never a line."""
-    lines = text.splitlines()
-    return {"credential_text_lines": sum(1 for l in lines if R.looks_like_credential_text(l)),
-            "customer_id_lines": sum(1 for l in lines if redactor.has_customer_id(l)),
-            **_count_cred_text(text, secrets)}
+def _unit_search(host, unit, secrets, redactor, on_message=None):
+    """What a unit's journal of the last 30 days must hold none of, in every stored field: lines
+    of Google-credential-shaped text, lines with a registered customer id, credential patterns and
+    the installed secret values themselves. Counts only, never a line."""
+    return _search_journal(host, ["journalctl", "-u", unit, "--since", "-30d", *JOURNAL_ALL_FIELDS],
+                           secrets, redactor, on_message=on_message)
 
 
 def d10_7(host, ctx):
-    """Counts only, never a line: the journal names clients and request ids by design. The
+    """Counts only, never a line or a field: the journal names clients and request ids by design. The
     status/reason counts are the broker's; the leak counts cover the runner's journal too,
     which is where run-client-audit's own output lands (its unit sets no StandardOutput)."""
-    broker = _journal(host, f"hermes-app-broker@{APP}")
-    runner = _journal(host, f"hermes-app-runner@{APP}")
+    # The non-Google values are loaded before the probes; D2.1 (it runs first) adds the Google
+    # ones and any other it finds. With none
+    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
+    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
+    lines = []
+    broker = _unit_search(host, f"hermes-app-broker@{APP}", secrets, ctx["redactor"],
+                          on_message=lambda t: lines.extend(t.splitlines()))
+    runner = _unit_search(host, f"hermes-app-runner@{APP}", secrets, ctx["redactor"])
     oldest = {label: _oldest_entry_or_unknown(host, ("-u", unit, "--since", "-30d"))
               for label, unit in JOURNAL_UNITS.items()}
     counts, notes, other = {}, {}, 0
-    for line in broker.splitlines():
+    for line in lines:
         if not line.strip():
             continue
         body = line[len(_BROKER_LINE):] if line.startswith(_BROKER_LINE) else ""
@@ -2441,13 +2431,11 @@ def d10_7(host, ctx):
             notes[note.group(1)] = notes.get(note.group(1), 0) + 1
         else:
             other += 1                                      # systemd's own lines, a traceback, anything else
-    # The non-Google values are loaded before the probes; D2.1 (it runs first) adds the Google
-    # ones and any other it finds. With none
-    # loaded, known_secret_hits can only be 0: known_secrets_checked says how many were looked for.
-    secrets = sorted({s for s in ctx.get("secrets", []) if len(s) >= 8})
     return {"journal_counts": counts, "note_counts": notes, "other_lines": other,
-            "broker_journal": _journal_leaks(broker, secrets, ctx["redactor"]),
-            "runner_journal": _journal_leaks(runner, secrets, ctx["redactor"]),
+            "broker_journal": {k: broker[k] for k in LEAK_COUNTS},
+            "runner_journal": {k: runner[k] for k in LEAK_COUNTS},
+            "journal_read": {"broker": {k: broker[k] for k in READ_COUNTS},
+                             "runner": {k: runner[k] for k in READ_COUNTS}},
             "known_secrets_checked": len(secrets), "oldest_entry_read": oldest}
 
 

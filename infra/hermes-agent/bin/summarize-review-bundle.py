@@ -223,13 +223,14 @@ def key_files(v):
 _SETTING = fixed({"number": num, "set_by": ("file", set_by), "value": member(SETTING_VALUES)})
 _BROKER_RUNNER = fixed({k: when for k in sorted(JOURNAL_LABELS - {"journal"})})
 _LEAKS = fixed({k: num for k in LEAK_KEYS})
+_READ = fixed({k: num for k in ("entries", "fields", "undecodable_characters")})
 
 SCHEMA = {
     "D1.7": {"accounts_checked": num, "unprivileged_port_start": num, "match_lines": num, "include_elsewhere": num,
              "daemon_options": fixed({"listeners": num, "config_file_options": num, "setting_options": num}),
              "sshd_settings": ("sshd", count), "files": key_files},
     "D2.3": {"journal": fixed({k: num for k in SEARCH_KEYS}), "scanned_characters": num,
-             "undecodable_characters": num, "oldest_entry_read": when},
+             "entries": num, "fields": num, "undecodable_characters": num, "oldest_entry_read": when},
     "D2.4": {"oldest_entry": fixed({k: when for k in sorted(JOURNAL_LABELS)}), "reach_days": num,
              "settings": keyed(SETTING_NAMES, _SETTING), "config_files": None,
              "drop_in": fixed({"equals_repo": flag, "owner_is_root": ("owner", is_root),
@@ -255,7 +256,8 @@ SCHEMA = {
     "D7.1": {"records": num, "vaults": None, "reports_rows": None, "draft_out_rows": None, "parents": None,
              "old_data": None, "audit_data": None, "audit_logs": None, "root_backups": None},
     "D10.7": {"journal_counts": journal_counts, "note_counts": keyed(NOTE_WORDS, num), "other_lines": num,
-              "broker_journal": _LEAKS, "runner_journal": _LEAKS, "known_secrets_checked": num,
+              "broker_journal": _LEAKS, "runner_journal": _LEAKS,
+              "journal_read": fixed({"broker": _READ, "runner": _READ}), "known_secrets_checked": num,
               "oldest_entry_read": _BROKER_RUNNER},
     "D10.8": {"out_of_whitelist": num, "results": None},
 }
