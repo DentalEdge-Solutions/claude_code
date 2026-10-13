@@ -1566,19 +1566,24 @@ the link was made before; the `readlink` line decides. Any other owner, mode or 
 
 ```bash
 ( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
-sudo test -e "/var/lib/hermes/app-state/${JOB:?}/DISABLED" || { echo "STOP: the off switch is not set"; exit 1; }
+if sudo test -e "/var/lib/hermes/app-state/${JOB:?}/DISABLED"; then
 echo "proxy line before: $(systemctl show hermes-docker-proxy -p ExecStart --no-pager | sha256sum | cut -c1-64)"
 sudo systemctl enable --now "hermes-app-broker@${JOB:?}" "hermes-app-runner@${JOB:?}.path"
 sleep 3; systemctl is-active "hermes-app-broker@${JOB:?}" "hermes-app-runner@${JOB:?}.path"
 echo "proxy line after:  $(systemctl show hermes-docker-proxy -p ExecStart --no-pager | sha256sum | cut -c1-64)"
+else echo "STOP: the off switch is not set: nothing was enabled"; fi
 )
 ```
 
 Expected: `proxy line before:` and a hash of 64 characters, → `active active` (one word per line,
 read 3 seconds after the enable: a broker that dies at its start is started again 5 seconds later,
 so a word other than `active` here is a broker that did not stay up), then `proxy line after:` and a
-hash. `STOP: the off switch is not set` and nothing else: the block's second line did not find the
-job's switch (step 3a), so nothing was enabled; do step 3a, then paste the block again. Any word
+hash. `STOP: the off switch is not set: nothing was enabled` and nothing else (no hash, no state
+word): the block's second line did not find the job's switch (step 3a), so the lines between `then`
+and `else` did not run; do step 3a, then paste the block again. With the switch set, the four lines
+are printed as above and no `STOP` line. No line of the block but its first holds an `exit`: a
+paste that lost its first line cannot close your window (it ends with an error that names `)`).
+Any word
 other than `active`: stop; paste the block's fifth line (the one that starts `sleep 3`) again after
 ten seconds, and report both outputs. The two hashes: write both into the operator evidence file. Different: the
 enable reloaded the manager, and D4.2 needs the statement named above. Equal: this systemd did not
