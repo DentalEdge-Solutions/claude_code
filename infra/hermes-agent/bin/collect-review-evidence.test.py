@@ -4553,7 +4553,7 @@ class TestD46StartTimes(Base):
         super().setUp()
         self.addCleanup(setattr, CE, "LAST_PASS_COLLECTED_AT", None)
         CE.LAST_PASS_COLLECTED_AT = None
-        for unit in ("docker", *CE.SERVICE_FILES):
+        for unit in ("docker", "systemd-journald", *CE.SERVICE_FILES):
             self._start(unit, self.START)
         self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
         self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = (0, "2026-10-07T15:39:12.123456789Z\n", "")
@@ -4577,12 +4577,22 @@ class TestD46StartTimes(Base):
     def test_every_start_is_reported_in_utc(self):
         d = CE.d4_6(self.host(), {})
         self.assertEqual(sorted(d["started_at"]), sorted(["boot", "docker", "gateway-container", "hermes-broker",
-                                                          "hermes-docker-proxy", self.APP]))
+                                                          "hermes-docker-proxy", "systemd-journald", self.APP]))
         for unit in ("docker", "hermes-broker", "hermes-docker-proxy", self.APP):
             self.assertEqual(d["started_at"][unit], self.START_ISO)
         self.assertEqual(d["started_at"]["gateway-container"], "2026-10-07T15:39:12Z")
         self.assertEqual(d["started_at"]["boot"], CE._iso(self.BOOT))
         self.assertRegex(d["started_at"]["boot"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_the_journal_service_s_start_is_reported_and_compared_with_the_last_pass(self):
+        self.outputs[("systemctl", "show", "systemd-journald", "-p", "ActiveEnterTimestamp", "--value")] = \
+            (0, "Mon 2026-10-12 09:10:11 UTC\n", "")
+        with mock.patch.object(CE, "LAST_PASS_COLLECTED_AT", "2026-10-12T13:39:00Z"):
+            d = CE.d4_6(self.host(), {})
+        self.assertEqual(d["started_at"]["systemd-journald"], "2026-10-12T09:10:11Z")
+        self.assertIs(d["started_after_last_pass"]["systemd-journald"], False)
+        self.assertNotIn("systemd-journald", d["files_newer_than_start"])
+        self.assertEqual(set(d["started_at"]), set(CE.SERVICE_FILES) | set(CE.OTHER_STARTS))
 
     def test_without_a_baseline_nothing_is_compared(self):
         d = CE.d4_6(self.host(), {})
@@ -4594,8 +4604,8 @@ class TestD46StartTimes(Base):
         d = CE.d4_6(self.host(), {})
         self.assertEqual(d["last_pass_collected_at"], "2026-10-07T10:00:00Z")
         self.assertEqual(d["started_after_last_pass"],
-                         {"boot": False, "docker": False, "hermes-broker": False, "hermes-docker-proxy": False,
-                          self.APP: False, "gateway-container": True})
+                         {"boot": False, "docker": False, "systemd-journald": False, "hermes-broker": False,
+                          "hermes-docker-proxy": False, self.APP: False, "gateway-container": True})
         CE.LAST_PASS_COLLECTED_AT = self.START_ISO          # the same second is not "after"
         self.assertFalse(CE.d4_6(self.host(), {})["started_after_last_pass"]["hermes-broker"])
 

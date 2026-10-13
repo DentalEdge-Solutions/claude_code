@@ -1910,6 +1910,9 @@ LAST_PASS_COLLECTED_AT = None   # the last passing review's box-bundle collected
 SERVICE_FILES = {"hermes-docker-proxy": ("hermes-docker-proxy.service", "docker-create-proxy.py"),
                  "hermes-broker": ("hermes-broker.service", "hermes-broker.py"),
                  "hermes-app-broker@" + APP: ("hermes-app-broker@.service", "hermes-app-broker.py")}
+# The other starts D4.6 reports. The journal service since v1.20 (review #10, entry 8): its restart
+# changes what the journal holds from then on, and an automatic update can cause one.
+OTHER_STARTS = ("boot", "docker", "systemd-journald", "gateway-container")
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _ISO_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _SYSTEMD_TS_RE = re.compile(r"[A-Z][a-z]{2} ([0-9]{4}-[0-9]{2}-[0-9]{2}) ([0-9]{2}:[0-9]{2}:[0-9]{2}) UTC")
@@ -2004,6 +2007,7 @@ def d4_6(host, ctx):
     started. D4.2's hash is the same string after any daemon-reload, so it cannot show a
     restart (review #8); this item can. Timestamps, unit names and file names only."""
     starts = {"boot": _boot_at(host), "docker": _unit_started_at(host, "docker"),
+              "systemd-journald": _unit_started_at(host, "systemd-journald"),
               **{u: _unit_started_at(host, u) for u in SERVICE_FILES},
               "gateway-container": _gateway_started_at(host)}
     base = LAST_PASS_COLLECTED_AT

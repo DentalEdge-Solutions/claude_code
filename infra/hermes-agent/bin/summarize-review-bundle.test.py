@@ -228,7 +228,7 @@ class TestSetsMatchTheCollector(unittest.TestCase):
 
     def test_services_and_unit_labels(self):
         self.assertEqual(SB.SERVICES, tuple(CE.SERVICE_FILES))
-        self.assertEqual(SB.START_KEYS, frozenset(CE.SERVICE_FILES) | {"boot", "docker", "gateway-container"})
+        self.assertEqual(SB.START_KEYS, frozenset(CE.SERVICE_FILES) | frozenset(CE.OTHER_STARTS))
         self.assertEqual(SB.JOURNAL_LABELS, frozenset(CE.JOURNAL_UNITS) | {"journal"})
         self.assertEqual(SB.LISTENER_UNITS, frozenset(CE.LISTENER_UNITS))
 
