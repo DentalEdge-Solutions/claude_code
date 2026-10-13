@@ -437,6 +437,10 @@ class TestRestrictOutput(unittest.TestCase):
         with tempfile.TemporaryFile("w") as f, mock.patch("os.fchmod", side_effect=PermissionError):
             self.assertFalse(R.restrict_output(f))
 
+    def test_a_file_whose_descriptor_cannot_be_examined_is_refused(self):
+        with tempfile.TemporaryFile("w") as f, mock.patch("os.fstat", side_effect=OSError):
+            self.assertFalse(R.restrict_output(f))
+
 
 if __name__ == "__main__":
     unittest.main()

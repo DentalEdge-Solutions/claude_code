@@ -304,13 +304,16 @@ def restrict_output(stream):
     shell's umask: 0664 at review #10. Called before the first byte is written: when `stream` is
     a regular file, it is set to 0600. True when there was nothing to do (a pipe, a terminal, a
     stream without a descriptor) or the mode is now 0600; False when a regular file's mode could
-    not be set, and the caller then prints nothing."""
+    not be set, or when the descriptor could not be examined, and the caller then prints nothing."""
     try:
         fd = stream.fileno()
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return True
     except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
         return True
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
+    except OSError:
+        return False
     try:
         os.fchmod(fd, 0o600)
         return stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
