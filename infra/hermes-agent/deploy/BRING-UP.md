@@ -1321,6 +1321,10 @@ is `hermes-app-<job>`, its units are `hermes-app-broker@<job>.service`,
 `hermes-app-runner@<job>.service` and `hermes-app-runner@<job>.path`, and its off switch is
 `/var/lib/hermes/app-state/<job>/DISABLED`. A job is added with its off switch ON (step 3a): the
 switch is set before the job's units exist and is taken off only at step 10, after a run by hand.
+It comes off there only to produce the evidence of the review that covers the job (one chat run
+and step 11's three live refusals): after step 11 the job stays in use only once that review has
+passed; until then, set the switch again when the evidence has been produced (the block at the end
+of step 11).
 
 What is done once per box and what once per job. Steps 1 to 4, 8 to 11: once for each job. Steps 5
 and 7's sidecar lines: once per box, done when the first job was added; skip them for a second job.
@@ -1465,7 +1469,7 @@ when the first block of this step said `switch was ON already` for a job on its 
    round, the plan is step 10's figures plan.
 
    First read the client in: paste the line "the client at a hidden prompt" of step 11 ALONE, type
-   the client, Enter. Then the plan of an audit, which changes nothing, starts no container and has
+   the client the chat audit below will be asked for, Enter. Then the plan of an audit, which changes nothing, starts no container and has
    no AI fee. The block prints step names and an exit code only:
 
 ```bash
@@ -1487,8 +1491,13 @@ first.
    Then, on the rollout day, make ONE chat audit and repeat step 11's three live refusals with
    `JOB=ads-audit`, even though older refusals and an older `ok` run may still be counted: the
    broker's code changed, and the review must judge evidence produced by the code now running. The
-   chat run is step 10's "from chat" paragraph (the job's switch is off again since step 1's last
-   block). The audit's chat run costs an AI fee, and it is that client's one audit of the day. For
+   chat run is step 10's "from chat" paragraph, without its first sentence: the job's switch is
+   off already when step 1's last block took it off (`switch present: no`), and this job, which a
+   passed review covers, does not get its switch set again after step 11. When step 1's first
+   block said `switch was ON already` on its first paste, the switch was on before the pull, by
+   your earlier choice, and step 1 left it on: the chat audit and the live refusals cannot be made
+   until you take it off. Do the dry run above now, and the chat audit and the three refusals when
+   the job is back in use, before the review. The audit's chat run costs an AI fee, and it is that client's one audit of the day. For
    step 11's blocks type `JOB=ads-audit` and paste the check block of "the job's name"; do checks
    a, b and c and the "afterwards" block; then type `JOB=` with the job you are adding and paste
    the check block again BEFORE step 2 (every block from step 2 on acts on `$JOB`). When the job
@@ -1620,7 +1629,8 @@ nothing. Any number above the one expected for the missing server block means He
 something of its own there: stop and report before installing. The first number has not been
 measured on this box: on the first run report both numbers, and install nothing until they have
 been read. `diff rc=0`: the two files are equal and this step is not needed. `diff rc=2`: a file
-could not be read; stop and report.
+could not be read; stop and report. `diff rc=1` with both numbers `0`: nothing was compared, the
+files could not be read (for example sudo refused, which also ends with 1); stop and report.
 
    Then `cd /opt/hermes-agent && sudo install -o 10000 -g 10000 -m 640 config.yaml.example data/config.yaml`
    The gateway rewrites `data/config.yaml` once it runs (its layout, and it may add keys of its own); review item D10.6 compares the
@@ -1824,7 +1834,10 @@ next run for that client. Report the two counts; do NOT run the report again (a 
 those three files and the log, and would be refused the same way).
 
     **From chat (both jobs).** Take the off switch off with step 9's `off:` block (→ `switch
-    present: no`). Then:
+    present: no`). It comes off to produce the review's evidence, this run and step 11's three live
+    refusals: after step 11 the job stays in use only once the review that covers it has passed;
+    until then, set the switch again when the evidence has been produced (the block at the end of
+    step 11). Then:
     `cd /opt/hermes-agent && sudo docker compose exec -it hermes-agent hermes chat`, then ask
     "Run the Google Ads audit for <client>." for `ads-audit`, or "Run the Google Ads figures report
     for <client>." for `ads-report`. Expect `ok` within ~5 min (or `pending`; ask for its
@@ -1991,6 +2004,22 @@ must be read in again, because this block forgets it). `switch present: YES` or 
 same. Each refusal also leaves a result file in `results/` (the review's D10.8 lists them; they are
 in the whitelist). The three counts are one job's: the review needs them for EVERY installed job, so
 this block is run once with `JOB=ads-audit` and once with `JOB=ads-report` before a collection.
+
+**VPS, the switch back on, for a job no review covers yet.** A job that was just added is not live
+until the security review that follows its installation has passed. Once its chat run and its
+three live refusals are in the journal (the block above), set its switch again, and take it off
+(step 9's `off:` block) only when that review has passed; if the review does not pass, the switch
+stays on. Skip this block for a job a passed review already covers (the job already installed, in
+step 1a).
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac; sudo touch "/var/lib/hermes/app-state/${JOB:?}/DISABLED"; echo "job: ${JOB:?} | switch present: $(sudo test -e "/var/lib/hermes/app-state/${JOB:?}/DISABLED" && echo YES || echo no)" )
+```
+
+Expected: `job: <job> | switch present: YES`. `no`: stop and report. `STOP: set JOB first`: nothing
+was done. With the switch on, the job cannot be started from chat; its refusals and its `ok` result
+stay where the review reads them (the journal for 30 days; the result for 7 days: collect within 7
+days of the chat run, "A security review").
 
 12. Rollback (only if the job must be undone). First the job itself:
 
@@ -2395,7 +2424,7 @@ gitignored `security-reviews/`; only the report is committed.
    - `the three live refusals are in the journal`: every installed job needs all three. It names the missing ones (over all jobs together) and counts the jobs concerned, `(not so for N of M jobs)`; D10.7's lines above show which job. Run those live checks for that job first ("Add a chat-triggered job" step 11, with `JOB` set to it).
    - `at least one run/ok result`: every installed job needs one of its own, and `(not so for N of M jobs)` counts the jobs without; D10.8's lines above show which. Make a chat run of that job first ("Add a chat-triggered job" step 10; the report's costs no AI fee, the audit's does).
    - `retention at least 30 days, set by our file, the file equal to the repository's, no other file, root:root 0644`: "The journal's retention", VPS 1 and VPS 2. The last words are our settings file's owner, group and mode as D2.4 `drop_in` shows them (`owner_is_root`, `group_is_root`, `mode`): anything else is a failed review item, so install the file again as VPS 2 does.
-   - `the journal reaches 30 days`: expected until about 23 days after the retention was raised (the journal already held about 7 days). The evidence then needs the date and time of VPS 3 (step 6). Two notes do not turn the line and are there to be read. `(1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry)` (with several, `(N jobs whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; each judged from its first entry)`): a job's first entry in the journal is later than the last PASS. For a job added since then, give its install date in the evidence (D10.7); for a job installed long before, it only means that the journal no longer holds entries that old, and that job is judged as any other. `(1 job installed since the last PASS and it has not logged yet)` (with several, `(N jobs installed since the last PASS and they have not logged yet)`): that job's broker has written no journal entry; make its chat run and its live checks first. `(not so for N of M jobs: a value could not be checked)` or `(the jobs could not be checked)` on this line: a job's D10.7 values or its oldest entry in D2.4 were not read; collect with `sudo`, and with the same note stop and report.
+   - `the journal reaches 30 days`: expected until about 23 days after the retention was raised (the journal already held about 7 days). The evidence then needs the date and time of VPS 3 (step 6). Two notes do not turn the line and are there to be read. `(1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry)` (with several, `(N jobs whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; each judged from its first entry)`): a job's first entry in the journal is later than the last PASS. For a job added since then, give its install date in the evidence (D10.7); for a job installed long before, it only means that the journal no longer holds entries that old, and that job is judged as any other. `(1 job with no journal entry: new and not yet run, or its entries have left the journal)` (with several, `(N jobs with no journal entry: new and not yet run, or their entries have left the journal)`): that job's broker has no entry in the journal; make its chat run and its live checks first. `(not so for N of M jobs: a value could not be checked)` or `(the jobs could not be checked)` on this line: a job's D10.7 values or its oldest entry in D2.4 were not read; collect with `sudo`, and with the same note stop and report.
    - `the journal search read everything it was given`: read D2.3 in the summary and report it.
    - `no leak count above 0 (D2.3, D10.7)`: with `(a count is above 0: this is a FAIL, not a reminder)`, stop: this is a failed review item (credential text or a customer id is in the journal). Do not go on to the real collection. Report the summary, and do not paste any journal line anywhere. With `(a count was not read)`: read D2.3 and D10.7 in the summary and report them. D10.7's counts are read for every job, a job that is not installed included.
    - `the running journal service has read its settings`: "The journal's retention", "Reading it later" (VPS 1 first, then VPS 3), then collect again.

@@ -1419,18 +1419,18 @@ class TestEveryJob(unittest.TestCase):
         self.assertRegex(closing, rf"(?m)^ok    {self.REACH}$")                  # absent reads as null: no last PASS was given
         quiet = lambda it, app: job(it, "D10.7", app).update(installed_since_last_pass=True, first_entry=None)
         self.assertRegex(self._closing(lambda it: quiet(it, "ads-report")),
-                         rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS and it has not logged yet\)$")
+                         rf"(?m)^ok    {self.REACH} \(1 job with no journal entry: new and not yet run, or its entries have left the journal\)$")
         self.assertRegex(self._closing(lambda it: [quiet(it, a) for a in JOBS]),
-                         rf"(?m)^ok    {self.REACH} \(2 jobs installed since the last PASS and they have not logged yet\)$")
+                         rf"(?m)^ok    {self.REACH} \(2 jobs with no journal entry: new and not yet run, or their entries have left the journal\)$")
         def one_of_each(it):
             quiet(it, "ads-report")
             job(it, "D10.7", "ads-audit")["installed_since_last_pass"] = True
         self.assertRegex(self._closing(one_of_each),
                          rf"(?m)^ok    {self.REACH} \(1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry\) "
-                         r"\(1 job installed since the last PASS and it has not logged yet\)$")
+                         r"\(1 job with no journal entry: new and not yet run, or its entries have left the journal\)$")
         self.assertRegex(self._closing(lambda it: [job(it, "D10.7", "ads-report").update(installed_since_last_pass=True),
                                                    job(it, "D10.7", "ads-report").pop("first_entry")]),
-                         rf"(?m)^ok    {self.REACH} \(1 job installed since the last PASS and it has not logged yet\)$")
+                         rf"(?m)^ok    {self.REACH} \(1 job with no journal entry: new and not yet run, or its entries have left the journal\)$")
 
     def test_only_a_declared_job_s_name_is_printed(self):
         def undeclared(name):

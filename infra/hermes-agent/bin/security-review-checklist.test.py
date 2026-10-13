@@ -357,7 +357,10 @@ class TestChecklistSync(unittest.TestCase):
         # D10 lead: a PASS under "declared and not installed" does not cover that job
         lead = d10_lead()
         self.assertIn("A PASS given under this statement does not cover that job: installing it is a change that needs "
-                      "a new review before its off switch is taken off.", lead)
+                      "a new review before the job is treated as live; its off switch comes off at the runbook's "
+                      "first-run step only to produce that review's evidence (one run and the three live refusals), "
+                      "and goes back on if that review does not pass.", lead)
+        self.assertNotIn("before its off switch is taken off", lead)      # an order the runbook cannot follow
         self.assertIn("The same wording covers a job that was disabled and left declared", lead)
         # D10.1: the two names and no other; the order carries no meaning
         self.assertNotIn("another order", b["D10.1"])
@@ -372,7 +375,7 @@ class TestChecklistSync(unittest.TestCase):
     def test_the_report_template_s_store_line_names_the_counts_the_checklist_judges(self):
         line = next(l for l in open(os.path.join(os.path.dirname(CHECKLIST), "REPORT-TEMPLATE.md")).read().split("\n")
                     if l.startswith("- **Report store (D7.1 `report_archive`):**"))
-        for key in ("rows_listed", "rows_not_read", "containers_mounting", "containers_not_inspected"):
+        for key in ("rows_listed", "rows_not_read", "files_not_read", "containers_mounting", "containers_not_inspected"):
             self.assertIn(f"`{key}`", line, key)
 
     def test_d7_1_keeps_the_words_of_the_report_store_ruling(self):

@@ -819,8 +819,8 @@ def _reach(bundle, items):
         note += (" (1 job whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; judged from its first entry)" if logged == 1 else
                  f" ({logged} jobs whose first journal entry is later than the last PASS: new, or the journal no longer reaches that far; each judged from its first entry)")
     if quiet:
-        note += (" (1 job installed since the last PASS and it has not logged yet)" if quiet == 1 else
-                 f" ({quiet} jobs installed since the last PASS and they have not logged yet)")
+        note += (" (1 job with no journal entry: new and not yet run, or its entries have left the journal)" if quiet == 1 else
+                 f" ({quiet} jobs with no journal entry: new and not yet run, or their entries have left the journal)")
     # by name, so that a job unread in both items is one job
     unread = {app for app, e in jobs.items()
               if _unchecked(e) or not any(e.get("installed_since_last_pass") is v for v in SINCE_LAST_PASS)
