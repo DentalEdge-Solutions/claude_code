@@ -24,7 +24,7 @@
 - Step classes, closed: `collect, snapshot, read, proxy, draft, isolation, vault-write, store`. Step limit for `store`: 120 s.
 - A figures run never opens the Anthropic key file, never checks the vault, and starts neither `ads-drafter` nor `egress-proxy`.
 - The audit's behaviour, result shape and stored results do not change: every existing audit test must pass with at most the changes this plan names.
-- The broker, the runner, the three unit files, the spool, the ledger and the off switch are not changed.
+- The broker, the runner, the three unit files, the spool, the ledger and the off switch are not changed. Do not edit a unit file, not even a comment: review item D4.3 compares the installed unit files with the repository's byte for byte, and a changed file would have to be reinstalled on the box.
 - The checklist goes from `version: 1.20` to `version: 1.21` once, in Task 8. Item count stays 38.
 - If an existing test fails for a reason this plan does not name: STOP and report it; do not edit that test.
 - Never commit anything under `evals/`. `git add` named paths only. Never push; the operator gives the word.
@@ -298,6 +298,7 @@ def result_path_re(manifest, client):
   at the top of `d10_8` inside a `try` that raises `CouldNotCheck("the job's manifest could not be loaded")` on `OSError` or `ValueError`, then `A.result_in_whitelist(obj, manifest)`. In `collect-review-evidence.test.py`, the fixture that builds the fake box for D10.8 must hold the manifest: copy `registry/apps/ads-audit.json` from the repository into `<root>/opt/hermes-agent/registry/apps/ads-audit.json` in that class's `setUp` (find it by `def _result(self, obj, name=None)`).
 - `bin/app_lib.test.py`: every existing call `A.result_in_whitelist(x)` becomes `A.result_in_whitelist(x, m())`. Existing tests that assert the exact `STEP_CLASSES` length or the manifest's exact key set are updated to the new values; list each in the report.
 - `bin/run-client-audit.test.py`, `test_the_app_runner_manifest_offers_no_probe`: run the same two assertions for both manifests.
+- `deploy/units.test.py` has a test that the runner unit's start limit (12 h) covers the audit manifest's worst queue (runs × run timeout + lists × list timeout). Make it check every manifest in `registry/apps/` (`ads-report`: 5 × 5400 s + 60 × 60 s = 8.5 h). Add it to this task's `git add`.
 - `git grep -n "result_in_whitelist\|_run_result\|Manifest(" infra/hermes-agent/bin` must show no caller with the old arity.
 
 - [ ] **Step 5: Run and commit**
@@ -305,7 +306,7 @@ def result_path_re(manifest, client):
 Run: `infra/hermes-agent/bin/run-bin-tests.sh; echo rc=$?` → every suite passes, `rc=0`.
 
 ```bash
-git add infra/hermes-agent/bin/app_lib.py infra/hermes-agent/bin/app_lib.test.py infra/hermes-agent/bin/hermes-app-mcp.py infra/hermes-agent/bin/hermes-app-mcp.test.py infra/hermes-agent/bin/collect-review-evidence.py infra/hermes-agent/bin/collect-review-evidence.test.py infra/hermes-agent/bin/run-client-audit.test.py infra/hermes-agent/registry/apps
+git add infra/hermes-agent/deploy/units.test.py infra/hermes-agent/bin/app_lib.py infra/hermes-agent/bin/app_lib.test.py infra/hermes-agent/bin/hermes-app-mcp.py infra/hermes-agent/bin/hermes-app-mcp.test.py infra/hermes-agent/bin/collect-review-evidence.py infra/hermes-agent/bin/collect-review-evidence.test.py infra/hermes-agent/bin/run-client-audit.test.py infra/hermes-agent/registry/apps
 git commit -m "apps: a job's manifest states where its results live and what its tools say; ads-report declared"
 ```
 
@@ -695,7 +696,7 @@ git commit -m "reports: a root-only store for figures reports, the store step an
 
 - [ ] **Step 1: Write the failing tests** (in `bin/run-client-audit.test.py`)
 
-Extend `FakeRunner.__call__`: when `"ads-reader" in argv`, write `f"2026-10-01_11-59-00-{report}.md"` (the name after `--report`) with text `f"figures {report}\n"` into `self.root + "/var/lib/hermes/reports/acme-dental"`; when `name == "store"`, run the real step: `RS.main(argv[1:])` where `RS` is `report-store.py` loaded with `importlib` and `RS.OWNER_UID = os.geteuid()`, and return its exit code. In `Base.setUp` create `/var/lib/hermes/report-archive` under the root with mode `0700`.
+Extend `FakeRunner.__call__`: when `"ads-reader" in argv`, write `f"2026-10-01_11-59-00-{report}.md"` (the name after `--report`) with text `f"figures {report}\n"` into `self.root + "/var/lib/hermes/reports/acme-dental"`; when `name == "store"`, run the real step: `RS.main(argv[2:])` (the argv is `python3 <script> --client ...`) where `RS` is `report-store.py` loaded with `importlib` and `RS.OWNER_UID = os.geteuid()`, and return its exit code. In `Base.setUp` create `/var/lib/hermes/report-archive` under the root with mode `0700`. Add `shutil` to the file's imports.
 
 ```python
 class TestFigures(Base):
@@ -1174,8 +1175,8 @@ Then, item by item, with the shapes of "Interfaces":
 - `d10_4`: `check_app` per app (a `LayoutError` for one app is that app's `layout_problems: could-not-check`, not the whole item's); the container loop is unchanged.
 - `d10_7`: a helper `_app_journal(host, ctx, app, secrets)` holding today's body with the unit names and the line prefix `"hermes-app-broker[" + app + "]: "` built from `app`; plus `first_entry = _oldest_entry_or_unknown(host, ("-u", "hermes-app-broker@" + app))` and `installed_since_last_pass`: `None` when `LAST_PASS_COLLECTED_AT` is `None`, could-not-check when `first_entry` is could-not-check, `True` when `first_entry` is `None` (the job never logged) or later than the last PASS, else `False`.
 - `d10_8`: per app, with `A.result_in_whitelist(obj, manifests[app])`; an installed app with no description file gets `{"results": could-not-check, "out_of_whitelist": could-not-check}`.
-- `d2_4`: `oldest_entry` as specified.
-- `d4_6`: `services = {**SERVICE_FILES, **{"hermes-app-broker@" + a: ("hermes-app-broker@.service", "hermes-app-broker.py") for a in _declared_apps(host)}}` and use `services` where `SERVICE_FILES` was used; `SERVICE_FILES` keeps the two fixed services.
+- `d2_4`: `oldest_entry` as specified. When the description files cannot be loaded, `oldest_entry["apps"]` is could-not-check and the REST of D2.4 is still reported: a broken description file must not hide the journal's retention.
+- `d4_6`: `services = {**SERVICE_FILES, **{"hermes-app-broker@" + a: ("hermes-app-broker@.service", "hermes-app-broker.py") for a in _declared_apps(host)}}` and use `services` where `SERVICE_FILES` was used; `SERVICE_FILES` keeps the two fixed services. When the description files cannot be loaded, the two fixed services, the host, Docker, the journal service and the gateway are still reported, and D4.6 gains `apps_declared: could-not-check` (otherwise `apps_declared` is the sorted list of names).
 - Delete the five constants; `git grep -n '\bAPP\b\|APP_USER\|APP_RESULTS\|JOURNAL_UNITS\|_BROKER_LINE' infra/hermes-agent/bin/collect-review-evidence.py` prints nothing.
 
 - [ ] **Step 4: Existing tests**
@@ -1205,6 +1206,7 @@ git commit -m "review: the collector finds the jobs itself and checks each one (
 - D7.1, with a fake tree `var/lib/hermes/report-archive/acme-dental/2026-10-01_12-00-00-report.md`: `parent` is the directory's row; `rows` has one row with `status: active` and a `files` count keyed by owner, group and mode, and holds no client name; a second folder for a client the registry does not know shows `status: unregistered`.
 - D7.1, mounts: with a fake `docker inspect` answer whose `Source` is `/var/lib/hermes/report-archive/acme-dental`, `/var/lib/hermes/report-archive` or `/var/lib/hermes`, `containers_mounting` is 1 each time; with `/var/lib/hermes/reports` it is 0; an inspect that fails counts in `containers_not_inspected`.
 - D10.1: a probe JSON holding `figures_services` reaches the item's `probe` unchanged.
+- In `bin/gateway-config.test.py`: `docker-compose.yml` does not contain the text `report-archive` anywhere (no service may mount the report store), and no line of it mounts `/var/lib/hermes` itself.
 
 - [ ] **Step 2: Write the implementation**
 
@@ -1216,7 +1218,7 @@ git commit -m "review: the collector finds the jobs itself and checks each one (
 - [ ] **Step 3: Run and commit**
 
 ```bash
-git add infra/hermes-agent/bin/collect-review-evidence.py infra/hermes-agent/bin/collect-review-evidence.test.py
+git add infra/hermes-agent/bin/collect-review-evidence.py infra/hermes-agent/bin/collect-review-evidence.test.py infra/hermes-agent/bin/gateway-config.test.py
 git commit -m "review: the report store is measured (D4.1 unseen by the gateway, D7.1 owner-only and unmounted)"
 ```
 
@@ -1243,7 +1245,7 @@ Update `bundle()` to the new shapes with two jobs, then:
 
 - [ ] **Step 2: Write the implementation**
 
-A helper `per_app(fmt)` that formats `{app: value}` with app names checked by the pattern; `SERVICES` becomes the two fixed services and the start/file keys accept `hermes-app-broker@<app>` for any valid app name; `JOURNAL_LABELS` becomes `{"journal"}` plus the per-app level; the closing checks iterate `d["apps"].values()`. Remove the `@unittest.expectedFailure` marks Task 5 added.
+A helper `per_app(fmt)` that formats `{app: value}` with app names checked by the pattern; `SERVICES` becomes the two fixed services and the start/file keys accept `hermes-app-broker@<app>` for any valid app name; `JOURNAL_LABELS` becomes `{"journal"}` plus the per-app level; the closing checks iterate `d["apps"].values()`. `JOURNAL_REASONS` gains `store` (the collector's own set already has it through `app_lib`; the existing test that ties the two sets together must pass unchanged). Remove the `@unittest.expectedFailure` marks Task 5 added.
 
 - [ ] **Step 3: Run and commit**
 
