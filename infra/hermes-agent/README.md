@@ -933,6 +933,8 @@ with `show-audit`. Runbook: `deploy/BRING-UP.md`, "Chat-triggered audits — par
 - **Runner**: `hermes-app-runner@<app>.service`, a root oneshot started by `hermes-app-runner@<app>.path`, runs the fixed argv and never re-runs an interrupted job. Results carry only whitelisted enums, numbers, timestamps and a regex-checked vault path, never free text from a step.
 - **Kill switch**: `touch /var/lib/hermes/app-state/<app>/DISABLED` refuses new requests; remove it to resume. Runbook: `deploy/BRING-UP.md`, "Chat-triggered audits — part 2".
 
+A second job, `ads-report`, uses the same machinery for a figures-only report (no AI analysis). Its three tools are `ads_report_run`, `ads_report_status` and `ads_report_list`. Reports are stored in `/var/lib/hermes/report-archive`, which no container mounts, and the operator reads one with `sudo show-report <client>`. A job is a description file in `registry/apps/` plus the runbook chapter "Add a chat-triggered job".
+
 ### Client — `hermes-syscall`, in-container
 
 Identifier-only. It passes a client slug and a change-set id, never a customer id, never a

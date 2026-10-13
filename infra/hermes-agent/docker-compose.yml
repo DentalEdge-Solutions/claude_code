@@ -45,6 +45,7 @@ services:
       - ./skills/claude-code-reviewer:/opt/data/skills/claude-code-reviewer:ro  # kanban review worker skill (read-only)
       - ./skills/claude-code-ads-analyst:/opt/data/skills/claude-code-ads-analyst:ro  # ads-analyst skill (read-only)
       - ./skills/ads-audits:/opt/data/skills/ads-audits:ro  # Option B: how Hermes calls the audit tools
+      - ./skills/ads-reports:/opt/data/skills/ads-reports:ro  # how Hermes calls the figures-report tools
       - ./bin:/opt/cc-bin:ro            # operational helpers (run monitor, read-only)
       # --- credential masks (registry: mask_paths) ---
       # The repo mount exposes every .env.* under infra/hermes-agent/, including the

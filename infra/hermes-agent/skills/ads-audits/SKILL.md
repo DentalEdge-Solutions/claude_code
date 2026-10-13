@@ -33,3 +33,4 @@ audit's content, and you must not try to: drafts are read by the operator on the
 - Write into or read from `/opt/data/spool` yourself, or use the terminal to reach the audit system.
 - Guess a client's short name. If unsure, ask the operator.
 - Treat a tool error or timeout as a failed audit.
+- Start an audit when a figures report was asked for, or the reverse. If the operator's request could mean either, ask.
