@@ -3,6 +3,8 @@
 
   sudo run-client-audit <client> [--dry-run] [--json]
   sudo run-client-audit <client> --list --json
+  sudo run-client-audit <client> --figures [--dry-run] [--json]
+  sudo run-client-audit <client> --figures --list --json
   sudo run-client-audit --probe-env | --probe-egress
 
 --json: exactly one JSON line on stdout (the broker's contract, Option B §3.5), every human line
@@ -27,6 +29,7 @@ import argparse, datetime, json, os, re, shutil, signal, stat, subprocess, sys, 
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import changeset_lib as C
 import client_audit_lib as L
+import report_lib as RL
 import review_lib as R
 
 AGENT_DIR = "/opt/hermes-agent"
@@ -37,6 +40,7 @@ APP_DIR = "/opt/projects/claude-google-ads"
 AUDIT_DATA = "/var/lib/hermes/audit-data"
 AUDIT_LOGS = "/var/lib/hermes/audit-logs"   # root-only; never mounted into anything
 VAULTS = "/var/lib/hermes/vaults"           # Option B §4: client data out of the gateway
+REPORT_ARCHIVE = RL.ARCHIVE     # root-only, 0700; no container mounts it (design 2026-10-13)
 REPORTS = "/var/lib/hermes/reports"
 DRAFT_OUT = "/var/lib/hermes/draft-out"
 ANTHROPIC_CRED = "/etc/hermes/.env" + ".anthropic"
@@ -48,7 +52,7 @@ COLLECTORS = ("audit_discovery", "negatives_audit", "audit_assets_rsa", "assess_
 READERS = ("account_overview", "audit_search_terms", "audit_analyze")
 CLEANUP_TIMEOUT = 20          # each cleanup command (logs capture, rm -sf, rm -f): bounded inside the runner's grace
 BLOCK_TERM_IN_CLEANUP = False   # set by the real entrypoint only: SIGTERM is held while _run's finally cleans up
-TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "proxy": 60, "draft": 1200, "vault-write": 120}
+TIMEOUTS = {"collect": 900, "snapshot": 120, "read": 300, "proxy": 60, "draft": 1200, "vault-write": 120, "store": 120}
 CRED_NAMES = ("GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_CLIENT_ID", "GOOGLE_ADS_CLIENT_SECRET",
               "GOOGLE_ADS_REFRESH_TOKEN", "GOOGLE_ADS_LOGIN_CUSTOMER_ID", "GOOGLE_ADS_CUSTOMER_ID")
 OWNER_UID = 0                 # the credential file's owner; tests override
@@ -85,11 +89,15 @@ def step_name(argv):
         return "draft"
     if "egress-proxy" in argv and "up" in argv:
         return "proxy"
-    return "snapshot" if any(a.endswith("ads-metrics-snapshot.py") for a in argv) else "vault-write"
     # (snapshot and vault-write argvs may start with RUN_AS_DATA_UID; neither test looks at argv[0])
+    for script, name in (("ads-metrics-snapshot.py", "snapshot"), ("vault-write.py", "vault-write"),
+                         ("report-store.py", "store")):
+        if any(a.endswith(script) for a in argv):
+            return name
+    raise ValueError("an argv that is no step of this program")
 
 
-STEP_CLASSES = ("collect", "snapshot", "read", "proxy", "draft", "isolation", "vault-write")
+STEP_CLASSES = ("collect", "snapshot", "read", "proxy", "draft", "isolation", "vault-write", "store")
 LIST_LIMIT = 24
 
 
@@ -262,7 +270,7 @@ def _compose(root):
             "--profile", "tools"]
 
 
-def plan(rec, ts, root, cred_values=None, anthropic_key=None):
+def plan(rec, ts, root, cred_values=None, anthropic_key=None, figures=False):
     """[(timeout_key, argv, env)] — env holds only what the step needs, plus PATH.
     cred_values / anthropic_key (the probes' sentinels) replace the two credential files' content:
     when given, that file is not opened."""
@@ -278,6 +286,16 @@ def plan(rec, ts, root, cred_values=None, anthropic_key=None):
     named = lambda step: _compose(root) + ["run", "--rm", "--no-deps", "-T", "--name", f"hermes-audit-{ts}-{step}"]
     run = lambda step: named(step) + eflags          # Google credential: collector and reader ONLY
     steps = [("collect", run(f"collect-{c}") + ["ads-collector", f"code/{c}.py"], cred) for c in COLLECTORS]
+    if figures:
+        # Figures only (design 2026-10-13): no snapshot (its one consumer is the vault's history), no
+        # proxy, no draft, no vault-write; the Anthropic key file is not opened. The store step runs
+        # as root: it reads what a container wrote, without following a link, and copies bytes.
+        steps += [("read", run(f"read-{r}") + ["ads-reader", "--report", r, "--project", PROJECT], cred)
+                  for r in READERS]
+        steps.append(("store", ["python3", root + AGENT_DIR + "/bin/report-store.py", "--client", slug, "--ts", ts,
+                                "--reports-dir", root + REPORTS, "--archive", root + REPORT_ARCHIVE,
+                                "--registry", root + REGISTRY] + [x for r in READERS for x in ("--reader", r)], base))
+        return steps
     # The snapshot reads collector-controlled audit-data/<slug>/*.json: never as root (F2). Its
     # stdout is still the root-created, fchown'd snapshot.stdout fd.
     steps.append(("snapshot", RUN_AS_DATA_UID + ["python3", root + AGENT_DIR + "/bin/ads-metrics-snapshot.py",
@@ -431,6 +449,13 @@ def _override(argv, svc, script):
     return argv[:i] + ["--entrypoint", "sh", svc, "-c", script]
 
 
+def _figures_services(root):
+    """Which audit services a figures run would start: read off plan() itself."""
+    rec = {"slug": PROBE_SLUG, "customer_id": "0000000000"}
+    steps = plan(rec, "2000-01-01_00-00-00", root, cred_values={n: SENTINEL for n in CRED_NAMES}, figures=True)
+    return sorted({s for _, argv, _ in steps for s in DECLARED if s in argv})
+
+
 def probe_env(root, runner=None):
     runner = runner or probe_runner
     base = root + PROBE_DIR
@@ -455,8 +480,10 @@ def probe_env(root, runner=None):
                           for n in (l[len("SENTINEL_ENV="):] for l in lines if l.startswith("SENTINEL_ENV=")))
             services[svc] = {"rc": rc, "env_names": names, "sentinel_env_names": held,
                              "sentinel_in_files": not clean, "host_credential_files_visible": not no_host_file}
-        ok = set(services) == set(DECLARED) and all(_matches(svc, s) for svc, s in services.items())
-        return {"services": services, "matches_declared": ok}
+        figures = _figures_services(root)
+        ok = (set(services) == set(DECLARED) and all(_matches(svc, s) for svc, s in services.items())
+              and figures == ["ads-collector", "ads-reader"])
+        return {"services": services, "figures_services": figures, "matches_declared": ok}
     finally:
         _probe_cleanup(root, base, proxy=False)
 
@@ -522,6 +549,7 @@ def main(argv=None, runner=None, root="/", now=None):
     ap.add_argument("client", nargs="?")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")    # exactly one JSON line on stdout (the broker's contract)
+    ap.add_argument("--figures", action="store_true")  # the ads-report job: collect, read, store; no AI step
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--list", action="store_true")  # this client's audit timestamps; takes no lock
     mode.add_argument("--probe-env", action="store_true")      # review probes: no client, one JSON object
@@ -530,7 +558,7 @@ def main(argv=None, runner=None, root="/", now=None):
     if a.list and not a.json:
         ap.error("--list requires --json")
     probe = a.probe_env or a.probe_egress
-    if probe and (a.client is not None or a.dry_run):
+    if probe and (a.client is not None or a.dry_run or a.figures):
         ap.error("--probe-env / --probe-egress take no client and no --dry-run")
     if not probe and a.client is None:
         ap.error("a client is required")
@@ -580,11 +608,12 @@ def main(argv=None, runner=None, root="/", now=None):
     say = lambda s: print(red.text(s), file=human)
     if a.list:
         try:
-            fd = L.open_dir_below(root + VAULTS, (rec["slug"], "audits"))
+            base, parts = (root + REPORT_ARCHIVE, (rec["slug"],)) if a.figures else (root + VAULTS, (rec["slug"], "audits"))
+            fd = L.open_dir_below(base, parts)
             audits = []
             if fd is not None:
                 try:
-                    audits = L.list_audit_ts(fd)[-LIST_LIMIT:]
+                    audits = (RL.list_report_ts(fd) if a.figures else L.list_audit_ts(fd))[-LIST_LIMIT:]
                 finally:
                     os.close(fd)
         except OSError as e:     # an entry vanished between listdir and stat (container-controlled dir)
@@ -596,16 +625,20 @@ def main(argv=None, runner=None, root="/", now=None):
         return 0
     try:
         L.check_secret_file(root + CRED, uid=OWNER_UID, mode=0o400)
-        L.check_secret_file(root + ANTHROPIC_CRED, uid=OWNER_UID, mode=0o400)
-        if L.anthropic_key_state(root + ANTHROPIC_CRED) != "real":
-            raise L.PrecheckError(f"{ANTHROPIC_CRED} holds no real Anthropic key")
-        for parent in HOST_PARENTS:
-            L.check_host_parent(root + parent, uid=OWNER_UID)
-        L.check_client_dir(root + VAULTS + "/" + rec["slug"],
-                           uid=os.geteuid() if DATA_UID is None else DATA_UID)
+        if a.figures:
+            L.check_host_parent(root + REPORTS, uid=OWNER_UID)
+            L.check_host_parent(root + REPORT_ARCHIVE, uid=OWNER_UID, mode=0o700)
+        else:
+            L.check_secret_file(root + ANTHROPIC_CRED, uid=OWNER_UID, mode=0o400)
+            if L.anthropic_key_state(root + ANTHROPIC_CRED) != "real":
+                raise L.PrecheckError(f"{ANTHROPIC_CRED} holds no real Anthropic key")
+            for parent in HOST_PARENTS:
+                L.check_host_parent(root + parent, uid=OWNER_UID)
+            L.check_client_dir(root + VAULTS + "/" + rec["slug"],
+                               uid=os.geteuid() if DATA_UID is None else DATA_UID)
         pin = PIN_OVERRIDE or C.read_package(root + AGENT_DIR + "/registry/projects.yaml", PROJECT)["sha256"]
         L.package_matches(root + APP_DIR, pin)
-        steps = plan(rec, ts, root)          # re-reads the credential file: same refusal path
+        steps = plan(rec, ts, root, figures=a.figures)          # re-reads the credential file: same refusal path
     except (L.PrecheckError, ValueError, OSError, TypeError, AttributeError) as e:
         print(red.text(f"run-client-audit: refused: {e}"), file=sys.stderr); return emit("refused", "precheck", 2)
     except Exception as e:
@@ -621,7 +654,7 @@ def main(argv=None, runner=None, root="/", now=None):
     state = {"results": [], "reason": None, "vault_path": None}
     try:
         with L.AuditLock(root + LOCK):
-            rc = _run(steps, rec, ts, root, runner, say, state)
+            rc = _run(steps, rec, ts, root, runner, say, state, figures=a.figures)
     except L.PrecheckError as e:
         print(f"run-client-audit: {e}", file=sys.stderr); return emit("busy", "busy", 3)
     except SystemExit as e:         # SIGTERM (_on_sigterm): cleanup has run; keep the one-JSON-line contract
@@ -640,22 +673,24 @@ def main(argv=None, runner=None, root="/", now=None):
     return emit("ok" if rc == 0 else "failed", state["reason"], rc, state["results"], state["vault_path"])
 
 
-def _run(steps, rec, ts, root, runner, say, state):
+def _run(steps, rec, ts, root, runner, say, state, figures=False):
     """state (main's) gets results as they happen, the failing class as "reason", and the vault path."""
     slug = rec["slug"]
     data = root + AUDIT_DATA + "/" + slug
     kw = ({"uid": os.geteuid(), "gid": os.getegid()} if DATA_UID is None
           else {"uid": DATA_UID, "gid": DATA_GID})
     L.reset_dir(data, **kw)
-    for parent in (REPORTS, DRAFT_OUT):               # last run's reports/draft never leak into this one
+    for parent in ((REPORTS,) if figures else (REPORTS, DRAFT_OUT)):   # last run's reports/draft never leak into this one
         L.reset_dir(root + parent + "/" + slug, **kw)
     logs = root + AUDIT_LOGS + "/" + slug              # root-created, so rmtree is safe; 0711 so
     L.reset_dir(logs, uid=os.geteuid(), gid=os.getegid(), mode=0o711)   # 10000 reaches snapshot.stdout
     results = state["results"]
+    collected = False
     try:
         for i, (key, argv_, env) in enumerate(steps):
             name = step_name(argv_)
-            if key == "snapshot":                                   # collection just finished
+            if key != "collect" and not collected:                  # collection just finished
+                collected = True
                 bad = L.error_files(data)
                 if bad:
                     state["reason"] = "collect"
@@ -677,10 +712,24 @@ def _run(steps, rec, ts, root, runner, say, state):
                     os.fchown(out.fileno(), DATA_UID, DATA_GID)
                 rc = runner(argv_, env, TIMEOUTS[key], out, err)
             results.append((name, rc, round(time.monotonic() - t0, 1)))
+            if key == "store" and rc == RL.ISOLATION_RC:        # the reports name another client: nothing was stored
+                results[-1] = ("isolation", 1, results[-1][2])
+                state["reason"] = "isolation"
+                say("run-client-audit: ASSERTION FAIL — the reports name another client; not stored")
+                return _summary(results, 1, say)
             if rc != 0:
                 state["reason"] = step_class(name)
                 say(f"run-client-audit: step {name} failed (rc {rc}); see {stem}.stderr")
                 return _summary(results, 1, say)
+        if figures:
+            stored = f"{REPORT_ARCHIVE}/{slug}/{ts}-report.md"
+            if not RL.is_stored(root + REPORT_ARCHIVE, slug, ts):
+                state["reason"] = "store"
+                say("run-client-audit: the store step reported success but the report is missing")
+                return _summary(results, 1, say)
+            state["vault_path"] = stored
+            say(f"run-client-audit: report -> {stored}  (data collected {ts} UTC)")
+            return _summary(results, 0, say)
         vault_draft = f"{VAULTS}/{slug}/audits/{ts}-audit.md"
         if not vault_draft_is_file(root, slug, ts):   # uid 10000 can write the vault tree
             state["reason"] = "vault-write"
@@ -695,10 +744,11 @@ def _run(steps, rec, ts, root, runner, say, state):
         # By design the cleanup children (docker logs/rm) inherit this blocked SIGTERM; each is
         # bounded by CLEANUP_TIMEOUT, so a TERM can delay but never wedge the cleanup.
         try:
-            try:
-                remove_transient(root, slug, ts)
-            finally:                # even if the removal raises, the proxy must not outlive the run
-                stop_proxy(root, logs, say)
+            if not figures:         # a figures run starts no proxy and writes no transient draft
+                try:
+                    remove_transient(root, slug, ts)
+                finally:            # even if the removal raises, the proxy must not outlive the run
+                    stop_proxy(root, logs, say)
         finally:                    # restoring delivers a pending TERM: _on_sigterm -> SystemExit(143)
             if held is not None:
                 signal.pthread_sigmask(signal.SIG_SETMASK, held)
