@@ -1310,7 +1310,7 @@ class TestD10(JobBox):
         return mock.patch.object(CE.HL, "system_resolver", return_value=CE.HL.Resolver(names, names))
 
     def _containers(self, mounts):
-        self.outputs.pop(("docker", "ps"), None)
+        del self.outputs[("docker", "ps")]
         self.outputs[("docker", "ps", "-q", "--no-trunc", "--filter")] = (0, "", "")
         self.outputs[("docker", "ps", "-q", "--no-trunc")] = (0, "".join(c + "\n" for c in mounts), "")
         for cid, out in mounts.items():
@@ -1370,6 +1370,10 @@ class TestD10(JobBox):
 
     def test_d4_1_probes_the_report_store(self):
         self.assertIn("/var/lib/hermes/report-archive", CE.GATEWAY_PROBE_PATHS)
+        self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
+        h = self.host(); CE.collect(h, self.KEY)
+        sh = [c for c in h.calls if c[:2] == ["docker", "exec"] and "sh" in c[3:5]]
+        self.assertTrue(sh and all("/var/lib/hermes/report-archive" in c for c in sh), sh)
 
     def test_d7_1_report_archive_rows_by_status_without_names(self):
         self._arch_setup()
@@ -1378,8 +1382,9 @@ class TestD10(JobBox):
         self.assertEqual(set(ra["parent"]), {"owner", "group", "mode"})
         self.assertEqual([r["status"] for r in ra["rows"]], ["active", "unregistered"])
         for r in ra["rows"]:
-            self.assertEqual(set(r), {"status", "owner", "mode", "files"})
+            self.assertEqual(set(r), {"status", "owner", "mode", "kind", "files", "not_files", "listed"})
         self.assertEqual(sum(ra["rows"][0]["files"].values()), 1)
+        self.assertEqual((ra["rows"][0]["kind"], ra["rows"][0]["not_files"], ra["rows"][0]["listed"]), ("dir", 0, True))
         self.assertTrue(all(len(k.split()) == 3 for k in ra["rows"][0]["files"]))
         self.assertEqual(ra["rows_listed"], True)
         for name in ("acme-dental", "ghost-client", "report.md"):
@@ -1412,9 +1417,11 @@ class TestD10(JobBox):
                           ("/var/lib/hermes", 1), ("/var", 1), ("/var/lib/hermes/reports", 0),
                           ("/var/lib/hermes/report-archive-other", 0)):
             with self.subTest(src=src):
+                self.outputs[("docker", "ps")] = (0, "", "")
                 self._containers({"c1": m(src)})
                 ra = self._item("D7.1")["data"]["report_archive"]
                 self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), (want, 0))
+        self.outputs[("docker", "ps")] = (0, "", "")
         self._containers({"c1": (1, "", "gone"), "c2": (0, "junk", "")})
         ra = self._item("D7.1")["data"]["report_archive"]
         self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), (0, 2))
@@ -1426,6 +1433,69 @@ class TestD10(JobBox):
         ra = it["data"]["report_archive"]
         self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]),
                          (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def _arch_rows(self):
+        return self._item("D7.1")["data"]["report_archive"]
+
+    def _reg_acme(self):
+        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {"acme-dental": {"status": "active"}}}))
+
+    def test_archive_row_kinds_symlink_file_and_nested(self):
+        self._reg_acme()
+        base = os.path.join(self.root, self.ARCH); os.makedirs(base)
+        target = os.path.join(self.root, "elsewhere"); os.makedirs(target)
+        open(os.path.join(target, "x"), "w").close()
+        os.symlink(target, os.path.join(base, "a-link"))
+        open(os.path.join(base, "b-file"), "w").close()
+        d = os.path.join(base, "c-nested"); os.makedirs(os.path.join(d, "sub"))
+        open(os.path.join(d, "sub", "deep"), "w").close()
+        os.symlink(target, os.path.join(d, "lnk"))
+        rows = {r["kind"]: r for r in self._arch_rows()["rows"]}
+        self.assertEqual(set(rows), {"symlink", "file", "dir"})
+        for k in ("symlink", "file"):
+            self.assertEqual((rows[k]["files"], rows[k]["not_files"], rows[k]["listed"]), ({}, 0, False))
+        self.assertEqual((rows["dir"]["files"], rows["dir"]["not_files"], rows["dir"]["listed"]), ({}, 2, True))
+
+    def test_archive_file_mode_keys_are_exact(self):
+        self._reg_acme()
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        for n, m in (("a-report.md", 0o644), ("b-report.md", 0o600)):
+            p = os.path.join(d, n); open(p, "w").close(); os.chmod(p, m)
+        files = self._arch_rows()["rows"][0]["files"]
+        me = f"{CE._owner(os.getuid())} {CE._group(os.getgid())}"
+        self.assertEqual(files, {me + " 0o644": 1, me + " 0o600": 1})
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list anything")
+    def test_archive_unreadable_client_folder_is_not_listed(self):
+        self._reg_acme()
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        os.chmod(d, 0)
+        try:
+            r = self._arch_rows()["rows"][0]
+        finally:
+            os.chmod(d, 0o700)
+        self.assertEqual((r["kind"], r["files"], r["not_files"], r["listed"]), ("dir", {}, R.COULD_NOT_CHECK, False))
+
+    def test_archive_rows_listed_only_for_a_real_listed_directory(self):
+        self.assertIs(self._arch_rows()["rows_listed"], False)              # absent
+        base = os.path.join(self.root, self.ARCH); os.makedirs(os.path.dirname(base), exist_ok=True)
+        open(base, "w").close()
+        self.assertIs(self._arch_rows()["rows_listed"], False)              # not a directory
+        os.remove(base); os.symlink(self.root, base)
+        self.assertIs(self._arch_rows()["rows_listed"], False)              # symlink
+        os.remove(base); os.makedirs(base)
+        self.assertIs(self._arch_rows()["rows_listed"], True)
+
+    def test_mount_cases_root_trailing_slash_and_unjudgeable_source(self):
+        def m(src):
+            return (0, json.dumps([{"Type": "bind", "Source": src}]), "")
+        for src, want in (("/", (1, 0)), ("/var/lib/hermes/report-archive/", (1, 0)), ("", (0, 1)),
+                          ("relative/path", (0, 1))):
+            with self.subTest(src=src):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": m(src)})
+                ra = self._arch_rows()
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
 
     def test_d10_1_carries_figures_services_unchanged(self):
         fs = {"ads-report": {"anthropic_key": "absent", "proxy": "unused"}}

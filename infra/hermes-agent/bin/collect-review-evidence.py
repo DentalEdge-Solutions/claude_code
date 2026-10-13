@@ -2367,7 +2367,7 @@ def _audit_logs(host, reg):
 HERMES_VAR = "/var/lib/hermes"
 
 
-def _client_rows(host, reg, parent, files=False):
+def _client_rows(host, reg, parent):
     """One row per child of a client-data parent: registry status, owner, mode, never the name.
     A symlinked or non-directory parent is not listed; a child that vanishes is skipped."""
     root = host.path(parent)
@@ -2382,33 +2382,71 @@ def _client_rows(host, reg, parent, files=False):
                 st = os.lstat(os.path.join(root, name))
             except OSError:
                 continue
-            row = {"status": _reg_status(reg, name), "owner": _owner(st.st_uid),
-                   "mode": oct(stat.S_IMODE(st.st_mode))}
-            if files:                                  # counts by "owner group mode", never names
-                row["files"] = _file_modes(os.path.join(root, name), st)
-            rows.append(row)
+            rows.append({"status": _reg_status(reg, name), "owner": _owner(st.st_uid),
+                         "mode": oct(stat.S_IMODE(st.st_mode))})
     return rows
 
 
+def _archive_row(reg, root, name):
+    """One client folder of the report store, never its name: registry status, owner, mode, `kind`
+    (dir | symlink | file | other, by lstat), `files` (regular files directly inside a dir, by
+    "owner group mode"), `not_files` (entries inside that are not regular files, counted and
+    never followed) and `listed` (false when the folder could not be listed)."""
+    full = os.path.join(root, name)
+    st = os.lstat(full)
+    kind = ("dir" if stat.S_ISDIR(st.st_mode) else "symlink" if stat.S_ISLNK(st.st_mode)
+            else "file" if stat.S_ISREG(st.st_mode) else "other")
+    row = {"status": _reg_status(reg, name), "owner": _owner(st.st_uid), "mode": oct(stat.S_IMODE(st.st_mode)),
+           "kind": kind, "files": {}, "not_files": 0, "listed": False}
+    if kind != "dir":
+        return row
+    try:
+        names = os.listdir(full)
+    except OSError:
+        row["not_files"] = R.COULD_NOT_CHECK
+        return row
+    row["listed"] = True
+    not_files = 0
+    for fn in names:
+        try:
+            fst = os.lstat(os.path.join(full, fn))
+        except OSError:
+            continue
+        if stat.S_ISREG(fst.st_mode):
+            k = f"{_owner(fst.st_uid)} {_group(fst.st_gid)} {oct(stat.S_IMODE(fst.st_mode))}"
+            row["files"][k] = row["files"].get(k, 0) + 1
+        else:
+            not_files += 1
+    row["not_files"] = not_files
+    return row
+
+
 def _report_archive(host, reg, ctx):
-    """The report store: its directory row, a row per client folder (status, owner, mode, file
-    counts, never a name), whether the listing could be had, and how many running containers
-    mount it, a path inside it or a directory above it. Every failure shows: a missing or
-    symlinked store is the parent row, an unlistable one is rows_listed false, and a container
-    listing that fails is could-not-check, never zero."""
+    """The report store: its directory row, a row per entry of it (see _archive_row), whether it
+    is a real directory that could be listed, and how many running containers mount it, a path
+    inside it or a directory above it. Every failure shows: a missing or symlinked store is the
+    parent row, an unlistable one is rows_listed false, and a container listing that fails is
+    could-not-check, never zero."""
     path = HERMES_VAR + "/report-archive"
     parent = _dir_row(host, path)
-    listed = True
+    rows, listed = [], False
     if isinstance(parent, dict):
+        root = host.path(path)
         try:
-            os.listdir(host.path(path))
+            names = sorted(os.listdir(root))
+            listed = True
         except OSError:
-            listed = False
+            names = []
+        for name in names:
+            try:
+                rows.append(_archive_row(reg, root, name))
+            except OSError:
+                continue
     try:
         _, mounting, not_inspected = _containers_mounting(host, path)
     except CouldNotCheck:
         mounting = not_inspected = R.COULD_NOT_CHECK
-    return {"parent": parent, "rows": _client_rows(host, reg, path, files=True), "rows_listed": listed,
+    return {"parent": parent, "rows": rows, "rows_listed": listed,
             "containers_mounting": mounting, "containers_not_inspected": not_inspected}
 
 
@@ -2569,6 +2607,8 @@ def _containers_mounting(host, tree):
         if not isinstance(mounts, list) or not all(isinstance(m, dict) and isinstance(m.get("Source"), str)
                                                    for m in mounts):
             not_inspected += 1
+        elif any(not m["Source"].startswith("/") for m in mounts):
+            not_inspected += 1                          # an empty or relative Source cannot be judged
         elif any(_exposes(m["Source"], tree) for m in mounts):
             mounting += 1
     return ids, mounting, not_inspected
