@@ -575,5 +575,107 @@ class TestResultPathPerJob(unittest.TestCase):
         self.assertIn("store", A.STATUS_REASONS["failed"])
 
 
+class TestManifestLoadersReturnAManifestOrValueError(unittest.TestCase):
+    def _write(self, text, name="ads-audit.json"):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return d, path
+
+    def _raw(self):
+        return json.load(open(MANIFEST))
+
+    def test_load_manifest_raises_exactly_value_error_on_any_shape(self):
+        cases = ["5", "null", "[]", '"x"', "not json", "{", "[" * 100000]
+        for change in (lambda d: d.update(ops=5), lambda d: d["ops"].update(run=5),
+                       lambda d: d["ops"].update(run=None), lambda d: d["ops"].update(run=[]),
+                       lambda d: d.update(result=5), lambda d: d.update(descriptions=[]),
+                       lambda d: d.update(wait_seconds=5), lambda d: d.update(tools=5)):
+            raw = self._raw(); change(raw); cases.append(json.dumps(raw))
+        for i, text in enumerate(cases):
+            _, path = self._write(text)
+            with self.subTest(i=i):
+                try:
+                    A.load_manifest(path, "ads-audit")
+                except ValueError:
+                    pass
+                except BaseException as e:
+                    self.fail(f"escaped as {type(e).__name__}")
+                else:
+                    self.fail("loaded")
+
+    def test_load_manifest_follows_no_symlink_and_reads_only_a_regular_file(self):
+        d = tempfile.mkdtemp()
+        os.symlink(MANIFEST, os.path.join(d, "ads-audit.json"))
+        with self.assertRaises(ValueError):
+            A.load_manifest(os.path.join(d, "ads-audit.json"), "ads-audit")
+        os.mkdir(os.path.join(d, "dir"))
+        with self.assertRaises(ValueError):
+            A.load_manifest(os.path.join(d, "dir"), "ads-audit")
+        with self.assertRaises(ValueError):
+            A.load_manifest(os.path.join(d, "missing.json"), "ads-audit")
+
+    def test_load_manifest_still_refuses_a_too_large_file(self):
+        _, path = self._write(" " * (A.MAX_MANIFEST_BYTES + 1))
+        with self.assertRaises(ValueError):
+            A.load_manifest(path, "ads-audit")
+
+    def test_load_manifests_turns_every_unreadable_directory_into_value_error(self):
+        t = tempfile.mkdtemp()
+        with self.assertRaises(ValueError):
+            A.load_manifests(os.path.join(t, "missing"))
+        for kind in ("dir", "dangling", "symlink"):
+            d = tempfile.mkdtemp()
+            shutil.copy(MANIFEST, d)
+            target = os.path.join(d, "ads-report.json")
+            if kind == "dir":
+                os.mkdir(target)
+            elif kind == "dangling":
+                os.symlink(os.path.join(d, "nowhere"), target)
+            else:
+                os.symlink(REPORT_MANIFEST, target)
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                A.load_manifests(d)
+
+    def test_an_empty_directory_declares_no_job(self):
+        with self.assertRaises(ValueError) as cm:
+            A.load_manifests(tempfile.mkdtemp())
+        self.assertEqual(str(cm.exception), "no job is declared")
+
+    def test_jobs_that_collide_are_refused_and_the_committed_ones_do_not(self):
+        self.assertEqual(sorted(A.load_manifests(os.path.dirname(MANIFEST))), ["ads-audit", "ads-report"])
+        raw = json.load(open(REPORT_MANIFEST))
+        for name, change in (("tool", lambda d: d["tools"].update(run="ads_audit_run")),
+                             ("result", lambda d: d.update(result={"root": "vaults", "subdir": "audits",
+                                                                   "suffix": "-audit.md"}))):
+            d = tempfile.mkdtemp()
+            shutil.copy(MANIFEST, d)
+            r = json.loads(json.dumps(raw)); change(r)
+            json.dump(r, open(os.path.join(d, "ads-report.json"), "w"))
+            with self.subTest(name=name), self.assertRaises(ValueError) as cm:
+                A.load_manifests(d)
+            self.assertEqual(str(cm.exception), "two jobs share a tool name, a user or a result location")
+
+    def test_two_jobs_with_one_user_are_refused(self):
+        a = A.load_manifest(MANIFEST, "ads-audit")
+        b = a._replace(app="other", tools={"run": "o_run", "status": "o_status", "list": "o_list"},
+                       result={"root": "report-archive", "subdir": "", "suffix": "-x.md"})
+        with self.assertRaises(ValueError):
+            A._refuse_collisions({"ads-audit": a, "other": b})
+
+    def test_a_description_starts_and_ends_with_a_visible_character(self):
+        def load(text):
+            raw = self._raw(); raw["descriptions"]["run"] = text
+            _, path = self._write(json.dumps(raw))
+            return A.load_manifest(path, "ads-audit")
+        for bad in (" ", " x", "x ", "x" * 299 + " "):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                load(bad)
+        for good in ("x", "a b", "x" * 300):
+            self.assertEqual(load(good).descriptions["run"], good)
+        m(); mr()
+
+
 if __name__ == "__main__":
     unittest.main()

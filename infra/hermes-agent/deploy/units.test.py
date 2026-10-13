@@ -369,7 +369,9 @@ class TestAppUnits(unittest.TestCase):
         manifests = A.load_manifests(os.path.join(AGENT, "registry", "apps"))
         self.assertTrue(manifests)
         for app, man in manifests.items():
-            worst = sum(op["quota"]["per_box_day"] * op["timeout"] for op in man.ops.values())
+            for op_name, op in man.ops.items():
+                self.assertIn("per_box_day", op["quota"], f"{app}.{op_name} has no per_box_day: its worst queue is unbounded")
+            worst = sum(op["quota"].get("per_box_day", 0) * op["timeout"] for op in man.ops.values())
             with self.subTest(app=app):
                 self.assertLess(worst, 12 * 3600)
 

@@ -3,8 +3,8 @@
 
 Everything the gateway client, the broker and the runner must agree on lives here, once:
 the manifest (which also says where its job's results live and what its tools say), the four
-file schemas (request, job, done, result; the result location is the manifest's), the result whitelist, the
-quota ledger and the atomic writer. Every parser treats its input as hostile: closed key sets,
+file schemas (request, job, done, result; the result location is the manifest's), the result
+whitelist, the quota ledger and the atomic writer. Every parser treats its input as hostile: closed key sets,
 byte caps, O_NOFOLLOW, regular-file checks. Nothing here decides policy (quota, kill switch,
 client status) — that is the broker's; nothing here executes anything — that is the runner's."""
 import collections, datetime, json, os, re, stat, tempfile, uuid
@@ -29,7 +29,7 @@ STEP_CLASSES = ("collect", "snapshot", "read", "proxy", "draft", "isolation", "v
 RESULT_ROOTS = {"vaults": "/var/lib/hermes/vaults", "report-archive": "/var/lib/hermes/report-archive"}
 _SUBDIR_RE = re.compile(r"^(?:[a-z][a-z0-9-]{0,31})?$")
 _SUFFIX_RE = re.compile(r"^-[a-z][a-z0-9-]{0,31}\.md$")
-_DESCRIPTION_RE = re.compile(r"^[\x20-\x7e]{1,300}$")
+_DESCRIPTION_RE = re.compile(r"^[\x21-\x7e](?:[\x20-\x7e]{0,298}[\x21-\x7e])?$")
 MANIFEST_KEYS = frozenset({"app", "user", "command", "ops", "tools", "wait_seconds", "result", "descriptions"})
 BROKER_REASONS = ("bad_request", "duplicate", "inactive_client", "quota", "disabled",
                   "timeout", "interrupted", "internal")
@@ -91,14 +91,17 @@ def _int(v, lo, hi):
 
 
 def load_manifest(path, app):
+    """A Manifest, or ValueError: nothing else escapes, whatever the file holds."""
     if not APP_RE.fullmatch(app):
         raise ValueError("invalid app name")
-    with open(path, "rb") as f:
-        raw = f.read(MAX_MANIFEST_BYTES + 1)
-    if len(raw) > MAX_MANIFEST_BYTES:
-        raise ValueError("manifest too large")
-    d = json.loads(raw)
-    if set(d) != MANIFEST_KEYS:
+    try:
+        raw = read_capped(path, MAX_MANIFEST_BYTES)       # Refused is a ValueError (too large, not a file, ...)
+        d = json.loads(raw)
+    except RecursionError:
+        raise ValueError("manifest nested too deeply")
+    except OSError:
+        raise ValueError("manifest cannot be read")
+    if not isinstance(d, dict) or set(d) != MANIFEST_KEYS:
         raise ValueError("manifest keys")
     if d["app"] != app or d["user"] != "hermes-app-" + app:
         raise ValueError("manifest app/user")
@@ -108,7 +111,7 @@ def load_manifest(path, app):
     if not isinstance(ops, dict) or not ops or not set(ops) <= set(KNOWN_OPS):
         raise ValueError("manifest ops")
     for name, op in ops.items():
-        if set(op) != {"args", "timeout", "quota"} or not isinstance(op["args"], list) \
+        if not isinstance(op, dict) or set(op) != {"args", "timeout", "quota"} or not isinstance(op["args"], list) \
                 or not all(isinstance(x, str) and _ARG_RE.fullmatch(x) for x in op["args"]) \
                 or not _int(op["timeout"], 1, 7200) or not isinstance(op["quota"], dict) \
                 or not set(op["quota"]) <= {"per_client_day", "per_box_day"} \
@@ -138,13 +141,32 @@ def load_manifest(path, app):
 def load_manifests(manifest_dir):
     """Every job the directory declares: {app: Manifest}. A file that is not `<app>.json` with a
     valid app name, or whose manifest does not load, is a ValueError: a directory that cannot be
-    read whole declares nothing."""
+    read whole declares nothing. So is an empty one, and a set of jobs that collide. The result
+    is every job the directory declares, or a ValueError, never anything else."""
     out = {}
-    for name in sorted(os.listdir(manifest_dir)):
-        if not name.endswith(".json") or not APP_RE.fullmatch(name[:-5]):
-            raise ValueError("an entry that is not a job's manifest")
-        out[name[:-5]] = load_manifest(os.path.join(manifest_dir, name), name[:-5])
+    try:
+        names = sorted(os.listdir(manifest_dir))
+        for name in names:
+            if not name.endswith(".json") or not APP_RE.fullmatch(name[:-5]):
+                raise ValueError("an entry that is not a job's manifest")
+            out[name[:-5]] = load_manifest(os.path.join(manifest_dir, name), name[:-5])
+    except OSError:
+        raise ValueError("the jobs' manifests could not be read")
+    if not out:
+        raise ValueError("no job is declared")
+    _refuse_collisions(out)
     return out
+
+
+def _refuse_collisions(manifests):
+    """Two jobs must not share a tool name, an account or a result location."""
+    seen = set()
+    for man in manifests.values():
+        keys = [("tool", t) for t in man.tools.values()] + [("user", man.user),
+                ("result", (man.result["root"], man.result["subdir"], man.result["suffix"]))]
+        if seen & set(keys):
+            raise ValueError("two jobs share a tool name, a user or a result location")
+        seen |= set(keys)
 
 
 def result_path_re(manifest, client):

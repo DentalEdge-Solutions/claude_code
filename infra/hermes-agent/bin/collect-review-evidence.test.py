@@ -2242,6 +2242,22 @@ class TestD10(Base):
                 self.assertIn("journalctl exited 1", it["reason"])
 
     # ---- D10.8 -------------------------------------------------------------------------
+    def test_d10_8_could_not_check_when_the_job_s_manifest_cannot_be_loaded(self):
+        man = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "registry", "apps", "ads-audit.json")
+        old_shape = {"app": "ads-audit", "user": "hermes-app-ads-audit", "command": "/usr/local/sbin/run-client-audit",
+                     "ops": {}, "tools": {}, "wait_seconds": {}}
+        for name, write in (("missing", lambda: os.unlink(man)),
+                            ("old shape", lambda: json.dump(old_shape, open(man, "w"))),
+                            ("not an object", lambda: open(man, "w").write("5"))):
+            shutil.copy(os.path.join(os.path.dirname(HERE), "registry", "apps", "ads-audit.json"), man)
+            write()
+            with self.subTest(name=name):
+                bundle = CE.collect(self.host(), self.KEY)
+                it = bundle["items"]["D10.8"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                self.assertEqual(it["reason"], "CouldNotCheck: the job's manifest could not be loaded")
+                self.assertNotIn("ads-audit.json", json.dumps(bundle))
+
     def test_d10_8_flags_out_of_whitelist_results(self):
         d = self._item("D10.8")["data"]
         self.assertEqual(d["out_of_whitelist"], 1)
