@@ -4641,5 +4641,137 @@ class TestD46StartTimes(Base):
         self.assertEqual(items["D1.7"]["status"], R.COULD_NOT_CHECK)      # no sshd in this fake host
 
 
+def _e(**fields):
+    """One journal entry as `journalctl -o json` prints it."""
+    return json.dumps(fields) + "\n"
+
+
+class TestSearchJournal(Base):
+    SECRET = "sk-or-v1-" + "0123456789abcdef" * 4
+    ARGV = ["journalctl", "-o", "json", "--all", "--no-pager"]
+
+    def _search(self, text, secrets=(), redactor=True, rc=0, err="", on_message=None):
+        # A plain Host with a fake runner, not FakeHost: from Task 2 on FakeHost rewrites a line
+        # that is not a JSON object into an entry, and these tests need the text as given.
+        host = CE.Host(self.root, lambda argv, timeout=60: (rc, text, err))
+        red = CE.context(host, self.KEY)["redactor"] if redactor else None
+        return CE._search_journal(host, self.ARGV, list(secrets), red, on_message=on_message)
+
+    def test_the_constants_are_the_design_s(self):
+        self.assertEqual(CE.JOURNAL_ALL_FIELDS, ["-o", "json", "--all", "--no-pager"])
+        self.assertEqual(len(CE.CID_SKIP_FIELDS), 17)
+        for name in ("MESSAGE", "_CMDLINE", "COMMAND", "_COMM", "_EXE", "CPU_USAGE_NSEC", "MAX_USE"):
+            self.assertNotIn(name, CE.CID_SKIP_FIELDS)
+        self.assertTrue(all(n.startswith("_") for n in CE.CID_SKIP_FIELDS))     # journald-written only
+
+    def test_a_secret_in_the_command_line_field_is_counted(self):
+        c = self._search(_e(MESSAGE="Started.", _CMDLINE=f"curl -H {self.SECRET}"), [self.SECRET])
+        self.assertEqual((c["known_secret_hits"], c["entries"], c["fields"]), (1, 1, 2))
+
+    def test_a_credential_pattern_in_sudo_s_command_field_is_counted(self):
+        c = self._search(_e(MESSAGE="x", COMMAND=f"/usr/bin/env GOOGLE_ADS_REFRESH_TOKEN={TOKEN} true"))
+        self.assertEqual((c["pattern_hits"], c["credential_text_lines"]), (1, 1))
+
+    def test_a_value_that_is_not_text_arrives_as_bytes_and_is_searched(self):
+        c = self._search(_e(MESSAGE=list(f"leak {self.SECRET} \xff".encode("latin-1"))), [self.SECRET])
+        self.assertEqual((c["known_secret_hits"], c["undecodable_characters"]), (1, 1))
+
+    def test_a_secret_at_the_end_of_a_very_long_field_is_counted(self):
+        c = self._search(_e(MESSAGE="x" * 100000 + self.SECRET), [self.SECRET])
+        self.assertEqual(c["known_secret_hits"], 1)
+
+    def test_a_field_set_twice_is_searched_in_both_values(self):
+        c = self._search(_e(MESSAGE=["a " + self.SECRET, list(("b " + self.SECRET).encode())]), [self.SECRET])
+        self.assertEqual((c["known_secret_hits"], c["fields"]), (2, 1))
+
+    def test_a_customer_id_in_a_clock_field_is_not_counted_and_in_the_command_line_is(self):
+        entry = dict(__REALTIME_TIMESTAMP="1760123456789000", _SOURCE_REALTIME_TIMESTAMP="1761234567890123",
+                     _AUDIT_LOGINUID="1234567890", MESSAGE="ok")
+        self.assertEqual(self._search(_e(**entry))["customer_id_lines"], 0)
+        self.assertEqual(self._search(_e(**entry, _CMDLINE="tool --customer 1234567890"))["customer_id_lines"], 1)
+        self.assertEqual(self._search(_e(**entry, MAX_USE="1234567890"))["customer_id_lines"], 1)   # a program can write it
+
+    def test_a_secret_in_a_skipped_field_is_still_counted(self):
+        c = self._search(_e(_STREAM_ID=self.SECRET, MESSAGE="ok"), [self.SECRET])
+        self.assertEqual(c["known_secret_hits"], 1)
+
+    def test_without_a_redactor_the_two_line_counts_stay_zero(self):
+        c = self._search(_e(MESSAGE=f"GOOGLE_ADS_REFRESH_TOKEN={TOKEN} 1234567890"), redactor=False)
+        self.assertEqual((c["pattern_hits"], c["credential_text_lines"], c["customer_id_lines"]), (1, 0, 0))
+
+    def test_the_size_is_the_text_read_and_the_keys_are_closed(self):
+        text = _e(MESSAGE="Started.") * 3
+        c = self._search(text)
+        self.assertEqual(set(c), set(CE.SEARCH_COUNTS))
+        self.assertEqual((c["scanned_characters"], c["entries"], c["fields"]), (len(text), 3, 3))
+
+    def test_json_escaping_does_not_hide_a_value(self):
+        secret = 'pa"ss\\word/1234'
+        c = self._search(_e(MESSAGE="x " + secret), [secret])
+        self.assertEqual(c["known_secret_hits"], 1)
+
+    def test_each_message_is_handed_to_the_caller(self):
+        seen = []
+        self._search(_e(MESSAGE="one\ntwo", _COMM="x") + _e(MESSAGE="three"), on_message=seen.append)
+        self.assertEqual(seen, ["one\ntwo", "three"])
+
+    def test_an_entry_that_does_not_parse_makes_the_search_could_not_check(self):
+        for bad in ("not json\n", "[1, 2]\n", '{"MESSAGE": "cut\n'):
+            with self.subTest(bad=bad), self.assertRaises(CE.CouldNotCheck) as cm:
+                self._search(_e(MESSAGE="ok") + bad)
+            self.assertIn("did not parse", str(cm.exception))
+
+    def test_a_field_printed_as_null_makes_the_search_could_not_check(self):
+        with self.assertRaises(CE.CouldNotCheck) as cm:
+            self._search(_e(MESSAGE=None))
+        self.assertIn("not printed", str(cm.exception))
+
+    def test_a_failed_or_warned_read_is_could_not_check_in_fixed_words(self):
+        for rc, err, want in ((1, "Failed to open /var/log/journal/0123", "journalctl exited 1"),
+                              (0, "Journal file /var/log/journal/0123/x corrupted", "wrote a warning on stderr")):
+            with self.subTest(rc=rc), self.assertRaises(CE.CouldNotCheck) as cm:
+                self._search(_e(MESSAGE="ok"), rc=rc, err=err)
+            self.assertIn(want, str(cm.exception))
+            self.assertNotIn("/var/log", str(cm.exception))
+
+    def test_blank_lines_are_not_entries(self):
+        self.assertEqual(self._search("\n" + _e(MESSAGE="ok") + "\n")["entries"], 1)
+
+
+class TestStream(unittest.TestCase):
+    def _real(self, code, timeout=30):
+        return CE.Host().stream([sys.executable, "-c", code], timeout)
+
+    def test_the_35_day_size_passes_through_the_real_stream_line_by_line(self):
+        """185,000 lines of 1,000 characters: M1 of 2026-10-13 scaled to 35 days (about 184 MB)."""
+        s = self._real("import sys\nline = 'x' * 999 + '\\n'\nfor i in range(185000): sys.stdout.write(line)", timeout=120)
+        n = size = 0
+        for line in s:
+            n += 1; size += len(line)
+        self.assertEqual((n, size, s.rc, s.err), (185000, 185000000, 0, ""))
+
+    def test_a_byte_that_is_not_text_becomes_one_replacement_character(self):
+        s = self._real("import sys; sys.stdout.buffer.write(b'a\\xffb\\n')")
+        self.assertEqual((list(s), s.rc), (["a�b\n"], 0))
+
+    def test_stderr_and_a_non_zero_exit_are_kept(self):
+        s = self._real("import sys; print('out'); sys.stderr.write('warn'); sys.exit(3)")
+        self.assertEqual((list(s), s.rc, s.err), (["out\n"], 3, "warn"))
+
+    def test_a_command_that_does_not_exist_is_127(self):
+        s = CE.Host().stream(["/nonexistent/hermes-test-binary"], 5)
+        self.assertEqual((list(s), s.rc), ([], 127))
+
+    def test_a_timeout_ends_the_lines_and_reads_as_124(self):
+        s = self._real("import time; print('first', flush=True); time.sleep(60)", timeout=2)
+        t0 = time.monotonic()
+        self.assertEqual((list(s), s.rc), (["first\n"], 124))
+        self.assertLess(time.monotonic() - t0, 30)
+
+    def test_a_fake_runner_s_text_is_streamed_as_lines(self):
+        s = CE.Host("/", lambda argv, timeout=60: (0, "a\nb\n", "w")).stream(["x"])
+        self.assertEqual((list(s), s.rc, s.err), (["a\n", "b\n"], 0, "w"))
+
+
 if __name__ == "__main__":
     unittest.main()

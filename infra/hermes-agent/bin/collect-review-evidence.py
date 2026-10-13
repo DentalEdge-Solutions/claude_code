@@ -18,7 +18,7 @@ probe. Three rules, each tested:
   * an item it cannot run is `could-not-check`, never silently healthy (F17);
   * if it cannot load the redaction list (clients.json) it prints nothing and exits 2.
 """
-import argparse, ast, base64, calendar, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, time
+import argparse, ast, base64, calendar, datetime, fnmatch, getpass, grp, json, os, pwd, re, shlex, stat, subprocess, sys, tempfile, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import app_lib as A
@@ -178,6 +178,61 @@ def _run_real(argv, timeout=60, errors="strict"):
             raise
 
 
+class _RealStream:
+    """One command's stdout line by line, never held whole: `rc` and `err` are set once the lines
+    have ended. Each line is decoded as UTF-8 with one replacement character for each byte, or
+    cut-short sequence of bytes, that is not valid. On a timeout the child gets SIGTERM, the lines
+    end and rc is 124. stderr goes to an unnamed temporary file, so a child that writes a lot of
+    it cannot block on a full pipe."""
+    ERR_CAP = 65536
+
+    def __init__(self, argv, timeout):
+        self._argv, self._timeout, self.rc, self.err = argv, timeout, None, ""
+
+    def __iter__(self):
+        errf = tempfile.TemporaryFile()
+        try:
+            p = subprocess.Popen(self._argv, stdout=subprocess.PIPE, stderr=errf)
+        except FileNotFoundError:
+            errf.close()
+            self.rc, self.err = 127, f"{self._argv[0]}: not found"
+            return
+        timed_out = threading.Event()
+
+        def stop():
+            timed_out.set()
+            p.terminate()                       # not kill(): as _run_real
+        timer = threading.Timer(self._timeout, stop)
+        timer.start()
+        try:
+            for raw in p.stdout:
+                yield raw.decode("utf-8", errors="replace")
+            try:
+                p.wait(timeout=TERM_GRACE)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
+        finally:
+            timer.cancel()
+            if p.poll() is None:                # the caller stopped early, or raised: never leave the child behind
+                p.kill()
+                p.wait()
+            p.stdout.close()
+            errf.seek(0)
+            err = errf.read(self.ERR_CAP).decode("utf-8", errors="replace")
+            errf.close()
+        self.rc, self.err = (124, f"{self._argv[0]}: timed out") if timed_out.is_set() else (p.returncode, err)
+
+
+class _TextStream:
+    """A fake runner's (rc, out, err) behind the same interface."""
+    def __init__(self, result):
+        self.rc, self._out, self.err = result
+
+    def __iter__(self):
+        return iter(self._out.splitlines(keepends=True))
+
+
 class Host:
     """Everything a probe touches, injectable for tests: the file root and the runner."""
     def __init__(self, root="/", run=None):
@@ -194,6 +249,12 @@ class Host:
         text (the journal): a byte that is not UTF-8 becomes U+FFFD instead of ending the read. A
         host built with a fake runner calls it unchanged."""
         return _run_real(argv, timeout, errors="replace") if self._real else self._run(argv, timeout)
+
+    def stream(self, argv, timeout=60):
+        """The same single command and limit as run_lossy(), read line by line instead of held
+        whole (the journal with every field is about 184 MB at 35 days, measured 2026-10-13). A
+        host built with a fake runner streams that runner's text."""
+        return _RealStream(argv, timeout) if self._real else _TextStream(self._run(argv, timeout))
 
 
 class CouldNotCheck(Exception):
@@ -1107,6 +1168,101 @@ def _journal_read(host, argv, timeout=60):
     if err.strip():
         raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
     return out
+
+
+# Every stored field of every entry (finding F59: `-o cat` prints the message alone, and a token in
+# a command line is stored in `_CMDLINE`). `--all`: without it a field over 4096 bytes prints as null.
+JOURNAL_ALL_FIELDS = ["-o", "json", "--all", "--no-pager"]
+# The customer-id count skips a field only when the journal service writes it itself, no program
+# can set it, and it holds a number or an identifier by construction: a ten-digit id can match a
+# long number there by chance (design 2026-10-13, from the box's 70 field names). The credential
+# search skips nothing.
+CID_SKIP_FIELDS = frozenset({
+    "__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "__SEQNUM", "__SEQNUM_ID",
+    "_SOURCE_REALTIME_TIMESTAMP", "_SOURCE_MONOTONIC_TIMESTAMP",
+    "_BOOT_ID", "_MACHINE_ID", "_STREAM_ID", "_SYSTEMD_INVOCATION_ID",
+    "_PID", "_UID", "_GID", "_AUDIT_LOGINUID", "_AUDIT_SESSION", "_SYSTEMD_OWNER_UID"})
+SEARCH_COUNTS = ("pattern_hits", "known_secret_hits", "credential_text_lines", "customer_id_lines",
+                 "entries", "fields", "scanned_characters", "undecodable_characters")
+
+
+def _byte_list(v):
+    return isinstance(v, list) and all(isinstance(b, int) and not isinstance(b, bool) and 0 <= b <= 255 for b in v)
+
+
+def _field_texts(value):
+    """A journal field's value as the texts to search. systemd's JSON gives a string; a list of
+    byte numbers for a value that is not text; a list of those two for a field set more than once.
+    None for anything else (null: journalctl did not print the value), which the caller counts."""
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return None
+    if _byte_list(value):
+        return [bytes(value).decode("utf-8", errors="replace")]
+    out = []
+    for v in value:
+        if isinstance(v, str):
+            out.append(v)
+        elif _byte_list(v):
+            out.append(bytes(v).decode("utf-8", errors="replace"))
+        else:
+            return None
+    return out
+
+
+def _search_journal(host, argv, secrets, redactor=None, timeout=60, on_message=None):
+    """One journalctl call (`argv` ends with JOURNAL_ALL_FIELDS), read entry by entry: every field
+    value is parsed out of its JSON and searched for the credential patterns and the known secret
+    values; with a redactor, each line of each value is also counted when it looks like
+    Google-credential text or (outside CID_SKIP_FIELDS) holds a registered customer id.
+    `on_message` gets each MESSAGE text. Counts only (SEARCH_COUNTS), never a value.
+    CouldNotCheck, in fixed words: not root on a real host; a non-zero exit; anything on stderr
+    (record R14: a damaged file is skipped with a warning and rc 0); an entry that is not a JSON
+    object or a field printed as null (what was searched is then unknown)."""
+    if _not_root_on_a_real_host(host):
+        raise CouldNotCheck("the journal is read as root only")
+    c = dict.fromkeys(SEARCH_COUNTS, 0)
+    known = [s for s in set(secrets) if len(s) >= 8]
+    unparsed = unprinted = 0
+    stream = host.stream(argv, timeout)
+    for line in stream:
+        c["scanned_characters"] += len(line)
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            entry = None
+        if not isinstance(entry, dict):
+            unparsed += 1
+            continue
+        c["entries"] += 1
+        for name, value in entry.items():
+            texts = _field_texts(value)
+            if texts is None:
+                unprinted += 1
+                continue
+            c["fields"] += 1
+            for t in texts:
+                c["undecodable_characters"] += t.count("�")
+                c["pattern_hits"] += len(CRED_TEXT_RE.findall(t))
+                c["known_secret_hits"] += sum(t.count(s) for s in known)
+                if redactor is not None:
+                    for l in t.splitlines():
+                        c["credential_text_lines"] += 1 if R.looks_like_credential_text(l) else 0
+                        if name not in CID_SKIP_FIELDS and redactor.has_customer_id(l):
+                            c["customer_id_lines"] += 1
+                if on_message is not None and name == "MESSAGE":
+                    on_message(t)
+    if stream.rc != 0:
+        raise CouldNotCheck(f"{argv[0]} exited {stream.rc}")
+    if stream.err.strip():
+        raise CouldNotCheck(f"{argv[0]} read the journal but wrote a warning on stderr: what it covered is unknown")
+    if unparsed or unprinted:
+        raise CouldNotCheck(f"{unparsed} journal entries did not parse and {unprinted} fields were not printed: "
+                            "what was searched is unknown")
+    return c
 
 
 def d2_3(host, ctx):
