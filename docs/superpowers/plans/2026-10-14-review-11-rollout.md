@@ -1,6 +1,6 @@
 # Rollout plan 2026-10-14: the review #11 box change
 
-Status: written for the operator's review. Nothing here has been run. Every step on the box is done by
+Status: approved by the operator on 2026-10-14, after a check against the runbook. Nothing here has been run. Every step on the box is done by
 the operator, one block per paste, each on the operator's word. The blocks themselves are in
 `infra/hermes-agent/deploy/BRING-UP.md` (the runbook); this plan gives the order, what each stage
 proves, and when to stop. Client names are written as `<client>`. This file carries no customer id,
@@ -32,8 +32,11 @@ the undo of each stage below.
 
 ## Stage 0: measurements before anything changes (read-only)
 
-Runbook: "Add a chat-triggered job", step 0, plus the checks below. Each settles something the
-build could not measure. Record every result in the operator evidence file.
+Runbook: "Add a chat-triggered job", step 0, holds the blocks for 0.1 to 0.3; step 10 holds the
+block for 0.4. **The runbook has no block for 0.5, 0.6 and 0.7**: each is a new read-only block that
+prints counts, sizes or modes only, written by the assistant on the day, checked with `sh -n`, and
+given to the operator one at a time. 0.8 is on the laptop. Each settles something the build could
+not measure. Record every result in the operator evidence file.
 
 | # | What is measured | Why |
 |---|---|---|
@@ -111,12 +114,16 @@ runbook's counts block; report it; do not run again.
    findings document's open-items list brought up to date.
 2. The trial collection: twenty lines. Expected `LOOK` lines are only those the runbook explains for
    this box (the journal's reach until about 2026-11-04; the proxy line if stage 4 changed it).
-3. The real collection, both bundles the same UTC day, within 7 days of each job's `ok` run.
+3. The real collection on the box (review step 3, alone: it prompts for the review key), then the
+   laptop collection (step 4), both the same UTC day, within 7 days of each job's `ok` run; the box
+   bundle copied to the laptop, the copy made owner-only, and the box's copy removed with `shred`
+   (step 5); both bundles show the same key id.
 4. The evidence file: every restart since the last PASS (the audit's broker, the report's broker, the
    gateway, and the journal service if it restarted); the install date of `ads-report`; the leftover
    directory's search counts and removal line; the stage 0 measurements; each standing acceptance
    repeated with its reason.
-5. A fresh reviewer with only what the reviewer brief lists; the report; the operator's sign-off.
+5. LAPTOP: the check that the administrative key's passphrase is out of the keychain (step 7).
+   A fresh reviewer with only what the reviewer brief lists; the report; the operator's sign-off.
 6. On PASS: the report job's off switch off. On anything else: it stays on.
 
 ## What is still decided by the operator, outside this plan
@@ -135,3 +142,39 @@ runbook's counts block; report it; do not run again.
   and stage 5's runs.
 - `dentaledge-bot-pat` expires on 2026-10-23 (the operator's decision; the box holds no GitHub
   credential).
+
+## To resume in a fresh conversation
+
+State on 2026-10-14: `main` holds pull requests #120 and #121. This plan is committed on the local
+branch `docs/review-11-rollout-plan` (not pushed). The box is unchanged since review #10's PASS.
+Nothing of this plan has been run.
+
+Read first, in this order:
+
+1. This file.
+2. `infra/hermes-agent/deploy/BRING-UP.md`: "Add a chat-triggered job", "The leftover journal
+   directory", "A security review".
+3. `docs/superpowers/handoffs/2026-10-12-review-10-pass.md` (where things stood, the dates, the
+   lessons).
+4. The two build ledgers (git-ignored, on the laptop): `.superpowers/sdd/2026-10-13-review-10-follow-ups/progress.md`
+   and `.superpowers/sdd/2026-10-14-ads-report-job/progress.md`: every ruling, what was parked and
+   why, and the things left to measure on the box.
+
+Standing rules of the operator (unchanged):
+
+- Plain language for a non-coder; one block at a time; nothing changes on the box and nothing is
+  pushed without the operator's word; the operator merges.
+- The assistant cannot reach the box: every VPS block is pasted by the operator, ALONE, labelled, with
+  what to expect and the stop condition; `sudo -v` alone first; output pasted starting after the
+  prompt line; never retry a login that fails.
+- Never a client name, customer id, host name, address, fingerprint or credential value in the
+  repository, the brain or the conversation; blocks print counts, states and fixed words only.
+- The private files under `infra/hermes-agent/security-reviews/` are never committed, printed whole
+  or pasted; the assistant does not read `.env` files.
+- Never commit anything under `evals/`.
+
+First thing to do: stage 0, block 0.1.
+
+Open with the operator, not blocking the rollout: the three decisions listed above; pushing this
+plan; deleting the two finished build workspaces under `.superpowers/sdd/` once the rollout is
+recorded; recording the build in the brain (`brain-capture`, then the operator's `/brain-promote`).
