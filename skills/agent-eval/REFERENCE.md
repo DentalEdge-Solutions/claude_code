@@ -154,6 +154,7 @@ After grading all runs, check for:
 **Evaluator:** agent-eval-agent  
 **Model:** <declared model>  
 **Tools:** <declared tools list>  
+**Subject revision:** <commit> · agent .md sha256 <first 12> (from run-manifest.json)  
 **Scenarios run:** N (×3 reps for dispatch-type scenarios)  
 **Baseline:** no-agent | snapshot of previous version
 
@@ -190,6 +191,13 @@ After grading all runs, check for:
 ## Issues Found
 
 (list scenarios scoring < 7, with root cause)
+
+## Evidence and Limits
+
+- **Subject revision:** <commit> · definition sha256 <first 12> — copied from `run-manifest.json` `subject`
+- **Evidence source:** `evidence.json` per scenario (harvest-evidence.js); subagent self-reports are not grading input
+- **Untested:** (every scenario type, rep or check not run, each with its reason — never omitted silently; "none" if complete)
+- **Limitations:** (anything that bounds these numbers — e.g. whether the subject's description was in the skill listing during the run, reduced reps, judge model)
 
 ## Recommendation
 

@@ -7,10 +7,12 @@
 //
 // Subcommands:
 //   init <iteration-dir> --baseline-method none|snapshot [--snapshot-path P] [--methodology-version N]
+//        [--subject <definition-file>] [--commit <sha>]
 //   mark <iteration-dir> <scenario-dir-name> <pending|dispatched|complete|graded>
 //   status <iteration-dir>
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -21,11 +23,15 @@ const MANIFEST_NAME = 'run-manifest.json';
 function usageAndExit(code) {
   console.error(`Usage:
   node run-manifest.js init <iteration-dir> --baseline-method none|snapshot [--snapshot-path P] [--methodology-version N]
+                            [--subject <definition-file>] [--commit <sha>]
   node run-manifest.js mark <iteration-dir> <scenario-dir-name> <${STATUSES.join('|')}>
   node run-manifest.js status <iteration-dir>
 
 init:   Writes run-manifest.json at the iteration root. Refuses to re-init if one
         already exists (idempotent-safe) — resume by using mark/status instead.
+        --subject pins the evaluated definition (SKILL.md / agent .md) by sha256,
+        so a report states exactly which revision it measured; --commit adds the
+        repo commit (git rev-parse --short HEAD). Both optional.
 mark:   Updates (or creates) a scenario's status entry.
 status: Prints a table and exits non-zero if any complete/graded scenario is
         missing output.md, timing.json, or evidence.json in either side, or if
@@ -55,7 +61,7 @@ function writeManifest(iterationDir, manifest) {
 
 // ── init ───────────────────────────────────────────────────────────────────────
 if (cmd === 'init') {
-  const VALUE_FLAGS = new Set(['--baseline-method', '--snapshot-path', '--methodology-version']);
+  const VALUE_FLAGS = new Set(['--baseline-method', '--snapshot-path', '--methodology-version', '--subject', '--commit']);
   let iterationDir = null;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -68,6 +74,10 @@ if (cmd === 'init') {
   const snapshotPath = snapshotFlag !== -1 ? rest[snapshotFlag + 1] : null;
   const versionFlag = rest.indexOf('--methodology-version');
   const methodologyVersion = versionFlag !== -1 ? parseInt(rest[versionFlag + 1], 10) : 2;
+  const subjectFlag = rest.indexOf('--subject');
+  const subjectPath = subjectFlag !== -1 ? rest[subjectFlag + 1] : null;
+  const commitFlag = rest.indexOf('--commit');
+  const commit = commitFlag !== -1 ? rest[commitFlag + 1] : null;
 
   if (!iterationDir) { console.error('Error: <iteration-dir> is required.'); usageAndExit(1); }
   if (baselineMethod !== 'none' && baselineMethod !== 'snapshot') {
@@ -77,6 +87,15 @@ if (cmd === 'init') {
   if (baselineMethod === 'snapshot' && !snapshotPath) {
     console.error('Error: --baseline-method snapshot requires --snapshot-path.');
     usageAndExit(1);
+  }
+
+  if (subjectPath && !fs.existsSync(subjectPath)) {
+    console.error(`Error: --subject ${subjectPath} does not exist — refusing to record a revision for a missing definition.`);
+    process.exit(1);
+  }
+  if (commit !== null && !/^[0-9a-f]{7,40}$/.test(commit)) {
+    console.error('Error: --commit must be a 7-40 character lowercase hex SHA.');
+    process.exit(1);
   }
 
   if (fs.existsSync(manifestPath(iterationDir))) {
@@ -90,6 +109,11 @@ if (cmd === 'init') {
     methodology_version: methodologyVersion,
     baseline_method: baselineMethod,
     snapshot_path: snapshotPath || null,
+    subject: subjectPath ? {
+      path: subjectPath,
+      sha256: crypto.createHash('sha256').update(fs.readFileSync(subjectPath)).digest('hex'),
+      commit: commit || null,
+    } : null,
     started_at: new Date().toISOString(),
     scenario_status: {},
     timing: {},
@@ -134,6 +158,9 @@ if (cmd === 'status') {
   const entries = Object.entries(manifest.scenario_status || {});
   console.log(`Run manifest: ${manifestPath(iterationDir)}`);
   console.log(`baseline_method=${manifest.baseline_method}  methodology_version=${manifest.methodology_version}  started_at=${manifest.started_at}`);
+  if (manifest.subject) {
+    console.log(`subject=${manifest.subject.path}  sha256=${manifest.subject.sha256.slice(0, 12)}  commit=${manifest.subject.commit || '-'}`);
+  }
   console.log('');
 
   if (entries.length === 0) {
