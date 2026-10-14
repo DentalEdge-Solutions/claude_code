@@ -1324,7 +1324,7 @@ switch is set before the job's units exist and is taken off only at step 10, aft
 It comes off there only to produce the evidence of the review that covers the job (one chat run
 and step 11's three live refusals): after step 11 the job stays in use only once that review has
 passed; until then, set the switch again when the evidence has been produced (the block at the end
-of step 11).
+of step 11). Once that review has passed, "A security review" step 8 takes it off.
 
 What is done once per box and what once per job. Steps 1 to 4, 8 to 11: once for each job. Steps 5
 and 7's sidecar lines: once per box, done when the first job was added; skip them for a second job.
@@ -1562,8 +1562,10 @@ the link was made before; the `readlink` line decides. Any other owner, mode or 
    them again (a copy gives them a new date, and review item D4.6 would then count the running
    broker as started before its unit file) and type no `daemon-reload`. Adding a job DOES cause a
    reload all the same, though no unit file is copied: `systemctl enable` reloads the manager's
-   configuration itself (systemctl's manual; not measured on this box). After it, D4.2's
-   `matches_last_pass` reads `false` and needs the operator's statement, as after any reload ("A
+   configuration itself (systemctl's manual). Measured on this box once, on 2026-10-14, when
+   `ads-report` was added: the proxy's `ExecStart` hash did NOT change, and D4.2 needed no statement;
+   another box or another systemd may differ, so the block below still shows it. When it changes,
+   D4.2's `matches_last_pass` reads `false` and needs the operator's statement, as after any reload ("A
    security review" step 3, the paragraph that starts "If the proxy's `ExecStart` hash will not
    match the last PASS", explains the statement and its two hashes). The block below prints the
    hash of the proxy's `ExecStart` line before and after the enable, so that you SEE whether it
@@ -1611,9 +1613,23 @@ change the line; say so in the evidence, and D4.2 is then read as the collection
    three tools each, six tools). It is needed only when the live settings lack the job's server:
    step 8's `hermes mcp list` shows no server for the job, or the diff below shows its block
    missing from the live file. When both already show it, skip to step 7. Back up the live file
-   first, outside the gateway-writable `data/`:
-   `cd /opt/hermes-agent && sudo install -o root -g root -m 0600 data/config.yaml /root/config.yaml.pre-optb2`
-   (it is your rollback copy), then `cd /opt/hermes-agent && sudo diff data/config.yaml config.yaml.example` (review anything
+   first, outside the gateway-writable `data/`, under a name of the job's own
+   (`/root/config.yaml.pre-<job>`; until 2026-10-14 this step used `/root/config.yaml.pre-optb2` for
+   every job, so a later job's backup could take the name of an earlier one's). The block refuses a
+   name that is already taken:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+B="/root/config.yaml.pre-${JOB:?}"
+if sudo test -e "$B"; then echo "STOP: $B is there already: nothing was copied"
+else sudo install -o root -g root -m 0600 /opt/hermes-agent/data/config.yaml "$B"; echo "backup: $B | rc=$?"; fi
+)
+```
+
+   Expected: `backup: /root/config.yaml.pre-<job> | rc=0`. `STOP: … is there already`: a backup of
+   an earlier attempt is still there; read why before removing it (step 10 removes it with `shred`),
+   and copy nothing over it.
+   It is your rollback copy. Then `cd /opt/hermes-agent && sudo diff data/config.yaml config.yaml.example` (review anything
    Hermes wrote itself). Then, BEFORE the line that installs the template, this block, which prints
    an exit code and two numbers and nothing of either file:
 
@@ -1640,7 +1656,11 @@ files could not be read (for example sudo refused, which also ends with 1); stop
    template is how it is settled. Installing the template replaces the whole live file: when the
    diff shows a key Hermes wrote itself (a line that is in the live file and not in the template,
    other than the layout), STOP before the `install` line and report the diff's line count and
-   the key's name, not its value; it is decided before the template is installed.
+   the key's name, not its value; it is decided before the template is installed. One such key is
+   known (measured 2026-10-14, when `ads-report` was added): `onboarding.seen.tool_progress_prompt`,
+   which Hermes' source names a show-once tip flag; installing the template removes it, and the only
+   cost is that the tip shows once more. That time the live file and the template differed by 18
+   lines: 17 of the gateway's own layout (quotes dropped, lists one item per line) and that key.
    From Hermes v0.21.5 the template carries `platforms.api_server.enabled: false` (the API server stays off); a box whose `data/config.yaml` predates it gets that block appended once, as a top-level key, or `api_server: {enabled: false}` added under an existing top-level `platforms:` key (never a second `platforms:` key) (the gateway keeps it through its rewrites), then `cd /opt/hermes-agent && sudo docker compose restart hermes-agent`; review item D4.1 `listeners` then shows no `8642`.
 7. Recreate the gateway (on the first job's installation, without the retired sidecar):
    `cd /opt/hermes-agent && sudo docker compose up -d --build --remove-orphans hermes-agent`
@@ -1858,10 +1878,12 @@ wrote no such line; stop and report.
     running a tool server from before the ping fix: pull, then `cd /opt/hermes-agent && sudo docker compose restart hermes-agent`.
     Once it works, delete both rollback backups (they may hold provider keys; they MUST be gone
     before the review's evidence collection; keep them until then only if you still need to roll back):
-    `sudo shred -u /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2`
-    `sudo ls /opt/hermes-agent/.env.pre-optb2 /root/config.yaml.pre-optb2` → both `No such file or directory`
+    `sudo shred -u /opt/hermes-agent/.env.pre-optb2 "/root/config.yaml.pre-${JOB:?}"`
+    `sudo ls /opt/hermes-agent/.env.pre-optb2 "/root/config.yaml.pre-${JOB:?}"` → both `No such file or directory`
     (when step 5 was skipped there is no `.env.pre-optb2`: `shred` says so for that file and still
-    removes the other; the `ls` line decides.)
+    removes the other; the `ls` line decides. The gateway env's backup keeps its old name: step 5 runs
+    once per box. A box whose first job was installed before 2026-10-14 has its settings backup, if
+    any is left, at `/root/config.yaml.pre-optb2`: remove it the same way.)
 11. Live refusal checks, for EACH job (review D10.7 needs, for every installed job, one each of
     `refused/disabled`, `refused/quota` and `refused/bad_request` in that job's broker journal, 30 days
     back; with "The journal's retention" applied they stay 35 days). They place a request file in the
@@ -2038,7 +2060,7 @@ systemctl is-active "hermes-app-broker@${JOB:?}" "hermes-app-runner@${JOB:?}.pat
     commit):
     `cd /opt/hermes-agent && sudo docker compose stop hermes-agent`
     Return the checkout to the commit recorded before step 1's pull: `sudo git -C /opt/projects/claude_code checkout <recorded sha>` (detached HEAD: later pulls fail until you return; once the issue is fixed: `cd /opt/projects/claude_code && sudo git checkout main && sudo git pull --ff-only`)
-    Restore the config: `cd /opt/hermes-agent && sudo install -o 10000 -g 10000 -m 640 /root/config.yaml.pre-optb2 data/config.yaml`
+    Restore the config: `cd /opt/hermes-agent && sudo install -o 10000 -g 10000 -m 640 "/root/config.yaml.pre-${JOB:?}" data/config.yaml` (the backup step 6 made for this job)
     Restore the gateway env (only when step 5 was run for this job): `sudo install -o root -g root -m 600 /opt/hermes-agent/.env.pre-optb2 /opt/hermes-agent/.env`
     `cd /opt/hermes-agent && sudo docker compose up -d --build --force-recreate hermes-agent`
     Restart the broker of every job that stays installed, as step 7a does (the checkout it reads
@@ -2441,11 +2463,12 @@ gitignored `security-reviews/`; only the report is committed.
    Once the key is pasted, clear the laptop's clipboard: `pbcopy < /dev/null`.
    A value that is pasted at a prompt on the box is copied in a SECOND laptop window, after the block is pasted and its prompt is waiting: copying the block itself replaces what the clipboard held.
    If the proxy's `ExecStart` hash will not match the last PASS (D4.2) because `systemctl daemon-reload` ran since
-   then ("Add a chat-triggered job" step 4 causes one for every job added: the `daemon-reload` typed on a box that has no job yet, and the reload `systemctl enable` makes itself, which step 4 shows as two hashes; so does "The listener check"; the line then shows `start_time=[n/a]` and `pid=0` for a running proxy), put this
+   then ("Add a chat-triggered job" step 4 causes one for every job added: the `daemon-reload` typed on a box that has no job yet, and the reload `systemctl enable` makes itself, which step 4 shows as two hashes (on this box, adding `ads-report` on 2026-10-14 left the hash unchanged: step 4's two hashes were equal); so does "The listener check"; the line then shows `start_time=[n/a]` and `pid=0` for a running proxy), put this
    output in the operator evidence file. Its first hash is the bundle's `execstart_sha256`; its second puts the
    running process's start time and pid back, and equals the last PASS value when the command line is unchanged:
    `L=$(systemctl show hermes-docker-proxy -p ExecStart --no-pager); P=$(systemctl show hermes-docker-proxy -p MainPID --value); T=$(systemctl show hermes-docker-proxy -p ExecMainStartTimestamp --value); echo "pid=$P start=$T"; printf '%s\n' "$L" | sha256sum; printf '%s\n' "$L" | sed "s/start_time=\[n\/a\] ; stop_time=\[n\/a\] ; pid=0/start_time=[$T] ; stop_time=[n\/a] ; pid=$P/" | sha256sum`
 4. Laptop: `bin/collect-review-evidence-laptop.py --customer <dormant pilot id> --package-* ...` (reads the same key file, and refuses one with any group or other access: it is `0600`; the ads repo checked out at the pin, with `.claude/settings.json` stashed). Redirect its output into a file created under `umask 077` (for example `( umask 077; <the command above> > <the laptop bundle file> )`).
+   D3.1 runs the credential audit in a Docker container ON THE LAPTOP: start Docker Desktop first and check it, `docker info >/dev/null 2>&1 && echo "docker: running" || echo "docker: NOT running"` → `docker: running`. With Docker not running the collector still ends with exit code 0, but writes D3.1 as `could-not-check` ("no audit documents in the output"; found 2026-10-14, nothing was asked of Google). So after the collection read both items' status, which prints no value: `python3 -I -c 'import json,sys; b=json.load(open(sys.argv[1])); print({k: v["status"] for k, v in b["items"].items()})' <the laptop bundle file>` → `{'D3.1': 'observed', 'D6.3': 'observed'}`. Anything else: do not use that file; set it aside under another name, fix the cause, and collect again.
 5. Copy the box bundle to the laptop's `security-reviews/` (`chmod 600` the copy), and remove it from the box with `shred -u ~/bundle-box.json` (best effort on a virtual disk), then `ls ~/bundle-box.json` → `No such file or directory`. Check that both bundles show the same `cid_key_id`.
 6. Launch a fresh reviewer with only what REVIEWER-BRIEF lists: REVIEWER-BRIEF, CHECKLIST, REPORT-TEMPLATE, both bundles, the findings doc, `config.yaml.example` (D10.6) and the operator evidence file. That file holds the manual items' statements (D3.2, D8.1, D8.2, D9.1, and D10.5's limit and privacy routing with the console screens), D2.1's Anthropic-key statement, D2.1's dashboard statement (on, or off with a password left in the file; needed whenever the gateway row's `secrets_held` names `dashboard-password`) and the `ls` output of "Add a chat-triggered job" step 10, D4.2's baseline statement (when `matches_last_pass` is `null` or `false`), D10.8's statement, for each installed job, that its `ok` run came from chat, D10.3's statement of a job that is declared and not installed (in the rollout window only: that it is not yet installed, that this review is not a review of that job, and, when D7.1 shows the report store `absent`, that the store is not yet created; D10.6 has no such exception and must already pass, so the box's chat settings hold both servers by then, steps 6 to 8 of "Add a chat-triggered job"), D1.7's statement of whose each accepted key is (and of any `Match` block, `Include` of another place or daemon option, none expected; and, when `allowtcpforwarding` is `local`, of when it was set), D2.4's date the journal's retention was raised (while `reach_days` is under 30) with the time the journal service was restarted, D2.4's statement of the other directory under `/var/log/journal` (on this box there is one: an old file from the machine the server image was built on, outside the live journal; the operator decided on 2026-10-10 to leave it and state it; the statement is needed at any reach, whenever `other_directories` is above `0`; once "The leftover journal directory" has been done, the evidence states instead the date it was searched and removed, with that search's counts, and D2.4's `other_directories` is `0`), D2.4's explanation of `usage.files` lower than `reach_days` (whenever it is so, at any reach), the laptop keychain check below, D4.6's statement of each restart since the last PASS (what started, when, why). While `reach_days` is under 30 the report states the days D2.3's search covered and the days the two unit journals of D10.7 covered (REPORT-TEMPLATE has both lines). Every console screen and every pasted output is read in full before it goes into the evidence file: twice a paste turned out to be the day before's, and once a screen showed more than the statement said.
 7. Laptop, for the evidence file: is the administrative key's passphrase still out of the keychain (step 7f
@@ -2471,6 +2494,20 @@ kc() {
    Expected: `UseKeychain lines left in the file: 0`; `ssh on the new alias: 1; ssh on the old alias: 0`;
    `keychain load rc=0`; `supplied by the keychain: 0`. Paste the four lines into the evidence file. Any
    other output: stop and report it; do not run step 7f's removal again without asking.
+8. After the operator has signed a PASS: a job whose off switch was set again at the end of "Add a
+   chat-triggered job" step 11 (a job added since the last PASS) comes into use. VPS, once for each
+   such job, with `JOB` set to it; the block touches that job's switch only and shows both:
+
+```bash
+( case "$JOB" in ads-audit|ads-report) ;; *) echo "STOP: set JOB first"; exit 1;; esac
+sudo rm -f "/var/lib/hermes/app-state/${JOB:?}/DISABLED"
+for j in ads-audit ads-report; do if sudo test -d "/var/lib/hermes/app-state/$j"; then echo "$j: switch present: $(sudo test -e "/var/lib/hermes/app-state/$j/DISABLED" && echo YES || echo no)"; else echo "$j: not on this box"; fi; done
+)
+```
+
+   Expected: `<job>: switch present: no`, and for the other job its state as it was (`no` when it is
+   in use). `YES` for `$JOB`: stop and report. Write the time into the evidence file. A review that
+   did not PASS leaves the switch on.
 
 ---
 
