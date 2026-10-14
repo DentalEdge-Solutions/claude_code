@@ -2611,7 +2611,7 @@ def _containers_mounting(host, tree):
             continue
         mounts = [m for m in mounts if not (m.get("Type") == "tmpfs" and m["Source"] == "")]
         if any(not m["Source"].startswith("/") for m in mounts):
-            not_inspected += 1                          # an empty or relative Source cannot be judged
+            not_inspected += 1                          # an empty or relative Source (not a tmpfs's) cannot be judged
         elif any(_exposes(m["Source"], tree) for m in mounts):
             mounting += 1
     return ids, mounting, not_inspected

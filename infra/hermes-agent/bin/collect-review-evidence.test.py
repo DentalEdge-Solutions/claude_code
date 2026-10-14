@@ -1550,7 +1550,9 @@ class TestD10(JobBox):
                 ("a tmpfs that names a host side", ({"Type": "tmpfs", "Source": "/var/lib/hermes/report-archive"},), (1, 0)),
                 ("a tmpfs with a relative host side", ({"Type": "tmpfs", "Source": "x"},), (0, 1)),
                 ("no Type and no host side", ({"Source": ""},), (0, 1)),
-                ("a Type that is not a string", ({"Type": ["tmpfs"], "Source": ""},), (0, 1))):
+                ("a Type that is not a string", ({"Type": ["tmpfs"], "Source": ""},), (0, 1)),
+                ("a tmpfs with no Source at all", ({"Type": "tmpfs"},), (0, 1)),
+                ("the type in other letters", ({"Type": "TMPFS", "Source": ""},), (0, 1))):
             with self.subTest(name):
                 self.outputs[("docker", "ps")] = (0, "", "")
                 self._containers({"c1": m(*mounts)})
