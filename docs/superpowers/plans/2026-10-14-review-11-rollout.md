@@ -145,9 +145,17 @@ runbook's counts block; report it; do not run again.
 
 ## To resume in a fresh conversation
 
-State on 2026-10-14: `main` holds pull requests #120 and #121. This plan is committed on the local
-branch `docs/review-11-rollout-plan` (not pushed). The box is unchanged since review #10's PASS.
-Nothing of this plan has been run.
+State on 2026-10-14, end of the day: stages 0 to 5 are done. The box is at `a2c243e` (`main` with
+pull request #123, checklist v1.22). `ads-report` was installed at 12:26:28 UTC, its chat run was
+`ok`, its three live refusals are in the journal, and its off switch is ON again. The proxy line's
+hash did not change at step 4. The chat settings' rollback copy has been removed with `shred`. Every
+result is in the private operator evidence file
+(`infra/hermes-agent/security-reviews/2026-10-14-operator-evidence-review11.md`, still DRAFT). The
+private helpers for stage 6 are in `infra/hermes-agent/security-reviews/review-11/tools/`; the
+comparison helper reads the per-job shape. Stage 6 must be collected by 2026-10-21 UTC.
+
+Earlier state (the start of the day): `main` held pull requests #120 and #121, and nothing of this
+plan had been run.
 
 Read first, in this order:
 
@@ -173,7 +181,8 @@ Standing rules of the operator (unchanged):
   or pasted; the assistant does not read `.env` files.
 - Never commit anything under `evals/`.
 
-First thing to do: stage 0, block 0.1.
+First thing to do: stage 6, step 1 (if not already done), then the operator's statements still
+open in the evidence file, then step 2.
 
 Open with the operator, not blocking the rollout: the three decisions listed above; pushing this
 plan; deleting the two finished build workspaces under `.superpowers/sdd/` once the rollout is
