@@ -1,6 +1,6 @@
 # Rollout plan 2026-10-14: the review #11 box change
 
-Status: approved by the operator on 2026-10-14, after a check against the runbook. Nothing here has been run. Every step on the box is done by
+Status: approved by the operator on 2026-10-14, after a check against the runbook. **Done 2026-10-14: stages 0 to 6 run, security review #11 PASS 38/38, signed (`docs/security-reviews/2026-10-14-review-11.md`).** Every step on the box is done by
 the operator, one block per paste, each on the operator's word. The blocks themselves are in
 `infra/hermes-agent/deploy/BRING-UP.md` (the runbook); this plan gives the order, what each stage
 proves, and when to stop. Client names are written as `<client>`. This file carries no customer id,
@@ -146,33 +146,47 @@ runbook's counts block; report it; do not run again.
 
 ## To resume in a fresh conversation
 
-State on 2026-10-14, end of the day: stages 0 to 5 are done. The box is at `a2c243e` (`main` with
-pull request #123, checklist v1.22). `ads-report` was installed at 12:26:28 UTC, its chat run was
-`ok`, its three live refusals are in the journal, and its off switch is ON again. The proxy line's
-hash did not change at step 4. The chat settings' rollback copy has been removed with `shred`. Every
-result is in the private operator evidence file
-(`infra/hermes-agent/security-reviews/2026-10-14-operator-evidence-review11.md`, still DRAFT). The
-private helpers for stage 6 are in `infra/hermes-agent/security-reviews/review-11/tools/`; the
-comparison helper reads the per-job shape. Stage 6 must be collected by 2026-10-21 UTC.
+State on 2026-10-14, end of the day: **the rollout is complete.** Stages 0 to 6 are done. Security
+review #11 PASSED 38/38 on checklist v1.22 and is signed and dated 2026-10-14
+(`docs/security-reviews/2026-10-14-review-11.md`, pull request #126). The box is at `20a2e7c` (the
+pull since `a2c243e` changed two documents only). Both jobs are in use: the off switches of
+`ads-audit` and `ads-report` are both off (17:43:57 UTC). Finding F62 (OpenRouter's new retention
+choice for the box's chat model, found set to "Safety retention allowed") was fixed in the console the
+same day ("Zero retention only"); it is in the findings document. The private evidence file
+(`infra/hermes-agent/security-reviews/2026-10-14-operator-evidence-review11.md`, git-ignored) holds
+every result, with a dated corrections section after the reviewer's reading; the bundles and console
+screens are in `infra/hermes-agent/security-reviews/review-11/`, owner-only.
 
-Earlier state (the start of the day): `main` held pull requests #120 and #121, and nothing of this
-plan had been run.
+Standing rule accepted at the sign-off: before a report is run for a client whose last audit failed,
+read that audit's step logs first (the report run clears them).
 
-Read first, in this order:
+Read first, in this order, for the next piece of work:
 
-1. This file.
-2. `infra/hermes-agent/deploy/BRING-UP.md`: "A security review" (stage 6); "Add a chat-triggered
-   job" only for a step 9 or step 11 block that stage 6 needs again.
-3. The private operator evidence file (git-ignored, on the laptop; never committed, printed whole
-   or pasted): `infra/hermes-agent/security-reviews/2026-10-14-operator-evidence-review11.md`.
-   Every stage's results, the standing acceptances (confirmed 2026-10-14), review #10's follow-ups
-   and what is still to be filled in at collection.
-4. `docs/superpowers/handoffs/2026-10-12-review-10-pass.md` (where things stood at review #10, the
-   dates, the lessons) and `docs/security-reviews/2026-10-12-review-10.md` (the last PASS report:
-   its twelve entries "not on the checklist").
-5. The brain's daily log of 2026-10-14 (`.project-brain/sessions/daily/2026-10-14.md`): two lessons
-   from stage 4, and the backlog saved from the two build ledgers, which were deleted on
-   2026-10-14 (their work is in git; what was parked and left to measure is in that note).
+1. `docs/security-reviews/2026-10-14-review-11.md`: its "Not on the checklist" entries and the
+   operator sign-off (the follow-ups below come from there).
+2. `docs/superpowers/specs/2026-09-21-vps-first-bring-up-findings.md`: F61, F62 and the open items
+   21 and 22.
+3. The brain's daily log of 2026-10-14 (`.project-brain/sessions/daily/2026-10-14.md`).
+
+Open with the operator, none blocking:
+
+- An API-key guardrail limiting the OpenRouter key to the box's model (closes the Google residual of
+  F46; shown in review #12's screens). A console change only.
+- For review #12 (a box change): the collector reads a named volume's options (F61) and
+  `provider_routing` from the box's `data/config.yaml`; D10.5 names each Zero Data Retention row's
+  retention choice (item 22); the next evidence file quotes the time of D4.5's one `could-not-check`
+  run; review #12 reads `ads-report`'s D10.7 counts with particular care.
+- Whether reports keep their step logs in a folder of their own; whether the audit's own check for
+  another client's name and `show-audit` get the report job's two hardenings; removing the retired
+  `rehearsal` record at the next registry change.
+- The runbook fixes noted during the rollout (a block that takes one job's off switch off; the
+  `git log` line run without `sudo`; the `wc` read of `sudoers.d/README` through an unprivileged
+  redirection). They change a file the box's fingerprint covers, so review #12 judges them.
+- Compiling and promoting the brain entries (`brain-compile`, then the operator's `/brain-promote`).
+
+Dates: `dentaledge-bot-pat` expires 2026-10-23; the journal reaches 30 days about 2026-11-04;
+`ads-audit`'s `ok` result of 2026-10-09 leaves the box 2026-10-16, both jobs' results of 2026-10-14
+on 2026-10-21 (a review collected after that needs a new chat run of each job first).
 
 Standing rules of the operator (unchanged):
 
@@ -186,13 +200,3 @@ Standing rules of the operator (unchanged):
 - The private files under `infra/hermes-agent/security-reviews/` are never committed, printed whole
   or pasted; the assistant does not read `.env` files.
 - Never commit anything under `evals/`.
-
-First thing to do: stage 6, step 1 (if not already done), then the operator's statements still
-open in the evidence file, then step 2.
-
-Open with the operator, not blocking the rollout: two of the three decisions listed above (the
-audit's two hardenings; a log folder for reports; the name check's limits were accepted on
-2026-10-14); after a PASS, compiling and promoting the brain entries (`brain-compile`, then the
-operator's `/brain-promote`), and the runbook fixes noted during the rollout (they change a file the
-box's fingerprint covers, so they wait until after the review). Done on 2026-10-14: the plan
-pushed; the two build workspaces deleted, their backlog saved in the brain.
