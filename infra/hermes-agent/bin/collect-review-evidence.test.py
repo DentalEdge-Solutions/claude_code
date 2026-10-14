@@ -1587,6 +1587,16 @@ class TestD10(JobBox):
                 ("a bind volume elsewhere", self._vol("v", options=dict(bind, device="/srv/other")), (0, 0)),
                 ("bind among other mount options", self._vol("v", options=dict(bind, o="rw,bind")), (1, 0)),
                 ("an in-memory volume", self._vol("v", options={"type": "tmpfs", "device": "tmpfs"}), (0, 0)),
+                ("an in-memory volume with its size options", self._vol("v", options={"type": "tmpfs", "device": "tmpfs",
+                                                                                        "o": "size=64m,mode=1777,uid=0,gid=0"}), (0, 0)),
+                # The kernel ignores the type of a bind mount: tmpfs with `bind` mounts the device (review of F61's fix).
+                ("an in-memory type with bind", self._vol("v", options={"type": "tmpfs", "o": "bind", "device": self.STORE}), (0, 1)),
+                ("an in-memory type with rbind", self._vol("v", options={"type": "tmpfs", "o": "size=1m,rbind", "device": self.STORE}), (0, 1)),
+                ("an in-memory type with another option", self._vol("v", options={"type": "tmpfs", "o": "remount"}), (0, 1)),
+                ("an in-memory type with another key", self._vol("v", options={"type": "tmpfs", "copy": "x"}), (0, 1)),
+                ("a device with two leading slashes", self._vol("v", options=dict(bind, device="//var/lib/hermes/report-archive")), (0, 1)),
+                ("a device that is not in its plain form", self._vol("v", options=dict(bind, device="/var/lib/hermes/../hermes/report-archive")), (0, 1)),
+                ("a device with a trailing slash", self._vol("v", options=dict(bind, device="/srv/other/")), (0, 1)),
                 ("a relative device", self._vol("v", options=dict(bind, device="srv")), (0, 1)),
                 ("a network filesystem", self._vol("v", options={"type": "nfs", "o": "addr=127.0.0.1", "device": ":/srv"}), (0, 1)),
                 ("a device with no type", self._vol("v", options={"device": self.STORE, "o": "bind"}), (0, 1)),
@@ -1600,6 +1610,22 @@ class TestD10(JobBox):
                 self.outputs[("docker", "ps")] = (0, "", "")
                 self._containers({"c1": m("v")})
                 self._volume("v", answer)
+                ra = self._arch_rows()
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
+
+    def test_a_bind_volume_through_a_symbolic_link_is_not_inspected(self):
+        # The kernel follows a link in the device's path; the collector compares text, so a device
+        # that is not its own resolved path cannot be judged (review of F61's fix).
+        os.makedirs(os.path.join(self.root, "var/lib/hermes"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "srv"), exist_ok=True)
+        os.symlink(os.path.join(self.root, "var/lib/hermes"), os.path.join(self.root, "srv/link"))
+        os.makedirs(os.path.join(self.root, "srv/plain"), exist_ok=True)
+        vol = {"Type": "volume", "Name": "v", "Source": "/var/lib/docker/volumes/v/_data"}
+        for device, want in (("/srv/link", (0, 1)), ("/srv/link/report-archive", (0, 1)), ("/srv/plain", (0, 0))):
+            with self.subTest(device):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": (0, json.dumps([vol]), "")})
+                self._volume("v", self._vol("v", options={"type": "none", "o": "bind", "device": device}))
                 ra = self._arch_rows()
                 self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
 

@@ -2635,8 +2635,9 @@ VOLUME_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")    # Docker's own pat
 
 def _volume_host_paths(host, name):
     """The host folders a named volume reaches besides its own folder, from `docker volume
-    inspect` (F61, review #11): [] for a plain local volume or an in-memory one, [device] for a
-    local bind volume (`type` `none`, `bind` among the `o` options). None when it cannot be
+    inspect` (F61, review #11): [] for a plain local volume or an in-memory one (`type` `tmpfs`
+    with in-memory options only), [device] for a local bind volume (`type` `none`, `bind` among
+    the `o` options, the device a plain absolute path with no link in it). None when it cannot be
     judged: no name or one Docker would not give, an inspect that fails or is not an object, another driver (a plugin can
     reach anything), or any other options (another filesystem type, a device with no type, a
     value that is not text). None is counted as not inspected, never as "mounts nothing"."""
@@ -2654,11 +2655,34 @@ def _volume_host_paths(host, name):
         return [] if opts is None or opts == {} else None
     if not isinstance(opts, dict) or not all(isinstance(v, str) for v in opts.values()):
         return None
+    o = opts.get("o", "").split(",") if opts.get("o") else []
     if opts.get("type") == "tmpfs":
-        return []
-    if opts.get("type") == "none" and "bind" in opts.get("o", "").split(",") and "device" in opts:
-        return [opts["device"]]
+        # The kernel ignores a bind mount's type: tmpfs with `bind` mounts the device. Only the
+        # in-memory options, and no key but these three, keep it in memory.
+        if set(opts) <= {"type", "o", "device"} and all(TMPFS_OPTION_RE.fullmatch(x) for x in o):
+            return []
+        return None
+    device = opts.get("device")
+    if opts.get("type") == "none" and "bind" in o and isinstance(device, str) and _plain_path(host, device):
+        return [device]
     return None
+
+
+TMPFS_OPTION_RE = re.compile(r"(size|mode|uid|gid|nr_inodes|nr_blocks)=[A-Za-z0-9%]+")
+
+
+def _plain_path(host, path):
+    """True for an absolute path written in its plain form (no `//`, `.`, `..` or trailing slash)
+    with no symbolic link in it on the host: the only form the text comparison can judge, since
+    the kernel follows links and reads `//x` as `/x`. A volume's device is the box's own text."""
+    if not path.startswith("/") or path.startswith("//") or os.path.normpath(path) != path:
+        return False
+    part = ""
+    for name in path.strip("/").split("/"):
+        part += "/" + name
+        if os.path.islink(host.path(part)):
+            return False
+    return True
 
 
 LAYOUT_REASONS = ("no-account", "host-layout", "other")
