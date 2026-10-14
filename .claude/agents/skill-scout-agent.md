@@ -99,7 +99,8 @@ and conflict detection — then present a ranked shortlist.
    so skill-synthesizer-agent can synthesize the best elements from each?"
 
 10. If no candidate scores > 5 and no registry match: inform user no suitable
-    skill found. Offer direct assistance, or recommend write-a-skill.
+    skill found. Offer direct assistance, or recommend building one with
+    superpowers:writing-skills, then skill-audit → skill-eval before installing.
 
 11. Exit. Do not invoke skill-audit or any other agent.
 

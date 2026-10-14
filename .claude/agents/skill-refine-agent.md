@@ -127,7 +127,7 @@ own eval logic.
    - eval_pass_rate ≥ 80% AND trigger_accuracy ≥ 85% AND resilience_score ≥ 8 → target met
    - All three ≥ 95% for 3 consecutive iterations → early stop (optimal)
    - 10 iterations completed → budget exhausted
-   - eval_pass_rate < 40% after 5 iterations → "Recommend write-a-skill." Exit.
+   - eval_pass_rate < 40% after 5 iterations → "Recommend a rebuild with superpowers:writing-skills, then skill-audit → skill-eval." Exit.
    - All levers tried ≥ 2× with no improvement → no hypotheses remain
 
 9. Final validation — invoke skill-eval-agent as subagent (full 9-scenario run):

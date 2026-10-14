@@ -20,12 +20,70 @@ Checks:
   - compatibility field present
   - description contains "Use when" trigger clause
   - No description starts with raw quotes (parsing artifact)
+  - Every invocation-shaped skill/agent reference resolves (skills/*/**.md,
+    .claude/agents/*.md): a backticked kebab name after invoke/run/use/
+    recommend/dispatch/..., or followed by "skill"/"agent". Namespaced plugin
+    skills (ns:name) must be declared in EXTERNAL_SKILLS.
 
 Exit codes:
   0  All skills pass
   1  One or more skills fail`);
   process.exit(0);
 }
+
+// Plugin skills this repo's skills route to. CI cannot see installed plugins, so
+// each namespaced reference must be declared here — a deliberate, reviewable list.
+const EXTERNAL_SKILLS = [
+  'superpowers:writing-skills', // D1 (2026-10-14): the pipeline's build-from-scratch path
+];
+
+// A backticked kebab name (optionally ns:name) right after an invocation verb,
+// or followed by "skill"/"agent". Plain backticked file names and flags don't match.
+const REF_RE = /\b(?:invoke|invoking|recommend|recommends|run|use|using|route to|hand off to|dispatch|dispatches|spawn|call|calls|with)\s+(?:the\s+)?`((?:[a-z0-9-]+:)?[a-z0-9]+(?:-[a-z0-9]+)+)`|`((?:[a-z0-9-]+:)?[a-z0-9]+(?:-[a-z0-9]+)+)`\s+(?:skill|agent|sub-agent|subagent)\b/gi;
+
+// Generated eval reports and refine logs are history, not instructions.
+const HISTORICAL_RE = /(-EVAL|REFINE-LOG)\.md$/;
+
+function listDirs(dir) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name);
+}
+
+function walkMarkdown(dir) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) return walkMarkdown(p);
+    return e.name.endsWith('.md') && !HISTORICAL_RE.test(e.name) ? [p] : [];
+  });
+}
+
+// Returns [{ name, location }] for every invocation-shaped reference that names
+// neither a skill (skillsDir, knownSkillDirs), an agent (agentDirs), nor a
+// declared external plugin skill.
+function findUnresolvedSkillRefs({ skillsDir, agentDirs = [], knownSkillDirs = [], external = EXTERNAL_SKILLS }) {
+  const known = new Set([...listDirs(skillsDir), ...knownSkillDirs.flatMap(listDirs)]);
+  const agentFiles = agentDirs.flatMap(d => (fs.existsSync(d) ? fs.readdirSync(d) : [])
+    .filter(f => f.endsWith('.md')).map(f => path.join(d, f)));
+  for (const f of agentFiles) known.add(path.basename(f, '.md'));
+  const declared = new Set(external);
+
+  const unresolved = [];
+  for (const file of [...walkMarkdown(skillsDir), ...agentFiles]) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const m of text.matchAll(REF_RE)) {
+      const name = m[1] || m[2];
+      if (!/^[a-z0-9:-]+$/.test(name)) continue; // /i matches verbs; names stay lowercase kebab
+      if (name.includes(':') ? declared.has(name) : known.has(name)) continue;
+      const line = text.slice(0, m.index).split('\n').length;
+      unresolved.push({ name, location: `${path.relative(process.cwd(), file)}:${line}` });
+    }
+  }
+  return unresolved;
+}
+
+module.exports = { findUnresolvedSkillRefs, EXTERNAL_SKILLS };
+if (require.main !== module) return;
 
 const skillsDir = process.argv[2] || path.join(process.cwd(), 'skills');
 const skills = fs.readdirSync(skillsDir, { withFileTypes: true })
@@ -96,4 +154,13 @@ for (const skill of skills) {
 }
 
 console.log(`\n${passed + failed} skills checked — ${passed} passed, ${failed} failed`);
-process.exit(failed > 0 ? 1 : 0);
+
+const repoRoot = path.resolve(skillsDir, '..');
+const unresolved = findUnresolvedSkillRefs({
+  skillsDir,
+  agentDirs: [path.join(repoRoot, '.claude', 'agents')],
+  knownSkillDirs: [path.join(repoRoot, '.claude', 'skills')],
+});
+unresolved.forEach(r => console.log(`  FAIL  unresolved skill reference \`${r.name}\` at ${r.location}`));
+console.log(`skill references: ${unresolved.length} unresolved`);
+process.exit(failed > 0 || unresolved.length > 0 ? 1 : 0);
