@@ -19,7 +19,9 @@ function test(label, fn) {
   catch (e) { console.error(`FAIL ${label}: ${e.message}`); ok = false; }
 }
 function run(...args) {
-  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
+  // cwd = tmpdir: a misparsed argument taken as a relative iteration dir lands
+  // there, never in the repo (the red phase once created dirs in the repo root).
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', cwd: os.tmpdir() });
   return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'run-manifest-')); }
