@@ -235,6 +235,15 @@ flowchart TB
 | **P3** | Item 13: REA trial in a disposable VM (pinned `rea-agents@6.5.0`, no `setup`, static tools on our own artifacts); item 14: agent teams | a real closed-source-artifact use case; legal authorization | — | evidence records validate; limitations populated | a recorded go/no-go in `docs/evaluations/` |
 | **REJECT** | items 15–19 | — | — | — | — |
 
+**Implementation note (Phase 3, 2026-10-14).** P1-A was delivered in narrower form than item 6 in §6, and that is recorded here, not hidden.
+- **What was built:**
+  - the subject revision is pinned in `run-manifest.json`: definition sha256 plus commit;
+  - an **Evidence and Limits** section was added to the SKILL-EVAL, AGENT-EVAL and TEAM-EVAL report formats.
+- **What was not built:** no JSON schema was added.
+- **Why:** the reports are model-written Markdown, so a schema would have no producer and no validator.
+- **Revisit when:** a machine-readable eval summary exists to validate.
+- **Record:** `docs/evaluations/2026-10-14-phase3-implementation.md`.
+
 **Rollback:**
 
 - P0-A, P1-A and P1-B are single-PR reverts.

@@ -276,11 +276,15 @@ Runs the full pipeline orchestration cycle:
 
 ## CI/CD
 
-The repo includes a 3-job GitHub Actions workflow (`.github/workflows/ci.yml`) that runs on every push and PR to `main`:
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs five jobs on every push and PR to `main`:
 
-1. **Validate skill frontmatter** — checks all SKILL.md files for valid `name` (≤64 chars, lowercase-hyphens), `description` (≤1024 chars, contains "Use when"), and `compatibility` field
-2. **Security gate** — runs `ecc-agentshield@1.4.0` on `.claude/`; fails if grade < C; if AgentShield is unavailable (network issue), falls back to static-scan.js on all agent files and settings files
-3. **Static scan all skills** — runs `static-scan.js` on every `skills/*/` directory; BLOCK verdict fails the build
+1. **Validate skill frontmatter.** Every SKILL.md must have a valid `name` (≤64 chars, lowercase-hyphens), a `description` (≤1024 chars, containing "Use when") and a `compatibility` field. **Invocation-shaped skill and agent references must resolve.** A backticked kebab name (or `/name`) right after invoke, run, use, recommend, dispatch and similar verbs, or followed by "skill" or "agent", must be an existing skill or agent, or a plugin skill declared in `EXTERNAL_SKILLS` in `scripts/validate-skills.js`. The check favours precision over recall: unquoted names, single-word names and other phrasings are not checked.
+2. **Security gate.** Runs `ecc-agentshield@1.4.0` on `.claude/` and fails below grade C. If AgentShield is unavailable, it falls back to `static-scan.js` on the agent and settings files.
+3. **Test suites.** Node (`scripts/run-all-tests.js`) and Hermes `bin/` (`run-bin-tests.sh`), plus the deploy suites.
+4. **Bind agreement.** Linux, as root, against the real proxy.
+5. **Static scan all skills.** `static-scan.js` on every `skills/*/` directory. A BLOCK not covered by the reviewed baseline (`.github/skill-scan-baseline.json`) fails the build.
+
+**Merge gate.** The `main-protection` ruleset requires a pull request and checks 1–4, and requires the branch to be up to date with `main`. It also forbids force-pushes and deletion. Job 5 runs but is not a required check. Reviews follow `docs/REVIEW_PROTOCOL.md`.
 
 Run locally: `make validate`, `make audit SKILL=<name>`
 
