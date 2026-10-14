@@ -22,6 +22,15 @@ class T(unittest.TestCase):
                            "params": {"name": name, "arguments": args}})
         return r["result"]
 
+    def test_each_job_s_tools_carry_its_own_descriptions(self):
+        for app, word in (("ads-audit", "audit"), ("ads-report", "report")):
+            man = A.load_manifest(os.path.join(os.path.dirname(HERE), "registry/apps", app + ".json"), app)
+            tools = {t["name"]: t["description"] for t in M.Server(man, "/nonexistent")._tools()}
+            self.assertEqual(set(tools), set(man.tools.values()))
+            self.assertEqual(tools[man.tools["run"]], man.descriptions["run"])
+            self.assertIn(word, tools[man.tools["run"]].lower())
+        self.assertFalse(hasattr(M, "DESCRIPTIONS"))
+
     def test_initialize_echoes_supported_version(self):
         r = self.s.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                            "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})

@@ -44,6 +44,10 @@ class FakeHost(CE.Host):
         return (127, "", "not found")
 
 
+APPS = ("ads-audit", "ads-report")
+BOTH = {"declared": True, "installed": True}        # what every per-job entry says of a job that is both
+
+
 class Base(unittest.TestCase):
     KEY = bytes.fromhex("11" * 32)
 
@@ -60,7 +64,13 @@ class Base(unittest.TestCase):
                          "tcp LISTEN 0 4096 127.0.0.1:9119 0.0.0.0:*\n", ""),
             ("runuser",): (1, "mismatch log/acme-dental.jsonl expected 0660\n", ""),
             ("docker", "ps"): (0, "", ""),
+            ("systemctl", "list-units"): (0, "".join(f"hermes-app-{k}@{a}.{s} loaded active running x\n"
+                                                     for a in APPS
+                                                     for k, s in (("broker", "service"), ("runner", "path"))), ""),
         }
+        man_dir = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "registry", "apps"); os.makedirs(man_dir)
+        for app in APPS:                                # the fake box holds both jobs
+            shutil.copy(os.path.join(os.path.dirname(HERE), "registry", "apps", app + ".json"), man_dir)
 
     def _w(self, rel, body):
         p = os.path.join(self.root, rel.lstrip("/"))
@@ -1075,7 +1085,9 @@ GW_ID = "ab" * 32
 BROKER = "hermes-app-broker[ads-audit]: "
 
 
-class TestD10(Base):
+class JobBox(Base):
+    """The fake box with both jobs' journals and results: the audit's hold what the tests of the
+    audit read, the second job's are there and empty."""
     def setUp(self):
         super().setUp()
         self.outputs[("run-client-audit", "--probe-env")] = (0, json.dumps({"matches_declared": True, "services": {}}), "")
@@ -1083,27 +1095,35 @@ class TestD10(Base):
         self._journal(broker=BROKER + "request=x op=run client=acme-dental status=refused reason=quota\n"
                              + BROKER + "request=y op=run client=acme-dental status=ok reason=-\n",
                       runner="Collecting...\nAudit complete.\n")
-        self.res = os.path.join(self.root, CE.APP_RESULTS.lstrip("/")); os.makedirs(self.res)
+        self._journal(app="ads-report", broker="", runner="")
+        for app in APPS:
+            os.makedirs(self._results_dir(app))
+        self.res = self._results_dir("ads-audit")
         self.good = {"request_id": RID_A, "op": "run", "client": "acme-dental",
                      "status": "ok", "reason": None, "exit_code": 0, "ts": "2026-10-01_12-00-00", "steps": [],
                      "vault_path": "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"}
         self._result(self.good)
         self._result(dict(self.good, request_id=RID_B, reason="free text"))
 
-    def _result(self, obj, name=None):
-        with open(os.path.join(self.res, name or obj["request_id"] + ".json"), "w") as f:
+    def _results_dir(self, app):
+        return os.path.join(self.root, "var/lib/hermes/spool/apps", app, "results")
+
+    def _result(self, obj, name=None, app="ads-audit"):
+        with open(os.path.join(self._results_dir(app), name or obj["request_id"] + ".json"), "w") as f:
             json.dump(obj, f)
 
-    def _journal(self, broker=None, runner=None):
+    def _journal(self, broker=None, runner=None, app="ads-audit"):
         """Each unit's journal text, or an (rc, out, err) tuple for a failing journalctl."""
         for unit, out in (("broker", broker), ("runner", runner)):
             if out is not None:
-                self.outputs[("journalctl", "-u", f"hermes-app-{unit}@ads-audit")] = \
+                self.outputs[("journalctl", "-u", f"hermes-app-{unit}@{app}")] = \
                     out if isinstance(out, tuple) else (0, out, "")
 
     def _item(self, iid):
         return CE.collect(self.host(), self.KEY)["items"][iid]
 
+
+class TestD10(JobBox):
     def test_probes_registered(self):
         for k in ("D10.1", "D10.2", "D10.3", "D10.4", "D10.6", "D10.7", "D10.8"):
             self.assertIn(k, CE.PROBES)
@@ -1152,27 +1172,29 @@ class TestD10(Base):
         for u in CE.APP_UNITS:
             self._w("/etc/systemd/system/" + u, "unit " + u)
             self._w(CE.CHECKOUT + "/infra/hermes-agent/deploy/" + u, "unit " + u)
-        self.outputs[("systemctl", "show", "hermes-app-broker@ads-audit")] = (
-            0, "User=hermes-app-ads-audit\nNoNewPrivileges=yes\nCapabilityBoundingSet=\nPrivateNetwork=yes\n"
-               "ProtectSystem=strict\nProtectHome=yes\nPrivateTmp=yes\nUMask=0077\n"
-               "ReadWritePaths=/var/lib/hermes/spool/apps/ads-audit /var/lib/hermes/app-state/ads-audit\n"
-               "ActiveState=active\nEnvironment=\n", "")
-        self.outputs[("systemctl", "show", "hermes-app-runner@ads-audit")] = (0, "Environment=\n", "")
-        for u in self.INSTANCES:
-            self.outputs[("systemctl", "show", u, "-p", "DropInPaths")] = (0, "DropInPaths=\n", "")
+        for app in APPS:                                # the second job answers as the audit does
+            self.outputs[("systemctl", "show", f"hermes-app-broker@{app}")] = (
+                0, f"User=hermes-app-{app}\nNoNewPrivileges=yes\nCapabilityBoundingSet=\nPrivateNetwork=yes\n"
+                   "ProtectSystem=strict\nProtectHome=yes\nPrivateTmp=yes\nUMask=0077\n"
+                   f"ReadWritePaths=/var/lib/hermes/spool/apps/{app} /var/lib/hermes/app-state/{app}\n"
+                   "ActiveState=active\nEnvironment=\n", "")
+            self.outputs[("systemctl", "show", f"hermes-app-runner@{app}")] = (0, "Environment=\n", "")
+            for u in self.INSTANCES:
+                self.outputs[("systemctl", "show", u.replace("ads-audit", app), "-p", "DropInPaths")] = (0, "DropInPaths=\n", "")
+            self.outputs[("systemctl", "is-active", f"hermes-app-runner@{app}.path")] = (0, "active\n", "")
         self.outputs[("id", "-nG")] = (0, "hermes-app-ads-audit hermes\n", "")
         self.outputs[("sudo", "-l", "-U")] = (0, "User hermes-app-ads-audit is not allowed to run sudo on box-7.\n", "")
-        self.outputs[("systemctl", "is-active", "hermes-app-runner@ads-audit.path")] = (0, "active\n", "")
 
     def test_d10_3_reports_units_groups_sudo_and_path(self):
         self._units()
-        d = self._item("D10.3")["data"]
+        top = self._item("D10.3")["data"]
+        d = top["apps"]["ads-audit"]
         self.assertEqual(d["broker_unit"]["User"], "hermes-app-ads-audit")
         self.assertEqual(d["broker_unit"]["CapabilityBoundingSet"], "")
         self.assertEqual(d["broker_unit"]["Environment"], [])
         self.assertEqual(d["broker_unit"]["EnvironmentFiles"], [])
         self.assertEqual(d["runner_unit"], {"Environment": [], "EnvironmentFiles": []})
-        self.assertEqual(d["installed_equal_repo"], {u: True for u in CE.APP_UNITS})
+        self.assertEqual(top["installed_equal_repo"], {u: True for u in CE.APP_UNITS})
         self.assertEqual(d["drop_in_paths"], {u: [] for u in self.INSTANCES})
         self.assertEqual(d["broker_user_groups"], ["hermes-app-ads-audit", "hermes"])
         self.assertEqual(d["sudo_rules"], {"rc": 0, "not_allowed": True, "command_lines": 0})
@@ -1185,7 +1207,7 @@ class TestD10(Base):
                "User hermes-app-ads-audit may run the following commands on box-7:\n"
                "    (root) NOPASSWD: /usr/bin/docker\n    (root) /bin/sh\n", "")
         it = self._item("D10.3")
-        self.assertEqual(it["data"]["sudo_rules"], {"rc": 0, "not_allowed": False, "command_lines": 2})
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["sudo_rules"], {"rc": 0, "not_allowed": False, "command_lines": 2})
         self.assertNotIn("box-7", json.dumps(it))
 
     def test_d10_3_environment_is_names_only_and_drop_in_files_are_listed(self):
@@ -1197,7 +1219,7 @@ class TestD10(Base):
                "EnvironmentFiles=/etc/extra (ignore_errors=yes)\n"
                "a line without an equals sign\nExecStart=/not/asked/for\n", "")
         it = self._item("D10.3")
-        self.assertEqual(it["data"]["runner_unit"],
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["runner_unit"],
                          {"Environment": ["ANTHROPIC_API_KEY", "NOTE"],
                           "EnvironmentFiles": ["/etc/hermes/.env.anthropic (ignore_errors=no)",
                                                "/etc/extra (ignore_errors=yes)"]})
@@ -1212,14 +1234,14 @@ class TestD10(Base):
         self.outputs[("systemctl", "show", self.INSTANCES[1], "-p", "DropInPaths")] = (
             0, f"DropInPaths={d1} {d2}\n", "")
         d = self._item("D10.3")["data"]
-        self.assertEqual(d["drop_in_paths"], {self.INSTANCES[0]: [], self.INSTANCES[1]: [d1, d2],
-                                              self.INSTANCES[2]: []})
+        self.assertEqual(d["apps"]["ads-audit"]["drop_in_paths"], {self.INSTANCES[0]: [], self.INSTANCES[1]: [d1, d2],
+                                                                   self.INSTANCES[2]: []})
         self.assertEqual(d["installed_equal_repo"], {u: True for u in CE.APP_UNITS})    # control
 
     def test_d10_3_drop_ins_that_cannot_be_read_are_never_an_empty_list(self):
         self._units()
         self.outputs[("systemctl", "show", self.INSTANCES[0], "-p", "DropInPaths")] = (0, "\n", "")
-        self.assertEqual(self._item("D10.3")["data"]["drop_in_paths"][self.INSTANCES[0]], R.COULD_NOT_CHECK)
+        self.assertEqual(self._item("D10.3")["data"]["apps"]["ads-audit"]["drop_in_paths"][self.INSTANCES[0]], R.COULD_NOT_CHECK)
         self.outputs[("systemctl", "show", self.INSTANCES[2], "-p", "DropInPaths")] = (1, "", "Failed to connect to bus")
         it = self._item("D10.3")
         self.assertEqual(it["status"], R.COULD_NOT_CHECK)
@@ -1234,14 +1256,14 @@ class TestD10(Base):
         self.outputs[("systemctl", "show", "hermes-app-runner@ads-audit")] = (
             0, "Environment=OK=1 sk-live-secret-fragment\n", "")
         it = self._item("D10.3")
-        self.assertEqual(it["data"]["runner_unit"]["Environment"], ["?", "OK"])
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["runner_unit"]["Environment"], ["?", "OK"])
         self.assertNotIn("sk-live-secret-fragment", json.dumps(it))
 
     def test_d10_3_a_property_systemd_did_not_print_is_could_not_check(self):
         self._units()
         self.outputs[("systemctl", "show", "hermes-app-broker@ads-audit")] = (0, "User=hermes-app-ads-audit\n", "")
         self.outputs[("systemctl", "show", "hermes-app-runner@ads-audit")] = (0, 'Environment="unbalanced\n', "")
-        d = self._item("D10.3")["data"]
+        d = self._item("D10.3")["data"]["apps"]["ads-audit"]
         self.assertEqual(d["broker_unit"]["NoNewPrivileges"], R.COULD_NOT_CHECK)
         self.assertEqual(d["broker_unit"]["Environment"], R.COULD_NOT_CHECK)
         self.assertEqual(d["runner_unit"]["Environment"], R.COULD_NOT_CHECK)
@@ -1259,7 +1281,7 @@ class TestD10(Base):
         self.outputs[("systemctl", "is-active", "hermes-app-runner@ads-audit.path")] = (3, "inactive\n", "")
         it = self._item("D10.3")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"]["runner_path_active"], "inactive")
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["runner_path_active"], "inactive")
 
     def test_d10_3_sudo_that_gave_neither_answer_is_could_not_check(self):
         self._units()
@@ -1269,7 +1291,7 @@ class TestD10(Base):
                 self.outputs[("sudo", "-l", "-U")] = (rc, out, "")
                 it = self._item("D10.3")
                 self.assertEqual(it["status"], R.OBSERVED)
-                self.assertEqual(it["data"]["sudo_rules"],
+                self.assertEqual(it["data"]["apps"]["ads-audit"]["sudo_rules"],
                                  {"rc": rc, "not_allowed": R.COULD_NOT_CHECK, "command_lines": R.COULD_NOT_CHECK})
 
     def test_d10_3_a_missing_app_user_costs_only_the_groups(self):
@@ -1277,9 +1299,9 @@ class TestD10(Base):
         self.outputs[("id", "-nG")] = (1, "", "id: 'hermes-app-ads-audit': no such user\n")
         it = self._item("D10.3")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"]["broker_user_groups"], R.COULD_NOT_CHECK)
-        self.assertEqual(it["data"]["broker_unit"]["User"], "hermes-app-ads-audit")
-        self.assertEqual(it["data"]["runner_path_active"], "active")
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["broker_user_groups"], R.COULD_NOT_CHECK)
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["broker_unit"]["User"], "hermes-app-ads-audit")
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["runner_path_active"], "active")
         self.assertNotIn("no such user", json.dumps(it))
 
     # ---- D10.4 -------------------------------------------------------------------------
@@ -1299,8 +1321,8 @@ class TestD10(Base):
         with self._resolver() as sr:
             it = self._item("D10.4")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(sr.call_args.kwargs["layout"], CE.HL.app_layout("ads-audit"))
-        self.assertTrue(any("app-state" in p for p in it["data"]["layout_problems"]))   # nothing built here
+        self.assertEqual([c.kwargs["layout"] for c in sr.call_args_list], [CE.HL.app_layout(a) for a in APPS])
+        self.assertTrue(any("app-state" in p for p in it["data"]["apps"]["ads-audit"]["layout_problems"]))   # nothing built here
         self.assertEqual({k: it["data"][k] for k in ("containers", "containers_mounting_app_state",
                                                      "containers_not_inspected")},
                          {"containers": 1, "containers_mounting_app_state": 0, "containers_not_inspected": 0})
@@ -1325,11 +1347,198 @@ class TestD10(Base):
         self.assertEqual((it["data"]["containers"], it["data"]["containers_mounting_app_state"],
                           it["data"]["containers_not_inspected"]), (5, 1, 4))
 
-    def test_d10_4_layout_refusal_is_could_not_check(self):
+    def test_d10_4_a_layout_refusal_costs_each_job_its_layout_and_the_item_stays_observed(self):
+        # Per job since the collector checks every job: the item stays observed, the containers are still counted.
+        self._containers({"c1": (0, json.dumps([{"Type": "bind", "Source": "/var/lib/hermes/app-state"}]), "")})
         with mock.patch.object(CE.HL, "system_resolver", side_effect=CE.HL.LayoutError("group 'hermes' is gid 5")):
             it = self._item("D10.4")
-        self.assertEqual(it["status"], R.COULD_NOT_CHECK)
-        self.assertIn("gid 5", it["reason"])
+        self.assertEqual(it["status"], R.OBSERVED)
+        self.assertEqual(it["data"]["apps"], {a: {"layout_problems": R.COULD_NOT_CHECK, "layout_reason": "host-layout", **BOTH}
+                                              for a in APPS})
+        self.assertEqual((it["data"]["containers"], it["data"]["containers_mounting_app_state"]), (1, 1))
+        self.assertNotIn("gid 5", json.dumps(it))
+
+    # ---- Task 6: the report store (D4.1, D7.1) and the probe's figures line (D10.1) ----------
+    ARCH = "var/lib/hermes/report-archive"
+
+    def _arch_setup(self):
+        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {
+            "acme-dental": {"customer_id": "1234567890", "status": "active"}}}))
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        p = os.path.join(d, "2026-10-01_12-00-00-report.md"); open(p, "w").close(); os.chmod(p, 0o600)
+        os.makedirs(os.path.join(self.root, self.ARCH, "ghost-client"))
+
+    def test_d4_1_probes_the_report_store(self):
+        self.assertIn("/var/lib/hermes/report-archive", CE.GATEWAY_PROBE_PATHS)
+        self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
+        h = self.host(); CE.collect(h, self.KEY)
+        sh = [c for c in h.calls if c[:2] == ["docker", "exec"] and "sh" in c[3:5]]
+        self.assertTrue(sh and all("/var/lib/hermes/report-archive" in c for c in sh), sh)
+
+    def test_d7_1_report_archive_rows_by_status_without_names(self):
+        self._arch_setup()
+        out = CE.collect(self.host(), self.KEY)
+        ra = out["items"]["D7.1"]["data"]["report_archive"]
+        self.assertEqual(set(ra["parent"]), {"owner", "group", "mode"})
+        self.assertEqual([r["status"] for r in ra["rows"]], ["active", "unregistered"])
+        for r in ra["rows"]:
+            self.assertEqual(set(r), {"status", "owner", "mode", "kind", "files", "not_files", "files_not_read", "listed"})
+            self.assertEqual(r["files_not_read"], 0)
+        self.assertEqual(ra["rows_not_read"], 0)
+        self.assertEqual(sum(ra["rows"][0]["files"].values()), 1)
+        self.assertEqual((ra["rows"][0]["kind"], ra["rows"][0]["not_files"], ra["rows"][0]["listed"]), ("dir", 0, True))
+        self.assertTrue(all(len(k.split()) == 3 for k in ra["rows"][0]["files"]))
+        self.assertEqual(ra["rows_listed"], True)
+        for name in ("acme-dental", "ghost-client", "report.md"):
+            self.assertNotIn(name, json.dumps(ra))
+
+    def test_d7_1_report_archive_missing_symlinked_or_unlistable_is_visible(self):
+        ra = self._item("D7.1")["data"]["report_archive"]
+        self.assertEqual((ra["parent"], ra["rows"]), ("absent", []))
+        link = os.path.join(self.root, self.ARCH); target = os.path.join(self.root, "elsewhere")
+        os.makedirs(os.path.join(target, "ghost-client")); os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+        out = CE.collect(self.host(), self.KEY)
+        self.assertEqual((out["items"]["D7.1"]["data"]["report_archive"]["parent"],
+                          out["items"]["D7.1"]["data"]["report_archive"]["rows"]), ("symlink", []))
+        self.assertNotIn("ghost-client", json.dumps(out))
+        os.remove(link); os.makedirs(link)
+        real = os.listdir
+        def deny(p, *a, **k):
+            if str(p).endswith("report-archive"):
+                raise PermissionError(p)
+            return real(p, *a, **k)
+        with mock.patch.object(CE.os, "listdir", deny):
+            ra = self._item("D7.1")["data"]["report_archive"]
+        self.assertEqual((ra["rows"], ra["rows_listed"]), ([], False))
+
+    def test_d7_1_report_archive_counts_containers_mounting_it(self):
+        def m(src):
+            return (0, json.dumps([{"Type": "bind", "Source": src}]), "")
+        for src, want in (("/var/lib/hermes/report-archive/acme-dental", 1), ("/var/lib/hermes/report-archive", 1),
+                          ("/var/lib/hermes", 1), ("/var", 1), ("/var/lib/hermes/reports", 0),
+                          ("/var/lib/hermes/report-archive-other", 0)):
+            with self.subTest(src=src):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": m(src)})
+                ra = self._item("D7.1")["data"]["report_archive"]
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), (want, 0))
+        self.outputs[("docker", "ps")] = (0, "", "")
+        self._containers({"c1": (1, "", "gone"), "c2": (0, "junk", "")})
+        ra = self._item("D7.1")["data"]["report_archive"]
+        self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), (0, 2))
+
+    def test_d7_1_a_container_listing_that_fails_is_visible_not_zero(self):
+        self.outputs[("docker", "ps")] = (1, "", "daemon down")
+        it = self._item("D7.1")
+        self.assertEqual(it["status"], R.OBSERVED)
+        ra = it["data"]["report_archive"]
+        self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]),
+                         (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def _arch_rows(self):
+        return self._item("D7.1")["data"]["report_archive"]
+
+    def _reg_acme(self):
+        self._w(CE.GOV + "/registry/clients.json", json.dumps({"clients": {"acme-dental": {"status": "active"}}}))
+
+    def test_archive_row_kinds_symlink_file_and_nested(self):
+        self._reg_acme()
+        base = os.path.join(self.root, self.ARCH); os.makedirs(base)
+        target = os.path.join(self.root, "elsewhere"); os.makedirs(target)
+        open(os.path.join(target, "x"), "w").close()
+        os.symlink(target, os.path.join(base, "a-link"))
+        open(os.path.join(base, "b-file"), "w").close()
+        d = os.path.join(base, "c-nested"); os.makedirs(os.path.join(d, "sub"))
+        open(os.path.join(d, "sub", "deep"), "w").close()
+        os.symlink(target, os.path.join(d, "lnk"))
+        rows = {r["kind"]: r for r in self._arch_rows()["rows"]}
+        self.assertEqual(set(rows), {"symlink", "file", "dir"})
+        for k in ("symlink", "file"):
+            self.assertEqual((rows[k]["files"], rows[k]["not_files"], rows[k]["listed"]), ({}, 0, False))
+        self.assertEqual((rows["dir"]["files"], rows["dir"]["not_files"], rows["dir"]["listed"]), ({}, 2, True))
+
+    def test_archive_file_mode_keys_are_exact(self):
+        self._reg_acme()
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        for n, m in (("a-report.md", 0o644), ("b-report.md", 0o600)):
+            p = os.path.join(d, n); open(p, "w").close(); os.chmod(p, m)
+        files = self._arch_rows()["rows"][0]["files"]
+        me = f"{CE._owner(os.getuid())} {CE._group(os.getgid())}"
+        self.assertEqual(files, {me + " 0o644": 1, me + " 0o600": 1})
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list anything")
+    def test_archive_unreadable_client_folder_is_not_listed(self):
+        self._reg_acme()
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        os.chmod(d, 0)
+        try:
+            r = self._arch_rows()["rows"][0]
+        finally:
+            os.chmod(d, 0o700)
+        self.assertEqual((r["kind"], r["files"], r["not_files"], r["listed"]), ("dir", {}, R.COULD_NOT_CHECK, False))
+
+    def _lstat_failing_for(self, name):
+        real = os.lstat
+        def lstat(p, *a, **k):
+            if os.path.basename(str(p)) == name:
+                raise PermissionError(p)
+            return real(p, *a, **k)
+        return mock.patch.object(CE.os, "lstat", lstat)
+
+    def test_archive_entry_that_cannot_be_examined_is_counted_never_dropped(self):
+        self._reg_acme()
+        base = os.path.join(self.root, self.ARCH)
+        os.makedirs(os.path.join(base, "acme-dental")); os.makedirs(os.path.join(base, "ghost-client"))
+        with self._lstat_failing_for("ghost-client"):
+            ra = self._arch_rows()
+        self.assertEqual((len(ra["rows"]), ra["rows_listed"], ra["rows_not_read"]), (1, True, 1))
+        self.assertIs(type(ra["rows_not_read"]), int)
+        self.assertNotIn("ghost-client", json.dumps(ra))
+        self.assertEqual(self._arch_rows()["rows_not_read"], 0)
+
+    def test_archive_file_that_cannot_be_examined_is_counted_in_its_row(self):
+        self._reg_acme()
+        d = os.path.join(self.root, self.ARCH, "acme-dental"); os.makedirs(d)
+        for n in ("a-report.md", "b-report.md"):
+            open(os.path.join(d, n), "w").close()
+        with self._lstat_failing_for("b-report.md"):
+            ra = self._arch_rows()
+        row = ra["rows"][0]
+        self.assertEqual((sum(row["files"].values()), row["not_files"], row["files_not_read"], row["listed"]), (1, 0, 1, True))
+        self.assertIs(type(row["files_not_read"]), int)
+        self.assertEqual(ra["rows_not_read"], 0)
+        self.assertNotIn("b-report.md", json.dumps(ra))
+
+    def test_archive_rows_not_read_is_zero_when_the_store_is_not_there(self):
+        ra = self._arch_rows()
+        self.assertEqual((ra["parent"], ra["rows_not_read"]), ("absent", 0))
+
+    def test_archive_rows_listed_only_for_a_real_listed_directory(self):
+        self.assertIs(self._arch_rows()["rows_listed"], False)              # absent
+        base = os.path.join(self.root, self.ARCH); os.makedirs(os.path.dirname(base), exist_ok=True)
+        open(base, "w").close()
+        self.assertIs(self._arch_rows()["rows_listed"], False)              # not a directory
+        os.remove(base); os.symlink(self.root, base)
+        self.assertIs(self._arch_rows()["rows_listed"], False)              # symlink
+        os.remove(base); os.makedirs(base)
+        self.assertIs(self._arch_rows()["rows_listed"], True)
+
+    def test_mount_cases_root_trailing_slash_and_unjudgeable_source(self):
+        def m(src):
+            return (0, json.dumps([{"Type": "bind", "Source": src}]), "")
+        for src, want in (("/", (1, 0)), ("/var/lib/hermes/report-archive/", (1, 0)), ("", (0, 1)),
+                          ("relative/path", (0, 1))):
+            with self.subTest(src=src):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": m(src)})
+                ra = self._arch_rows()
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
+
+    def test_d10_1_carries_figures_services_unchanged(self):
+        fs = {"ads-report": {"anthropic_key": "absent", "proxy": "unused"}}
+        self.outputs[("run-client-audit", "--probe-env")] = (0, json.dumps({"matches_declared": True, "figures_services": fs}), "")
+        self.assertEqual(self._item("D10.1")["data"]["probe"]["figures_services"], fs)
 
     # ---- D10.6 -------------------------------------------------------------------------
     BLOCK = ("mcp_servers:\n"
@@ -1362,6 +1571,21 @@ class TestD10(Base):
                  "        - ads_audit_run\n"
                  "        - ads_audit_status\n"
                  "        - ads_audit_list\n"
+                 "      resources: false\n"
+                 "      prompts: false\n"
+                 "  ads_report:\n"
+                 "    command: python3\n"
+                 "    args:\n"
+                 "      - /opt/cc-bin/hermes-app-mcp.py\n"
+                 "      - --app\n"
+                 "      - ads-report\n"
+                 "    env: {}\n"
+                 "    timeout: 360\n"
+                 "    tools:\n"
+                 "      include:\n"
+                 "        - ads_report_run\n"
+                 "        - ads_report_status\n"
+                 "        - ads_report_list\n"
                  "      resources: false\n"
                  "      prompts: false\n"
                  "onboarding:\n  seen:\n  - welcome\n  note: |\n    any shape: {not, parsed}\n")
@@ -2119,7 +2343,7 @@ class TestD10(Base):
 
     # ---- D10.7 -------------------------------------------------------------------------
     def test_d10_7_counts_without_slugs(self):
-        d = self._item("D10.7")["data"]
+        d = self._item("D10.7")["data"]["apps"]["ads-audit"]
         self.assertEqual(d["journal_counts"], {"refused/quota": 1, "ok/-": 1})
         self.assertNotIn("acme-dental", json.dumps(d))
 
@@ -2138,7 +2362,7 @@ class TestD10(Base):
             "Started hermes-app-broker@ads-audit.service.\n"
             "Traceback (most recent call last):\n"
             "\n"))
-        d = self._item("D10.7")["data"]
+        d = self._item("D10.7")["data"]["apps"]["ads-audit"]
         self.assertEqual(d["journal_counts"],
                          {"queued/-": 1, "dropped/bad_request": 1, "dropped/expired": 1, "dropped/duplicate": 1,
                           "failed/proxy": 1, "busy/busy": 1, "refused/bad_request": 1})
@@ -2152,8 +2376,8 @@ class TestD10(Base):
                              + BROKER + "request=x op=run client=acme-dental status=ok reason=some-free-text\n"
                              "something status=ok reason=quota but not a broker line\n")
         it = self._item("D10.7")
-        self.assertEqual(it["data"]["journal_counts"], {"?/quota": 1, "ok/?": 1})
-        self.assertEqual(it["data"]["other_lines"], 1)
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["journal_counts"], {"?/quota": 1, "ok/?": 1})
+        self.assertEqual(it["data"]["apps"]["ads-audit"]["other_lines"], 1)
         self.assertNotIn("weird-host-name", json.dumps(it)); self.assertNotIn("some-free-text", json.dumps(it))
 
     def test_d10_7_counts_credential_text_and_customer_id_lines_never_the_lines(self):
@@ -2161,11 +2385,12 @@ class TestD10(Base):
                              f"oops GOOGLE_ADS_REFRESH_TOKEN={TOKEN}\n"
                              "customer 123-456-7890 failed\ncustomer 1234567890 failed\ncustomer 9999999999 is not ours\n")
         it = self._item("D10.7")
-        self.assertEqual(it["data"]["broker_journal"], {"credential_text_lines": 1, "customer_id_lines": 2,
-                                                        "pattern_hits": 1, "known_secret_hits": 1})
-        self.assertEqual(it["data"]["runner_journal"], {"credential_text_lines": 0, "customer_id_lines": 0,
-                                                        "pattern_hits": 0, "known_secret_hits": 0})
-        self.assertEqual(it["data"]["other_lines"], 4)
+        a = it["data"]["apps"]["ads-audit"]
+        self.assertEqual(a["broker_journal"], {"credential_text_lines": 1, "customer_id_lines": 2,
+                                               "pattern_hits": 1, "known_secret_hits": 1})
+        self.assertEqual(a["runner_journal"], {"credential_text_lines": 0, "customer_id_lines": 0,
+                                               "pattern_hits": 0, "known_secret_hits": 0})
+        self.assertEqual(a["other_lines"], 4)
         out = json.dumps(it)
         for leak in (TOKEN, "1234567890", "123-456-7890", "9999999999", "oops"):
             self.assertNotIn(leak, out)
@@ -2181,7 +2406,7 @@ class TestD10(Base):
     def test_d10_7_runner_journal_customer_id_is_counted_under_the_runner_key(self):
         self._journal(runner="Collecting for customer 1234567890\nand again 123-456-7890\nAudit complete.\n")
         b = CE.collect(self.host(), self.KEY)
-        d = b["items"]["D10.7"]["data"]
+        d = b["items"]["D10.7"]["data"]["apps"]["ads-audit"]
         self.assertEqual(d["runner_journal"]["customer_id_lines"], 2)
         self.assertEqual(d["broker_journal"]["customer_id_lines"], 0)
         self.assertEqual(d["journal_counts"], {"refused/quota": 1, "ok/-": 1})      # broker-only, unchanged
@@ -2194,24 +2419,24 @@ class TestD10(Base):
         self._install_client_secret()
         self._journal(runner=f"debug: secret is {self.CLIENT_SECRET}\nheader {self.CLIENT_SECRET} {self.CLIENT_SECRET}\n")
         b = CE.collect(self.host(), self.KEY)
-        d = b["items"]["D10.7"]["data"]
+        d = b["items"]["D10.7"]["data"]["apps"]["ads-audit"]
         self.assertEqual(d["runner_journal"], {"credential_text_lines": 0,          # not Google-shaped text:
                                                "customer_id_lines": 0, "pattern_hits": 0,
                                                "known_secret_hits": 3})             # only the known value finds it
         self.assertEqual(d["broker_journal"]["known_secret_hits"], 0)
-        self.assertEqual(d["known_secrets_checked"], 2)                             # the token and the client secret
+        self.assertEqual(b["items"]["D10.7"]["data"]["known_secrets_checked"], 2)                             # the token and the client secret
         self.assertNotIn(self.CLIENT_SECRET, json.dumps(b))
 
     def test_d10_7_broker_journal_installed_secret_value_is_counted_under_the_broker_key(self):
         self._install_client_secret()
         self._journal(broker=f"Traceback: {self.CLIENT_SECRET}\n")
-        d = self._item("D10.7")["data"]
+        d = self._item("D10.7")["data"]["apps"]["ads-audit"]
         self.assertEqual((d["broker_journal"]["known_secret_hits"], d["runner_journal"]["known_secret_hits"]), (1, 0))
 
     def test_d10_7_counts_a_customer_id_in_the_runner_s_command_line_field(self):
         self._journal(runner=_e(MESSAGE="Audit complete.", _CMDLINE="python3 tool --customer 1234567890",
                                 __REALTIME_TIMESTAMP="1761234567890123"))
-        d = self._item("D10.7")["data"]
+        d = self._item("D10.7")["data"]["apps"]["ads-audit"]
         self.assertEqual(d["runner_journal"]["customer_id_lines"], 1)
         self.assertEqual(d["journal_read"]["runner"], {"entries": 1, "fields": 3, "undecodable_characters": 0})
         self.assertEqual(set(d["journal_read"]), {"broker", "runner"})
@@ -2220,14 +2445,15 @@ class TestD10(Base):
         host = self.host()
         CE.collect(host, self.KEY)
         calls = [c for c in host.calls if c[:2] == ["journalctl", "-u"] and "--all" in c]
-        self.assertEqual([c[3:] for c in calls], [["--since", "-30d", "-o", "json", "--all", "--no-pager", "-q"]] * 2)
+        self.assertEqual([c[3:] for c in calls], [["--since", "-30d", "-o", "json", "--all", "--no-pager", "-q"]] * 4)   # two jobs
 
     def test_d10_7_reads_both_units_over_the_same_window(self):
         host = self.host()
         CE.collect(host, self.KEY)
         calls = [c for c in host.calls if c[:2] == ["journalctl", "-u"]]
-        self.assertEqual([c[2] for c in calls], ["hermes-app-broker@ads-audit", "hermes-app-runner@ads-audit"])
-        self.assertEqual(calls[0][3:], calls[1][3:])
+        self.assertEqual([c[2] for c in calls], ["hermes-app-broker@ads-audit", "hermes-app-runner@ads-audit",
+                                                 "hermes-app-broker@ads-report", "hermes-app-runner@ads-report"])
+        self.assertEqual({tuple(c[3:]) for c in calls}, {tuple(calls[0][3:])})
         self.assertIn("-30d", calls[0])
 
     def test_d10_7_a_failing_journalctl_for_either_unit_is_could_not_check(self):
@@ -2240,8 +2466,33 @@ class TestD10(Base):
                 self.assertIn("journalctl exited 1", it["reason"])
 
     # ---- D10.8 -------------------------------------------------------------------------
+    def test_d10_8_could_not_check_when_a_description_file_does_not_load(self):
+        man = os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "registry", "apps", "ads-audit.json")
+        old_shape = {"app": "ads-audit", "user": "hermes-app-ads-audit", "command": "/usr/local/sbin/run-client-audit",
+                     "ops": {}, "tools": {}, "wait_seconds": {}}
+        for name, write in (("old shape", lambda: json.dump(old_shape, open(man, "w"))),
+                            ("not an object", lambda: open(man, "w").write("5"))):
+            shutil.copy(os.path.join(os.path.dirname(HERE), "registry", "apps", "ads-audit.json"), man)
+            write()
+            with self.subTest(name=name):
+                bundle = CE.collect(self.host(), self.KEY)
+                it = bundle["items"]["D10.8"]
+                self.assertEqual(it["status"], R.COULD_NOT_CHECK)
+                self.assertEqual(it["reason"], "CouldNotCheck: the jobs' description files could not all be loaded")
+                self.assertNotIn("ads-audit.json", json.dumps(bundle))
+
+    def test_d10_8_a_job_without_a_description_file_is_observed_and_its_results_are_not_judged(self):
+        # Missing, with the job still known to systemd: its results have no rule to be judged by.
+        os.unlink(os.path.join(self.root, CE.AGENT_DIR.lstrip("/"), "registry", "apps", "ads-audit.json"))
+        bundle = CE.collect(self.host(), self.KEY)
+        it = bundle["items"]["D10.8"]
+        self.assertEqual(it["status"], R.OBSERVED)
+        self.assertEqual(it["data"]["apps"]["ads-audit"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK,
+                                                           "declared": False, "installed": True})
+        self.assertNotIn("ads-audit.json", json.dumps(bundle))
+
     def test_d10_8_flags_out_of_whitelist_results(self):
-        d = self._item("D10.8")["data"]
+        d = self._item("D10.8")["data"]["apps"]["ads-audit"]
         self.assertEqual(d["out_of_whitelist"], 1)
         self.assertNotIn("acme-dental", json.dumps(d))
         self.assertEqual(d["results"], [
@@ -2265,7 +2516,7 @@ class TestD10(Base):
             self._result(obj, name)
         self._result({"status": ["ok"], "reason": {"a": 1}, "op": 7}, "k-types.json")
         self._result(dict(self.good, request_id=RID_C, steps=["rm -rf /"]), RID_C + ".json")
-        d = self._item("D10.8")["data"]
+        d = self._item("D10.8")["data"]["apps"]["ads-audit"]
         self.assertEqual(len(d["results"]), 14)
         self.assertEqual(d["out_of_whitelist"], 13)
         self.assertEqual(d["results"][:2], [                                # sorted: the two from setUp first
@@ -2291,21 +2542,21 @@ class TestD10(Base):
                 with open(os.path.join(self.res, RID_C + ".json"), "w") as f:
                     f.write(body)
                 with self.subTest(depth=depth, kind=nest[0]):
-                    d = CE.d10_8(host, {})
+                    d = CE.d10_8(host, {})["apps"]["ads-audit"]
                     self.assertEqual((len(d["results"]), d["out_of_whitelist"]), (3, 2))
                     self.assertIs(d["results"][2]["values_ok"], False)
 
     def test_d10_8_a_raise_from_the_whitelist_check_costs_one_row_never_the_item(self):
         real = CE.A.result_in_whitelist
 
-        def flaky(obj):
+        def flaky(obj, manifest):
             if obj["request_id"] == RID_A:
                 raise RecursionError("maximum recursion depth exceeded")
-            return real(obj)
+            return real(obj, manifest)
         with mock.patch.object(CE.A, "result_in_whitelist", side_effect=flaky):
             it = self._item("D10.8")
         self.assertEqual(it["status"], R.OBSERVED)
-        self.assertEqual(it["data"], {"out_of_whitelist": 2, "results": [
+        self.assertEqual(it["data"]["apps"]["ads-audit"], {**BOTH, "out_of_whitelist": 2, "results": [
             {"keys_ok": False, "values_ok": False},
             {"op": "run", "status": "ok", "reason": "?", "keys_ok": True, "values_ok": False}]})
 
@@ -2317,7 +2568,7 @@ class TestD10(Base):
 
     def test_d10_8_a_result_under_another_file_name_is_out_of_whitelist(self):
         self._result(self.good, RID_C + ".json")                           # a copy: its id is RID_A
-        d = self._item("D10.8")["data"]
+        d = self._item("D10.8")["data"]["apps"]["ads-audit"]
         self.assertEqual(d["out_of_whitelist"], 2)
         self.assertEqual(d["results"][2], {"op": "run", "status": "ok", "reason": "-", "keys_ok": True, "values_ok": False})
 
@@ -2326,19 +2577,352 @@ class TestD10(Base):
             os.remove(os.path.join(self.res, n))
         self._result(CE.A.refused_result(RID_A, None, None, "bad_request"))
         self._result(CE.A.refused_result(RID_B, "list", "acme-dental", "interrupted", status="failed"))
-        d = self._item("D10.8")["data"]
-        self.assertEqual(d, {"out_of_whitelist": 0, "results": [
+        d = self._item("D10.8")["data"]["apps"]["ads-audit"]
+        self.assertEqual(d, {**BOTH, "out_of_whitelist": 0, "results": [
             {"op": "-", "status": "refused", "reason": "bad_request", "keys_ok": True, "values_ok": True},
             {"op": "list", "status": "failed", "reason": "interrupted", "keys_ok": True, "values_ok": True}]})
 
-    def test_d10_8_missing_results_dir_is_could_not_check(self):
+    def test_d10_8_a_missing_results_dir_is_could_not_check_for_that_job_alone(self):
+        # For that job alone: the item stays observed and the other job is judged as usual.
         import shutil
         shutil.rmtree(self.res)
-        self.assertEqual(self._item("D10.8")["status"], R.COULD_NOT_CHECK)
+        self._result(CE.A.refused_result(RID_A, None, None, "bad_request"), app="ads-report")
+        it = self._item("D10.8")
+        self.assertEqual(it["status"], R.OBSERVED)
+        self.assertEqual(it["data"]["apps"]["ads-audit"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK, **BOTH})
+        self.assertEqual(it["data"]["apps"]["ads-report"], {**BOTH, "out_of_whitelist": 0, "results": [
+            {"op": "-", "status": "refused", "reason": "bad_request", "keys_ok": True, "values_ok": True}]})
+
+    def test_a_declared_job_that_is_not_installed_leaves_the_four_job_items_observed(self):
+        """Between the pull and the job's installation: no account, no units, no spool, no journal."""
+        self._units()
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-audit.service loaded active running x\n"
+                                                        "hermes-app-runner@ads-audit.path loaded active waiting x\n", "")
+        # as systemd answers for an instance of an installed template that was never started: `show` exits 0
+        # with every property (the template's values) and ActiveState=inactive, LoadState=loaded; list-units does
+        # not list it; `is-active` says `inactive` and exits 3
+        shown = self.outputs[("systemctl", "show", "hermes-app-broker@ads-report")][1]
+        self.outputs[("systemctl", "show", "hermes-app-broker@ads-report")] = (
+            0, shown.replace("ActiveState=active", "ActiveState=inactive") + "LoadState=loaded\n", "")
+        self.outputs[("systemctl", "show", "hermes-app-runner@ads-report")] = (0, "Environment=\nLoadState=loaded\n", "")
+        self.outputs[("systemctl", "is-active", "hermes-app-runner@ads-report.path")] = (3, "inactive\n", "")
+        for cmd in (("id", "-nG"), ("sudo", "-l", "-U")):          # the audit's account answers, the other does not exist
+            self.outputs[(*cmd, "hermes-app-ads-audit")] = self.outputs.pop(cmd)
+            self.outputs[(*cmd, "hermes-app-ads-report")] = (1, "", "unknown user")
+        shutil.rmtree(os.path.dirname(self._results_dir("ads-report")))
+        for unit in ("broker", "runner"):                          # a unit that never logged: nothing, exit 0
+            self.outputs[_oldest_key("-u", f"hermes-app-{unit}@ads-report")] = (0, "", "")
+        self._containers({})
+        CN = R.COULD_NOT_CHECK
+        with self._resolver():                                     # resolves the audit's account only
+            b = CE.collect(self.host(), self.KEY)["items"]
+        self.assertEqual({i: b[i]["status"] for i in ("D10.3", "D10.4", "D10.7", "D10.8")},
+                         dict.fromkeys(("D10.3", "D10.4", "D10.7", "D10.8"), R.OBSERVED))
+        d3 = b["D10.3"]["data"]
+        self.assertEqual((d3["declared_apps"], d3["installed_apps"]), (list(APPS), ["ads-audit"]))
+        report = d3["apps"]["ads-report"]
+        # installed: false is said in the entry itself, so `inactive`, no groups and no sudo answer are not
+        # read as a fault of an installed job
+        self.assertEqual((report["declared"], report["installed"]), (True, False))
+        self.assertEqual({k: v for k, v in report.items() if k != "broker_unit"}, {
+            "runner_unit": {"Environment": [], "EnvironmentFiles": []},
+            "drop_in_paths": {u.replace("ads-audit", "ads-report"): [] for u in self.INSTANCES},
+            "broker_user_groups": CN, "sudo_rules": {"rc": 1, "not_allowed": CN, "command_lines": CN},
+            "runner_path_active": "inactive", "declared": True, "installed": False})
+        self.assertEqual((report["broker_unit"]["ActiveState"], report["broker_unit"]["User"], report["broker_unit"]["NoNewPrivileges"]),
+                         ("inactive", "hermes-app-ads-report", "yes"))
+        self.assertNotIn(CN, report["broker_unit"].values())
+        self.assertEqual((d3["on_disk_apps"], d3["units_not_counted"]), (["ads-audit"], 0))
+        self.assertEqual((d3["apps"]["ads-audit"]["declared"], d3["apps"]["ads-audit"]["installed"]), (True, True))
+        for iid in ("D10.4", "D10.7", "D10.8"):
+            self.assertEqual((b[iid]["data"]["apps"]["ads-report"]["declared"], b[iid]["data"]["apps"]["ads-report"]["installed"]),
+                             (True, False), iid)
+        self.assertEqual(d3["apps"]["ads-audit"]["broker_unit"]["User"], "hermes-app-ads-audit")
+        self.assertEqual(d3["apps"]["ads-audit"]["broker_user_groups"], ["hermes-app-ads-audit", "hermes"])
+        d4 = b["D10.4"]["data"]
+        # Never an empty list: what is missing is listed, or (a directory there whose account is not) could-not-check.
+        self.assertTrue(d4["apps"]["ads-report"]["layout_problems"] == CN or
+                        any("missing" in p for p in d4["apps"]["ads-report"]["layout_problems"]))
+        self.assertIsInstance(d4["apps"]["ads-audit"]["layout_problems"], list)
+        self.assertEqual(d4["containers"], 0)
+        zero = dict.fromkeys(CE.LEAK_COUNTS, 0)
+        read = {u: dict.fromkeys(CE.READ_COUNTS, 0) for u in ("broker", "runner")}
+        self.assertEqual(b["D10.7"]["data"]["apps"]["ads-report"], {
+            "journal_counts": {}, "note_counts": {}, "other_lines": 0, "broker_journal": zero, "runner_journal": zero,
+            "journal_read": read, "oldest_entry_read": {"broker": None, "runner": None}, "first_entry": None,
+            "installed_since_last_pass": None, "declared": True, "installed": False})
+        self.assertEqual(b["D10.7"]["data"]["apps"]["ads-audit"]["journal_counts"], {"refused/quota": 1, "ok/-": 1})
+        self.assertEqual(b["D10.8"]["data"]["apps"]["ads-report"], {"results": CN, "out_of_whitelist": CN,
+                                                                    "declared": True, "installed": False})
+        self.assertEqual(b["D10.8"]["data"]["apps"]["ads-audit"]["out_of_whitelist"], 1)
 
     def test_d10_items_survive_the_redactor_and_the_secret_check(self):
         out = json.dumps(CE.collect(self.host(), self.KEY))
         self.assertNotIn("acme-dental", out); self.assertNotIn("1234567890", out)
+
+
+class TestEveryJob(JobBox):
+    APPS = ["ads-audit", "ads-report"]
+
+    def setUp(self):
+        super().setUp()
+        self.outputs[("systemctl", "show")] = (0, "", "")      # every unit answers, with no property
+
+    def test_the_jobs_are_read_from_the_description_files_and_from_systemd(self):
+        d = self._item("D10.3")["data"]
+        self.assertEqual((d["declared_apps"], d["installed_apps"], sorted(d["apps"])), (self.APPS, self.APPS, self.APPS))
+        for app in self.APPS:
+            self.assertEqual(set(d["apps"][app]), {"broker_unit", "runner_unit", "drop_in_paths", "broker_user_groups",
+                                                   "sudo_rules", "runner_path_active", "declared", "installed"})
+        self.assertEqual(sorted(d["installed_equal_repo"]), sorted(CE.APP_UNITS))
+
+    def test_a_job_installed_without_a_description_file_and_the_reverse_are_both_shown(self):
+        os.unlink(os.path.join(self.root, "opt/hermes-agent/registry/apps/ads-report.json"))
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-audit.service loaded active running x\n"
+                                                        "hermes-app-broker@ghost.service loaded active running x\n", "")
+        d = self._item("D10.3")["data"]
+        self.assertEqual((d["declared_apps"], d["installed_apps"]), (["ads-audit"], ["ads-audit", "ghost"]))
+        self.assertEqual(sorted(d["apps"]), ["ads-audit", "ads-report", "ghost"])   # the undeclared one is still measured; so is
+        self.assertEqual(d["apps"]["ads-report"]["declared"], False)                # the one that is only a spool directory
+
+    def test_a_description_file_that_does_not_load_makes_the_job_items_could_not_check(self):
+        open(os.path.join(self.root, "opt/hermes-agent/registry/apps/ads-report.json"), "w").write("{}")
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            self.assertEqual(self._item(iid)["status"], R.COULD_NOT_CHECK, iid)
+
+    def test_a_unit_name_that_is_not_a_job_s_is_not_an_app(self):
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@Bad..Name.service loaded active running x\n"
+                                                        "hermes-app-runner@ads-audit.path loaded active waiting x\n", "")
+        self.assertEqual(self._item("D10.3")["data"]["installed_apps"], ["ads-audit"])
+
+    def test_each_job_s_journal_is_searched_and_counted_on_its_own(self):
+        self._journal(app="ads-report", broker="hermes-app-broker[ads-report]: request=1 op=run client=x status=ok reason=-\n",
+                      runner=_e(MESSAGE="done", _CMDLINE="tool --customer 1234567890"))
+        d = self._item("D10.7")["data"]
+        self.assertEqual(sorted(d["apps"]), self.APPS)
+        self.assertEqual(d["apps"]["ads-report"]["journal_counts"], {"ok/-": 1})
+        self.assertEqual(d["apps"]["ads-report"]["runner_journal"]["customer_id_lines"], 1)
+        self.assertEqual(d["apps"]["ads-audit"]["runner_journal"]["customer_id_lines"], 0)
+        self.assertNotIn("1234567890", json.dumps(d))
+
+    def test_a_broker_line_of_another_job_in_a_job_s_journal_is_not_its_count(self):
+        self._journal(app="ads-report", broker="hermes-app-broker[ads-audit]: request=1 op=run client=x status=ok reason=-\n")
+        a = self._item("D10.7")["data"]["apps"]["ads-report"]
+        self.assertEqual((a["journal_counts"], a["other_lines"]), ({}, 1))
+
+    def test_a_job_whose_first_entry_is_after_the_last_pass_is_marked_installed_since(self):
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-report")] = (0, _entry(1760500000), "")
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (0, _entry(1759000000), "")
+        with mock.patch.object(CE, "LAST_PASS_COLLECTED_AT", "2025-10-10T00:00:00Z"):
+            d = self._item("D10.7")["data"]["apps"]
+        self.assertEqual((d["ads-report"]["installed_since_last_pass"], d["ads-audit"]["installed_since_last_pass"]), (True, False))
+        self.assertRegex(d["ads-report"]["first_entry"], r"^2025-10-1\dT")
+        self.assertIsNone(self._item("D10.7")["data"]["apps"]["ads-report"]["installed_since_last_pass"])   # no flag given
+
+    def test_each_job_s_results_are_judged_by_its_own_rule(self):
+        report_ok = {"request_id": "0" * 8 + "-0000-4000-8000-" + "0" * 12, "op": "run", "client": "acme-dental",
+                     "status": "ok", "reason": None, "exit_code": 0, "ts": "2026-10-01_12-00-00",
+                     "steps": [{"name": "store", "rc": 0, "seconds": 0.1}],
+                     "vault_path": "/var/lib/hermes/report-archive/acme-dental/2026-10-01_12-00-00-report.md"}
+        self._result(report_ok, app="ads-report")
+        self._result(report_ok, app="ads-audit")                      # the same file in the audit's results is out of ITS rule
+        d = self._item("D10.8")["data"]["apps"]
+        self.assertEqual(d["ads-report"]["out_of_whitelist"], 0)
+        self.assertEqual(d["ads-audit"]["out_of_whitelist"], 2)       # the report's result, and the fixture's one bad result
+
+    def test_the_layout_is_checked_per_job(self):
+        with self._audit_resolver():
+            d = self._item("D10.4")["data"]
+        self.assertEqual(sorted(d["apps"]), self.APPS)
+        self.assertIn("containers_mounting_app_state", d)
+        audit = d["apps"]["ads-audit"]
+        self.assertTrue(any("app-state" in p for p in audit["layout_problems"]))        # nothing built here
+        self.assertEqual({k: v for k, v in audit.items() if k != "layout_problems"},
+                         {"layout_reason": None, "declared": True, "installed": True})
+
+    def test_the_journal_reach_and_the_restart_items_name_every_job(self):
+        b = CE.collect(self.host(), self.KEY)["items"]
+        self.assertEqual(sorted(b["D2.4"]["data"]["oldest_entry"]["apps"]), self.APPS)
+        self.assertEqual(set(b["D2.4"]["data"]["oldest_entry"]["apps"]["ads-report"]), {"broker", "runner"})
+        for key in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+            for app in self.APPS:
+                self.assertIn(f"hermes-app-broker@{app}", b["D4.6"]["data"][key], key)
+
+    # ---- beyond the brief: the design points it states and its tests do not pin
+    def test_a_job_s_layout_that_cannot_be_judged_costs_that_job_alone(self):
+        with self._audit_resolver():                                            # the audit's account resolves, the report's does not
+            it = self._item("D10.4")
+        self.assertEqual(it["status"], R.OBSERVED)
+        self.assertIsInstance(it["data"]["apps"]["ads-audit"]["layout_problems"], list)
+        self.assertEqual(it["data"]["apps"]["ads-report"], {"layout_problems": R.COULD_NOT_CHECK, "layout_reason": "no-account", **BOTH})
+        self.assertEqual((it["data"]["containers"], it["data"]["containers_not_inspected"]), (0, 0))
+        with self._audit_resolver(**{"hermes-app-ads-report": 991}):            # control: with its account, it is judged
+            self.assertIsInstance(self._item("D10.4")["data"]["apps"]["ads-report"]["layout_problems"], list)
+
+    def test_a_job_without_a_results_directory_costs_that_job_alone(self):
+        shutil.rmtree(self._results_dir("ads-report"))
+        it = self._item("D10.8")
+        self.assertEqual(it["status"], R.OBSERVED)
+        self.assertEqual(it["data"]["apps"]["ads-report"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK, **BOTH})
+        self.assertEqual((len(it["data"]["apps"]["ads-audit"]["results"]), it["data"]["apps"]["ads-audit"]["out_of_whitelist"]), (2, 1))
+        os.makedirs(self._results_dir("ads-report"))                            # control: an empty directory is judged
+        self.assertEqual(self._item("D10.8")["data"]["apps"]["ads-report"], {"results": [], "out_of_whitelist": 0, **BOTH})
+
+    def test_an_installed_list_line_that_is_not_a_loaded_unit_of_a_job_is_not_installed(self):
+        self.outputs[("systemctl", "list-units")] = (0, "\n● hermes-app-broker@ads-report.service not-found inactive dead x\n"
+                                                        "0 loaded units listed.\nhermes-app-broker@ads-audit.socket loaded x\n"
+                                                        "  hermes-app-runner@ads-audit.path loaded active waiting x\n", "")
+        d = self._item("D10.3")["data"]
+        self.assertEqual((d["installed_apps"], d["units_not_counted"]), (["ads-audit"], 3))
+
+    def test_a_job_systemd_knows_without_a_description_file_is_measured_and_its_results_are_not_judged(self):
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ghost.service loaded active running x\n", "")
+        self._journal(app="ghost", broker="hermes-app-broker[ghost]: request=1 op=run client=x status=ok reason=-\n", runner="")
+        b = CE.collect(self.host(), self.KEY)["items"]
+        self.assertEqual(b["D10.7"]["data"]["apps"]["ghost"]["journal_counts"], {"ok/-": 1})
+        self.assertEqual(b["D10.8"]["data"]["apps"]["ghost"], {"results": R.COULD_NOT_CHECK, "out_of_whitelist": R.COULD_NOT_CHECK,
+                                                               "declared": False, "installed": True})
+        self.assertEqual(b["D10.8"]["data"]["apps"]["ads-audit"]["out_of_whitelist"], 1)     # the declared ones are still judged
+        self.assertIn("ghost", b["D10.4"]["data"]["apps"])
+        self.assertNotIn("ghost", b["D2.4"]["data"]["oldest_entry"]["apps"])                 # D2.4 and D4.6: declared jobs only
+        self.assertEqual(b["D4.6"]["data"]["apps_declared"], self.APPS)
+
+    def test_description_files_that_do_not_load_cost_the_reach_and_restart_items_their_per_job_part_only(self):
+        self.outputs[_oldest_key()] = (0, _entry(int(time.time()) - 86400 * 3), "")
+        self._w(CE.APPS_DIR + "/ads-report.json", "{}")
+        b = CE.collect(self.host(), self.KEY)["items"]
+        self.assertEqual((b["D2.4"]["status"], b["D4.6"]["status"]), (R.OBSERVED, R.OBSERVED))
+        d24, d46 = b["D2.4"]["data"], b["D4.6"]["data"]
+        self.assertEqual((d24["oldest_entry"]["apps"], d24["reach_days"]), (R.COULD_NOT_CHECK, 3))
+        self.assertEqual(d46["apps_declared"], R.COULD_NOT_CHECK)
+        # the brokers are then those systemd lists
+        self.assertEqual(set(d46["started_at"]), set(CE.SERVICE_FILES) | set(CE.OTHER_STARTS) | {f"hermes-app-broker@{a}" for a in APPS})
+        self.assertEqual(d46["apps_installed"], self.APPS)
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            self.assertEqual(b[iid]["reason"], "CouldNotCheck: the jobs' description files could not all be loaded", iid)
+
+    def test_a_job_that_never_logged_is_installed_since_and_an_unread_first_entry_is_could_not_check(self):
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-report")] = (0, "", "")
+        self.outputs[_oldest_key("-u", "hermes-app-broker@ads-audit")] = (1, "", "Failed")
+        with mock.patch.object(CE, "LAST_PASS_COLLECTED_AT", "2025-10-10T00:00:00Z"):
+            d = self._item("D10.7")["data"]["apps"]
+        self.assertEqual((d["ads-report"]["first_entry"], d["ads-report"]["installed_since_last_pass"]), (None, True))
+        self.assertEqual((d["ads-audit"]["first_entry"], d["ads-audit"]["installed_since_last_pass"]),
+                         (R.COULD_NOT_CHECK, R.COULD_NOT_CHECK))
+
+    def test_systemd_not_answering_for_the_jobs_is_could_not_check_never_an_empty_list(self):
+        self.outputs[("systemctl", "list-units")] = (1, "", "Failed to connect to bus")
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            self.assertEqual(self._item(iid)["status"], R.COULD_NOT_CHECK, iid)
+
+    # ---- fix round 1: a job is declared, installed or on disk, and each entry says which
+    def _audit_resolver(self, **more):
+        names = {"root": 0, "hermes": 10000, "hermes-app-ads-audit": 990, **more}
+        return mock.patch.object(CE.HL, "system_resolver", return_value=CE.HL.Resolver(names, names))
+
+    def test_a_unit_systemd_only_remembers_the_name_of_is_not_installed_and_is_counted(self):
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-audit.service loaded active running x\n"
+                                                        "hermes-app-broker@ads-report.service not-found inactive dead x\n"
+                                                        "hermes-app-runner@ads-report.path masked inactive dead x\n"
+                                                        "hermes-app-broker@Bad..Name.service loaded active running x\n"
+                                                        "hermes-app-broker@ads-audit.socket loaded active running x\n"
+                                                        "hermes-app-runner@ads-audit.path\n"
+                                                        "\n", "")
+        d = self._item("D10.3")["data"]
+        self.assertEqual((d["installed_apps"], d["units_not_counted"]), (["ads-audit"], 5))
+        self.assertEqual((d["apps"]["ads-report"]["declared"], d["apps"]["ads-report"]["installed"]), (True, False))
+        self.assertNotIn("Bad..Name", json.dumps(d))
+        self.setUp(); self.outputs[("systemctl", "show")] = (0, "", "")
+        self.assertEqual(self._item("D10.3")["data"]["units_not_counted"], 0)        # the healthy box
+
+    def test_a_job_that_exists_only_as_a_spool_directory_is_listed_and_measured(self):
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/spool/apps/stopped/results"))
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/spool/apps/Bad..Name"))
+        self._w("/var/lib/hermes/app-state/a-file", "x")
+        os.symlink(self._results_dir("ads-audit"), os.path.join(self.root, "var/lib/hermes/app-state/linked"))
+        os.makedirs(os.path.join(self.root, "var/lib/hermes/app-state/parked"))
+        for app in ("stopped", "parked"):
+            self._journal(app=app, broker="", runner="")
+        b = CE.collect(self.host(), self.KEY)["items"]
+        d = b["D10.3"]["data"]
+        self.assertEqual((d["on_disk_apps"], d["on_disk_not_counted"]), (["ads-audit", "ads-report", "parked", "stopped"], 3))
+        self.assertEqual((d["declared_apps"], d["installed_apps"]), (self.APPS, self.APPS))
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            apps = b[iid]["data"]["apps"]
+            self.assertEqual(sorted(apps), ["ads-audit", "ads-report", "parked", "stopped"], iid)
+            self.assertEqual((apps["stopped"]["declared"], apps["stopped"]["installed"]), (False, False), iid)
+        self.assertEqual(b["D10.8"]["data"]["apps"]["stopped"]["results"], R.COULD_NOT_CHECK)   # no rule to judge by
+        self.assertNotIn("Bad..Name", json.dumps(b)); self.assertNotIn("a-file", json.dumps(b))
+
+    def test_the_restart_item_covers_an_undeclared_running_broker_and_says_when_systemd_did_not_answer(self):
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-audit.service loaded active running x\n"
+                                                        "hermes-app-broker@ghost.service loaded active running x\n", "")
+        d = CE.collect(self.host(), self.KEY)["items"]["D4.6"]["data"]
+        self.assertEqual((d["apps_declared"], d["apps_installed"]), (self.APPS, ["ads-audit", "ghost"]))
+        want = {f"hermes-app-broker@{a}" for a in (*self.APPS, "ghost")}
+        for key in ("started_at", "started_after_last_pass", "files_newer_than_start", "files_checked"):
+            self.assertEqual({k for k in d[key] if k.startswith("hermes-app-broker@")}, want, key)
+        self.outputs[("systemctl", "list-units")] = (1, "", "Failed to connect to bus")
+        d = CE.collect(self.host(), self.KEY)["items"]["D4.6"]["data"]
+        self.assertEqual((d["apps_declared"], d["apps_installed"]), (self.APPS, R.COULD_NOT_CHECK))
+        self.assertEqual({k for k in d["started_at"] if k.startswith("hermes-app-broker@")},
+                         {f"hermes-app-broker@{a}" for a in self.APPS})
+
+    def test_every_per_job_entry_says_whether_the_job_is_declared_and_installed(self):
+        os.unlink(os.path.join(self.root, "opt/hermes-agent/registry/apps/ads-report.json"))
+        shutil.rmtree(os.path.dirname(self._results_dir("ads-report")))
+        self._journal(app="ghost", broker="", runner="")
+        self.outputs[("systemctl", "list-units")] = (0, "hermes-app-broker@ads-report.service loaded active running x\n"
+                                                        "hermes-app-broker@ghost.service loaded active running x\n", "")
+        b = CE.collect(self.host(), self.KEY)["items"]
+        for iid in ("D10.3", "D10.4", "D10.7", "D10.8"):
+            self.assertEqual({a: (e["declared"], e["installed"]) for a, e in b[iid]["data"]["apps"].items()},
+                             {"ads-audit": (True, False), "ads-report": (False, True), "ghost": (False, True)}, iid)
+
+    def test_a_layout_that_cannot_be_checked_says_which_kind_of_refusal(self):
+        CN = R.COULD_NOT_CHECK
+        with self._audit_resolver():                                    # the report's own account does not resolve
+            d = self._item("D10.4")["data"]["apps"]
+        self.assertEqual((d["ads-report"]["layout_problems"], d["ads-report"]["layout_reason"]), (CN, "no-account"))
+        self.assertIsInstance(d["ads-audit"]["layout_problems"], list)
+        self.assertIsNone(d["ads-audit"]["layout_reason"])
+        names = {"root": 0, "hermes-app-ads-audit": 990, "hermes-app-ads-report": 991}      # the shared group does not
+        with mock.patch.object(CE.HL, "system_resolver", return_value=CE.HL.Resolver(names, names)):
+            d = self._item("D10.4")["data"]["apps"]
+        self.assertEqual({a: (e["layout_problems"], e["layout_reason"]) for a, e in d.items()},
+                         {a: (CN, "host-layout") for a in self.APPS})
+        with mock.patch.object(CE.HL, "system_resolver", side_effect=CE.HL.LayoutError("group 'hermes' is gid 5")):
+            it = self._item("D10.4")
+        self.assertEqual({e["layout_reason"] for e in it["data"]["apps"].values()}, {"host-layout"})
+        self.assertNotIn("gid 5", json.dumps(it))
+        with self._audit_resolver(**{"hermes-app-ads-report": 991}), \
+                mock.patch.object(CE.HL, "check_app", side_effect=CE.HL.LayoutError("something else")):
+            it = self._item("D10.4")
+        self.assertEqual({e["layout_reason"] for e in it["data"]["apps"].values()}, {"other"})
+        self.assertNotIn("something else", json.dumps(it))
+
+    def test_the_job_sets_are_computed_once_per_collection(self):
+        host = self.host()
+        CE.collect(host, self.KEY)
+        self.assertEqual(len([c for c in host.calls if c[:2] == ["systemctl", "list-units"]]), 1)
+        with mock.patch.object(CE.A, "load_manifests", wraps=CE.A.load_manifests) as lm:
+            CE.collect(self.host(), self.KEY)
+        self.assertEqual(lm.call_count, 1)
+
+    def test_a_known_secret_in_the_second_job_s_journal_is_counted_under_that_job(self):
+        self._journal(app="ads-report", runner=f"debug: token is {TOKEN}\n")
+        b = CE.collect(self.host(), self.KEY)
+        d = b["items"]["D10.7"]["data"]["apps"]
+        self.assertEqual((d["ads-report"]["runner_journal"]["known_secret_hits"], d["ads-report"]["broker_journal"]["known_secret_hits"]), (1, 0))
+        self.assertEqual((d["ads-audit"]["runner_journal"]["known_secret_hits"], d["ads-audit"]["broker_journal"]["known_secret_hits"]), (0, 0))
+        self.assertNotIn(TOKEN, json.dumps(b))
+
+    def test_no_constant_names_a_job(self):
+        src = open(os.path.join(HERE, "collect-review-evidence.py")).read()
+        code = "\n".join(l.split("#", 1)[0] for l in src.splitlines() if not l.lstrip().startswith(("#", '"""')))
+        self.assertNotRegex(code, r'"ads-(audit|report)"')
+        for name in ("APP", "APP_USER", "APP_RESULTS", "JOURNAL_UNITS", "_BROKER_LINE"):
+            self.assertFalse(hasattr(CE, name), name)
 
 
 class TestRunReal(unittest.TestCase):
@@ -3507,7 +4091,7 @@ class TestJournalReach(Base):
                 with patch, mock.patch.object(os, "geteuid", return_value=euid):
                     if ok:
                         self.assertEqual(CE.d2_3(host, {"secrets": []})["scanned_characters"], 24)
-                        self.assertEqual(CE.d10_7(host, CE.context(host, self.KEY))["oldest_entry_read"]["runner"], "2025-10-09T08:53:20Z")
+                        self.assertEqual(CE.d10_7(host, CE.context(host, self.KEY))["apps"]["ads-audit"]["oldest_entry_read"]["runner"], "2025-10-09T08:53:20Z")
                     else:
                         with self.assertRaises(CE.CouldNotCheck) as c:
                             CE.d2_3(host, {"secrets": []})
@@ -3587,10 +4171,13 @@ class TestJournalReach(Base):
         self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, "", "")
         self.outputs[("journalctl", "-u")] = (0, "", "")
         host = self.host()
-        d = CE.d10_7(host, CE.context(host, self.KEY))
+        d = CE.d10_7(host, CE.context(host, self.KEY))["apps"]["ads-audit"]
         self.assertEqual(d["oldest_entry_read"], {"broker": "2025-10-09T08:53:20Z", "runner": None})
         oldest = [c for c in host.calls if c[1] == "-q"]
-        self.assertEqual(len(oldest), 2)
+        first = [c for c in oldest if "--since" not in c]       # each job's first entry: the whole journal, its broker
+        self.assertEqual([c[-2:] for c in first], [["-u", f"hermes-app-broker@{a}"] for a in APPS])
+        oldest = [c for c in oldest if c not in first]
+        self.assertEqual(len(oldest), 4)                        # two units for each of the two jobs
         self.assertTrue(all(c[-2:] == ["--since", "-30d"] for c in oldest), oldest)
 
     def test_d10_7_an_oldest_entry_that_cannot_be_read_is_could_not_check_for_that_unit_alone(self):
@@ -3599,14 +4186,14 @@ class TestJournalReach(Base):
         self.outputs[_oldest_key("-u", "hermes-app-runner@ads-audit")] = (0, _entry(1760000000), "")
         self.outputs[("journalctl", "-u")] = (0, "", "")
         host = self.host()
-        d = CE.d10_7(host, CE.context(host, self.KEY))
+        d = CE.d10_7(host, CE.context(host, self.KEY))["apps"]["ads-audit"]
         self.assertEqual(d["oldest_entry_read"], {"broker": CN, "runner": "2025-10-09T08:53:20Z"})
         def run(argv, timeout=60):
             if argv[1] == "-q":
                 raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
             return (0, "", "")
         host = CE.Host(self.root, run)
-        d = CE.d10_7(host, CE.context(host, self.KEY))
+        d = CE.d10_7(host, CE.context(host, self.KEY))["apps"]["ads-audit"]
         self.assertEqual(d["oldest_entry_read"], {"broker": CN, "runner": CN})
 
 
@@ -3961,8 +4548,8 @@ class TestD24Journal(Base):
         self.assertEqual(sorted(d), ["config_files", "drop_in", "oldest_entry", "reach_days", "service", "settings", "usage"])
         self.assertEqual(d["reach_days"], 31)
         self.assertRegex(d["oldest_entry"]["journal"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
-        self.assertRegex(d["oldest_entry"]["broker"], r"Z$")
-        self.assertIsNone(d["oldest_entry"]["runner"])
+        self.assertRegex(d["oldest_entry"]["apps"]["ads-audit"]["broker"], r"Z$")
+        self.assertIsNone(d["oldest_entry"]["apps"]["ads-audit"]["runner"])
         self.assertEqual(d["settings"]["MaxRetentionSec"], {"value": "35day", "file": OURS, "number": 3024000})
         self.assertEqual(d["settings"]["SystemMaxFiles"], {"value": "500", "file": OURS, "number": 500})
         self.assertEqual(d["settings"]["SystemMaxUse"], {"value": "1G", "file": MAIN, "number": 1 << 30})
@@ -3985,7 +4572,7 @@ class TestD24Journal(Base):
 
     def test_the_names_later_tasks_read(self):
         self.assertEqual(CE.JOURNALD_DROP_IN, OURS)
-        self.assertEqual(CE.JOURNAL_UNITS, {"broker": "hermes-app-broker@ads-audit", "runner": "hermes-app-runner@ads-audit"})
+        self.assertEqual(CE._journal_units("ads-audit"), {"broker": "hermes-app-broker@ads-audit", "runner": "hermes-app-runner@ads-audit"})
         self.assertIs(CE.PROBES["D2.4"], CE.d2_4)
         self.assertEqual(list(CE.PROBES)[list(CE.PROBES).index("D2.3") + 1], "D2.4")
 
@@ -4323,7 +4910,7 @@ class TestD24Journal(Base):
                 d = CE.d2_4(self._raising("systemd-analyze", exc), {})
                 self.assertEqual((d["settings"], d["config_files"], d["reach_days"]), (CN, CN, 31))
                 d = CE.d2_4(self._raising("journalctl", exc), {})
-                self.assertEqual((d["oldest_entry"], d["reach_days"]), ({"journal": CN, "broker": CN, "runner": CN}, CN))
+                self.assertEqual((d["oldest_entry"], d["reach_days"]), ({"journal": CN, "apps": {a: {"broker": CN, "runner": CN} for a in APPS}}, CN))
                 self.assertEqual(d["config_files"], [MAIN, OURS, SYSLOG])
                 d = CE.d2_4(self._raising("systemctl", exc), {})
                 self.assertEqual(d["service"], {"active": CN, "started_at": CN, "config_changed_after_start": CN})
@@ -4358,7 +4945,7 @@ class TestD24Journal(Base):
             host = self.host()
             host._real = True
             d = CE.d2_4(host, {})
-            self.assertEqual(d["oldest_entry"], {"journal": CN, "broker": CN, "runner": CN})
+            self.assertEqual(d["oldest_entry"], {"journal": CN, "apps": {a: {"broker": CN, "runner": CN} for a in APPS}})
             self.assertEqual((d["reach_days"], d["usage"]["newest_entry_on_disk"], d["usage"]["on_disk_age_seconds"]), (CN, CN, CN))
             self.assertEqual(d["usage"]["files"], 4)                                  # what is not a journal read is read
             d = CE.d2_4(self.host(), {})
@@ -4530,7 +5117,7 @@ class TestD24Journal(Base):
         real = CE._entry_time
         with mock.patch.object(CE, "_entry_time", lambda host, argv: seen.append(argv[1]) or real(host, argv)):
             CE.d2_4(self.host(), {})
-        self.assertEqual(seen, ["-q", "-q", "-q", "-D"])
+        self.assertEqual(seen, ["-q"] * 5 + ["-D"])            # the journal, then two units for each of the two jobs
 
     def test_percent_is_only_ever_computed_from_two_counts(self):
         CN = R.COULD_NOT_CHECK
@@ -4562,13 +5149,13 @@ class TestD46StartTimes(Base):
         super().setUp()
         self.addCleanup(setattr, CE, "LAST_PASS_COLLECTED_AT", None)
         CE.LAST_PASS_COLLECTED_AT = None
-        for unit in ("docker", "systemd-journald", *CE.SERVICE_FILES):
+        for unit in ("docker", "systemd-journald", *CE.SERVICE_FILES, self.APP, self.APP2):
             self._start(unit, self.START)
         self.outputs[("docker", "ps")] = (0, "a" * 64 + "\n", "")
         self.outputs[("docker", "inspect", "--format", "{{.State.StartedAt}}")] = (0, "2026-10-07T15:39:12.123456789Z\n", "")
         self._w("/proc/stat", f"cpu  1 2 3\nbtime {self.BOOT}\nprocesses 5\n")
         self.t0 = CE._epoch(self.START_ISO)
-        for unit_file, script in CE.SERVICE_FILES.values():
+        for unit_file, script in (*CE.SERVICE_FILES.values(), CE.APP_BROKER_FILES):
             self._file("/etc/systemd/system/" + unit_file, "[Unit]\n")
             self._file(CE.AGENT_DIR + "/bin/" + script, "import os\n")
 
@@ -4582,12 +5169,13 @@ class TestD46StartTimes(Base):
         return p
 
     APP = "hermes-app-broker@ads-audit"
+    APP2 = "hermes-app-broker@ads-report"
 
     def test_every_start_is_reported_in_utc(self):
         d = CE.d4_6(self.host(), {})
         self.assertEqual(sorted(d["started_at"]), sorted(["boot", "docker", "gateway-container", "hermes-broker",
-                                                          "hermes-docker-proxy", "systemd-journald", self.APP]))
-        for unit in ("docker", "hermes-broker", "hermes-docker-proxy", self.APP):
+                                                          "hermes-docker-proxy", "systemd-journald", self.APP, self.APP2]))
+        for unit in ("docker", "hermes-broker", "hermes-docker-proxy", self.APP, self.APP2):
             self.assertEqual(d["started_at"][unit], self.START_ISO)
         self.assertEqual(d["started_at"]["gateway-container"], "2026-10-07T15:39:12Z")
         self.assertEqual(d["started_at"]["boot"], CE._iso(self.BOOT))
@@ -4601,7 +5189,7 @@ class TestD46StartTimes(Base):
         self.assertEqual(d["started_at"]["systemd-journald"], "2026-10-12T09:10:11Z")
         self.assertIs(d["started_after_last_pass"]["systemd-journald"], False)
         self.assertNotIn("systemd-journald", d["files_newer_than_start"])
-        self.assertEqual(set(d["started_at"]), set(CE.SERVICE_FILES) | set(CE.OTHER_STARTS))
+        self.assertEqual(set(d["started_at"]), set(CE.SERVICE_FILES) | {self.APP, self.APP2} | set(CE.OTHER_STARTS))
         self.assertNotIn("systemd-journald", d["files_checked"])
 
     def test_a_journal_service_start_that_cannot_be_read_is_could_not_check_for_that_entry_only(self):
@@ -4623,7 +5211,7 @@ class TestD46StartTimes(Base):
         self.assertEqual(d["last_pass_collected_at"], "2026-10-07T10:00:00Z")
         self.assertEqual(d["started_after_last_pass"],
                          {"boot": False, "docker": False, "systemd-journald": False, "hermes-broker": False,
-                          "hermes-docker-proxy": False, self.APP: False, "gateway-container": True})
+                          "hermes-docker-proxy": False, self.APP: False, self.APP2: False, "gateway-container": True})
         CE.LAST_PASS_COLLECTED_AT = self.START_ISO          # the same second is not "after"
         self.assertFalse(CE.d4_6(self.host(), {})["started_after_last_pass"]["hermes-broker"])
 
@@ -4653,14 +5241,15 @@ class TestD46StartTimes(Base):
 
     def test_files_older_than_the_start_are_not_listed(self):
         d = CE.d4_6(self.host(), {})
-        self.assertEqual(d["files_newer_than_start"], {"hermes-broker": [], "hermes-docker-proxy": [], self.APP: []})
-        self.assertEqual(d["files_checked"], {"hermes-broker": 2, "hermes-docker-proxy": 2, self.APP: 2})
+        self.assertEqual(d["files_newer_than_start"], {"hermes-broker": [], "hermes-docker-proxy": [], self.APP: [], self.APP2: []})
+        self.assertEqual(d["files_checked"], {"hermes-broker": 2, "hermes-docker-proxy": 2, self.APP: 2, self.APP2: 2})
 
     def test_a_script_or_a_unit_file_changed_after_the_start_is_listed(self):
         self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "import os\n", age=60)
         self._file("/etc/systemd/system/hermes-app-broker@.service", "[Unit]\n", age=60)
         d = CE.d4_6(self.host(), {})["files_newer_than_start"]
-        self.assertEqual(d, {"hermes-broker": ["hermes-broker.py"], "hermes-docker-proxy": [], self.APP: ["unit"]})
+        self.assertEqual(d, {"hermes-broker": ["hermes-broker.py"], "hermes-docker-proxy": [], self.APP: ["unit"],
+                             self.APP2: ["unit"]})
 
     def test_a_file_changed_in_the_same_second_as_the_start_is_not_listed(self):
         self._file(CE.AGENT_DIR + "/bin/hermes-broker.py", "import os\n", age=0)
@@ -4688,12 +5277,12 @@ class TestD46StartTimes(Base):
         self._file(CE.AGENT_DIR + "/bin/docker-create-proxy.py", "def broken(:\n")
         d = CE.d4_6(self.host(), {})
         self.assertEqual(d["files_newer_than_start"], {"hermes-broker": R.COULD_NOT_CHECK,
-                                                       "hermes-docker-proxy": R.COULD_NOT_CHECK, self.APP: []})
+                                                       "hermes-docker-proxy": R.COULD_NOT_CHECK, self.APP: [], self.APP2: []})
         self.assertEqual(d["files_checked"]["hermes-broker"], R.COULD_NOT_CHECK)
 
     def test_each_service_is_paired_with_the_script_its_unit_runs(self):
         deploy = os.path.join(os.path.dirname(HERE), "deploy")
-        for unit_file, script in CE.SERVICE_FILES.values():
+        for unit_file, script in (*CE.SERVICE_FILES.values(), CE.APP_BROKER_FILES):
             with open(os.path.join(deploy, unit_file)) as f:
                 self.assertRegex(f.read(), r"(?m)^ExecStart=.*/opt/hermes-agent/bin/" + script.replace(".", r"\."), unit_file)
 

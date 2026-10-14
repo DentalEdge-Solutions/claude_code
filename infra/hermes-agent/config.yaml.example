@@ -46,6 +46,15 @@ mcp_servers:
       include: [ads_audit_run, ads_audit_status, ads_audit_list]
       resources: false
       prompts: false
+  ads_report:
+    command: "python3"
+    args: ["/opt/cc-bin/hermes-app-mcp.py", "--app", "ads-report"]
+    env: {}
+    timeout: 360
+    tools:
+      include: [ads_report_run, ads_report_status, ads_report_list]
+      resources: false
+      prompts: false
 
 # Hermes v0.21.5+ generates an API_SERVER_KEY and would start its OpenAI-compatible API server on
 # container loopback (8642); our posture keeps it off, measured by review item D4.1 `listeners`.

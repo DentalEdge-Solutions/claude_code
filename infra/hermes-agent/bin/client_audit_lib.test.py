@@ -194,7 +194,7 @@ class TestLock(Base):
             with self.assertRaises(L.PrecheckError) as cm:
                 with L.AuditLock(p):
                     pass
-            self.assertIn("another audit is running", str(cm.exception))
+            self.assertIn("another run is in progress (an audit or a figures report)", str(cm.exception))
         with L.AuditLock(p):                               # released after the first exits
             pass
 

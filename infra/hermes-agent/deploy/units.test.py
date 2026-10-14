@@ -4,6 +4,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 AGENT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(AGENT, "bin"))
+import app_lib as A
 import host_layout as H
 import bind_agreement as BA
 
@@ -362,8 +363,17 @@ class TestAppUnits(unittest.TestCase):
         unit_section = unit("hermes-app-runner@.service").split("[Service]")[0]
         self.assertIn("[Unit]", unit_section)
         self.assertIn("StartLimitIntervalSec=0", live_lines(unit_section))
-        # worst ads-audit queue: 5 runs x 7200 s + 60 lists x 60 s = 11 h; the unit limit must exceed it.
+        # worst queue of each job: runs x run timeout + lists x list timeout (ads-audit 11 h,
+        # ads-report 8.5 h); the unit limit must exceed every one.
         self.assertIn("TimeoutStartSec=12h", self.directives("hermes-app-runner@.service"))
+        manifests = A.load_manifests(os.path.join(AGENT, "registry", "apps"))
+        self.assertTrue(manifests)
+        for app, man in manifests.items():
+            for op_name, op in man.ops.items():
+                self.assertIn("per_box_day", op["quota"], f"{app}.{op_name} has no per_box_day: its worst queue is unbounded")
+            worst = sum(op["quota"].get("per_box_day", 0) * op["timeout"] for op in man.ops.values())
+            with self.subTest(app=app):
+                self.assertLess(worst, 12 * 3600)
 
     def test_path_unit_watches_jobs(self):
         d = self.directives("hermes-app-runner@.path")

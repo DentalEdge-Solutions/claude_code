@@ -1,0 +1,17 @@
+{
+  "app": "ads-report",
+  "user": "hermes-app-ads-report",
+  "command": "/usr/local/sbin/run-client-audit",
+  "ops": {
+    "run": {"args": ["--figures", "--json"], "timeout": 5400, "quota": {"per_client_day": 1, "per_box_day": 5}},
+    "list": {"args": ["--figures", "--list", "--json"], "timeout": 60, "quota": {"per_box_day": 60}}
+  },
+  "tools": {"run": "ads_report_run", "status": "ads_report_status", "list": "ads_report_list"},
+  "wait_seconds": {"run": 300, "list": 60},
+  "result": {"root": "report-archive", "subdir": "", "suffix": "-report.md"},
+  "descriptions": {
+    "run": "Produce the Google Ads figures report for one registered client: its three read-only reports, no AI analysis. Takes minutes. Returns a result with status ok|refused|failed|busy, or pending with a request_id. A refused or failed result is FINAL: do not call this tool again for that client today.",
+    "list": "List the timestamps of a client's past figures reports. Returns timestamps only.",
+    "status": "Check the result of an earlier report request by its request_id. Files nothing."
+  }
+}

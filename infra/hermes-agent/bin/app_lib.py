@@ -2,8 +2,9 @@
 """The per-app chat-trigger contract (Option B spec 2026-09-30 §2-§3). Stdlib only.
 
 Everything the gateway client, the broker and the runner must agree on lives here, once:
-the manifest, the four file schemas (request, job, done, result), the result whitelist, the
-quota ledger and the atomic writer. Every parser treats its input as hostile: closed key sets,
+the manifest (which also says where its job's results live and what its tools say), the four
+file schemas (request, job, done, result; the result location is the manifest's), the result
+whitelist, the quota ledger and the atomic writer. Every parser treats its input as hostile: closed key sets,
 byte caps, O_NOFOLLOW, regular-file checks. Nothing here decides policy (quota, kill switch,
 client status) — that is the broker's; nothing here executes anything — that is the runner's."""
 import collections, datetime, json, os, re, stat, tempfile, uuid
@@ -23,7 +24,13 @@ MAX_DONE_BYTES = MAX_STDOUT * 2 + 1024      # JSON-escaped stdout plus the envel
 SPOOL_FILE_MODE = 0o640
 KNOWN_OPS = ("run", "list")
 STATUSES = ("ok", "refused", "failed", "busy")
-STEP_CLASSES = ("collect", "snapshot", "read", "proxy", "draft", "isolation", "vault-write")
+STEP_CLASSES = ("collect", "snapshot", "read", "proxy", "draft", "isolation", "vault-write", "store")
+# Where a job's results may live: the manifest names a root from this table, never a path.
+RESULT_ROOTS = {"vaults": "/var/lib/hermes/vaults", "report-archive": "/var/lib/hermes/report-archive"}
+_SUBDIR_RE = re.compile(r"^(?:[a-z][a-z0-9-]{0,31})?$")
+_SUFFIX_RE = re.compile(r"^-[a-z][a-z0-9-]{0,31}\.md$")
+_DESCRIPTION_RE = re.compile(r"^[\x21-\x7e](?:[\x20-\x7e]{0,298}[\x21-\x7e])?$")
+MANIFEST_KEYS = frozenset({"app", "user", "command", "ops", "tools", "wait_seconds", "result", "descriptions"})
 BROKER_REASONS = ("bad_request", "duplicate", "inactive_client", "quota", "disabled",
                   "timeout", "interrupted", "internal")
 COMMAND_REASONS = ("precheck", "busy", "internal") + STEP_CLASSES
@@ -36,7 +43,7 @@ STATUS_REASONS = {"ok": (None,), "busy": ("busy",), "refused": ("precheck",),
 _TS_BODY = TS_RE.pattern[1:-1]      # TS_RE without its ^...$ anchors, never restated
 assert TS_RE.pattern == "^" + _TS_BODY + "$"
 
-Manifest = collections.namedtuple("Manifest", "app user command ops tools wait_seconds")
+Manifest = collections.namedtuple("Manifest", "app user command ops tools wait_seconds result descriptions")
 
 
 class Refused(ValueError):
@@ -84,14 +91,17 @@ def _int(v, lo, hi):
 
 
 def load_manifest(path, app):
+    """A Manifest, or ValueError: nothing else escapes, whatever the file holds."""
     if not APP_RE.fullmatch(app):
         raise ValueError("invalid app name")
-    with open(path, "rb") as f:
-        raw = f.read(MAX_MANIFEST_BYTES + 1)
-    if len(raw) > MAX_MANIFEST_BYTES:
-        raise ValueError("manifest too large")
-    d = json.loads(raw)
-    if set(d) != {"app", "user", "command", "ops", "tools", "wait_seconds"}:
+    try:
+        raw = read_capped(path, MAX_MANIFEST_BYTES)       # Refused is a ValueError (too large, not a file, ...)
+        d = json.loads(raw)
+    except RecursionError:
+        raise ValueError("manifest nested too deeply")
+    except OSError:
+        raise ValueError("manifest cannot be read")
+    if not isinstance(d, dict) or set(d) != MANIFEST_KEYS:
         raise ValueError("manifest keys")
     if d["app"] != app or d["user"] != "hermes-app-" + app:
         raise ValueError("manifest app/user")
@@ -101,7 +111,7 @@ def load_manifest(path, app):
     if not isinstance(ops, dict) or not ops or not set(ops) <= set(KNOWN_OPS):
         raise ValueError("manifest ops")
     for name, op in ops.items():
-        if set(op) != {"args", "timeout", "quota"} or not isinstance(op["args"], list) \
+        if not isinstance(op, dict) or set(op) != {"args", "timeout", "quota"} or not isinstance(op["args"], list) \
                 or not all(isinstance(x, str) and _ARG_RE.fullmatch(x) for x in op["args"]) \
                 or not _int(op["timeout"], 1, 7200) or not isinstance(op["quota"], dict) \
                 or not set(op["quota"]) <= {"per_client_day", "per_box_day"} \
@@ -115,7 +125,56 @@ def load_manifest(path, app):
     ws = d["wait_seconds"]
     if not isinstance(ws, dict) or set(ws) != set(ops) or not all(_int(v, 1, 600) for v in ws.values()):
         raise ValueError("manifest wait_seconds")
-    return Manifest(d["app"], d["user"], d["command"], ops, tools, ws)
+    res = d["result"]
+    if not isinstance(res, dict) or set(res) != {"root", "subdir", "suffix"} \
+            or not isinstance(res["root"], str) or res["root"] not in RESULT_ROOTS \
+            or not isinstance(res["subdir"], str) or not _SUBDIR_RE.fullmatch(res["subdir"]) \
+            or not isinstance(res["suffix"], str) or not _SUFFIX_RE.fullmatch(res["suffix"]):
+        raise ValueError("manifest result")
+    desc = d["descriptions"]
+    if not isinstance(desc, dict) or set(desc) != set(tools) \
+            or not all(isinstance(v, str) and _DESCRIPTION_RE.fullmatch(v) for v in desc.values()):
+        raise ValueError("manifest descriptions")
+    return Manifest(d["app"], d["user"], d["command"], ops, tools, ws, dict(res), dict(desc))
+
+
+def load_manifests(manifest_dir):
+    """Every job the directory declares: {app: Manifest}. A file that is not `<app>.json` with a
+    valid app name, or whose manifest does not load, is a ValueError: a directory that cannot be
+    read whole declares nothing. So is an empty one, and a set of jobs that collide. The result
+    is every job the directory declares, or a ValueError, never anything else."""
+    out = {}
+    try:
+        names = sorted(os.listdir(manifest_dir))
+        for name in names:
+            if not name.endswith(".json") or not APP_RE.fullmatch(name[:-5]):
+                raise ValueError("an entry that is not a job's manifest")
+            out[name[:-5]] = load_manifest(os.path.join(manifest_dir, name), name[:-5])
+    except OSError:
+        raise ValueError("the jobs' manifests could not be read")
+    if not out:
+        raise ValueError("no job is declared")
+    _refuse_collisions(out)
+    return out
+
+
+def _refuse_collisions(manifests):
+    """Two jobs must not share a tool name, an account or a result location."""
+    seen = set()
+    for man in manifests.values():
+        keys = [("tool", t) for t in man.tools.values()] + [("user", man.user),
+                ("result", (man.result["root"], man.result["subdir"], man.result["suffix"]))]
+        if seen & set(keys):
+            raise ValueError("two jobs share a tool name, a user or a result location")
+        seen |= set(keys)
+
+
+def result_path_re(manifest, client):
+    """The one place a run's result may be for this job and this client; group 1 is the timestamp."""
+    res = manifest.result
+    sub = "/" + res["subdir"] if res["subdir"] else ""
+    return re.compile(re.escape(RESULT_ROOTS[res["root"]] + "/" + client + sub) + "/(" + _TS_BODY + ")"
+                      + re.escape(res["suffix"]))
 
 
 def _slug(v):
@@ -189,7 +248,7 @@ def _one_json_line(stdout):
     return d
 
 
-def _run_result(req, rc, p):
+def _run_result(req, rc, p, manifest):
     if set(p) != {"status", "reason", "exit_code", "ts", "steps", "vault_path"}:
         raise Refused("keys")
     if rc not in RC_STATUS or RC_STATUS[rc] != p["status"] or p["exit_code"] != rc:
@@ -206,8 +265,7 @@ def _run_result(req, rc, p):
         raise Refused("steps")
     vp = p["vault_path"]
     if vp is not None:
-        want = re.compile("/var/lib/hermes/vaults/" + re.escape(req["client"])
-                          + "/audits/(" + _TS_BODY + r")-audit\.md")
+        want = result_path_re(manifest, req["client"])
         mt = want.fullmatch(vp) if isinstance(vp, str) else None
         if mt is None or mt.group(1) != p["ts"] or p["status"] != "ok":
             raise Refused("vault_path")
@@ -238,7 +296,7 @@ def map_done(req, done, manifest):
         return refused_result(rid, op, client, "timeout", status="failed")
     try:
         p = _one_json_line(done["stdout"])
-        return _run_result(req, done["rc"], p) if op == "run" else _list_result(req, done["rc"], p)
+        return _run_result(req, done["rc"], p, manifest) if op == "run" else _list_result(req, done["rc"], p)
     except Refused:
         return refused_result(rid, op, client, "internal", status="failed")
 
@@ -267,7 +325,7 @@ def _same_json(r, want):
     return r == want
 
 
-def _broker_could_write(r, is_list):
+def _broker_could_write(r, is_list, manifest):
     rid, op, client, status, reason = (r[k] for k in ("request_id", "op", "client", "status", "reason"))
     if not (isinstance(rid, str) and REQUEST_ID_RE.fullmatch(rid) and isinstance(status, str)
             and (reason is None or isinstance(reason, str))):
@@ -286,12 +344,12 @@ def _broker_could_write(r, is_list):
                 (2, {"status": status, "reason": reason})
             return _same_json(r, _list_result(req, rc, p))
         rc = r["exit_code"]
-        return _int(rc, -255, 255) and _same_json(r, _run_result(req, rc, {k: r[k] for k in _RUN_PAYLOAD}))
+        return _int(rc, -255, 255) and _same_json(r, _run_result(req, rc, {k: r[k] for k in _RUN_PAYLOAD}, manifest))
     except Refused:
         return False
 
 
-def result_in_whitelist(r):
+def result_in_whitelist(r, manifest):
     """(keys_ok, values_ok) for a result file, re-checked independently of the broker (review
     D10.8). keys_ok: exactly a run result's keys or a list result's. values_ok: the broker could
     have written exactly this, through refused_result, _run_result or _list_result — so free
@@ -300,7 +358,7 @@ def result_in_whitelist(r):
     if not isinstance(r, dict) or set(r) not in (_RUN_KEYS, _LIST_KEYS):
         return False, False
     try:
-        return True, bool(_broker_could_write(r, set(r) == _LIST_KEYS))
+        return True, bool(_broker_could_write(r, set(r) == _LIST_KEYS, manifest))
     except RecursionError:                    # belt and braces: no check above recurses into `r`
         return True, False
 

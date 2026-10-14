@@ -1,6 +1,6 @@
 ---
 name: ads-audits
-description: Use when the operator asks to run, check, or list a client's Google Ads audit. Calls the ads_audit_run, ads_audit_status and ads_audit_list tools. Never reads or summarizes audit content; the operator reads drafts on the host.
+description: Use when the operator asks to run, check, or list a client's Google Ads audit. Calls the ads_audit_run, ads_audit_status and ads_audit_list tools. Never reads or summarizes audit content; the operator reads drafts on the host. Not for figures reports: a figures-report request goes to the ads-reports skill.
 ---
 
 # Client Google Ads audits
@@ -22,7 +22,7 @@ audit's content, and you must not try to: drafts are read by the operator on the
 | `ok` | the audit is done, its timestamp `ts`, and that they can read it with `sudo show-audit <client>` | stop |
 | `refused` | it was refused, and the `reason` in plain words (`quota`: one audit per client per day; `disabled`: audits are switched off; `inactive_client`: not an active client; `precheck`: the server refused before starting; `bad_request`, `duplicate`) | stop. **Never call the tool again for that client today.** |
 | `failed` | it failed at step `reason` (e.g. `collect`, `draft`, `timeout`, `interrupted`) | suggest the manual command `sudo run-client-audit <client>`; do not retry |
-| `busy` | another audit is running on the server | offer to try later; do not loop |
+| `busy` | another run (an audit or a figures report) is in progress on the server | offer to try later; do not loop |
 | `pending` | it is still running, and the `request_id` | check with `ads_audit_status` once, only when the operator asks |
 | the tool call itself errors or times out (no `status` came back) | you got no answer; the audit may still be running or may have finished | do NOT call `ads_audit_run` again and do NOT suggest the manual command (it would start a second audit). Call `ads_audit_list` once and report the latest timestamp; the operator can read it with `sudo show-audit <client>` |
 
@@ -33,3 +33,4 @@ audit's content, and you must not try to: drafts are read by the operator on the
 - Write into or read from `/opt/data/spool` yourself, or use the terminal to reach the audit system.
 - Guess a client's short name. If unsure, ask the operator.
 - Treat a tool error or timeout as a failed audit.
+- Start an audit when a figures report was asked for, or the reverse. If the operator's request could mean either, ask.

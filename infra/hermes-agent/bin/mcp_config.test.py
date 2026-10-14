@@ -7,7 +7,11 @@ import mcp_config as M
 EXPECTED = {"ads_audit": {"command": "python3", "args": ["/opt/cc-bin/hermes-app-mcp.py", "--app", "ads-audit"],
                           "env": {}, "timeout": 360,
                           "tools": {"include": ["ads_audit_run", "ads_audit_status", "ads_audit_list"],
-                                    "resources": False, "prompts": False}}}
+                                    "resources": False, "prompts": False}},
+            "ads_report": {"command": "python3", "args": ["/opt/cc-bin/hermes-app-mcp.py", "--app", "ads-report"],
+                           "env": {}, "timeout": 360,
+                           "tools": {"include": ["ads_report_run", "ads_report_status", "ads_report_list"],
+                                     "resources": False, "prompts": False}}}
 
 # The committed block (config.yaml.example's layout) and the block as the gateway rewrote it on
 # the box: the same values, quotes dropped, the flow lists written one item per line.
@@ -19,6 +23,15 @@ TEMPLATE_BLOCK = """mcp_servers:
     timeout: 360
     tools:
       include: [ads_audit_run, ads_audit_status, ads_audit_list]
+      resources: false
+      prompts: false
+  ads_report:
+    command: "python3"
+    args: ["/opt/cc-bin/hermes-app-mcp.py", "--app", "ads-report"]
+    env: {}
+    timeout: 360
+    tools:
+      include: [ads_report_run, ads_report_status, ads_report_list]
       resources: false
       prompts: false
 """
@@ -38,7 +51,23 @@ REWRITTEN_BLOCK = """mcp_servers:
         - ads_audit_list
       resources: false
       prompts: false
+  ads_report:
+    command: python3
+    args:
+      - /opt/cc-bin/hermes-app-mcp.py
+      - --app
+      - ads-report
+    env: {}
+    timeout: 360
+    tools:
+      include:
+        - ads_report_run
+        - ads_report_status
+        - ads_report_list
+      resources: false
+      prompts: false
 """
+REPORT_SERVER = "  ads_report:\n" + REWRITTEN_BLOCK.split("  ads_report:\n", 1)[1]    # the second server, as rewritten
 TEMPLATE_HEAD = """# The template: comments, blank lines, quoted values.
 model:
   # a comment under a key — with a dash and a § sign
@@ -143,7 +172,7 @@ class TestTheTwoRealLayouts(unittest.TestCase):
       - --app
       - ads-audit
     command: 'python3'
-"""
+""" + REPORT_SERVER
         self.assertEqual(M.compare(box(shuffled), template()),
                          {"equals_repo": True, "reason": "-", "canonical_sha256": sha(EXPECTED)})
         self.assertEqual(M.canonical({"b": 1, "a": [2, 1]}), '{"a":[2,1],"b":1}')
@@ -177,7 +206,7 @@ class TestTheTwoRealLayouts(unittest.TestCase):
       - ads_audit_list
       resources: false
       prompts: false
-"""
+""" + REPORT_SERVER
         self.assertEqual(M.block_value(box(indentless)), (EXPECTED, None))
         # A list that is the last thing in its mapping, then a key of the mapping above.
         self.assertEqual(M.block_value("mcp_servers:\n  a:\n    l:\n    - x\n  b:\n    l:\n      - z\n"),
@@ -547,6 +576,9 @@ class TestCompare(unittest.TestCase):
         self.assertEqual(sha(EXPECTED), hashlib.sha256(
             b'{"ads_audit":{"args":["/opt/cc-bin/hermes-app-mcp.py","--app","ads-audit"],"command":"python3",'
             b'"env":{},"timeout":360,"tools":{"include":["ads_audit_run","ads_audit_status","ads_audit_list"],'
+            b'"prompts":false,"resources":false}},'
+            b'"ads_report":{"args":["/opt/cc-bin/hermes-app-mcp.py","--app","ads-report"],"command":"python3",'
+            b'"env":{},"timeout":360,"tools":{"include":["ads_report_run","ads_report_status","ads_report_list"],'
             b'"prompts":false,"resources":false}}}').hexdigest())
         changed = dict(EXPECTED, other={"command": "sh"})
         self.assertEqual(M.compare(box(REWRITTEN_BLOCK + "  other:\n    command: sh\n"), template()),

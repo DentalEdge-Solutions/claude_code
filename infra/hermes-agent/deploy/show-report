@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed as /usr/local/sbin/show-report (symlink, BRING-UP "Add a chat-triggered job").
+# Root only: the report store is root's, 0700.
+[ "$(id -u)" = 0 ] || { echo "show-report: run with sudo" >&2; exit 2; }
+exec python3 /opt/hermes-agent/bin/show-report.py "$@"

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-import contextlib, importlib.util, io, json, os, signal, stat, subprocess, sys, tempfile, threading, unittest
+import contextlib, importlib.util, io, json, os, shutil, signal, stat, subprocess, sys, tempfile, threading, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import package_lib as PK
 spec = importlib.util.spec_from_file_location("rca", os.path.join(HERE, "run-client-audit.py"))
 RCA = importlib.util.module_from_spec(spec); spec.loader.exec_module(RCA)
+_rs = importlib.util.spec_from_file_location("rs", os.path.join(HERE, "report-store.py"))
+RS = importlib.util.module_from_spec(_rs); _rs.loader.exec_module(RS)
 REAL_STOP_PROXY = RCA.stop_proxy      # Base stubs the module attribute; the real one is tested below
 
 TOKEN = "1//0gFAKEREFRESHTOKENabcdefghijklmnop"
@@ -44,6 +46,14 @@ class FakeRunner:
             open(os.path.join(ad, argv[-1].split("/")[-1] + ".json"), "w").write("{}")
             if self.error_file:
                 open(os.path.join(ad, self.error_file), "w").write("boom")
+        if "ads-reader" in argv:
+            report = argv[argv.index("--report") + 1]
+            rd = self.root + "/var/lib/hermes/reports/acme-dental"
+            os.makedirs(rd, exist_ok=True)
+            open(os.path.join(rd, f"2026-10-01_11-59-00-{report}.md"), "w").write(f"figures {report}\n")
+        if name == "store":
+            RS.OWNER_UID = os.geteuid()
+            return RS.main(argv[2:])
         ts = env.get("TS") or next((a[3:] for a in argv if a.startswith("TS=")), None)
         if name == "draft":
             d = self.root + "/var/lib/hermes/draft-out/acme-dental"
@@ -78,6 +88,7 @@ class Base(unittest.TestCase):
         for parent in ("/var/lib/hermes/vaults", "/var/lib/hermes/reports", "/var/lib/hermes/draft-out"):
             os.makedirs(R(parent), exist_ok=True); os.chmod(R(parent), 0o711)
         os.makedirs(R("/var/lib/hermes/vaults/acme-dental"), exist_ok=True)
+        os.makedirs(R("/var/lib/hermes/report-archive"), exist_ok=True); os.chmod(R("/var/lib/hermes/report-archive"), 0o700)
         self.proxy_stops = []
         RCA.stop_proxy = lambda root, logs, say: self.proxy_stops.append((root, logs))
         RCA.PIN_OVERRIDE = self.pin          # tests bypass projects.yaml; main() reads the pin otherwise
@@ -363,7 +374,7 @@ class TestPrechecks(Base):
         with L.AuditLock(self.root + "/run/lock/hermes-client-audit.lock"):
             r = FakeRunner(self.root)
             rc, text = self.run_main(r)
-        self.assertEqual(rc, 3); self.assertEqual(r.calls, []); self.assertIn("another audit is running", text)
+        self.assertEqual(rc, 3); self.assertEqual(r.calls, []); self.assertIn("another run is in progress (an audit or a figures report)", text)
 
     def test_dry_run_prints_plan_runs_nothing_and_shows_no_secret(self):
         r = FakeRunner(self.root)
@@ -930,6 +941,20 @@ class TestProbes(Base):
             return 0, ""
         return run, calls
 
+    def test_the_probe_reports_which_services_a_figures_run_would_start(self):
+        run, _ = self.fake_probe_runner(ENV_OK)
+        j = RCA.probe_env(self.root, run)
+        self.assertEqual(j["figures_services"], ["ads-collector", "ads-reader"])
+        self.assertTrue(j["matches_declared"], j)
+        with mock.patch.object(RCA, "_figures_services", return_value=["ads-collector", "ads-drafter", "ads-reader"]):
+            run, _ = self.fake_probe_runner(ENV_OK)
+            self.assertFalse(RCA.probe_env(self.root, run)["matches_declared"])
+
+    def test_the_figures_plan_is_built_without_opening_a_credential_file(self):
+        with mock.patch.object(RCA.L, "load_cred_env", side_effect=AssertionError("the Google credential file was opened")), \
+                mock.patch.object(RCA.L, "load_env_value", side_effect=AssertionError("the AI key file was opened")):
+            self.assertEqual(RCA._figures_services(self.root), ["ads-collector", "ads-reader"])
+
     def test_probe_env_uses_sentinels_and_never_opens_real_secret_files(self):
         opened = []
         real_open = open
@@ -1337,7 +1362,7 @@ class TestProbeCli(Base):
         self.assertEqual(rc, 0, err)
         self.assertEqual(len(out.splitlines()), 1, out)
         j = json.loads(out)
-        self.assertEqual(set(j), {"services", "matches_declared"}); self.assertTrue(j["matches_declared"])
+        self.assertEqual(set(j), {"services", "figures_services", "matches_declared"}); self.assertTrue(j["matches_declared"])
         self.assertEqual(j["services"]["ads-drafter"],
                          {"rc": 0, "env_names": ["ANTHROPIC_API_KEY"], "sentinel_env_names": ["ANTHROPIC_API_KEY"],
                           "sentinel_in_files": False, "host_credential_files_visible": False})
@@ -1367,7 +1392,7 @@ class TestProbeCli(Base):
             with L.AuditLock(self.root + RCA.LOCK):
                 rc, out, err, runs = self.call([flag], ENV_OK)
             self.assertEqual((rc, out, runs), (3, "", []))
-            self.assertIn("another audit is running", err)
+            self.assertIn("another run is in progress (an audit or a figures report)", err)
             self.assertEqual(self.proxy_stops, [])            # the running audit's proxy is not touched
             self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
 
@@ -1383,10 +1408,220 @@ class TestProbeCli(Base):
         self.assertFalse(os.path.exists(self.root + RCA.PROBE_DIR))
 
     def test_the_app_runner_manifest_offers_no_probe(self):
-        with open(os.path.join(os.path.dirname(HERE), "registry/apps/ads-audit.json")) as f:
-            text = f.read()
-        self.assertEqual(sorted(json.loads(text)["ops"]), ["list", "run"])
-        self.assertNotIn("probe", text)
+        for app in ("ads-audit", "ads-report"):
+            with self.subTest(app=app), open(os.path.join(os.path.dirname(HERE), "registry/apps", app + ".json")) as f:
+                text = f.read()
+                self.assertEqual(sorted(json.loads(text)["ops"]), ["list", "run"])
+                self.assertNotIn("probe", text)
+
+
+class TestFigures(Base):
+    ARCHIVED = "/var/lib/hermes/report-archive/acme-dental/2026-10-01_12-00-00-report.md"
+
+    def test_the_steps_are_collect_read_store_and_the_report_lands_in_the_archive(self):
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r, "--figures")
+        self.assertEqual(rc, 0, text)
+        names = [RCA.step_name(c["argv"]) for c in r.calls]
+        self.assertEqual(names, [f"collect:{c}" for c in RCA.COLLECTORS] + [f"read:{x}" for x in RCA.READERS] + ["store"])
+        doc = open(self.root + self.ARCHIVED).read()
+        for x in RCA.READERS:
+            self.assertIn(f"figures {x}", doc)
+        self.assertIn(self.ARCHIVED, text)
+        self.assertEqual(self.proxy_stops, [])                       # the proxy is neither started nor stopped
+        self.assertFalse(os.path.exists(self.root + "/var/lib/hermes/vaults/acme-dental/audits"))
+
+    def test_json_names_the_archive_path_and_only_the_three_step_classes(self):
+        rc, text = self.run_main(FakeRunner(self.root), "--figures", "--json")
+        j = json.loads(text.splitlines()[0])
+        self.assertEqual((j["status"], j["vault_path"]), ("ok", self.ARCHIVED))
+        self.assertEqual([s["name"] for s in j["steps"]], ["collect", "read", "store"])
+
+    def test_no_anthropic_key_no_drafter_no_proxy_no_vault(self):
+        ra = FakeRunner(self.root)
+        self.assertEqual(self.run_main(ra)[0], 0)                       # one audit, for the comparison below
+        os.unlink(self.root + "/etc/hermes/.env.anthropic")
+        shutil.rmtree(self.root + "/var/lib/hermes/vaults")             # the vault AND its parent are gone
+        r = FakeRunner(self.root)
+        with mock.patch.object(RCA.L, "load_env_value", side_effect=AssertionError("the AI key file was opened")), \
+                mock.patch.object(RCA.L, "anthropic_key_state", side_effect=AssertionError("the AI key file was read")):
+            rc, text = self.run_main(r, "--figures")
+        self.assertEqual(rc, 0, text)
+        for c in r.calls:
+            self.assertNotIn("ads-drafter", c["argv"]); self.assertNotIn("egress-proxy", c["argv"])
+            self.assertNotIn("ANTHROPIC_API_KEY", c["env"]); self.assertNotIn("HERMES_VAULT_DIR", c["env"])
+        first = lambda run: next(c for c in run.calls if "ads-reader" in c["argv"])
+        self.assertEqual(first(r)["argv"], first(ra)["argv"])
+        self.assertEqual(sorted(first(r)["env"]), sorted(first(ra)["env"]))
+        self.assertFalse(os.path.exists(self.root + "/var/lib/hermes/vaults"))
+
+    def test_the_audit_still_refuses_without_the_key_and_still_runs_its_ten_steps(self):
+        r = FakeRunner(self.root)
+        rc, _ = self.run_main(r)
+        self.assertEqual(rc, 0)
+        names = [RCA.step_name(c["argv"]) for c in r.calls]
+        self.assertEqual(names, [f"collect:{c}" for c in RCA.COLLECTORS] + ["snapshot"]
+                         + [f"read:{x}" for x in RCA.READERS] + ["proxy", "draft", "vault-write"])
+        self.assertNotIn("store", names)
+        os.unlink(self.root + "/etc/hermes/.env.anthropic")
+        self.assertEqual(self.run_main(FakeRunner(self.root))[0], 2)
+
+    def test_a_collector_error_or_no_data_fails_as_collect_before_any_reader(self):
+        for kw in ({"error_file": "x.ERROR.txt"}, {"collector_json": False}):
+            with self.subTest(kw=kw):
+                r = FakeRunner(self.root, **kw)
+                rc, text = self.run_main(r, "--figures", "--json")
+                j = json.loads(text.splitlines()[0])
+                self.assertEqual((rc, j["reason"]), (1, "collect"))
+                self.assertFalse(any("ads-reader" in c["argv"] for c in r.calls))
+
+    def test_reports_that_name_another_client_fail_as_isolation_and_store_nothing(self):
+        r = FakeRunner(self.root)
+        orig = r.__call__
+        def call(argv, env, timeout, out, err):
+            rc = orig(argv, env, timeout, out, err)
+            if "ads-reader" in argv and argv[argv.index("--report") + 1] == RCA.READERS[0]:
+                open(self.root + f"/var/lib/hermes/reports/acme-dental/2026-10-01_11-59-00-{RCA.READERS[0]}.md", "a").write("see other-dental\n")
+            return rc
+        rc, text = self.run_main(call, "--figures", "--json")
+        j = json.loads(text.splitlines()[0])
+        self.assertEqual((rc, j["status"], j["reason"], j["vault_path"]), (1, "failed", "isolation", None))
+        self.assertEqual([s["name"] for s in j["steps"]][-1], "isolation")
+        self.assertFalse(os.path.exists(self.root + self.ARCHIVED))
+
+    def test_a_failed_store_step_fails_as_store(self):
+        os.chmod(self.root + "/var/lib/hermes/report-archive", 0o755)        # the store refuses a loose archive
+        rc, text = self.run_main(FakeRunner(self.root), "--figures", "--json")
+        self.assertEqual(rc, 2)                                              # caught by the pre-check, before any step
+        j = json.loads(text.splitlines()[0])
+        self.assertEqual((j["status"], j["reason"]), ("refused", "precheck"))
+        os.chmod(self.root + "/var/lib/hermes/report-archive", 0o700)
+        rc, text = self.run_main(FakeRunner(self.root, fail_on="store"), "--figures", "--json")
+        self.assertEqual(json.loads(text.splitlines()[0])["reason"], "store")
+        for code in (2, 124):
+            with self.subTest(store_rc=code):
+                r = self.fixed_store(code)
+                rc, text = self.run_main(r, "--figures", "--json")
+                j = json.loads(text.splitlines()[0])
+                self.assertEqual((rc, j["status"], j["reason"], j["vault_path"]), (1, "failed", "store", None))
+
+    def fixed_store(self, rc, skip_readers=False):     # rc None: the real store step runs
+        """A runner whose store step returns `rc` and writes nothing (and, optionally, whose readers write nothing)."""
+        r = FakeRunner(self.root)
+        orig = r.__call__
+        def call(argv, env, timeout, out, err):
+            if skip_readers and "ads-reader" in argv:
+                r.calls.append({"argv": argv, "env": dict(env or {}), "timeout": timeout}); return 0
+            if RCA.step_name(argv) == "store" and rc is not None:
+                r.calls.append({"argv": argv, "env": dict(env or {}), "timeout": timeout}); return rc
+            return orig(argv, env, timeout, out, err)
+        call.calls = r.calls
+        return call
+
+    def test_a_store_that_returns_zero_without_writing_is_not_ok(self):
+        rc, text = self.run_main(self.fixed_store(0), "--figures", "--json")
+        j = json.loads(text.splitlines()[0])
+        self.assertEqual((rc, j["status"], j["reason"], j["vault_path"]), (1, "failed", "store", None))
+        self.assertFalse(os.path.exists(self.root + self.ARCHIVED))
+        self.assertEqual(os.listdir(self.root + "/var/lib/hermes/report-archive"), [])
+
+    def test_stale_reports_are_never_archived(self):
+        d = self.root + "/var/lib/hermes/reports/acme-dental"
+        os.makedirs(d, exist_ok=True)
+        for x in RCA.READERS:
+            open(f"{d}/2026-09-01_08-00-00-{x}.md", "w").write("STALE-MARKER\n")
+        rc, text = self.run_main(self.fixed_store(None, skip_readers=True), "--figures", "--json")
+        j = json.loads(text.splitlines()[0])
+        self.assertEqual((rc, j["status"], j["reason"]), (1, "failed", "store"))
+        arch = self.root + "/var/lib/hermes/report-archive"
+        found = [os.path.join(b, f) for b, _, fs in os.walk(arch) for f in fs]
+        self.assertEqual(found, [])                 # no file at all in the store: the marker is in none
+        self.assertTrue(os.path.isdir(arch))        # ... and the walk above really walked the store
+        self.assertIsNone(j["vault_path"])
+
+    def test_list_shows_the_archive_and_takes_no_lock(self):
+        self.run_main(FakeRunner(self.root), "--figures")
+        with RCA.L.AuditLock(self.root + RCA.LOCK):                          # a run is in progress
+            rc, text = self.run_main(FakeRunner(self.root), "--figures", "--list", "--json")
+        self.assertEqual((rc, json.loads(text.splitlines()[0])), (0, {"status": "ok", "audits": ["2026-10-01_12-00-00"]}))
+        rc, text = self.run_main(FakeRunner(self.root), "--list", "--json")      # the audit's list is its own
+        self.assertEqual(json.loads(text.splitlines()[0]), {"status": "ok", "audits": []})
+
+    def test_dry_run_prints_the_figures_plan_and_runs_nothing(self):
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r, "--figures", "--dry-run")
+        self.assertEqual((rc, r.calls), (0, []))
+        self.assertIn("[store]", text); self.assertNotIn("[draft]", text); self.assertNotIn("[proxy]", text)
+
+    def test_a_busy_lock_is_busy_for_a_figures_run_too(self):
+        with RCA.L.AuditLock(self.root + RCA.LOCK):
+            rc, text = self.run_main(FakeRunner(self.root), "--figures", "--json")
+        self.assertEqual((rc, json.loads(text.splitlines()[0])["status"]), (3, "busy"))
+
+    def test_figures_does_not_mix_with_the_probes(self):
+        for probe in ("--probe-env", "--probe-egress"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(err):
+                RCA.main([probe, "--figures"], root=self.root)
+            self.assertEqual(cm.exception.code, 2)                       # argparse's usage error
+            self.assertIn("no --figures", err.getvalue())                # the refusal is about --figures ...
+            self.assertNotIn("unrecognized arguments", err.getvalue())   # ... and not an option the parser does not know
+
+    def test_figures_with_a_client_is_accepted_by_the_parser(self):
+        r = FakeRunner(self.root)
+        rc, text = self.run_main(r, "--figures", "--dry-run")            # no SystemExit: the option is known
+        self.assertEqual((rc, r.calls), (0, []))
+        self.assertNotIn("usage:", text)
+
+
+class TestTheJobSLineUnderTheCommittedManifests(Base):
+    """The seam between the job and the contract: the ONE line a run prints with --json, given to
+    app_lib.map_done as a runner's done record, under the manifests the repository ships. A change
+    to the archive path, to a suffix or to a manifest's `result` cannot split the two unseen."""
+    APPS = os.path.join(os.path.dirname(HERE), "registry", "apps")
+    PATHS = {"ads-report": TestFigures.ARCHIVED,
+             "ads-audit": "/var/lib/hermes/vaults/acme-dental/audits/2026-10-01_12-00-00-audit.md"}
+
+    def _line(self, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = RCA.main(["acme-dental", *extra], runner=FakeRunner(self.root), root=self.root, now="2026-10-01_12-00-00")
+        self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())
+        return rc, out.getvalue()
+
+    def _mapped(self, app, rc, stdout, manifest_dir=None):
+        import app_lib as A
+        m = A.load_manifest(os.path.join(manifest_dir or self.APPS, app + ".json"), app)
+        req = {"request_id": "0" * 32, "op": "run", "client": "acme-dental"}
+        return A.map_done(req, {"rc": rc, "stdout": stdout, "timed_out": False, "interrupted": False}, m)
+
+    def _both(self, args, own, other, manifest_dir=None):
+        rc, line = self._line(*args)
+        self.assertEqual(rc, 0, line)
+        r = self._mapped(own, rc, line, manifest_dir)
+        self.assertEqual((r["status"], r["reason"], r["vault_path"]), ("ok", None, self.PATHS[own]))
+        self.assertEqual((r["exit_code"], r["ts"], r["client"]), (0, "2026-10-01_12-00-00", "acme-dental"))
+        self.assertTrue(os.path.isfile(self.root + r["vault_path"]))        # the path named is the file written
+        r = self._mapped(other, rc, line, manifest_dir)
+        self.assertEqual((r["status"], r["reason"], r["vault_path"]), ("failed", "internal", None))
+
+    def test_a_figures_line_is_ok_under_the_report_manifest_and_internal_under_the_audit_s(self):
+        self._both(json.load(open(os.path.join(self.APPS, "ads-report.json")))["ops"]["run"]["args"], "ads-report", "ads-audit")
+
+    def test_an_audit_line_is_ok_under_the_audit_manifest_and_internal_under_the_report_s(self):
+        self._both(json.load(open(os.path.join(self.APPS, "ads-audit.json")))["ops"]["run"]["args"], "ads-audit", "ads-report")
+
+
+class TestStepNames(unittest.TestCase):
+    def test_the_two_lists_of_step_classes_are_one(self):
+        import app_lib as A
+        self.assertEqual(RCA.STEP_CLASSES, A.STEP_CLASSES)
+        self.assertEqual(set(RCA.TIMEOUTS), set(A.STEP_CLASSES) - {"isolation"})
+        self.assertEqual(RCA.TIMEOUTS["store"], 120)
+
+    def test_an_unknown_step_has_no_name(self):
+        with self.assertRaises(ValueError):
+            RCA.step_name(["true"])
 
 
 if __name__ == "__main__":

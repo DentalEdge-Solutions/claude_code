@@ -16,13 +16,6 @@ HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import app_lib as A
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
-DESCRIPTIONS = {
-    "run": "Run a Google Ads trend audit for one registered client. Takes minutes. Returns a result "
-           "with status ok|refused|failed|busy, or pending with a request_id. A refused or failed "
-           "result is FINAL: do not call this tool again for that client today.",
-    "list": "List the timestamps of a client's past audits. Returns timestamps only.",
-    "status": "Check the result of an earlier request by its request_id. Files nothing.",
-}
 
 
 class Server:
@@ -40,7 +33,7 @@ class Server:
                 schema = {"type": "object", "properties": {"client": {"type": "string",
                           "description": "the client's registered short name (slug)"}},
                           "required": ["client"], "additionalProperties": False}
-            out.append({"name": name, "description": DESCRIPTIONS[op], "inputSchema": schema})
+            out.append({"name": name, "description": self.m.descriptions[op], "inputSchema": schema})
         return out
 
     def _result(self, rid):
