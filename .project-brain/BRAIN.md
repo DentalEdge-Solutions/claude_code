@@ -17,7 +17,8 @@ Before architecture, workflow, skill, agent, hook, or governance decisions:
 ## Memory Routing
 
 - Durable project knowledge → `.project-brain/` (this capsule — git-versioned, shared).
-- Personal machine-local observations → Claude Code native auto-memory (`~/.claude/projects/<project>/memory/`).
+- Personal machine-local observations → not stored. Claude Code native auto-memory is off on this machine
+  (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`), so anything worth keeping goes to the capsule via capture (decision D4, 2026-10-14).
 - Current task context → stays in the session.
 - Repeated corrections → lesson candidates via capture-learning.
 - Canon → only through `brain-promote --approve`. Never write `canon/` directly.
