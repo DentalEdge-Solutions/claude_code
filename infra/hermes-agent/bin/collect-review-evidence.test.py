@@ -1559,6 +1559,101 @@ class TestD10(JobBox):
                 ra = self._arch_rows()
                 self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
 
+    STORE = "/var/lib/hermes/report-archive"
+
+    def _volume(self, name, answer):
+        self.outputs[("docker", "volume", "inspect", "--format", "{{json .}}", name)] = answer
+
+    @staticmethod
+    def _vol(name, driver="local", options=None):
+        return (0, json.dumps({"Name": name, "Driver": driver, "Options": options,
+                               "Mountpoint": f"/var/lib/docker/volumes/{name}/_data"}), "")
+
+    def test_a_named_volume_is_judged_by_where_its_options_point_it(self):
+        # F61 (review #11): a named volume is listed with its own folder under /var/lib/docker/volumes/
+        # as its host path; driver options can point it at any host folder. Its options are read: a
+        # local bind volume is judged by its device, and anything that cannot be judged is counted
+        # as not inspected, never as "mounts nothing".
+        def m(name, src=None):
+            return (0, json.dumps([{"Type": "volume", "Name": name,
+                                    "Source": src or f"/var/lib/docker/volumes/{name}/_data"}]), "")
+        bind = {"type": "none", "o": "bind", "device": self.STORE}
+        for case, answer, want in (
+                ("a plain local volume", self._vol("v", options=None), (0, 0)),
+                ("a plain local volume, empty options", self._vol("v", options={}), (0, 0)),
+                ("a bind volume onto the store", self._vol("v", options=bind), (1, 0)),
+                ("a bind volume onto a folder inside it", self._vol("v", options=dict(bind, device=self.STORE + "/x")), (1, 0)),
+                ("a bind volume onto a folder above it", self._vol("v", options=dict(bind, device="/var/lib")), (1, 0)),
+                ("a bind volume elsewhere", self._vol("v", options=dict(bind, device="/srv/other")), (0, 0)),
+                ("bind among other mount options", self._vol("v", options=dict(bind, o="rw,bind")), (1, 0)),
+                ("an in-memory volume", self._vol("v", options={"type": "tmpfs", "device": "tmpfs"}), (0, 0)),
+                ("an in-memory volume with its size options", self._vol("v", options={"type": "tmpfs", "device": "tmpfs",
+                                                                                        "o": "size=64m,mode=1777,uid=0,gid=0"}), (0, 0)),
+                # The kernel ignores the type of a bind mount: tmpfs with `bind` mounts the device (review of F61's fix).
+                ("an in-memory type with bind", self._vol("v", options={"type": "tmpfs", "o": "bind", "device": self.STORE}), (0, 1)),
+                ("an in-memory type with rbind", self._vol("v", options={"type": "tmpfs", "o": "size=1m,rbind", "device": self.STORE}), (0, 1)),
+                ("an in-memory type with another option", self._vol("v", options={"type": "tmpfs", "o": "remount"}), (0, 1)),
+                ("an in-memory type with another key", self._vol("v", options={"type": "tmpfs", "copy": "x"}), (0, 1)),
+                ("a device with two leading slashes", self._vol("v", options=dict(bind, device="//var/lib/hermes/report-archive")), (0, 1)),
+                ("a device that is not in its plain form", self._vol("v", options=dict(bind, device="/var/lib/hermes/../hermes/report-archive")), (0, 1)),
+                ("a device with a trailing slash", self._vol("v", options=dict(bind, device="/srv/other/")), (0, 1)),
+                ("a relative device", self._vol("v", options=dict(bind, device="srv")), (0, 1)),
+                ("a network filesystem", self._vol("v", options={"type": "nfs", "o": "addr=127.0.0.1", "device": ":/srv"}), (0, 1)),
+                ("a device with no type", self._vol("v", options={"device": self.STORE, "o": "bind"}), (0, 1)),
+                ("type none without bind", self._vol("v", options={"type": "none", "device": self.STORE}), (0, 1)),
+                ("another driver", self._vol("v", driver="rexray", options=None), (0, 1)),
+                ("options that are not text", self._vol("v", options={"type": "none", "o": "bind", "device": ["/"]}), (0, 1)),
+                ("the inspect fails", (1, "", "no such volume"), (0, 1)),
+                ("the inspect is not JSON", (0, "{not json", ""), (0, 1)),
+                ("the inspect is not an object", (0, "[]", ""), (0, 1))):
+            with self.subTest(case):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": m("v")})
+                self._volume("v", answer)
+                ra = self._arch_rows()
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
+
+    def test_a_bind_volume_through_a_symbolic_link_is_not_inspected(self):
+        # The kernel follows a link in the device's path; the collector compares text, so a device
+        # that is not its own resolved path cannot be judged (review of F61's fix).
+        os.makedirs(os.path.join(self.root, "var/lib/hermes"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "srv"), exist_ok=True)
+        os.symlink(os.path.join(self.root, "var/lib/hermes"), os.path.join(self.root, "srv/link"))
+        os.makedirs(os.path.join(self.root, "srv/plain"), exist_ok=True)
+        vol = {"Type": "volume", "Name": "v", "Source": "/var/lib/docker/volumes/v/_data"}
+        for device, want in (("/srv/link", (0, 1)), ("/srv/link/report-archive", (0, 1)), ("/srv/plain", (0, 0))):
+            with self.subTest(device):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": (0, json.dumps([vol]), "")})
+                self._volume("v", self._vol("v", options={"type": "none", "o": "bind", "device": device}))
+                ra = self._arch_rows()
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
+
+    def test_a_volume_mount_with_no_name_is_not_inspected(self):
+        for mount in ({"Type": "volume", "Source": "/var/lib/docker/volumes/v/_data"},
+                      {"Type": "volume", "Name": "", "Source": "/var/lib/docker/volumes/v/_data"},
+                      {"Type": "volume", "Name": ["v"], "Source": "/var/lib/docker/volumes/v/_data"},
+                      {"Type": "volume", "Name": "--help", "Source": "/var/lib/docker/volumes/v/_data"},
+                      {"Type": "volume", "Name": "v w", "Source": "/var/lib/docker/volumes/v/_data"}):
+            with self.subTest(mount):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": (0, json.dumps([mount]), "")})
+                self._volume(mount.get("Name") if isinstance(mount.get("Name"), str) else "x", self._vol("v"))
+                hosts = []
+                with mock.patch.object(self, "host", lambda: hosts.append(FakeHost(self.root, self.outputs)) or hosts[-1]):
+                    ra = self._arch_rows()
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), (0, 1))
+                self.assertFalse([c for h in hosts for c in h.calls if c[:2] == ["docker", "volume"]])
+
+    def test_d10_4_a_bind_volume_onto_the_job_state_is_counted(self):
+        vol = {"Type": "volume", "Name": "jobs", "Source": "/var/lib/docker/volumes/jobs/_data"}
+        self._containers({"c1": (0, json.dumps([vol]), "")})
+        self._volume("jobs", self._vol("jobs", options={"type": "none", "o": "bind",
+                                                         "device": "/var/lib/hermes/app-state/ads-report"}))
+        with self._resolver():
+            d = self._item("D10.4")["data"]
+        self.assertEqual((d["containers_mounting_app_state"], d["containers_not_inspected"]), (1, 0))
+
     def test_d10_4_an_in_memory_mount_does_not_cost_the_container_its_inspection(self):
         tmpfs = {"Type": "tmpfs", "Source": "", "Destination": "/projects/x"}
         def m(*mounts):
@@ -1664,7 +1759,7 @@ class TestD10(JobBox):
         d = it["data"]
         self.assertEqual(d["mcp_block"], {"equals_repo": True, "reason": "-", "canonical_sha256": self.BLOCK_SHA256})
         self.assertEqual((d["gateway_mcp_list"], d["gateway_mcp_list_rc"]), (["ads_audit  3 tools"], 0))
-        self.assertEqual(set(d), {"mcp_block", "gateway_mcp_list", "gateway_mcp_list_rc"})
+        self.assertEqual(set(d), {"mcp_block", "provider_routing", "gateway_mcp_list", "gateway_mcp_list_rc"})
         for text in ("ads_audit_run", "python3", "hermes-app-mcp"):      # the block's text is never emitted
             self.assertNotIn(text, json.dumps(it))
 
@@ -1682,6 +1777,34 @@ class TestD10(JobBox):
         self.assertEqual(self._item("D10.6")["data"]["mcp_block"], mine)
         self.assertEqual(mine["canonical_sha256"], CE.mcp_config.compare(template, template)["canonical_sha256"])
         self.assertNotEqual(mine["canonical_sha256"], self.BLOCK_SHA256)
+
+    def test_d10_6_reads_the_box_s_data_collection_as_a_closed_word(self):
+        """Review #11's follow-up: `provider_routing.data_collection: "deny"` was in the template
+        but not measured on the box. D10.6 reads it with the same strict parser and emits only a
+        word from a closed set (`deny`, `allow`, `-` for no value, `?` for anything else), with the
+        parser's reason when the block itself did not parse."""
+        template = self._real_template()
+        self._w(CE.MCP_REPO_CONFIG, template)
+        for name, box, want in (
+                ("the gateway's rewrite", self.REWRITTEN, {"data_collection": "deny", "reason": "-"}),
+                ("the template as installed", template, {"data_collection": "deny", "reason": "-"}),
+                ("allowed", self.REWRITTEN.replace("data_collection: deny", "data_collection: allow"),
+                 {"data_collection": "allow", "reason": "-"}),
+                ("another word", self.REWRITTEN.replace("data_collection: deny", "data_collection: sk-or-NOT-A-KEY"),
+                 {"data_collection": "?", "reason": "-"}),
+                ("no data_collection key", self.REWRITTEN.replace("  data_collection: deny\n", "  only:\n  - x\n"),
+                 {"data_collection": "-", "reason": "-"}),
+                ("no provider_routing block", self.REWRITTEN.replace("provider_routing:\n  data_collection: deny\n", ""),
+                 {"data_collection": "-", "reason": "no_block"}),
+                ("a flow mapping", self.REWRITTEN.replace("provider_routing:\n  data_collection: deny\n",
+                                                          "provider_routing: {data_collection: deny}\n"),
+                 {"data_collection": "-", "reason": "unparseable"})):
+            with self.subTest(name):
+                self._w(self.BOX_CONFIG, box)
+                it = self._item("D10.6")
+                self.assertEqual(it["status"], R.OBSERVED)
+                self.assertEqual(it["data"]["provider_routing"], want)
+                self.assertNotIn("sk-or-NOT-A-KEY", json.dumps(it))
 
     def test_d10_6_equal_means_the_same_values_whatever_the_layout(self):
         # Quoting, flow or block lists, key order, comments and blank lines are layout, and so is

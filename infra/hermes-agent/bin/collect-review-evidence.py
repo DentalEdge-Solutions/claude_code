@@ -2596,9 +2596,11 @@ def _containers_mounting(host, tree):
     never allowed to fail the item or to pass as "mounts nothing". The container listing failing
     raises CouldNotCheck.
     An in-memory mount (Type `tmpfs`, which Docker lists with an empty Source) has no host side:
-    it is left out, and the container's other mounts are judged as before."""
+    it is left out, and the container's other mounts are judged as before. A named volume (Type
+    `volume`) is also judged by where its driver options point it (F61, `_volume_host_paths`)."""
     ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
     mounting = not_inspected = 0
+    volumes = {}
     for cid in ids:
         rc, out, _ = host.run(["docker", "inspect", "--format", "{{json .Mounts}}", cid])
         try:
@@ -2610,11 +2612,77 @@ def _containers_mounting(host, tree):
             not_inspected += 1
             continue
         mounts = [m for m in mounts if not (m.get("Type") == "tmpfs" and m["Source"] == "")]
-        if any(not m["Source"].startswith("/") for m in mounts):
+        sources = [m["Source"] for m in mounts]
+        for m in mounts:
+            if m.get("Type") == "volume":
+                name = m.get("Name")
+                if not isinstance(name, str):
+                    paths = None                        # a name that is not text is never looked up or cached
+                else:
+                    if name not in volumes:
+                        volumes[name] = _volume_host_paths(host, name)
+                    paths = volumes[name]
+                sources += paths if paths is not None else [""]
+        if any(not src.startswith("/") for src in sources):
             not_inspected += 1                          # an empty or relative Source (not a tmpfs's) cannot be judged
-        elif any(_exposes(m["Source"], tree) for m in mounts):
+        elif any(_exposes(src, tree) for src in sources):
             mounting += 1
     return ids, mounting, not_inspected
+
+
+VOLUME_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")    # Docker's own pattern for a volume name
+
+
+def _volume_host_paths(host, name):
+    """The host folders a named volume reaches besides its own folder, from `docker volume
+    inspect` (F61, review #11): [] for a plain local volume or an in-memory one (`type` `tmpfs`
+    with in-memory options only), [device] for a local bind volume (`type` `none`, `bind` among
+    the `o` options, the device a plain absolute path with no link in it). None when it cannot be
+    judged: no name or one Docker would not give, an inspect that fails or is not an object, another driver (a plugin can
+    reach anything), or any other options (another filesystem type, a device with no type, a
+    value that is not text). None is counted as not inspected, never as "mounts nothing"."""
+    if not isinstance(name, str) or not VOLUME_NAME_RE.fullmatch(name):
+        return None                                     # never passed to docker: it could read as an option
+    rc, out, _ = host.run(["docker", "volume", "inspect", "--format", "{{json .}}", name])
+    try:
+        vol = json.loads(out) if rc == 0 else None
+    except (ValueError, RecursionError):
+        vol = None
+    if not isinstance(vol, dict) or vol.get("Driver") != "local":
+        return None
+    opts = vol.get("Options")
+    if not opts:
+        return [] if opts is None or opts == {} else None
+    if not isinstance(opts, dict) or not all(isinstance(v, str) for v in opts.values()):
+        return None
+    o = opts.get("o", "").split(",") if opts.get("o") else []
+    if opts.get("type") == "tmpfs":
+        # The kernel ignores a bind mount's type: tmpfs with `bind` mounts the device. Only the
+        # in-memory options, and no key but these three, keep it in memory.
+        if set(opts) <= {"type", "o", "device"} and all(TMPFS_OPTION_RE.fullmatch(x) for x in o):
+            return []
+        return None
+    device = opts.get("device")
+    if opts.get("type") == "none" and "bind" in o and isinstance(device, str) and _plain_path(host, device):
+        return [device]
+    return None
+
+
+TMPFS_OPTION_RE = re.compile(r"(size|mode|uid|gid|nr_inodes|nr_blocks)=[A-Za-z0-9%]+")
+
+
+def _plain_path(host, path):
+    """True for an absolute path written in its plain form (no `//`, `.`, `..` or trailing slash)
+    with no symbolic link in it on the host: the only form the text comparison can judge, since
+    the kernel follows links and reads `//x` as `/x`. A volume's device is the box's own text."""
+    if not path.startswith("/") or path.startswith("//") or os.path.normpath(path) != path:
+        return False
+    part = ""
+    for name in path.strip("/").split("/"):
+        part += "/" + name
+        if os.path.islink(host.path(part)):
+            return False
+    return True
 
 
 LAYOUT_REASONS = ("no-account", "host-layout", "other")
@@ -2701,6 +2769,7 @@ def d10_6(host, ctx):
         block = mcp_config.compare(box, repo)
     except ValueError:
         raise CouldNotCheck("config.yaml.example: no usable mcp_servers block")
+    routing = _provider_routing(box)
     # The tool list is information, not a boundary: when it cannot be had, it is empty with its
     # exit code (None: no gateway container to ask), and the comparison is still reported. It is
     # the gateway's own text: capped in lines and in line length, and emitted only when the values
@@ -2716,8 +2785,22 @@ def d10_6(host, ctx):
         if list_rc == 0 and measured:
             listing = _cut_listing(_no_credential_lines(out.splitlines()[:MCP_LIST_LINES]),
                                    ctx.get("secrets", []))
-    return {"mcp_block": block, "gateway_mcp_list": listing if measured else R.COULD_NOT_CHECK,
-            "gateway_mcp_list_rc": list_rc}
+    return {"mcp_block": block, "provider_routing": routing,
+            "gateway_mcp_list": listing if measured else R.COULD_NOT_CHECK, "gateway_mcp_list_rc": list_rc}
+
+
+DATA_COLLECTION = ("deny", "allow")
+
+
+def _provider_routing(box):
+    """The box's `provider_routing.data_collection`, read with D10.6's strict parser (review #11:
+    the template's `deny` was not measured on the box). Only a word from a closed set is emitted
+    (`deny`, `allow`; `-` for no value, `?` for anything else), and `reason` is the parser's when
+    the `provider_routing:` block did not parse (`-` when it did)."""
+    value, why = mcp_config.block_value(box, "provider_routing")
+    if value is None:
+        return {"data_collection": "-", "reason": why}
+    return {"data_collection": _label(value.get("data_collection"), DATA_COLLECTION), "reason": "-"}
 
 
 def _label(value, allowed):

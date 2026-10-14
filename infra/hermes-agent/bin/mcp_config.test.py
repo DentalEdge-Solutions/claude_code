@@ -603,5 +603,32 @@ class TestCompare(unittest.TestCase):
                     self.assertNotIn("\n", str(cm.exception))
 
 
+class TestAnotherTopLevelBlock(unittest.TestCase):
+    """block_value reads one other top-level block by name, with the same rules (review #11's
+    follow-up: D10.6 reads `provider_routing`, which the box's chat settings carry)."""
+
+    def test_the_real_template_carries_data_collection_deny(self):
+        self.assertEqual(M.block_value(real_template(), "provider_routing"), ({"data_collection": "deny"}, None))
+
+    def test_the_rewritten_layout_drops_the_quotes_and_reads_the_same(self):
+        text = "model:\n  default: x\nprovider_routing:\n  data_collection: deny\nmcp_servers:\n  a:\n    env: {}\n"
+        self.assertEqual(M.block_value(text, "provider_routing"), ({"data_collection": "deny"}, None))
+
+    def test_the_same_reasons_as_for_mcp_servers(self):
+        for name, text, want in (
+                ("absent", "model:\n  default: x\n", (None, "no_block")),
+                ("twice", "provider_routing:\n  data_collection: deny\nprovider_routing:\n  data_collection: allow\n",
+                 (None, "duplicate_key")),
+                ("not plain at the top", "\"provider_routing\":\n  data_collection: deny\n", (None, "top_level_not_plain")),
+                ("a flow mapping", "provider_routing: {data_collection: deny}\n", (None, "unparseable")),
+                ("a repeated key", "provider_routing:\n  data_collection: deny\n  data_collection: allow\n",
+                 (None, "duplicate_key"))):
+            with self.subTest(name):
+                self.assertEqual(M.block_value(text, "provider_routing"), want)
+
+    def test_the_default_key_is_still_mcp_servers(self):
+        self.assertEqual(M.block_value(real_template()), M.block_value(real_template(), "mcp_servers"))
+
+
 if __name__ == "__main__":
     unittest.main()
