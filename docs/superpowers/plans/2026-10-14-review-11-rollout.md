@@ -131,7 +131,8 @@ runbook's counts block; report it; do not run again.
 - Whether the audit's own check for another client's name and `show-audit` get the two hardenings the
   report job has (recommended: yes, as a small follow-up change, judged by review #12).
 - Whether to accept the stated limits of that check (a name without its hyphen or with a space is not
-  matched; a single-word name can refuse a report).
+  matched; a single-word name can refuse a report). Decided 2026-10-14: accepted (reports stay on
+  the box and are read before they go anywhere).
 - Whether reports should keep their step logs in a folder of their own.
 
 ## Dates
@@ -160,13 +161,18 @@ plan had been run.
 Read first, in this order:
 
 1. This file.
-2. `infra/hermes-agent/deploy/BRING-UP.md`: "Add a chat-triggered job", "The leftover journal
-   directory", "A security review".
-3. `docs/superpowers/handoffs/2026-10-12-review-10-pass.md` (where things stood, the dates, the
-   lessons).
-4. The two build ledgers (git-ignored, on the laptop): `.superpowers/sdd/2026-10-13-review-10-follow-ups/progress.md`
-   and `.superpowers/sdd/2026-10-14-ads-report-job/progress.md`: every ruling, what was parked and
-   why, and the things left to measure on the box.
+2. `infra/hermes-agent/deploy/BRING-UP.md`: "A security review" (stage 6); "Add a chat-triggered
+   job" only for a step 9 or step 11 block that stage 6 needs again.
+3. The private operator evidence file (git-ignored, on the laptop; never committed, printed whole
+   or pasted): `infra/hermes-agent/security-reviews/2026-10-14-operator-evidence-review11.md`.
+   Every stage's results, the standing acceptances (confirmed 2026-10-14), review #10's follow-ups
+   and what is still to be filled in at collection.
+4. `docs/superpowers/handoffs/2026-10-12-review-10-pass.md` (where things stood at review #10, the
+   dates, the lessons) and `docs/security-reviews/2026-10-12-review-10.md` (the last PASS report:
+   its twelve entries "not on the checklist").
+5. The brain's daily log of 2026-10-14 (`.project-brain/sessions/daily/2026-10-14.md`): two lessons
+   from stage 4, and the backlog saved from the two build ledgers, which were deleted on
+   2026-10-14 (their work is in git; what was parked and left to measure is in that note).
 
 Standing rules of the operator (unchanged):
 
@@ -184,6 +190,9 @@ Standing rules of the operator (unchanged):
 First thing to do: stage 6, step 1 (if not already done), then the operator's statements still
 open in the evidence file, then step 2.
 
-Open with the operator, not blocking the rollout: the three decisions listed above; pushing this
-plan; deleting the two finished build workspaces under `.superpowers/sdd/` once the rollout is
-recorded; recording the build in the brain (`brain-capture`, then the operator's `/brain-promote`).
+Open with the operator, not blocking the rollout: two of the three decisions listed above (the
+audit's two hardenings; a log folder for reports; the name check's limits were accepted on
+2026-10-14); after a PASS, compiling and promoting the brain entries (`brain-compile`, then the
+operator's `/brain-promote`), and the runbook fixes noted during the rollout (they change a file the
+box's fingerprint covers, so they wait until after the review). Done on 2026-10-14: the plan
+pushed; the two build workspaces deleted, their backlog saved in the brain.
