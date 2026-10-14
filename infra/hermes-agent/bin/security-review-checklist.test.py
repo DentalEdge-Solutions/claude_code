@@ -259,17 +259,25 @@ class TestChecklistSync(unittest.TestCase):
                     "port-forwarding", "restrict"):
             self.assertIn(f"`{opt}`", blocks["D1.7"], opt)
 
-    def test_the_version_is_1_21(self):
+    def test_the_version_is_1_22(self):
         text = items()[0]
-        self.assertRegex(text, r"(?m)^version: 1\.21$")
+        self.assertRegex(text, r"(?m)^version: 1\.22$")
         for words in ("(v1.21: the review covers every chat-triggered job the box declares: D10.3, D10.4, D10.7 and "
                       "D10.8 run once per job, D2.4 and D4.6 name every job's units, and D10.3 compares the jobs "
                       "declared with the jobs installed. A second job, `ads-report` (figures only). The report store "
                       "joins D4.1 and D7.1. D10.1 reports the services a figures run would start. D10.6: six tools.",
                       "A value that could not be checked for one installed job is CANNOT-VERIFY for the item. A job "
                       "is declared, installed or on disk, and each per-job entry says whether the job is declared and "
-                      "installed, and D10.3 lists the jobs on disk.)"):
+                      "installed, and D10.3 lists the jobs on disk.)",
+                      "(v1.22: D7.1 and D10.4: an in-memory mount (Docker's `tmpfs` type, listed with an empty host "
+                      "path) has no host side and is left out when a container's mounts are judged"):
             self.assertIn(words, text.split("**How to read an item.**")[0], words)
+
+    def test_d7_1_and_d10_4_say_that_an_in_memory_mount_is_left_out(self):
+        blocks = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}
+        for item in ("D7.1", "D10.4"):
+            self.assertIn("an in-memory mount, Docker's `tmpfs` type listed with an empty host path, has no host "
+                          "side and is left out", blocks[item], item)
 
     def test_there_are_38_items(self):
         self.assertEqual(len(items()[1]), 38)

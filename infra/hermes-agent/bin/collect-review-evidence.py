@@ -2594,7 +2594,9 @@ def _containers_mounting(host, tree):
     """(running containers, how many mount `tree`, how many could not be inspected). A container
     that went away, or Mounts that are not what Docker prints, is counted as not inspected —
     never allowed to fail the item or to pass as "mounts nothing". The container listing failing
-    raises CouldNotCheck."""
+    raises CouldNotCheck.
+    An in-memory mount (Type `tmpfs`, which Docker lists with an empty Source) has no host side:
+    it is left out, and the container's other mounts are judged as before."""
     ids = _ok(host, ["docker", "ps", "-q", "--no-trunc"]).split()
     mounting = not_inspected = 0
     for cid in ids:
@@ -2606,7 +2608,9 @@ def _containers_mounting(host, tree):
         if not isinstance(mounts, list) or not all(isinstance(m, dict) and isinstance(m.get("Source"), str)
                                                    for m in mounts):
             not_inspected += 1
-        elif any(not m["Source"].startswith("/") for m in mounts):
+            continue
+        mounts = [m for m in mounts if not (m.get("Type") == "tmpfs" and m["Source"] == "")]
+        if any(not m["Source"].startswith("/") for m in mounts):
             not_inspected += 1                          # an empty or relative Source cannot be judged
         elif any(_exposes(m["Source"], tree) for m in mounts):
             mounting += 1

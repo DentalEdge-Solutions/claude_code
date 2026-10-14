@@ -1535,6 +1535,38 @@ class TestD10(JobBox):
                 ra = self._arch_rows()
                 self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
 
+    def test_an_in_memory_mount_has_no_host_side_and_is_left_out_of_the_judgement(self):
+        # Docker lists a tmpfs mount with an empty Source (the gateway has one, measured on the box
+        # on 2026-10-14): it exposes nothing of the host, and must not hide a mount that does.
+        tmpfs = {"Type": "tmpfs", "Source": "", "Destination": "/projects/x", "Mode": "", "RW": False}
+        def m(*mounts):
+            return (0, json.dumps(list(mounts)), "")
+        bind = {"Type": "bind", "Source": "/opt/hermes-agent/skills"}
+        for name, mounts, want in (
+                ("with ordinary mounts", (bind, tmpfs), (0, 0)),
+                ("alone", (tmpfs,), (0, 0)),
+                ("beside a mount of the store", (tmpfs, {"Type": "bind", "Source": "/var/lib/hermes/report-archive"}), (1, 0)),
+                ("beside a bind with no host side", (tmpfs, {"Type": "bind", "Source": ""}), (0, 1)),
+                ("a tmpfs that names a host side", ({"Type": "tmpfs", "Source": "/var/lib/hermes/report-archive"},), (1, 0)),
+                ("a tmpfs with a relative host side", ({"Type": "tmpfs", "Source": "x"},), (0, 1)),
+                ("no Type and no host side", ({"Source": ""},), (0, 1)),
+                ("a Type that is not a string", ({"Type": ["tmpfs"], "Source": ""},), (0, 1))):
+            with self.subTest(name):
+                self.outputs[("docker", "ps")] = (0, "", "")
+                self._containers({"c1": m(*mounts)})
+                ra = self._arch_rows()
+                self.assertEqual((ra["containers_mounting"], ra["containers_not_inspected"]), want)
+
+    def test_d10_4_an_in_memory_mount_does_not_cost_the_container_its_inspection(self):
+        tmpfs = {"Type": "tmpfs", "Source": "", "Destination": "/projects/x"}
+        def m(*mounts):
+            return (0, json.dumps(list(mounts)), "")
+        self._containers({"c1": m({"Type": "bind", "Source": "/opt/hermes-agent/skills"}, tmpfs),
+                          "c2": m(tmpfs, {"Type": "bind", "Source": "/var/lib/hermes/app-state/ads-audit"})})
+        with self._resolver():
+            d = self._item("D10.4")["data"]
+        self.assertEqual((d["containers"], d["containers_mounting_app_state"], d["containers_not_inspected"]), (2, 1, 0))
+
     def test_d10_1_carries_figures_services_unchanged(self):
         fs = {"ads-report": {"anthropic_key": "absent", "proxy": "unused"}}
         self.outputs[("run-client-audit", "--probe-env")] = (0, json.dumps({"matches_declared": True, "figures_services": fs}), "")
