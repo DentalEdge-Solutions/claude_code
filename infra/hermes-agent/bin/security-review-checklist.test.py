@@ -278,6 +278,9 @@ class TestChecklistSync(unittest.TestCase):
         for item in ("D7.1", "D10.4"):
             self.assertIn("an in-memory mount, Docker's `tmpfs` type listed with an empty host path, has no host "
                           "side and is left out", blocks[item], item)
+            self.assertIn("Stated limit (v1.22): a named volume (Docker's `volume` type) whose driver options point it "
+                          "at a host folder", blocks[item], item)
+            self.assertIn("whether any running container has a `volume` mount", blocks[item], item)
 
     def test_there_are_38_items(self):
         self.assertEqual(len(items()[1]), 38)
