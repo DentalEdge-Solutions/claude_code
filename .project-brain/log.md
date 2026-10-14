@@ -40,3 +40,7 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-10-09 promoted decisions/candidates/2026-09-29-d3-2-decided-hermes-runs-read-only-no-write-credential.md → canon/2026-09-29-d3-2-decided-hermes-runs-read-only-no-write-credential.md
 - 2026-10-09 promoted decisions/candidates/2026-08-18-credential-access-levels-are-measured-never-asserted.md → canon/2026-08-18-credential-access-levels-are-measured-never-asserted.md
 - 2026-10-12 promoted decisions/candidates/2026-10-12-security-review-10-pass-38-38-v1-19-f58-fixed-on-the-box-f59.md → decisions/active/2026-10-12-security-review-10-pass-38-38-v1-19-f58-fixed-on-the-box-f59.md
+- 2026-10-14 promoted decisions/candidates/2026-10-14-security-review-11-pass-both-jobs-in-use-2026-10-14.md → decisions/active/2026-10-14-security-review-11-pass-both-jobs-in-use-2026-10-14.md
+- 2026-10-14 promoted lessons/memories/2026-10-14-a-provider-s-console-settings-can-weaken-without-anyone-touc.md → canon/2026-10-14-a-provider-s-console-settings-can-weaken-without-anyone-touc.md
+- 2026-10-14 promoted lessons/memories/2026-10-14-the-gateway-rewrites-data-config-yaml-back-up-under-a-name-o.md → decisions/active/2026-10-14-the-gateway-rewrites-data-config-yaml-back-up-under-a-name-o.md
+- 2026-10-14 superseded decisions/active/2026-10-12-security-review-10-pass-38-38-v1-19-f58-fixed-on-the-box-f59.md → decisions/superseded/ (replaced by review #11; operator's verdict)

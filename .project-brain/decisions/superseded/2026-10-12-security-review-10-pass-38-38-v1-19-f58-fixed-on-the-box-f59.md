@@ -5,7 +5,7 @@ description: Security review #10 PASS 38/38 (checklist v1.19), signed 2026-10-12
 tags: []
 timestamp: 2026-10-12T18:56:00
 sources: [sessions/daily/2026-10-12.md]
-status: active
+status: superseded
 promoted_at: 2026-10-12
 ---
 
