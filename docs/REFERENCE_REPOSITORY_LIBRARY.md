@@ -27,7 +27,7 @@ eval-scenario/governance/retrieval/research/human-workflow-source), `install_pol
 
 | Script | Usage |
 |---|---|
-| `brain-reference-repo-add.js` | `--name <n> --url <u> --types a,b [--use "…"] [--risk "…"] [--force]` — validates, dedupes, scaffolds a source card, regenerates registry.md |
+| `brain-reference-repo-add.js` | `--name <n> --url <u> --types a,b [--use "…"]… [--risk "…"]… [--force]` (each `--use`/`--risk` is one item, kept verbatim; repeat the flag for more) — validates, dedupes, scaffolds a source card, regenerates registry.md |
 | `brain-reference-repo-audit.js` | `--name <n>` — docs-only + no-secrets + policy + freshness; exit 3 on security violation, warnings otherwise |
 | `brain-reference-repo-map.js` | `--name <n> [--json]` — parses the card's Reusable Patterns / Candidate Skills / Candidate Agents for skill-scout handoff |
 | `brain-reference-repo-refresh.js` | `--name <n>` — bumps `last_reviewed` in registry + card |

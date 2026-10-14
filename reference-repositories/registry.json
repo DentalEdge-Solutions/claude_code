@@ -313,10 +313,7 @@
       "install_policy": "do-not-install-directly",
       "last_reviewed": "2026-10-03",
       "preferred_use": [
-        "Primary source for the Hermes runtime we deploy: releases",
-        "docs",
-        "security policy",
-        "code at the pinned tag"
+        "Primary source for the Hermes runtime we deploy: releases, docs, security policy, code at the pinned tag"
       ],
       "risk_notes": [
         "Upstream ships about weekly; pin by image digest and re-run the audit on every upgrade"
@@ -336,10 +333,7 @@
         "Evolutionary optimisation of skills (DSPy + GEPA); phase 1 only as of 2026-10-03"
       ],
       "risk_notes": [
-        "Not adopted; any skill or agent from it goes through scout",
-        "audit",
-        "adapt",
-        "eval"
+        "Not adopted; any skill or agent from it goes through scout, audit, adapt, eval"
       ]
     },
     {
@@ -353,12 +347,10 @@
       "install_policy": "do-not-install-directly",
       "last_reviewed": "2026-10-03",
       "preferred_use": [
-        "Community operations guide",
-        "verified against Hermes v0.21.4; corroboration only"
+        "Community operations guide, verified against Hermes v0.21.4; corroboration only"
       ],
       "risk_notes": [
-        "Independent community project",
-        "not affiliated with Nous Research; never the sole basis for a decision"
+        "Independent community project, not affiliated with Nous Research; never the sole basis for a decision"
       ]
     },
     {

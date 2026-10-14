@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // scripts/brain/brain-reference-repo-add.js — register a new reference repository.
 // Usage: node brain-reference-repo-add.js --name <n> --url <u> --types a,b
-//        [--use "..."] [--risk "..."] [--force] [--root <dir>]
+//        [--use "..."]... [--risk "..."]... [--force] [--root <dir>]
+// Each --use / --risk is one item, kept verbatim; repeat the flag for more.
 // Every entry is registered docs-only: install_policy is always forced to
 // 'do-not-install-directly'. Exit 0 ok · 1 usage/duplicate/unknown-type.
 'use strict';
@@ -18,7 +19,7 @@ const typesArg = getArg(process.argv, '--types');
 const force = hasFlag(process.argv, '--force');
 
 if (!name || !url || !typesArg) {
-  console.error('brain-reference-repo-add: usage --name <n> --url <u> --types a,b [--use "..."] [--risk "..."] [--force] [--root <dir>]');
+  console.error('brain-reference-repo-add: usage --name <n> --url <u> --types a,b [--use "..."]... [--risk "..."]... [--force] [--root <dir>]');
   process.exit(1);
 }
 if (!NAME_PATTERN.test(name)) {
@@ -50,8 +51,14 @@ if (existingIdx !== -1 && !force) {
   process.exit(1);
 }
 
-const use = getArg(process.argv, '--use');
-const risk = getArg(process.argv, '--risk');
+// Every value of a repeatable flag, verbatim. Commas inside a value are prose.
+function getArgs(argv, flag) {
+  const out = [];
+  for (let i = 0; i < argv.length - 1; i++) if (argv[i] === flag) out.push(argv[i + 1].trim());
+  return out.filter(Boolean);
+}
+const use = getArgs(process.argv, '--use');
+const risk = getArgs(process.argv, '--risk');
 const entry = {
   name,
   url,
@@ -59,8 +66,8 @@ const entry = {
   types,
   install_policy: INSTALL_POLICY,
   last_reviewed: todayStamp(),
-  preferred_use: use ? use.split(',').map(s => s.trim()).filter(Boolean) : [],
-  risk_notes: risk ? risk.split(',').map(s => s.trim()).filter(Boolean) : [],
+  preferred_use: use,
+  risk_notes: risk,
 };
 
 if (existingIdx !== -1) data.repositories[existingIdx] = entry;

@@ -20,7 +20,7 @@ Register a repository as source material only — metadata + a source card, neve
 1. Confirm with the user: `name` (kebab-case), `url`, and `types` (from the schema enum:
    methodology-source, skill-pattern-source, agent-pattern-source, candidate-skill-source,
    eval-scenario-source, governance-source, retrieval-source, research-source, human-workflow-source).
-2. Run: `node scripts/brain/brain-reference-repo-add.js --name <n> --url <u> --types a,b [--use "..."] [--risk "..."]`
+2. Run: `node scripts/brain/brain-reference-repo-add.js --name <n> --url <u> --types a,b [--use "..."]... [--risk "..."]...` — each `--use`/`--risk` is one item, kept verbatim (commas included); repeat the flag for more
 3. Open the scaffolded `reference-repositories/sources/<n>/source-card.md`; fill Source Summary /
    Why It Matters / Reusable Patterns with the user (or a quick WebFetch of the repo README — read only).
 4. Run `node scripts/brain/brain-reference-repo-audit.js --name <n>` and report the result.
