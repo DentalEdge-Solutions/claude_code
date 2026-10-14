@@ -736,6 +736,15 @@ collection, on 2026-10-08, failed D10.7; this finding is why.
 
 2026-10-13: fixed in code (the leak search reads every stored field; plan 2026-10-13-review-10-follow-ups, Tasks 1 and 2). Judged by review #11.
 
+2026-10-14: on the box (the pull of stage 1 of the review #11 rollout, `docs/superpowers/plans/2026-10-14-review-11-rollout.md`). That day's trial collection read every stored field of 44178 journal entries (1,072,394 fields): 0 hits. The leftover journal directory of review #10 was searched the same way (100 entries, 3745 fields: 0 hits) and then removed.
+
+### F60 and F61: found at the review #11 rollout (2026-10-14)
+
+| # | Finding | Decision | Now |
+|---|---|---|---|
+| F60 | D7.1 and D10.4 counted a container with an in-memory mount (Docker's `tmpfs` type, which Docker lists with an empty host path) as "not inspected". Found at the trial collection of 2026-10-14: the gateway has 13 bind mounts and 1 in-memory mount, so both items read one container not inspected, and neither could pass. The error was on the safe side: a closing line read `LOOK`, and no mount was missed. | fix now (operator, 2026-10-14) | **fixed** (PR #123, checklist v1.22; independent review: approved): an in-memory mount has no host side and is left out; the container's other mounts are judged as before; a mount with an empty host path that is not `tmpfs` is still "not inspected". On the box 2026-10-14; the second trial collection read 0 containers not inspected on both items. Judged by review #11. |
+| F61 | D7.1 and D10.4 judge a mount by its host path. A named volume (Docker's `volume` type) whose driver options point it at a host folder is listed with its own folder under `/var/lib/docker/volumes/` as its host path, so a volume set up that way to reach the report store or the job state would not be counted. True since D7.1 first read mounts. Raised by the independent review of PR #123. On 2026-10-14 the only running container, the gateway, had no `volume` mount. | state the limit now; the collector reads a volume's options for review #12 (operator, 2026-10-14) | **stated limit** in D7.1 and D10.4 (checklist v1.22): the reviewer asks the operator whether any running container has a `volume` mount, and one that has is CANNOT-VERIFY for that item until it is inspected by hand. Not fixed. |
+
 ## Final state of the box (end of session)
 
 - Stack running: `hermes-agent` up. `claude-auth-init` exited 0. The dashboard is enabled,
@@ -791,3 +800,19 @@ collection, on 2026-10-08, failed D10.7; this finding is why.
     audits) is live on the box.** Its findings are F26 to F43 above. The follow-up change that
     fixes eleven of them moves the checklist to v1.15 and changes the box fingerprint, so it needs a
     pull on the box and review #7 before the box is at that code.
+19. **2026-10-06 to 2026-10-12: security reviews #7 to #10 PASS** (checklists v1.16 to v1.19; reports
+    in `docs/security-reviews/`). Findings F44 to F59 above were opened in that time; F59 was accepted
+    at review #10 for that review only.
+20. **2026-10-14: the review #11 change rolled out** (plan `docs/superpowers/plans/2026-10-14-review-11-rollout.md`):
+    F59's fix on the box; F60 found and fixed (PR #123, checklist v1.22); F61 stated as a limit; the
+    leftover journal directory removed; a second job, `ads-report` (figures only, no AI analysis),
+    installed with its off switch ON. The switch stays on until security review #11 has passed; the
+    review must be collected by 2026-10-21 UTC (each job's `ok` result leaves the box after 7 days).
+21. Decided 2026-10-14 (operator): the stated limits of the report job's check for another client's
+    name are accepted (a name written with a space, an underscore or a line break, look-alike
+    letters, or an id grouped differently is not matched; reports stay on the box, readable by the
+    administrator only, and are read before they go anywhere), and F61 is accepted for review #11.
+    Still open, not blocking review #11: whether the audit's own check for another client's name
+    and `show-audit` get the two hardenings the report job has; whether reports keep their step
+    logs in a folder of their own. Next code change, for review #12: F61 (the collector reads a
+    named volume's options).
