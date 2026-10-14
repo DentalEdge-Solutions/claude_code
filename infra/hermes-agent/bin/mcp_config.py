@@ -200,10 +200,11 @@ def _build(lines):
     return holder[KEY], None
 
 
-def block_value(text):
-    """(value, None): the mapping under the file's one top-level `mcp_servers:` key. Otherwise
-    (None, reason), reason one of no_block, duplicate_key, top_level_not_plain, unparseable.
-    Never raises, whatever the text."""
+def block_value(text, key=KEY):
+    """(value, None): the mapping under the file's one top-level `key:` (`mcp_servers` unless
+    another top-level name is given; D10.6 also reads `provider_routing`), read with the same
+    rules. Otherwise (None, reason), reason one of no_block, duplicate_key, top_level_not_plain,
+    unparseable. Never raises, whatever the text."""
     if _REFUSED_CHARS_RE.search(text):
         return None, "unparseable"
     lines = text.split("\n")
@@ -222,7 +223,7 @@ def block_value(text):
         if not m:
             return None, "top_level_not_plain"
         tops.append(n)
-        if m.group(1) == KEY:
+        if m.group(1) == key:
             found.append((n, len(tops), m.group(2)))
     if len(found) != 1:
         return None, "duplicate_key" if found else "no_block"

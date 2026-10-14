@@ -259,9 +259,9 @@ class TestChecklistSync(unittest.TestCase):
                     "port-forwarding", "restrict"):
             self.assertIn(f"`{opt}`", blocks["D1.7"], opt)
 
-    def test_the_version_is_1_22(self):
+    def test_the_version_is_1_23(self):
         text = items()[0]
-        self.assertRegex(text, r"(?m)^version: 1\.22$")
+        self.assertRegex(text, r"(?m)^version: 1\.23$")
         for words in ("(v1.21: the review covers every chat-triggered job the box declares: D10.3, D10.4, D10.7 and "
                       "D10.8 run once per job, D2.4 and D4.6 name every job's units, and D10.3 compares the jobs "
                       "declared with the jobs installed. A second job, `ads-report` (figures only). The report store "
@@ -270,7 +270,10 @@ class TestChecklistSync(unittest.TestCase):
                       "is declared, installed or on disk, and each per-job entry says whether the job is declared and "
                       "installed, and D10.3 lists the jobs on disk.)",
                       "(v1.22: D7.1 and D10.4: an in-memory mount (Docker's `tmpfs` type, listed with an empty host "
-                      "path) has no host side and is left out when a container's mounts are judged"):
+                      "path) has no host side and is left out when a container's mounts are judged",
+                      "(v1.23, after review #11: D7.1 and D10.4 judge a named volume by where its driver options "
+                      "point it, which closes the v1.22 stated limit (F61); D10.6 also reports the box's "
+                      "`provider_routing.data_collection` as a closed word"):
             self.assertIn(words, text.split("**How to read an item.**")[0], words)
 
     def test_d7_1_and_d10_4_say_that_an_in_memory_mount_is_left_out(self):
@@ -278,9 +281,16 @@ class TestChecklistSync(unittest.TestCase):
         for item in ("D7.1", "D10.4"):
             self.assertIn("an in-memory mount, Docker's `tmpfs` type listed with an empty host path, has no host "
                           "side and is left out", blocks[item], item)
-            self.assertIn("Stated limit (v1.22): a named volume (Docker's `volume` type) whose driver options point it "
-                          "at a host folder", blocks[item], item)
-            self.assertIn("whether any running container has a `volume` mount", blocks[item], item)
+            self.assertIn("Since v1.23 (F61): a named volume (Docker's `volume` type)", blocks[item], item)
+            self.assertIn("a local bind volume (`type` `none`, `bind` among the `o` options) is also judged by its "
+                          "`device`", blocks[item], item)
+            self.assertIn("or a named volume that cannot be judged", blocks[item], item)
+            self.assertNotIn("Stated limit (v1.22)", blocks[item], item)
+
+    def test_d10_6_states_the_provider_routing_expectation(self):
+        block = {b.split(" ", 1)[0]: b for b in re.split(r"(?m)^### ", items()[0])}["D10.6"]
+        self.assertIn('`provider_routing` is `{"data_collection": "deny", "reason": "-"}`', block)
+        self.assertIn('A `provider_routing` other than `{"data_collection": "deny", "reason": "-"}` is a FAIL', block)
 
     def test_there_are_38_items(self):
         self.assertEqual(len(items()[1]), 38)
