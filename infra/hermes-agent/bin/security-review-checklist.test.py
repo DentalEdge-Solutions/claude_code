@@ -287,6 +287,8 @@ class TestChecklistSync(unittest.TestCase):
             self.assertIn("or a named volume that cannot be judged", blocks[item], item)
             self.assertIn("with `bind` the kernel would mount its `device`", blocks[item], item)
             self.assertIn("in its plain form with no symbolic link in it on the host", blocks[item], item)
+            self.assertIn("checked for symbolic links when the evidence is collected, while the kernel resolved it "
+                          "when the container started", blocks[item], item)
             self.assertNotIn("Stated limit (v1.22)", blocks[item], item)
 
     def test_d10_6_states_the_provider_routing_expectation(self):
