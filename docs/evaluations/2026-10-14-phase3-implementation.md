@@ -19,6 +19,19 @@
 | **P1-B** review protocol | `docs/REVIEW_PROTOCOL.md`, `.github/pull_request_template.md`, and a one-line pointer in CLAUDE.md | Codifies the practice in PR #130. Applied to this branch: an independent review found R1–R8 | done; **adoption metric pending** (§3) |
 | Review fixes | R2–R7 fixed, each with a test. Also found and fixed: agent eval reports in `.claude/agents/` were scanned and counted as agents | `c417953` | done |
 
+**Follow-up: D1 made portable (option B, approved 2026-10-14).**
+- **Finding:** `superpowers:writing-skills` is enabled only at user level on the development laptop.
+  - The Hermes box has only `playwright`, but never runs the pipeline skills.
+  - Projects set up with `install.sh` get no plugin, so P0-A's fallback would have named a missing skill there.
+  - The CI check verified only that the plugin skill was *declared*.
+- **Fix:**
+  - All six references now say "`superpowers:writing-skills` if installed, otherwise by hand per the official skills docs", always followed by skill-audit → skill-eval.
+  - `validate-skills.js` fails a declared external reference with no stated fallback within two lines (reason `no-fallback`), with a test.
+  - `install.sh` prints a note that the plugin is optional, and installs none.
+- **Rejected alternatives:**
+  - **A**, project-scope `enabledPlugins` in every target: this would bring the whole plugin and its session hook into each project, and worsen the listing overflow.
+  - **C**, vendoring a skill-writing skill into the toolkit: more maintenance; revisit only if B proves too thin.
+
 ## 2 · Validation (final run, this branch)
 
 | Check | Result |

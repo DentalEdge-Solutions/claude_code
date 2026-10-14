@@ -33,9 +33,13 @@ Exit codes:
 
 // Plugin skills this repo's skills route to. CI cannot see installed plugins, so
 // each namespaced reference must be declared here — a deliberate, reviewable list.
+// They are OPTIONAL: install.sh installs no plugin, and target projects (and the
+// Hermes box) may not have them. So every reference must state its fallback on
+// the same or the next two lines ("if ... installed/available", or "otherwise").
 const EXTERNAL_SKILLS = [
-  'superpowers:writing-skills', // D1 (2026-10-14): the pipeline's build-from-scratch path
+  'superpowers:writing-skills', // D1 (2026-10-14): preferred build-from-scratch tool, with a fallback
 ];
+const FALLBACK_RE = /\botherwise\b|\bif\b[^.\n]{0,80}\b(?:installed|available)\b/i;
 
 // A backticked kebab name (optionally ns:name) right after an invocation verb,
 // or followed by "skill"/"agent". Plain backticked file names and flags don't match.
@@ -65,9 +69,10 @@ function walkMarkdown(dir) {
   });
 }
 
-// Returns [{ name, location }] for every invocation-shaped reference that names
-// neither a skill (skillsDir, knownSkillDirs), an agent (agentDirs), nor a
-// declared external plugin skill.
+// Returns [{ name, location, reason }] for every invocation-shaped reference that
+// names neither a skill (skillsDir, knownSkillDirs), an agent (agentDirs), nor a
+// declared external plugin skill (reason 'unresolved'), and for every declared
+// external reference with no stated fallback nearby (reason 'no-fallback').
 function findUnresolvedSkillRefs({ skillsDir, agentDirs = [], knownSkillDirs = [], external = EXTERNAL_SKILLS }) {
   const known = new Set([...listDirs(skillsDir), ...knownSkillDirs.flatMap(listDirs)]);
   const agentFiles = agentDirs.flatMap(d => (fs.existsSync(d) ? fs.readdirSync(d) : [])
@@ -82,9 +87,15 @@ function findUnresolvedSkillRefs({ skillsDir, agentDirs = [], knownSkillDirs = [
     for (const m of text.matchAll(REF_RE)) {
       const name = m[1] || m[2];
       if (!/^[a-z0-9:-]+$/.test(name)) continue; // /i matches verbs; names stay lowercase kebab
-      if (name.includes(':') ? declared.has(name) : known.has(name)) continue;
       const line = text.slice(0, m.index).split('\n').length;
-      unresolved.push({ name, location: `${path.relative(process.cwd(), file)}:${line}` });
+      const location = `${path.relative(process.cwd(), file)}:${line}`;
+      if (name.includes(':') && declared.has(name)) {
+        const near = text.split('\n').slice(line - 1, line + 2).join('\n');
+        if (!FALLBACK_RE.test(near)) unresolved.push({ name, location, reason: 'no-fallback' });
+        continue;
+      }
+      if (known.has(name)) continue;
+      unresolved.push({ name, location, reason: 'unresolved' });
     }
   }
   return unresolved;
@@ -169,6 +180,8 @@ const unresolved = findUnresolvedSkillRefs({
   agentDirs: [path.join(repoRoot, '.claude', 'agents')],
   knownSkillDirs: [path.join(repoRoot, '.claude', 'skills')],
 });
-unresolved.forEach(r => console.log(`  FAIL  unresolved skill reference \`${r.name}\` at ${r.location}`));
+unresolved.forEach(r => console.log(r.reason === 'no-fallback'
+  ? `  FAIL  optional plugin skill \`${r.name}\` referenced without a fallback at ${r.location}`
+  : `  FAIL  unresolved skill reference \`${r.name}\` at ${r.location}`));
 console.log(`skill references: ${unresolved.length} unresolved`);
 process.exit(failed > 0 || unresolved.length > 0 ? 1 : 0);

@@ -67,7 +67,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 - **One lever per iteration** — never change description AND checklist in the same iteration.
 - **Revert faithfully** — restore the exact prior content, not a rewrite of it.
 - **Log every iteration** — including failed hypotheses. They're data.
-- **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend a rebuild with `superpowers:writing-skills` instead (then `skill-audit` → `skill-eval`).
+- **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend a rebuild instead: `superpowers:writing-skills` if installed, otherwise by hand per skill-scout's no-results step; then `skill-audit` → `skill-eval`.
 - **Never skip the baseline backup** — `SKILL.md.baseline` must exist before the first mutation.
 
 See [REFERENCE.md](REFERENCE.md) for lever definitions, keep/revert thresholds, hypothesis guide, good/bad mutations, convergence criteria, and log template.

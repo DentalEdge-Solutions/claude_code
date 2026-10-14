@@ -75,7 +75,7 @@ test('ignores generated eval reports and refine logs (historical artifacts)', ()
 });
 
 test('namespaced plugin skills must be declared external', () => {
-  const { opts } = fixture({ skills: { 'skill-scout': { 'SKILL.md': 'invoke `superpowers:writing-skills`, or use `other:undeclared-skill`.\n' } } });
+  const { opts } = fixture({ skills: { 'skill-scout': { 'SKILL.md': 'If installed, invoke `superpowers:writing-skills`, or use `other:undeclared-skill`.\n' } } });
   const refs = findUnresolvedSkillRefs({ ...opts, external: ['superpowers:writing-skills'] });
   assert.deepStrictEqual(refs.map(r => r.name), ['other:undeclared-skill']);
 });
@@ -118,6 +118,19 @@ test('agent eval reports beside definitions are history, and are not agents', ()
   // the report's own ref is skipped; and "foo-agent-EVAL" is not resolvable as an agent:
   const { opts: o2 } = fixture({ skills: { 's-g': { 'SKILL.md': 'dispatch the `bar-agent-eval` agent\n' } }, agents: { 'bar-agent-EVAL': 'x\n' } });
   assert.deepStrictEqual(findUnresolvedSkillRefs(o2).map(r => r.name), ['bar-agent-eval']);
+});
+
+test('optional plugin skills: a reference must state its fallback (portability to target projects)', () => {
+  const { opts } = fixture({ skills: { 's-h': { 'SKILL.md': [
+    'Build it: invoke `superpowers:writing-skills`.',            // line 1: no fallback nearby -> flagged
+    '', '', '',
+    'If it is installed, invoke `superpowers:writing-skills`;',  // line 5: fallback stated -> ok
+    'otherwise write SKILL.md per the official skills docs.',
+    '',
+  ].join('\n') } } });
+  const refs = findUnresolvedSkillRefs({ ...opts, external: ['superpowers:writing-skills'] });
+  assert.deepStrictEqual(refs.map(r => [r.name, r.reason]), [['superpowers:writing-skills', 'no-fallback']]);
+  assert.match(refs[0].location, /SKILL\.md:1$/);
 });
 
 test('the declared external list names the D1 generate path', () => {
