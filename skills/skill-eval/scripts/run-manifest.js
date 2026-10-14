@@ -74,10 +74,19 @@ if (cmd === 'init') {
   const snapshotPath = snapshotFlag !== -1 ? rest[snapshotFlag + 1] : null;
   const versionFlag = rest.indexOf('--methodology-version');
   const methodologyVersion = versionFlag !== -1 ? parseInt(rest[versionFlag + 1], 10) : 2;
-  const subjectFlag = rest.indexOf('--subject');
-  const subjectPath = subjectFlag !== -1 ? rest[subjectFlag + 1] : null;
-  const commitFlag = rest.indexOf('--commit');
-  const commit = commitFlag !== -1 ? rest[commitFlag + 1] : null;
+  // A present value flag must carry a value that is not itself a flag.
+  function flagValue(flag) {
+    const i = rest.indexOf(flag);
+    if (i === -1) return null;
+    const v = rest[i + 1];
+    if (v === undefined || v.startsWith('--')) {
+      console.error(`Error: ${flag} needs a value.`);
+      process.exit(1);
+    }
+    return v;
+  }
+  const subjectPath = flagValue('--subject');
+  const commit = flagValue('--commit');
 
   if (!iterationDir) { console.error('Error: <iteration-dir> is required.'); usageAndExit(1); }
   if (baselineMethod !== 'none' && baselineMethod !== 'snapshot') {
@@ -91,6 +100,14 @@ if (cmd === 'init') {
 
   if (subjectPath && !fs.existsSync(subjectPath)) {
     console.error(`Error: --subject ${subjectPath} does not exist — refusing to record a revision for a missing definition.`);
+    process.exit(1);
+  }
+  if (subjectPath && !fs.statSync(subjectPath).isFile()) {
+    console.error(`Error: --subject ${subjectPath} is not a file — pass the definition file (SKILL.md or the agent .md).`);
+    process.exit(1);
+  }
+  if (commit !== null && !subjectPath) {
+    console.error('Error: --commit requires --subject (the commit is recorded as part of the subject revision).');
     process.exit(1);
   }
   if (commit !== null && !/^[0-9a-f]{7,40}$/.test(commit)) {

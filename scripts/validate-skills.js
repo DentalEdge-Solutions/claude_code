@@ -39,10 +39,17 @@ const EXTERNAL_SKILLS = [
 
 // A backticked kebab name (optionally ns:name) right after an invocation verb,
 // or followed by "skill"/"agent". Plain backticked file names and flags don't match.
-const REF_RE = /\b(?:invoke|invoking|recommend|recommends|run|use|using|route to|hand off to|dispatch|dispatches|spawn|call|calls|with)\s+(?:the\s+)?`((?:[a-z0-9-]+:)?[a-z0-9]+(?:-[a-z0-9]+)+)`|`((?:[a-z0-9-]+:)?[a-z0-9]+(?:-[a-z0-9]+)+)`\s+(?:skill|agent|sub-agent|subagent)\b/gi;
+// Deliberately narrow (precision over recall): other phrasings — unquoted names,
+// single-word names, verbs not listed — are not checked. "with" is excluded on
+// purpose: "with `dry-run` mode" is prose, not a reference.
+const REF_RE = /\b(?:invoke|invoking|recommend|recommends|run|use|using|route to|hand off to|dispatch|dispatches|spawn|call|calls)\s+(?:the\s+)?`\/?((?:[a-z0-9-]+:)?[a-z0-9]+(?:-[a-z0-9]+)+)`|`\/?((?:[a-z0-9-]+:)?[a-z0-9]+(?:-[a-z0-9]+)+)`\s+(?:skill|agent|sub-agent|subagent)\b/gi;
 
-// Generated eval reports and refine logs are history, not instructions.
-const HISTORICAL_RE = /(-EVAL|REFINE-LOG)\.md$/;
+// Generated eval reports and refine logs are history, not instructions. Per
+// location: skill dirs hold SKILL-/AGENT-/TEAM-EVAL.md and *REFINE-LOG.md;
+// .claude/agents/ holds <name>-EVAL.md and <name>-REFINE-LOG.md beside the
+// definitions (those must not be counted as agents either).
+const SKILL_DIR_HISTORY_RE = /^(?:SKILL|AGENT|TEAM)-EVAL\.md$|REFINE-LOG\.md$/;
+const AGENT_DIR_HISTORY_RE = /-EVAL\.md$|-REFINE-LOG\.md$/;
 
 function listDirs(dir) {
   if (!fs.existsSync(dir)) return [];
@@ -54,7 +61,7 @@ function walkMarkdown(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) return walkMarkdown(p);
-    return e.name.endsWith('.md') && !HISTORICAL_RE.test(e.name) ? [p] : [];
+    return e.name.endsWith('.md') && !SKILL_DIR_HISTORY_RE.test(e.name) ? [p] : [];
   });
 }
 
@@ -64,12 +71,13 @@ function walkMarkdown(dir) {
 function findUnresolvedSkillRefs({ skillsDir, agentDirs = [], knownSkillDirs = [], external = EXTERNAL_SKILLS }) {
   const known = new Set([...listDirs(skillsDir), ...knownSkillDirs.flatMap(listDirs)]);
   const agentFiles = agentDirs.flatMap(d => (fs.existsSync(d) ? fs.readdirSync(d) : [])
-    .filter(f => f.endsWith('.md')).map(f => path.join(d, f)));
+    .filter(f => f.endsWith('.md') && !AGENT_DIR_HISTORY_RE.test(f)).map(f => path.join(d, f)));
   for (const f of agentFiles) known.add(path.basename(f, '.md'));
   const declared = new Set(external);
 
   const unresolved = [];
-  for (const file of [...walkMarkdown(skillsDir), ...agentFiles]) {
+  const scanned = [skillsDir, ...knownSkillDirs].flatMap(walkMarkdown);
+  for (const file of [...scanned, ...agentFiles]) {
     const text = fs.readFileSync(file, 'utf8');
     for (const m of text.matchAll(REF_RE)) {
       const name = m[1] || m[2];

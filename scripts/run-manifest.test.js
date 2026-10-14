@@ -85,5 +85,30 @@ test('status prints the subject revision', () => {
   assert.match(r.out, /commit=abcdef1/);
 });
 
+test('R5: --commit without --subject is refused, not silently dropped', () => {
+  const root = tmp();
+  const r = run('init', path.join(root, 'it'), '--baseline-method', 'none', '--commit', 'abc1234');
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.out, /--commit requires --subject/);
+});
+
+test('R6: a value flag with no value (or another flag as its value) is refused', () => {
+  const root = tmp();
+  let r = run('init', path.join(root, 'a'), '--baseline-method', 'none', '--subject');
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.out, /--subject needs a value/);
+  r = run('init', path.join(root, 'b'), '--baseline-method', 'none', '--subject', '--commit', 'abc1234');
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.out, /--subject needs a value/);
+});
+
+test('R6: --subject pointing at a directory fails cleanly, without a stack trace', () => {
+  const root = tmp();
+  const r = run('init', path.join(root, 'it'), '--baseline-method', 'none', '--subject', root);
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.out, /not a file/);
+  assert.doesNotMatch(r.out, /EISDIR|at Object\./);
+});
+
 if (!ok) process.exit(1);
 console.log('\nrun-manifest.test.js: all tests passed');

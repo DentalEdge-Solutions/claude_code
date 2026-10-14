@@ -52,9 +52,18 @@ if (existingIdx !== -1 && !force) {
 }
 
 // Every value of a repeatable flag, verbatim. Commas inside a value are prose.
+// A flag can't be another flag's value: "--use --risk x" is refused, not stored.
 function getArgs(argv, flag) {
   const out = [];
-  for (let i = 0; i < argv.length - 1; i++) if (argv[i] === flag) out.push(argv[i + 1].trim());
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== flag) continue;
+    const v = argv[i + 1];
+    if (v === undefined || v.startsWith('--')) {
+      console.error(`brain-reference-repo-add: ${flag} needs a value`);
+      process.exit(1);
+    }
+    out.push(v.trim());
+  }
   return out.filter(Boolean);
 }
 const use = getArgs(process.argv, '--use');

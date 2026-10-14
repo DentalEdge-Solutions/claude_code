@@ -149,6 +149,11 @@ try {
   entry = readRegistry().repositories.find(e => e.name === 'no-use-repo');
   assert.deepStrictEqual([entry.preferred_use, entry.risk_notes], [[], []], 'absent flags give empty arrays');
 
+  // R7: a flag cannot be swallowed as the previous flag's value.
+  r = run(ADD, ['--name', 'swallow-repo', '--url', 'https://example.com/s', '--types', 'research-source', '--use', '--risk', 'x']);
+  assert.notStrictEqual(r.status, 0, 'a flag given as a --use value is refused');
+  assert.match(r.stderr, /--use needs a value/);
+
   console.log('brain-reference-repo.test.js: all assertions passed');
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });
