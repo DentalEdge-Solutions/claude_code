@@ -360,6 +360,93 @@
         "Independent community project",
         "not affiliated with Nous Research; never the sole basis for a decision"
       ]
+    },
+    {
+      "name": "claude-code-docs",
+      "url": "https://code.claude.com/docs/llms.txt",
+      "status": "reference",
+      "types": [
+        "research-source",
+        "governance-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-14",
+      "preferred_use": [
+        "Primary source for Claude Code behaviour: features and config and limits",
+        "Fetch the .md form of a page listed in llms.txt"
+      ],
+      "risk_notes": [
+        "Pages show no update dates: pin claims to the changelog version"
+      ]
+    },
+    {
+      "name": "anthropic-claude-code",
+      "url": "https://github.com/anthropics/claude-code",
+      "status": "reference",
+      "types": [
+        "research-source",
+        "governance-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-14",
+      "preferred_use": [
+        "Releases and CHANGELOG.md and feed.xml",
+        "Security advisories (GHSA) for version floors"
+      ],
+      "risk_notes": [
+        "No product source in the repo; proprietary license (Commercial ToS)"
+      ]
+    },
+    {
+      "name": "anthropic-skills",
+      "url": "https://github.com/anthropics/skills",
+      "status": "reference",
+      "types": [
+        "skill-pattern-source",
+        "candidate-skill-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-14",
+      "preferred_use": [
+        "Agent Skills spec and reference skill structure"
+      ],
+      "risk_notes": [
+        "Mixed licensing: docx/pdf/pptx/xlsx proprietary; doc-coauthoring unlicensed; check per-skill LICENSE before reuse"
+      ]
+    },
+    {
+      "name": "anthropic-claude-plugins-official",
+      "url": "https://github.com/anthropics/claude-plugins-official",
+      "status": "reference",
+      "types": [
+        "skill-pattern-source",
+        "agent-pattern-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-14",
+      "preferred_use": [
+        "Anthropic-managed plugin directory: plugin structure patterns"
+      ],
+      "risk_notes": [
+        "Plugins run code with user privileges; directory listing is not an endorsement of bundled MCP servers"
+      ]
+    },
+    {
+      "name": "claude-code-ultimate-guide",
+      "url": "https://github.com/FlorianBruniaux/claude-code-ultimate-guide",
+      "status": "reference",
+      "types": [
+        "methodology-source",
+        "research-source"
+      ],
+      "install_policy": "do-not-install-directly",
+      "last_reviewed": "2026-10-14",
+      "preferred_use": [
+        "Independent methodology and ecosystem map: corroboration only"
+      ],
+      "risk_notes": [
+        "Single maintainer; tracks CC 2.1.296; CC BY-SA 4.0 (quote and attribute only); several native-feature claims conflict with official docs"
+      ]
     }
   ]
 }
