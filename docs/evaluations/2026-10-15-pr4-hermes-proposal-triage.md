@@ -322,24 +322,65 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   | 5 | The delete rule matched the word `rm` anywhere before `.project-brain` | `grep rm .project-brain/…` and `git add …-rm-rf-….md …` denied | allowed |
   | 6 | `cd .project-brain && rm -rf …`, `find .project-brain -delete`, `… \| xargs rm`, `rmdir`/`unlink`/`shred`/`git clean` | allowed | denied |
   | 7 | Four canon-rule regexes (`\d*>\s*/dev/null`, `\d*>&\d+`, `\bsed\b[^\|]*-i`, `brain-promote…[\s\S]*--approve`) and the old `rm` rule were quadratic | 1.8 s at 64 KB, minutes at 512 KB. A PreToolUse hook that times out "doesn't block the tool call", so this was a bypass | linear: indexOf, per-segment scans, no leading `\d*` |
+  | 8 | The first version of the new delete rule (at `509ac1c`) let through capsule deletes that `main` denied (review round 1, R1–R3, below) | allowed | denied (round 2) |
 
-- **New delete rule:** the command is split into pipelines (`;`, `&&`, `\|\|`, `&`, newline, parentheses, braces, backticks) and stages (`\|`), with quotes dropped. It denies when a stage runs a deleting program and the capsule is the target. A stage runs one when:
-  - the deleting program is the command word (after env assignments and shell keywords);
-  - or it sits behind a runner such as `sudo`, `env`, `xargs` or `bash -c`;
-  - or it is `find` with `-delete` / `-exec rm`, or `git rm` / `git clean`.
+- **Delete rule (final):**
+  - **Splitting follows the shell.** Only `;`, `&`, `&&`, `||`, `|`, `|&` and newlines outside quotes separate commands. A backslash escapes the next character, and `\<newline>` joins lines. `&>`, `>&` and `<&` are redirections.
+  - **What counts as a delete:** as on `main`, any `rm`/`rmdir`/`unlink`/`shred` word, whoever runs it. Also: one glued to a short option (`-Orm`), `find … -delete`, `git rm`, `git clean` (except a `-n` dry run), and `rmSync`/`unlinkSync`/`rmdirSync`/`rmtree`/`rimraf`.
+  - **The one exemption** is a stage whose command never runs its arguments: `grep`, `rg`, `cat`, `ls`, `echo`, `find` without `-exec`, `git add`/`commit`/`log`/`diff`/`show`/`grep`, and similar readers. The exemption ends when the stage has any of these:
+    - a `VAR=value` prefix;
+    - an option that runs a program (`rg --pre`/`--hostname-bin`, `git grep -O`/`--ope…`, git `-c`, `--ext-diff`, …);
+    - `$(…)`, backticks or `<(…)`;
+    - a later stage in the pipeline that is not a reader.
+  - **The target:** `.project-brain` is named in the same pipeline (expansions included), or the shell is inside the capsule. `cd`, `pushd` and `popd` are tracked by depth, so leaving with `cd ..`, `cd /tmp` or `popd` ends that state.
+- **Review round 1** (independent reviewer, at `509ac1c`, verdict REQUEST CHANGES). The author answers each finding here; only the reviewer closes it.
 
-  The capsule is the target when `.project-brain` is named in the same pipeline, or an earlier `cd`/`pushd` entered it.
-- **Evidence:**
-  - **Tests first.** 31 new checks in `scripts/brain/brain-hooks.test.js` (6e–6j), each hook run with a 15 s timeout. Against `main`'s guard, 27 failed in the first batch. The second batch then failed on NotebookEdit and on 3 timing cases (two still running when the 15 s limit killed them, one 8.4 s). A later false-positive case (`sudo grep -e -delete …`) was also watched failing first.
-  - **After:** all hook tests pass; 27/27 suites pass; `brain-lint` shows 0 security findings (the 3 known stale-canon warnings).
-  - **Mutations:** 7 targeted mutations were each caught: no cd tracking, capsule only in the deleting stage, bad input allowed, input via env var, fail-open exit 0, no runners, and NotebookEdit reading `file_path`. The last one first survived and exposed a weak assertion, which was then tightened.
-  - **Timing:** 27 regexes × 40 adversarial 1 MB inputs, in-process: worst 34 ms. The whole guard end-to-end on 40 × 1 MB commands: worst 126 ms.
-  - **Differential:** 99,981 generated inputs (17 prefixes × 30 verbs × 14 targets × 14 suffixes, plus 21 Write/Edit/NotebookEdit paths), each run through `main`'s guard and the new one:
-    - 80,601 got the same decision: 26,204 deny and 54,397 allow.
-    - **4,368 went deny → allow**, all in two classes. The first is `rm` only as an argument (`grep rm`, `grep "rm"`, `grep -rn rm`, `git commit -m "rm stuff"`), which is the intended fix. The second is nonsense `git -C .project-brain <not-a-git-command> …` calls that git rejects. No input with a real deleting command changed to allow.
-    - **15,012 went allow → deny.** Each contains a deleting program on the capsule: the new programs (`rmdir`, `unlink`, `shred`, `git clean`), a delete after `cd`/`pushd` into the capsule, `find … -delete`, `… | xargs rm`, `git -C .project-brain rm`, or NotebookEdit into `canon/`. A filter for allow → deny inputs without a deleting command found none.
-    - A first run also flagged 605 runner + `-delete` cases (`sudo grep -e -delete …`). `-delete` now counts only when the command is `find`, with a test.
-- **Gaps left open (not in P11's probe table):**
+  | ID | Severity | Finding | Author's answer (round 2) |
+  |---|---|---|---|
+  | R1 | blocking | Splitting at `(){}` and backticks cut `${…}`, `$(…)`, backticks and `{…,…}` targets off the delete | Split only at real separators outside quotes; 9 tests (`"${CLAUDE_PROJECT_DIR}/.project-brain"`, `$(pwd)/…`, `{.project-brain,…}`, quoted `;` and newline) |
+  | R2 | blocking | A leading redirection became the command word | Redirections skipped when finding the command word, and any `rm` word counts anyway; 4 tests |
+  | R3 | blocking | A fixed runner list (`busybox`, `ssh`, `watch`, `flock`, `trap`, `su -c`, glued here-strings, `env -S'…'`, `git --git-dir … rm`) | Rule inverted: any deleter word counts unless the stage is an exempt reader. Words are split twice (quotes dropped / quotes as separators). 20 tests, including `echo rm … \| sh`, `git -c alias…`, `eval "$(…)"` |
+  | R4 | minor | `cd`/`pushd` into the capsule never reset | Directory depth tracked through `cd`/`pushd`/`popd`; 3 allow tests, plus `cd …/decisions && cd .. && rm` stays denied |
+  | R5 | minor | False positives: `xargs grep -l rm`, `sh -c "grep unlink …"`, `git clean -n` | `git clean -n` now allowed (test). The other two stay as documented conservative denials (programs that run commands) |
+  | R6 | minor | Gaps also on `main` (`xargs -I{} rm`, `bash -c 'cd … && rm'`, `cd "$(…)/.project-brain"`, `find -exec sh -c 'rm …'`, `r\m`, script-level deletes) | All denied now, with tests. `mv`, `rsync --delete`, `cp -r` over, `truncate`, `: >` are documented as limits (G2) |
+  | R7 | minor | Docs overstated coverage ("and similar") | `SECOND_BRAIN_SECURITY.md` rewritten: exact rule, exemption conditions, known limits |
+  | R8 | minor | The differential lacked expansion, redirection, runner and here-string forms | Corpus extended (see Evidence) |
+  | R9 | minor | `guard-failures.log` not gitignored | Added to `.gitignore` |
+
+  Automated background security reviews ran four times during the two rounds. They flagged:
+  - **the R1–R3 classes**;
+  - **readers that can execute:** `rg --pre`, `ag`/`ack --pager`, `sort --compress-program` (shortenable), `less`/`more`, `git fetch`/`push`/`pull` `--upload-pack`, `GIT_EXTERNAL_DIFF=`/`PAGER=` prefixes;
+  - **`git grep -O` / `--open-files-in-pager`** and `rg --hostname-bin`;
+  - **quote concatenation:** `git grep -O"r"m …` got past the glued-option check.
+
+  Each was reproduced and given a failing test before the fix. The pagers, `sort` and network git were removed from the readers. `VAR=` prefixes and program-running options end the exemption. The glued-option check reads shell words (quotes joined). The extended differential also found a false positive from an earlier form of that check: `env -S'farm …'` was read as `-Sfarm`. It now has a test.
+- **Evidence (round 2):**
+  - **Tests first, again.** The round-2 additions to `scripts/brain/brain-hooks.test.js` are the R1–R6 cases, the readers that can execute, two `$(…)`/`<(…)` cases, and the quote-concatenation and `env -S'farm …'` cases. Each batch was watched failing first:
+    - against `509ac1c`, 45 of the first 50 failed; the other 5 already passed there and stay as regression checks;
+    - then 8 of 11 execute-capable reader cases failed;
+    - then 5 more (`git grep -O…`, `sort --compress-prog`, `rg --hostname-bin`);
+    - then 1 (`env -S'farm …'` falsely denied);
+    - then 2 of 4 quote-concatenation cases.
+  - **After:** `brain-hooks.test.js` passes; 27/27 suites pass; `brain-lint` shows 0 security findings (the 3 known stale-canon warnings).
+  - **Mutations:** 23 targeted mutations, each caught by a behavioural failure. Timing failures under CPU load were not counted as kills. The mutations covered:
+    - cd tracking and leaving the capsule;
+    - bad input, env-var input, the fail-open exit code;
+    - NotebookEdit;
+    - the downstream-stage, substitution and `VAR=` conditions on the exemption;
+    - splitting at `(){}`, quotes ignored when splitting, the leading-redirect skip;
+    - quote-separated words, API deletes, `git clean -n`, `find` as a reader;
+    - program-running options, `git grep -O`, `sort` as a reader;
+    - the glued-option check and the shell-word reading it uses;
+    - deleter words only as the command word.
+  - **Timing:** 34 regexes × 54 adversarial 1 MB inputs in-process: worst 37 ms. The whole guard end-to-end on 54 × 1 MB commands: worst 317 ms (load average about 10 at the time).
+  - **Differential (R8, extended):** 228,021 generated inputs, each run through `main`'s guard and the final one:
+    - **The corpus.** 25 prefixes, now including leading redirections, `busybox`, `caffeinate`, `ssh h`, `env -S'`, `sh <<<'` and `git --git-dir`. 30 verbs. 19 targets, now including `"${CLAUDE_PROJECT_DIR}/.project-brain"`, `$(pwd)/…`, backticks and brace expansion. 16 suffixes, now including `| sh` and `| bash`. Plus 21 Write/Edit/NotebookEdit paths.
+    - **183,471 same decision** (65,310 deny, 118,161 allow).
+    - **6,600 deny → allow,** all in the four intended argument classes: `grep rm`, `grep "rm"`, `grep -rn rm`, `git commit -m "rm stuff"`. They appear only behind plain prefixes (`cd`, `ls;`, `time`, a redirect, `git -C … grep`). None sits behind a prefix that runs commands, and none pipes into `sh`, `bash` or `xargs`. The round-1 class of nonsense `git -C …` calls is denied again.
+    - **37,950 allow → deny.** A filter for inputs without a real deleting word, `-delete` or `git rm`/`git clean` found none (NotebookEdit into `canon/` aside).
+    - Round-1 numbers (99,981 inputs: 4,368 deny → allow, 15,012 allow → deny) were for `509ac1c`. The reviewer showed that run's corpus missed the R1–R3 forms.
+- **Gaps left open:**
   - **G1:** the canon rule exempts any command that mentions `brain-promote … --approve` anywhere, so `brain-promote.js x --approve; echo x > .project-brain/canon/y.md` passes.
-  - **G2:** the delete rule does not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob, or globs that may expand to the capsule (`rm -rf .p*`).
+  - **G2:** the delete rule does not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob, or globs that may expand to the capsule (`rm -rf .p*`). It does not treat moving or overwriting as deleting (`mv`, `rsync --delete`, `cp -r` over, `truncate`, `: >`).
   - **G3:** the canon rule's mutation check still matches the word `rm` anywhere, so `grep rm .project-brain/canon/x.md` is denied (a conservative false positive, as documented).
+  - **G4:** the reader exemption depends on knowing each reader's program-running options. The list is kept small, and an option outside it ends nothing. A program-running option that isn't recognized would let a stage carrying `rm` next to a capsule path through.

@@ -50,12 +50,33 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
      NotebookEdit's `notebook_path` is checked too)
    - `Bash` mutations of `canon/` not going through `brain-promote --approve`
      (covers `cd`+relative paths and interpreter writes)
-   - deleting the capsule: `rm`, `rmdir`, `unlink`, `shred`, `git rm` or `git clean` as
-     the command being run (also behind `sudo`, `env`, `xargs`, `bash -c` and similar),
-     or `find … -delete` / `-exec rm`, when the capsule is the target. The target counts
-     when `.project-brain` is named in the same pipeline (so `find .project-brain | xargs rm`
-     is caught) or the command first `cd`/`pushd`-ed into the capsule. The word `rm` as an
-     argument (`grep rm .project-brain/…`) or inside a file name (`…-rm-rf-….md`) is not a delete.
+   - deleting the capsule, when the capsule is the target:
+     - **What counts as a delete:** any `rm`, `rmdir`, `unlink` or `shred` word, whatever runs
+       it (`sudo`, `busybox`, `ssh`, `xargs`, `bash -c`, a here-string, a git alias, `… | sh`).
+       That includes one glued to a short option, read as the shell joins quotes (`-Orm`,
+       `-O"r"m`);
+       `find … -delete`; `git rm`; `git clean` (but not a `-n` dry run); `fs.rmSync`,
+       `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
+     - **The one exemption:** a pipeline stage whose command never runs its arguments:
+       `grep`, `cat`, `ls`, `echo`, `head`, `wc`, `find` without `-exec`, `git add` /
+       `commit` / `log` / `diff` / `show` / `grep` and similar readers. Pagers (`less`, `more`,
+       `ag`/`ack`), `sort` and network git (`fetch`, `push`, `pull`) are not readers. The
+       exemption holds only when all of these are true:
+       - the stage has no `VAR=value` prefix (`PAGER=`, `GIT_EXTERNAL_DIFF=`);
+       - it has no option that runs a program (`rg --pre` / `--hostname-bin`, `git grep -O` /
+         `--open-files-in-pager` (also shortened), git `-c`, `--ext-diff` …);
+       - it has no `$(…)`, backticks or `<(…)`;
+       - it pipes only into other readers.
+
+       So
+       `grep rm .project-brain/…` and `git add …-rm-rf-….md` pass, but `echo rm … | sh` doesn't.
+     - **When the capsule is the target:** `.project-brain` is named in the same pipeline,
+       including inside `"${CLAUDE_PROJECT_DIR}/…"`, `$(pwd)/…` or `{…,…}`. Or the shell is
+       inside the capsule after a `cd`/`pushd`. The guard tracks `cd`, `pushd` and `popd`,
+       so `cd ..` or `cd /tmp` back out of the capsule ends that state.
+     - **Splitting follows the shell:** only `;`, `&`, `&&`, `||`, `|` and newlines outside
+       quotes separate commands. A leading redirection (`>/dev/null rm …`) is skipped when
+       finding the command word.
    - direct installs (`cp`/`mv`/`ln`/`rsync`) from `reference-repositories/sources/` into the skills dir
 
    **When the guard itself fails** (owner decision P11, 2026-10-15):
@@ -75,10 +96,14 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
 
    The guard is **defense-in-depth**: `brain-promote --approve` + git history are the
    real boundary. It errs toward denial — a read command mentioning `canon/` alongside a
-   redirect/`node -e` can be a conservative false-positive, as can a capsule path next to
-   `xargs grep rm` or `bash -c "… rm …"`; split such commands. Known limits: it does not
-   follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob, or
-   globs that could expand to the capsule (`rm -rf .p*`).
+   redirect/`node -e` can be a conservative false-positive. So can any program not on the
+   reader list that carries the word `rm` next to a capsule path (`xargs grep rm …`,
+   `sh -c "grep unlink …"`, `git rm --cached …`); split such commands. Known limits: it does
+   not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob
+   (`for f in .project-brain/*; do rm "$f"; done`), or globs that could expand to the
+   capsule (`rm -rf .p*`). It does not treat moving or overwriting as deleting (`mv` of the
+   capsule, `rsync --delete`, `cp -r` over it, `truncate`, `: >`). Code that deletes through
+   an API the guard doesn't name also gets through.
 
 ## Reference sources — documentation only
 

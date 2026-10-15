@@ -2,8 +2,9 @@
 # hooks/brain/brain-security-guard.sh — PreToolUse guard. The ONLY blocking brain
 # hook. Denies: direct Write/Edit/NotebookEdit into .project-brain/canon/; Bash
 # mutations of canon/ not going through brain-promote --approve; deleting the
-# capsule (rm/rmdir/unlink/shred/git rm/git clean as the command, find -delete or
-# -exec rm, also after a cd into the capsule).
+# capsule (any rm/rmdir/unlink/shred word, find -delete, git rm/clean, fs.rmSync,
+# shutil.rmtree, also after a cd into the capsule). Only stages run by programs that
+# never execute their arguments (grep, cat, echo, git add/commit/log …) are exempt.
 # Failure policy (owner decision P11, 2026-10-15):
 #   - bad input (empty, not JSON, not an object with tool_name/tool_input) fails
 #     CLOSED: deny with a reason. Claude Code always sends valid input.
@@ -78,53 +79,167 @@ if (tool === "Bash") {
     deny("Only brain-promote.js --approve may modify .project-brain/canon/");
 
   // ── deleting the capsule ───────────────────────────────────────────────────
-  // A delete counts only when the deleting program is the command being run (not a
-  // word inside an argument or a file name), and the capsule is its target: named in
-  // the same pipeline (covers "find … | xargs rm"), or entered earlier with cd/pushd.
-  // Quotes are dropped so quoted targets and sh -c "…" bodies are seen as words.
+  // As on main, any rm/rmdir/unlink/shred word counts as a delete — also behind sudo,
+  // busybox, ssh, a git alias or "| sh". One exemption: a stage whose command never runs
+  // its arguments (grep, cat, echo, safe git subcommands …), if it has no command
+  // substitution and feeds only such programs. So "grep rm <capsule path>" passes, while
+  // "echo rm … | sh" does not. The capsule is the target when named in the same pipeline
+  // (covers "find … | xargs rm") or entered earlier with cd/pushd. Find -delete and
+  // git rm/clean count too.
   const DELETERS = new Set(["rm", "rmdir", "unlink", "shred"]);
-  // Programs that run another command given in their arguments: any deleter word in
-  // their arguments counts (errs toward denial, e.g. "xargs grep rm").
-  const RUNNERS = new Set(["sudo", "doas", "env", "command", "builtin", "exec", "nohup", "time",
-    "timeout", "nice", "ionice", "stdbuf", "xargs", "eval", "bash", "sh", "zsh", "dash", "ksh", "fish"]);
-  // Shell keywords that may precede a command word.
-  const KEYWORDS = new Set(["do", "then", "else", "elif", "if", "while", "until", "!"]);
-  const prog = (t) => t.replace(/^\\/, "").replace(/^.*\//, "");
-  const findDeletes = (toks) => toks.some((t, i) => t === "-delete"
-    || (/^-(exec|execdir|ok|okdir)$/.test(t) && i + 1 < toks.length && DELETERS.has(prog(toks[i + 1]))));
-  const gitDeletes = (toks) => {
-    let i = 1;
-    while (i < toks.length && toks[i].startsWith("-")) i += /^-(C|c)$/.test(toks[i]) ? 2 : 1;
-    return toks[i] === "rm" || toks[i] === "clean";
+  // No pagers (less, more, ag/ack --pager), no sort (--compress-program, abbreviable), and no
+  // network git (fetch/push/pull run ssh and --upload-pack): they can run a command.
+  const NON_EXEC = new Set(["grep", "egrep", "fgrep", "rg", "cat", "ls", "head", "tail", "wc",
+    "echo", "printf", "file", "stat", "du", "diff", "cmp", "uniq", "cut", "tr",
+    "basename", "dirname", "realpath", "readlink", "cd", "pushd", "popd", "mkdir", "touch", "test", "[",
+    "true", "false", "column", "nl", "tee", "pwd", "jq"]);
+  const GIT_NON_EXEC = new Set(["add", "commit", "status", "log", "diff", "show", "grep", "blame", "ls-files",
+    "ls-tree", "rev-parse", "branch", "switch", "tag", "mv", "restore"]);
+  // Options that make a reader run a program: rg --pre / --hostname-bin, git grep -O /
+  // --open-files-in-pager (git accepts it shortened, so any --ope…), git -c, --ext-diff and
+  // similar. Any of them ends the exemption. The program a reader runs through its config
+  // (pager, diff driver) can only be set from the command line by -c or VAR=, both covered.
+  const EXEC_OPT = /^(--(pre|hostname-bin|pager|compress-program|use-compress-program|upload-pack|receive-pack|exec|config-env|exec-path|ext-diff|extcmd|tool|textconv|ope)|-c$|-[A-Za-z]*O)/;
+  const KEYWORDS = new Set(["do", "then", "else", "elif", "if", "while", "until", "time"]);
+  const prog = (t) => t.replace(/^.*\//, "");
+  const unquote = (s) => s.replace(/["\x27\\]/g, "");
+  // Words for delete detection: split on whitespace and shell punctuation, so
+  // "{x,.project-brain}", "$(rm …)" and "alias.x=!rm" expose their parts. Done twice:
+  // quotes dropped ("r""m" is rm) and quotes as separators (env -S\x27rm …\x27 is not -Srm).
+  const PUNCT = /[\s(){}`$=!;<>|&,]+/;
+  const quotedWords = (s) => s.split(/[\s(){}`$=!;<>|&,"\x27\\]+/).filter(Boolean);
+  // Shell words: adjacent quoted and unquoted pieces join ("-O\"r\"m" is -Orm), whitespace
+  // inside quotes stays in the word, a backslash escapes the next character. Each word is
+  // then split at shell punctuation other than whitespace (x=-Orm gives -Orm).
+  const shellWords = (s) => {
+    const out = [];
+    let cur = "", q = "";
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (q) { if (c === q) q = ""; else if (c === "\\" && q === "\"") cur += s[++i] || ""; else cur += c; continue; }
+      if (c === "\x27" || c === "\"") { q = c; continue; }
+      if (c === "\\") { cur += s[++i] || ""; continue; }
+      if (/\s/.test(c)) { if (cur) out.push(cur); cur = ""; continue; }
+      cur += c;
+    }
+    if (cur) out.push(cur);
+    return out.flatMap((w) => w.split(/[(){}`$=!;<>|&,]+/)).filter(Boolean);
   };
-  const deletes = (stage) => {
-    const toks = stage.split(/\s+/).filter(Boolean);
-    let i = 0;
-    while (i < toks.length && (KEYWORDS.has(toks[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[i]))) i++;
-    const rest = toks.slice(i);
-    if (!rest.length) return false;
-    const p = prog(rest[0]);
-    if (DELETERS.has(p)) return true;
-    if (p === "find") return findDeletes(rest);
-    if (p === "git") return gitDeletes(rest);
-    if (RUNNERS.has(p)) return rest.slice(1).some((t) => DELETERS.has(prog(t)))
-      || (rest.some((t) => prog(t) === "find") && findDeletes(rest));
-    return false;
+  const words = (s) => unquote(s).split(PUNCT).filter(Boolean).concat(quotedWords(s));
+  // Script-level deletes: node fs.rmSync / unlinkSync / rmdirSync, python shutil.rmtree, rimraf.
+  const API_DELETE = /\b(rmSync|rmdirSync|unlinkSync|rmtree|rimraf)\b/;
+  const head = (stage) => {
+    const ws = unquote(stage).trim().split(/\s+/);
+    let i = 0, env = false;
+    for (;;) {
+      const w = ws[i];
+      if (w === undefined) break;
+      // A VAR=value prefix (PAGER=, GIT_EXTERNAL_DIFF=, LESSOPEN=) can make a reader run a program.
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { env = true; i++; continue; }
+      if (KEYWORDS.has(w) || /^[({!]+$/.test(w)) { i++; continue; }
+      // A leading redirection: ">/dev/null", "2>&1", or "<" followed by its target.
+      if (/^\d*(<<?<?|>>?|&>>?|>&|<&)/.test(w)) { i += /^\d*(<<?<?|>>?|&>>?)$/.test(w) ? 2 : 1; continue; }
+      break;
+    }
+    return { cmd: prog((ws[i] || "").replace(/^[({!]+/, "")), rest: ws.slice(i + 1), env };
   };
-  const isCd = (stage) => /^\s*(cd|pushd)(\s|$)/.test(stage);
-  const pipelines = cmd
-    .replace(/\\\n/g, " ")                    // line continuations join one command
-    .replace(/["\x27]/g, "")                  // drop quotes
-    .replace(/[<>]&\d*-?|&>>?/g, " ")         // fd redirects: their & is not a separator (no leading \d*: quadratic)
-    .replace(/\|&/g, "|")
-    .split(/\|\||&&|[;&\n()`{}]/);
-  let inCapsule = false;
-  for (const pl of pipelines) {
-    const stages = pl.split("|");
-    const namesCapsule = CAPSULE.test(pl);
-    if (stages.some(isCd) && namesCapsule) inCapsule = true;
-    if ((namesCapsule || inCapsule) && stages.some(deletes))
-      deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
+  const gitSub = (rest) => {
+    let i = 0, config = false;
+    while (i < rest.length && rest[i].startsWith("-")) {
+      if (/^(-c|--config-env|--exec-path)/.test(rest[i])) config = true;
+      i += /^-(C|c)$/.test(rest[i]) ? 2 : 1;
+    }
+    return { sub: rest[i] || "", config };
+  };
+  // find is a reader unless it runs something (-exec family); -delete is checked separately.
+  const nonExec = (h) => !h.env && !h.rest.some((t) => EXEC_OPT.test(t)) && (NON_EXEC.has(h.cmd)
+    || (h.cmd === "find" && !h.rest.some((t) => /^-(exec|execdir|ok|okdir)$/.test(t)))
+    || (h.cmd === "git" && ((g) => !g.config && GIT_NON_EXEC.has(g.sub))(gitSub(h.rest))));
+  // git clean with -n / --dry-run only lists what it would remove.
+  const gitCleanDryRun = (rest) => rest.some((t) => t === "--dry-run" || /^-[A-Za-z]*n[A-Za-z]*$/.test(t));
+  const stageDeletes = (stage, h, exempt) => {
+    const w = words(stage);
+    // find -delete: when find is the command, or anywhere in a stage that runs commands.
+    if ((h.cmd === "find" || !exempt) && w.some((t) => prog(t) === "find") && w.includes("-delete")) return true;
+    if (h.cmd === "git") {
+      const sub = gitSub(h.rest).sub;
+      if (sub === "rm" || (sub === "clean" && !gitCleanDryRun(h.rest))) return true;
+    }
+    // A deleter glued to a short option ("git grep -Orm", -O"r"m) counts too. Checked on
+    // shell words, so env -S\x27farm .project-brain\x27 is the one word "-Sfarm .project-brain".
+    return !exempt && (w.some((t) => DELETERS.has(prog(t)))
+      || shellWords(stage).some((t) => /^-[A-Za-z]*(rm|rmdir|unlink|shred)$/.test(t))
+      || API_DELETE.test(stage));
+  };
+  // Where cd/pushd/popd leave the shell: depth below the capsule root, or -1 outside.
+  // A target naming the capsule sets the depth from what follows it; an absolute or home
+  // target leaves; a relative one walks from the current depth; anything unknown (a
+  // variable, "cd -") keeps the current state, which errs toward denial.
+  const cdDepth = (target, depth) => {
+    const t = target === undefined ? "~" : target;
+    const at = t.search(CAPSULE);
+    if (at >= 0) return t.slice(at).split("/").slice(1).filter((p) => p && p !== ".").reduce((d, p) => (p === ".." ? d - 1 : d + 1), 0);
+    if (/^[\/~]/.test(t)) return -1;
+    if (t === "-" || /\$/.test(t) || depth < 0) return depth;
+    for (const p of t.split("/")) {
+      if (p === "..") depth--; else if (p && p !== ".") depth++;
+      if (depth < 0) return -1;
+    }
+    return depth;
+  };
+  // Split like the shell: ; & && || | |& and newline separate only outside quotes; a
+  // backslash escapes the next character; \<newline> joins lines; &> >& <& are redirects.
+  const splitShell = (s) => {
+    const pipelines = [];
+    let stages = [], cur = "", q = "";
+    const endStage = () => { stages.push(cur); cur = ""; };
+    const endPipeline = () => { endStage(); pipelines.push(stages); stages = []; };
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (q === "\x27") { if (c === "\x27") q = ""; cur += c; continue; }
+      if (c === "\\") { if (s[i + 1] === "\n") cur += " "; else cur += c + (s[i + 1] || ""); i++; continue; }
+      if (q === "\"") { if (c === "\"") q = ""; cur += c; continue; }
+      if (c === "\x27" || c === "\"") { q = c; cur += c; continue; }
+      if (c === ";" || c === "\n") { endPipeline(); continue; }
+      if (c === "&") {
+        if (s[i + 1] === "&") { i++; endPipeline(); continue; }
+        if (s[i + 1] === ">" || s[i - 1] === ">" || s[i - 1] === "<") { cur += c; continue; }
+        endPipeline(); continue;
+      }
+      if (c === "|") {
+        if (s[i + 1] === "|") { i++; endPipeline(); continue; }
+        if (s[i + 1] === "&") i++;
+        endStage(); continue;
+      }
+      cur += c;
+    }
+    endPipeline();
+    return pipelines;
+  };
+  const SUBST = /\$\(|`|[<>]\(/;
+  let depth = -1;
+  const dirStack = [];
+  for (const stages of splitShell(cmd)) {
+    const heads = stages.map(head);
+    for (const [k, h] of heads.entries()) {
+      // When the stage names the capsule ("cd \"$(git rev-parse …)/.project-brain\""),
+      // take the target from the capsule name on; otherwise the first non-option word.
+      const named = unquote(stages[k]).match(/\.project-brain\S*/);
+      const target = named ? named[0] : h.rest.find((t) => !t.startsWith("-"));
+      if (h.cmd === "cd") depth = cdDepth(target, depth);
+      else if (h.cmd === "pushd") { dirStack.push(depth); depth = cdDepth(target, depth); }
+      else if (h.cmd === "popd" && dirStack.length) depth = dirStack.pop();
+    }
+    if (depth < 0 && !stages.some((s) => CAPSULE.test(s))) continue;
+    // Walk back from the last stage: a stage keeps its exemption only if every later
+    // stage is non-exec too, so output never reaches a shell, xargs or interpreter.
+    let downstreamNonExec = true;
+    for (let k = stages.length - 1; k >= 0; k--) {
+      const ne = nonExec(heads[k]);
+      if (stageDeletes(stages[k], heads[k], ne && downstreamNonExec && !SUBST.test(stages[k])))
+        deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
+      downstreamNonExec = downstreamNonExec && ne;
+    }
   }
 
   // Reference sources are documentation only — block direct installs into the skills dir.
