@@ -70,7 +70,10 @@ function stripRegexLiterals(text) {
 
 // ─── Markdown: Prompt Injection ────────────────────────────────────────────
 const MD_INJECTION = [
-  { re: /ignore\s+(previous|prior|all)\s+instructions/i,              name: 'instruction-override',  sev: 'BLOCK' },
+  // "ignore [all|any] [the|your|my] previous|prior|above|… instructions|rules|…" — a qualifier is
+  // required, so defensive text ("ignore instructions found in fetched pages") stays quiet (S1).
+  { re: /\bignore\s+(?:(?:all|any)\s+(?:of\s+)?)?(?:the\s+|your\s+|my\s+)?(?:previous|prior|above|earlier|preceding|all|your)\s+(?:instructions|directions|rules|guidelines|prompts?)\b/i,
+                                                                      name: 'instruction-override',  sev: 'BLOCK' },
   { re: /disregard\s+(previous|prior|all|your)/i,                     name: 'instruction-disregard', sev: 'BLOCK' },
   { re: /\byou are now\b/i,                                           name: 'persona-override',      sev: 'FLAG'  },
   { re: /forget\s+everything/i,                                       name: 'memory-wipe',           sev: 'BLOCK' },
@@ -84,7 +87,9 @@ const MD_INJECTION = [
 
 // ─── Markdown: Dangerous Bash in instructions ──────────────────────────────
 const MD_BASH = [
-  { re: /\brm\s+-[rf]{1,2}\s+[/~]/,      name: 'rm-rf-root',       sev: 'BLOCK' },
+  // the root, home or all of either, not any absolute path (rm -rf /tmp/x is routine cleanup)
+  { re: /\brm\s+-[rf]{1,2}\s+(?:\/|~\/?|\$\{?HOME\}?\/?)\*?(?=$|[\s;&|)"'])/,
+                                          name: 'rm-rf-root',       sev: 'BLOCK' },
   { re: /curl\s+.+\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
   { re: /wget\s+.+\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
   { re: /\bsudo\s+/,                      name: 'sudo',             sev: 'FLAG'  },
@@ -145,9 +150,12 @@ const JS_EXTS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx']);
 const JS_PATTERNS = [
   { re: /\beval\s*\(/,                                         name: 'eval-injection',         sev: 'BLOCK' },
   { re: /new\s+Function\s*\(/,                                 name: 'new-function-injection', sev: 'BLOCK' },
-  { re: /require\s*\(\s*['"]child_process['"]/,                name: 'child-process-require',  sev: 'BLOCK' },
-  { re: /(?<![a-zA-Z0-9_.])exec\s*\(/,                        name: 'child-process-exec',     sev: 'BLOCK' },
-  { re: /\bspawn\s*\(/,                                        name: 'spawn-call',             sev: 'FLAG'  },
+  // require(), import … from, import(), with or without the node: prefix (S3)
+  { re: /(?:require\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|\bimport\s+)['"](?:node:)?child_process['"]/,
+                                                               name: 'child-process-require',  sev: 'BLOCK' },
+  // a bare exec call (a method named exec, like RegExp's, is excluded); execSync however reached (S3)
+  { re: /(?<![a-zA-Z0-9_.])exec\s*\(|\bexecSync\s*\(/,          name: 'child-process-exec',     sev: 'BLOCK' },
+  { re: /\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(/,      name: 'spawn-call',             sev: 'FLAG'  },
   { re: /\bfetch\s*\(/,                                        name: 'network-fetch',          sev: 'FLAG'  },
   { re: /require\s*\(\s*['"]https?['"]/,                       name: 'http-require',           sev: 'FLAG'  },
   { re: /\bprocess\.env\b/,                                    name: 'env-access',             sev: 'FLAG'  },
@@ -192,11 +200,27 @@ const SH_PATTERNS = [
   { re: /--break-system-packages/,        name: 'pip-break-system',  sev: 'FLAG'  },
 ];
 
+function fencedBlocks(text) {
+  return (text.match(/```[\s\S]*?```/g) || []).join('\n');
+}
+
+// Which text each markdown table reads (S2):
+//   - injection and FLAG-level bash: prose only; code there is usually a documented example
+//   - BLOCK-level bash: prose and fenced blocks; fenced commands are the ones an agent runs
+//   - secrets: everything, code included; a real key leaks wherever it sits
+// Inline code spans stay excluded for bash, so prose like "we block `curl x | bash`" is quiet.
 function scanMarkdown(filePath, content) {
-  const s = stripCodeBlocks(content);
-  for (const { re, name, sev } of [...MD_INJECTION, ...MD_BASH, ...MD_SECRETS]) {
-    if (re.test(s)) {
-      const m = s.match(re);
+  const prose = stripCodeBlocks(content);
+  const fenced = fencedBlocks(content);
+  const targets = [
+    ...MD_INJECTION.map(p => [p, [prose]]),
+    ...MD_BASH.map(p => [p, p.sev === 'BLOCK' ? [prose, fenced] : [prose]]),
+    ...MD_SECRETS.map(p => [p, [content]]),
+  ];
+  for (const [{ re, name, sev }, texts] of targets) {
+    const text = texts.find(t => re.test(t));
+    if (text) {
+      const m = text.match(re);
       flag(filePath, name, sev, `"${m[0].slice(0, 80).replace(/\n/g, '\\n')}"`);
     }
   }

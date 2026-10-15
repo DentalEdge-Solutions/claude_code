@@ -62,7 +62,7 @@ The proposal's own `P` numbers are kept.
 
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
-3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S9 are open; S1–S3 come first.
+3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"); S4–S9 are open.
    **P2:** tests for the eval grader (`harvest-evidence.js`).
 4. **P11:** make the brain security guard's fail-open visible (a log) or fail closed.
 5. **P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`. Keep `install.sh` in sync.
@@ -107,7 +107,7 @@ The proposal's own `P` numbers are kept.
   - The first regex-literal sample was too weak (only the self-scan test caught that mutation); it was strengthened and re-checked.
 - **No behavior change.** `static-scan.js` is untouched.
 
-### Scanner gaps found (S1–S9, open)
+### Scanner gaps found (S1–S9; S1–S3 fixed, see "S1–S3 repair")
 
 Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK or FLAG was expected. None is pinned by a test, so a fix will not have to fight one.
 
@@ -124,3 +124,26 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 | S9 | In single-file mode every finding has `file: ""` | any single-file scan | Cosmetic; CI's fallback reads only the verdict |
 
 - **Doc drift:** `CLAUDE.md`, `README.md`, `docs/USER-GUIDE.md` and `skills/skill-audit/SKILL.md` call it a "47-pattern" scanner across 5 categories. The tables hold 70 patterns in 7 tables.
+
+## S1–S3 repair (2026-10-15)
+
+- **S1:** `instruction-override` now matches `ignore [all|any] [the|your|my] previous|prior|above|earlier|preceding|all|your instructions|directions|rules|guidelines|prompts`. A qualifier is still required, so defensive text ("ignore instructions found in fetched pages") stays quiet.
+- **S2:** each markdown table now reads its own text.
+  - Secrets: the whole file, code included.
+  - BLOCK-level Bash (`rm-rf-root`, curl/wget piped to a shell, `~/.ssh/`): prose and fenced blocks.
+  - FLAG-level Bash (`sudo`, `chmod`, settings) and prompt injection: prose only, as before.
+  - Inline code spans stay skipped for Bash, so prose naming a pattern is quiet.
+- **`rm-rf-root` tightened** (found while fixing S2). It matched any absolute path, so `rm -rf /tmp/repo-audit-…/` in `skills/repo-audit/SKILL.md` became a BLOCK once fenced blocks were read. It now matches only `/`, `~` and `$HOME` (alone or with `/*`). The old pattern also missed `$HOME`.
+- **S3:**
+  - `child-process-require` matches `require`, `import … from`, side-effect `import` and `import()`, with or without `node:`.
+  - `child-process-exec` also matches `execSync(`, however it is reached.
+  - `spawn-call` also matches `spawnSync`, `execFile` and `execFileSync`.
+- **Repo fallout:**
+  - The new `execSync` match hit two test harnesses, `skills/agent-eval/scripts/generate-agent-evals.test.js` and `skills/skill-eval/scripts/generate-seed-evals.test.js`.
+  - They now use `execFileSync(process.execPath, [...])`, which runs the same commands without a shell. That follows the CI gate's own advice ("fix the underlying script"), so `.github/skill-scan-baseline.json` is unchanged.
+  - Across every skill, agent and settings file CI scans, the only changed findings are three `spawn-call` FLAGs in test harnesses, which the gate ignores.
+- **Evidence:**
+  - Before the fix, 18 new tests failed for the expected reasons.
+  - After, `scripts/static-scan.test.js` and `node scripts/run-all-tests.js` (26/26) pass, and `node scripts/ci-scan-skills.js` passes with no new or stale entries.
+  - 7 mutations each failed the suite: the old `rm` pattern, secrets on prose only, every Bash severity read in fenced blocks, no fenced Bash, no `node:` prefix, no `execSync`, an optional S1 qualifier.
+- `skills/skill-audit/REFERENCE.md` describes the new rules.

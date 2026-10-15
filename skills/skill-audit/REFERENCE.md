@@ -48,7 +48,7 @@
 
 | Pattern | Severity | Risk |
 |---------|----------|------|
-| `ignore previous instructions` | BLOCK | Instruction override |
+| `ignore [all/any] [the/your] previous/prior/above/earlier/preceding/all/your instructions/rules/guidelines/directions/prompts` | BLOCK | Instruction override |
 | `disregard` + instructions | BLOCK | Instruction override |
 | `forget everything` | BLOCK | Memory wipe |
 | Zero-width Unicode (U+200B, U+200C, U+200D, U+FEFF, U+202E) | BLOCK | Hidden text |
@@ -64,9 +64,9 @@
 | Pattern | Severity |
 |---------|----------|
 | `eval()` / `new Function()` | BLOCK |
-| `require('child_process')` | BLOCK |
-| `exec()` (child process) | BLOCK |
-| `spawn()` | FLAG |
+| `require`, `import … from` or `import()` of `child_process` (with or without `node:`) | BLOCK |
+| `exec()` (child process, not a method like `re.exec()`) / `execSync()` | BLOCK |
+| `spawn()` / `spawnSync()` / `execFile()` / `execFileSync()` | FLAG |
 | `fetch()` / `require('http')` / `require('https')` | FLAG |
 | `process.env` access | FLAG |
 | `fs.writeFile/appendFile/unlink/rmdir/rm()` | FLAG |
@@ -96,9 +96,11 @@
 
 ### Dangerous Bash in Markdown Instructions
 
+BLOCK rows apply to prose and to fenced code blocks, because fenced commands are the ones an agent runs. FLAG rows apply to prose only. Inline code spans are skipped, so prose that names a pattern stays quiet. Secrets are matched everywhere in a markdown file, code included. Prompt-injection rows apply to prose only.
+
 | Pattern | Severity |
 |---------|----------|
-| `rm -rf /` or `rm -rf ~` | BLOCK |
+| `rm -rf` of `/`, `~` or `$HOME` (or `/*`, `~/*`); other paths such as `/tmp/x` are not flagged | BLOCK |
 | `curl ... \| bash` / `wget ... \| sh` | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |
