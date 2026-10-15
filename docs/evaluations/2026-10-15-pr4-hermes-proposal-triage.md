@@ -137,7 +137,7 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 - **`rm-rf-root`:** main's shape (the first target is an absolute or home path, `/tmp` included), with these additions:
   - Any spelling of the recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`, a `--` before the target). Separators may include a line break, as on main, so a soft wrap in prose keeps the command (re-check G1).
   - A quoted target, and `$HOME`.
-  - `rm` after any non-word character, as on main (`\rm`, `(rm`, `"rm"`, Makefile's `-rm`), except `git rm` (re-check G5).
+  - `rm` after any non-word character, as on main (`\rm`, `(rm`, `"rm"`, Makefile's `-rm`). An option run holding `--cached` is skipped, since that is `git rm`, which only untracks (re-check G5; pre-push H2 replaced a `git` lookbehind that let `X=git rm -rf /` through).
   - **History:** two intermediate designs were dropped. A narrowed target list lost `/etc` and `~/.ssh` (review R1). A `/tmp` exemption with an every-target scan could be escaped and froze the scanner (final review F1–F4). See the review tables below.
 - **`curl`/`wget` piped to a shell:** rewritten to run in linear time with no length cap. It anchors at the line start, a lookahead finds the line's first `curl`/`wget`, and one pass looks for a later pipe into a shell. The old unbounded `.+` was quadratic: reading fenced blocks made a 210 KB file take 5.1 s to scan (0.02 s before).
   - **Correction:** an intermediate draft capped the gap at 500 characters. A background security check flagged that a padded line slipped past the cap, which the old pattern never allowed. Tests now pin a 5,000-character gap and the scan time.
@@ -162,7 +162,7 @@ A second reviewer compared main and the branch on about 1,600 samples and timed 
 
 | # | Finding | Introduced by | Outcome |
 |---|---|---|---|
-| F1 | **Blocker.** ReDoS in the every-target `rm` scan: `rm -rf "` repeated took 5 s at 100 KB and over 20 s at 1 MB (main: 41 ms). `\rm -rf x` and `(rm -rf x)` also triggered it | branch | Fixed by the redesign: no cross-token target scan, and `rm` cannot start after a word character or `-`. Timing tests cover all four inputs |
+| F1 | **Blocker.** ReDoS in the every-target `rm` scan: `rm -rf "` repeated took 5 s at 100 KB and over 20 s at 1 MB (main: 41 ms). `\rm -rf x` and `(rm -rf x)` also triggered it | branch | Fixed by the redesign: no cross-token target scan, and `rm` cannot start after a word character or `-`. Timing tests cover all four inputs (superseded: G3 lets `rm` follow `-` again, and H1 fixed a remaining quadratic case) |
 | F2 | False BLOCKs across lines (`rm -rf dist` then `cd /usr/src/app`) | branch | Fixed: options and target must be on the `rm` line. Tests added |
 | F3 | Separators inside arguments (`2>&1`, `\;`, quoted `;`) ended the target scan early | branch | Fixed by the redesign: the first target decides, as on main, and `/tmp` counts. Tests added |
 | F4 | The `/tmp` exemption trusted literal text (`/tmp/.\./etc`, `/tmp/$X`, symlinks, globs) | branch | Fixed by dropping the exemption. Tests added |
@@ -188,16 +188,34 @@ A third reviewer re-checked F1–F8 (all fixed) and compared main and the branch
 | G2 | `subprocess-shell-true` stopped at `(`, so `subprocess.run("… #(", shell=True)` passed | cdb2d5c | Fixed: arguments run to the first `)`, as on main. The scan stops at the next `subprocess.` call to stay linear. Tests added, including `stdout=subprocess.PIPE` |
 | G3 | Makefile's `-rm -rf ~/` was missed | cdb2d5c | Fixed: `rm` may follow any non-word character, as on main. `-rm` never joins an option run, so it stays linear. Tests added, including timing |
 | G4 | The S1 nouns "rules", "guidelines" and "prompts" made ordinary prose a BLOCK ("ESLint will ignore all rules") | 12a378c | Fixed: nouns limited to "instructions" and "directions". Four tests added |
-| G5 | `git rm -r --cached /path` was a false BLOCK | branch | Fixed: `git rm` is excluded. Test added |
+| G5 | `git rm -r --cached /path` was a false BLOCK | branch | Fixed: `git rm` is excluded. Test added. (Pre-push H2 replaced the `git` lookbehind with a `--cached` check) |
 | G6 | Only the first `rm` target is checked | main | **Open, recorded as S11** |
 | G7 | The doc's claim that only the short-comment case was lost was wrong | doc | Corrected above |
 | B7 | Background check on 3f93cbf: two "detection-bypass" reports (no details given) | 3f93cbf | One found and fixed: the `git rm` exclusion reached across a line break, so `git` on one line and `rm -rf /` on the next passed (main: BLOCK). The exclusion now needs `git` and `rm` on the same line. Test added. The second report could not be identified. The closest candidate is the G4 narrowing: "ignore all previous rules/guidelines/prompts" is no longer caught, as on main, which also missed it |
+
+### Pre-push review of the whole branch (2026-10-15)
+
+A fourth reviewer re-ran everything, reused and extended the earlier harnesses, and gave the verdict **NOT READY**. These findings are fixed:
+
+| # | Finding | Introduced by | Outcome |
+|---|---|---|---|
+| H1 | **Blocker.** `rm-rf-root` was quadratic on option tokens holding `-rm` (`--rm`, `-x-rm`, `x-rm -`, `--no-rm` repeated: 14 s at 200 KB; over 20 s end to end at 1 MB). No caller sets a timeout | branch | Fixed: an option token is `-(\w \| - not followed by rm)*`, so no token holds `-rm`. About 1 ms at 200 KB, and at most 62 ms end to end at 1 MB. Timing tests for four inputs |
+| H2 | The `git` lookbehind let commands main blocks through: `X=git rm -rf /`, `ssh git rm -rf /`, `sudo -u git rm -rf ~`, `xargs -a git rm -rf /`, `echo git rm -rf / \| sh` | branch | Fixed: no `git` lookbehind. An option run holding `--cached` is skipped instead (plain `rm` has no such option). All six inputs are tested as BLOCK; `git rm --cached` and `docker run --rm` stay quiet |
+| H3 | More prose that the regex reads as code, so it gets FLAG not BLOCK: escaped backticks, backticks inside HTML tags, link titles or comments, a 4-backtick fence around a lone ``` | main (PASS there) | Documented in REFERENCE.md; it stays FLAG, never PASS |
+| H4 | Weak tests: three fence-type tests checked only presence (and one title was wrong); a stale "bounded gap" title; no timeout in the test runner, so a ReDoS would hang the suite | branch | Fixed: severities asserted (`~~~` and unclosed: BLOCK; 4-backtick: FLAG), title corrected, 20 s timeout per scan |
+| H5 | REFERENCE.md said "on the same line" for `rm` options (the code allows line breaks, G1); F1's lookbehind note was superseded | branch | Fixed |
+
+- **Also noted by the reviewer:** the S1 wording flags "ignore earlier instructions that conflict" (accepted under R3), and placeholder secrets in fences (`AKIA…EXAMPLE`) are BLOCKs, as intended by S2.
+- **After the fixes:**
+  - On the 2,393-sample harness, the only loss against main is main's false positive `{"command": "$(", "y": ")"}`.
+  - The slowest pattern at 1 MB is 14 ms (`rm-rf-root`: 7 ms).
+  - 219/219 scanner tests, 26/26 suites, `ci-scan-skills.js` clean.
 
 - **After these fixes:**
   - On the reviewer's own harness (2,393 samples), the only loss against main is a main false positive: `{"command": "$(", "y": ")"}`, an unclosed `$(` matched with a `)` from a different string.
   - The new false BLOCK in the reviewer's benign prose set is `rm -rf "$HOME/.cache/x"`. It's consistent with main, which blocks any `~/…` path.
   - On the 400 tracked markdown files, the only changes are FLAGs (code-only commands, per R2) and two secret BLOCKs inside code in `docs/superpowers/plans/`. Both look like test fixtures: a bare key-header assertion, and a `SENTINEL` token value with 12 distinct characters. The value was not printed.
-  - Every pattern scans 1 MB of hostile input in 14 ms or less.
+  - Every pattern scans 1 MB of hostile input in 14 ms or less. **Correction (pre-push H1):** this was wrong. `rm-rf-root` was still quadratic on option tokens holding `-rm` (`--rm` repeated: 14 s at 200 KB).
   - 207/207 scanner tests (after B7), 26/26 suites, `ci-scan-skills.js` clean.
 
 ### Independent review of the S1–S3 fix (2026-10-15)
