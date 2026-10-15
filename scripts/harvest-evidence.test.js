@@ -309,6 +309,69 @@ test('an unreadable run-manifest.json leaves mtime_in_window null', () => {
   assert.strictEqual(s.evidence('with_skill').artifacts[0].mtime_in_window, null);
 });
 
+// E1 (P2 findings): an artifact counts only when it resolves to a regular file inside the side's own
+// workspace. A link to a file outside, a linked folder that leads outside, or a spec path that climbs out
+// would otherwise satisfy an artifact workflow step without the run writing anything.
+function linkCase({ files = {}, links = {}, artifact = 'report.md', outside = {} }) {
+  const steps = [{ step: 'Write report', check: 'artifact', ref: artifact }];
+  const s = makeScenario({ evals: evalWith({ artifacts: [{ path: artifact }], transcript_markers: [], workflow_steps: steps }),
+    sides: { with_skill: { output: 'x', files } } });
+  const outDir = path.join(s.root, 'outside');
+  for (const [rel, content] of Object.entries(outside)) {
+    fs.mkdirSync(path.dirname(path.join(outDir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(outDir, rel), content);
+  }
+  const ws = path.join(s.sideDir('with_skill'), 'workspace');
+  fs.mkdirSync(ws, { recursive: true });
+  for (const [rel, target] of Object.entries(links)) {
+    const to = target.startsWith('outside/') ? path.join(s.root, target) : path.join(ws, target);
+    fs.mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
+    fs.symlinkSync(to, path.join(ws, rel));
+  }
+  const r = harvest(s);
+  return { r, w: s.evidence('with_skill') };
+}
+
+for (const [label, spec] of [
+  ['a link to a file outside the workspace', { outside: { 'old.md': 'old' }, links: { 'report.md': 'outside/old.md' } }],
+  ['a linked folder that leads outside', { outside: { 'dir/report.md': 'old' }, links: { out: 'outside/dir' }, artifact: 'out/report.md' }],
+  // the workspace sits six levels below the scratch root: evals/demo/iteration-1/s1-direct-r1/with_skill/workspace
+  ['a spec path that climbs out of the workspace', { outside: { 'report.md': 'old' }, artifact: '../'.repeat(6) + 'outside/report.md' }],
+]) {
+  test(`E1: ${label} is not an artifact, and the step is unsatisfied`, () => {
+    const { r, w } = linkCase(spec);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(w.artifacts[0].exists, false, JSON.stringify(w.artifacts[0]));
+    assert.strictEqual(w.artifacts[0].sha256, null);
+    assert.strictEqual(w.workflow_steps[0].satisfied, false);
+    assert.strictEqual(w.workflow_executed, false);
+    assert.ok(/outside the workspace/.test(r.stderr), r.stderr);
+  });
+}
+
+test('E1: a sibling folder whose name starts with "workspace" is outside', () => {
+  const steps = [{ step: 'Write report', check: 'artifact', ref: '../workspace-evil/report.md' }];
+  const s = makeScenario({ evals: evalWith({ artifacts: [{ path: '../workspace-evil/report.md' }], transcript_markers: [], workflow_steps: steps }),
+    sides: { with_skill: { output: 'x', files: { 'keep.md': 'k' } } } });
+  const evil = path.join(s.sideDir('with_skill'), 'workspace-evil');
+  fs.mkdirSync(evil, { recursive: true });
+  fs.writeFileSync(path.join(evil, 'report.md'), 'planted');
+  harvest(s);
+  assert.strictEqual(s.evidence('with_skill').artifacts[0].exists, false);
+});
+
+test('E1: a link to another file inside the same workspace still counts', () => {
+  const { w } = linkCase({ files: { 'real.md': 'r' }, links: { 'report.md': 'real.md' } });
+  assert.strictEqual(w.artifacts[0].exists, true);
+  assert.strictEqual(w.workflow_executed, true);
+});
+
+test('E1: a broken link is not an artifact', () => {
+  const { r, w } = linkCase({ links: { 'report.md': 'outside/never-written.md' } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(w.artifacts[0].exists, false);
+});
+
 // ── Claims ─────────────────────────────────────────────────────────────────
 
 function claimsFor(output, files = {}, repoFiles = {}) {

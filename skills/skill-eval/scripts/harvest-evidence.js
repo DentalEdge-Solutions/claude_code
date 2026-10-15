@@ -123,10 +123,24 @@ function sha256File(filePath) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
+// An artifact counts only when it resolves, links followed, to a file inside this side's own workspace.
+// Otherwise a link to an existing file, a linked folder or a path that climbs out (../) would satisfy an
+// artifact workflow step without the run writing anything (E1, PR #4 triage P2 findings).
+function insideWorkspace(resolved, workspaceDir) {
+  try {
+    const root = fs.realpathSync(workspaceDir);
+    return fs.realpathSync(resolved).startsWith(root + path.sep);
+  } catch { return false; }
+}
+
 function harvestArtifacts(artifactSpecs, workspaceDir, windowStart) {
   return artifactSpecs.map(spec => {
     const resolved = path.join(workspaceDir, spec.path);
-    const exists = fs.existsSync(resolved) && fs.statSync(resolved).isFile();
+    let exists = fs.existsSync(resolved) && fs.statSync(resolved).isFile();
+    if (exists && !insideWorkspace(resolved, workspaceDir)) {
+      console.error(`Warning: artifact "${spec.path}" resolves outside the workspace (${workspaceDir}) — not counted.`);
+      exists = false;
+    }
     if (!exists) {
       return { path: spec.path, exists: false, size: null, sha256: null, mtime_in_window: windowStart ? false : null };
     }
