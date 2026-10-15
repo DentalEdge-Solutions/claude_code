@@ -101,7 +101,7 @@ BLOCK rows apply to prose and to fenced code blocks, because fenced commands are
 | Pattern | Severity |
 |---------|----------|
 | `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`) on any absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not; `/tmp/`, `/private/tmp/` and `/var/tmp/` are exempt | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` (on one line, at most 500 characters apart) | BLOCK |
+| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |
 | `sudo` | FLAG |
@@ -113,7 +113,7 @@ BLOCK rows apply to prose and to fenced code blocks, because fenced commands are
 | Pattern | Severity |
 |---------|----------|
 | `eval "..."` | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` (on one line, at most 500 characters apart) | BLOCK |
+| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
 | `pip install --break-system-packages` | FLAG |
 
 ---

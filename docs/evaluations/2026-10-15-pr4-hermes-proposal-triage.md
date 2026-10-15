@@ -138,7 +138,9 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
   - `/tmp/`, `/private/tmp/` and `/var/tmp/` are exempt.
   - The old pattern missed `$HOME`, split or long options, quotes and `--`.
   - **Correction:** the first draft (commit 12a378c) narrowed the targets to `/`, `~` and `$HOME` alone. That dropped `/etc`, `/usr/local`, `~/Documents`, `~/.ssh` and others, which the old pattern caught. The independent review (R1) and a background security check both caught it before push, and tests now pin each of those paths.
-- **`curl`/`wget` piped to a shell:** the gap before the pipe is bounded to 500 characters on one line. The unbounded `.+` was quadratic: reading fenced blocks made a 210 KB file take 5.1 s to scan (0.02 s before). A timing test pins it.
+- **`curl`/`wget` piped to a shell:** rewritten to run in linear time with no length cap. It anchors at the line start, a lookahead finds the line's first `curl`/`wget`, and one pass looks for a later pipe into a shell. The old unbounded `.+` was quadratic: reading fenced blocks made a 210 KB file take 5.1 s to scan (0.02 s before).
+  - **Correction:** an intermediate draft capped the gap at 500 characters. A background security check flagged that a padded line slipped past the cap, which the old pattern never allowed. Tests now pin a 5,000-character gap and the scan time.
+- **Backtracking in `rm-rf-root`:** the first rework had two overlapping option loops, and `-{1,2}[\w-]*` could split `--x` two ways. That made it quadratic on long `-r` runs and exponential when nothing matched: 22 `--a` options took 386 ms, and 40,000 never finished. Each option now has one parse, and lookaheads do the checks, so 40,000 options scan in about 30 ms. Timing tests pin both inputs.
 - **S3:**
   - `child-process-require` matches `require`, `import … from`, side-effect `import` and `import()`, with or without `node:`.
   - `child-process-exec` also matches `execSync(`, however it is reached.
@@ -166,6 +168,9 @@ A separate reviewer re-ran every check and compared the old and new scanners on 
 | R5 | REFERENCE.md and this record left out the `my`/`of` qualifiers | Fixed |
 | R6 | No tests for `~~~`, 4-backtick or unclosed fences, or the R1 paths | Added |
 | P1 | (old) `rm -r -f /`, `rm -Rf /`, `rm -rf "/"`, `rm -rf -- /`, `rm --recursive --force /`, `rm -rf "$HOME"` | Fixed and tested |
-| P2 | (old) the quadratic `curl … \|` pattern became reachable in fenced blocks | Fixed (bounded gap) and tested |
+| P2 | (old) the quadratic `curl … \|` pattern became reachable in fenced blocks | Fixed (linear rewrite, no cap) and tested |
 | P3 | (old) inline code is never scanned for Bash; injection and hidden Unicode in fences are not scanned | Open |
+| B1 | Background check: the 500-character cap on the `curl`/`wget` gap was a bypass | Fixed (linear rewrite, no cap); 5,000-character gap test |
+| B2 | Background check: ReDoS in the scanner | Fixed: the `rm-rf-root` rework was exponential on `--a` runs (see above); timing tests added |
+| B3 | Background check: "parser differential" (no details given) | Read as the regex pairing of ``` fences, where a stray fence shifts the pairing and makes prose read as code. That affects only the code-skipping checks (injection, `sudo`/`chmod`) and is P3 below. Secrets and BLOCK-level Bash are now read in prose and code alike, so a shifted pairing cannot hide them |
 | P4 | (old) S1 still misses "ignore the instructions above" and "ignore everything above", and flags "never ignore previous instructions" | Open |
