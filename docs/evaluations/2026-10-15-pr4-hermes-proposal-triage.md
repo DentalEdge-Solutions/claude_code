@@ -191,13 +191,14 @@ A third reviewer re-checked F1–F8 (all fixed) and compared main and the branch
 | G5 | `git rm -r --cached /path` was a false BLOCK | branch | Fixed: `git rm` is excluded. Test added |
 | G6 | Only the first `rm` target is checked | main | **Open, recorded as S11** |
 | G7 | The doc's claim that only the short-comment case was lost was wrong | doc | Corrected above |
+| B7 | Background check on 3f93cbf: two "detection-bypass" reports (no details given) | 3f93cbf | One found and fixed: the `git rm` exclusion reached across a line break, so `git` on one line and `rm -rf /` on the next passed (main: BLOCK). The exclusion now needs `git` and `rm` on the same line. Test added. The second report could not be identified. The closest candidate is the G4 narrowing: "ignore all previous rules/guidelines/prompts" is no longer caught, as on main, which also missed it |
 
 - **After these fixes:**
   - On the reviewer's own harness (2,393 samples), the only loss against main is a main false positive: `{"command": "$(", "y": ")"}`, an unclosed `$(` matched with a `)` from a different string.
   - The new false BLOCK in the reviewer's benign prose set is `rm -rf "$HOME/.cache/x"`. It's consistent with main, which blocks any `~/…` path.
   - On the 400 tracked markdown files, the only changes are FLAGs (code-only commands, per R2) and two secret BLOCKs inside code in `docs/superpowers/plans/`. Both look like test fixtures: a bare key-header assertion, and a `SENTINEL` token value with 12 distinct characters. The value was not printed.
   - Every pattern scans 1 MB of hostile input in 14 ms or less.
-  - 206/206 scanner tests, 26/26 suites, `ci-scan-skills.js` clean.
+  - 207/207 scanner tests (after B7), 26/26 suites, `ci-scan-skills.js` clean.
 
 ### Independent review of the S1–S3 fix (2026-10-15)
 

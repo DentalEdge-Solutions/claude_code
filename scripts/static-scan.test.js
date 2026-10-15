@@ -461,6 +461,11 @@ for (const cmd of [
   });
 }
 
+test('rm-rf-root: the git rm exclusion does not reach across a line break', () => {
+  const r = run([makeDir({ 'SKILL.md': 'Run git\nrm -rf / now.\n' })]);
+  assert.strictEqual(sevOf(r.json, 'rm-rf-root'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
 test('rm-rf-root: a soft line wrap in prose does not end the command (re-check G1)', () => {
   const r = run([makeDir({ 'SKILL.md': 'To reset the workspace, run rm -rf\n~/ before starting.\n' })]);
   assert.strictEqual(sevOf(r.json, 'rm-rf-root'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);

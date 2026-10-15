@@ -96,11 +96,11 @@ const MD_BASH = [
   // whose first target is an absolute or home path (/…, ~…, $HOME…), quoted or not. As on main, /tmp
   // counts too: an exemption was escapable through .., quotes, variables and redirects (final review F3/F4).
   // As on main, rm may follow any non-word character (\rm, (rm, "rm, Makefile's -rm, re-check G3), but not
-  // "git " (git rm only untracks, G5). Option and target separators are \s, as on main, so a soft wrap in
+  // "git " on the same line (git rm only untracks, G5; a line break after git starts a new command). Option and target separators are \s, as on main, so a soft wrap in
   // prose keeps the command (G1). Linear: one parse per option, the token -rm never joins an option run
   // (so "-rm -rm …" starts stay O(1)), and lookaheads (never re-entered) check for a recursive/force option
   // and capture the option run, which \1 then consumes.
-  { re: /(?<!\w)(?<!\bgit\s+)rm["']?\s+(?=(?:(?!-rm\b)-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:(?!-rm\b)-[\w-]*\s+)*))\1["']?(?:\/|~|\$\{?HOME\b)/,
+  { re: /(?<!\w)(?<!\bgit[ \t]+)rm["']?\s+(?=(?:(?!-rm\b)-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:(?!-rm\b)-[\w-]*\s+)*))\1["']?(?:\/|~|\$\{?HOME\b)/,
                                           name: 'rm-rf-root',       sev: 'BLOCK' },
   // Linear time with no length cap: anchored at a line start (after \n only: the m flag would also start
   // a line after \r and \u2028, which [^\n] reads through, and that was quadratic), a lookahead (never re-entered) finds the
