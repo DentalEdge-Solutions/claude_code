@@ -277,15 +277,30 @@ A separate reviewer re-ran every check and compared the old and new scanners on 
   - 10 mutations of the harvester, each reverted, all failed the suite: loaded from any marker, an unescaped step marker, a flipped time window, md5 for sha256, the wrong agent key, an 800-character claim window, no repo-root fallback, `some` for `every`, a directory counted as an artifact, and a case-sensitive marker.
 - **No behavior change.** `harvest-evidence.js` is untouched.
 
-### Harvester weaknesses found (E1–E6, open)
+### Harvester weaknesses found (E1–E6; E1 fixed, see "E1 repair")
 
 Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 
 | # | Weakness | Reproduction | Impact |
 |---|---|---|---|
-| E1 | A symlink in the workspace satisfies an artifact check | `workspace/report.md` → symlink to any existing file outside the workspace: `exists: true`, the step is satisfied, `workflow_executed: true` | **Scoring.** A run can satisfy artifact workflow steps without writing the file. (A junk file also satisfies `exists`; content is left to the LLM judge.) Fix: `lstat`, and refuse links or paths that resolve outside the workspace |
+| E1 | A symlink in the workspace satisfies an artifact check | `workspace/report.md` → symlink to any existing file outside the workspace: `exists: true`, the step is satisfied, `workflow_executed: true` | **Fixed 2026-10-15** (see "E1 repair"). Before the fix, a run could satisfy artifact workflow steps without writing the file (a junk file still satisfies `exists`; content is left to the LLM judge) |
 | E2 | A claim path can leave the workspace | ``I wrote `../../…/etc/hosts` `` → `claim_verified: true` | Informational field only; misleading if a reader trusts it |
 | E3 | An invalid `started_at` in `run-manifest.json` makes every artifact `mtime_in_window: false` (not null) | `{"started_at": "not-a-date"}` | Informational field only |
 | E4 | `claim_verified` means "exists", not "written by this run": any existing repo file verifies (repo-root fallback, no time window) | ``I wrote `README.md` `` run from the repo root → `true` | Informational field only |
 | E5 | The 80-character claim window crosses lines and sentences, so a mention near another sentence's verb becomes a claim | `produced `a.md`.` then `See `b.md`.` → both claims | Noise in an informational field |
 | E6 | Design note: `skill_loaded` comes from the literal token `Skill(<name>)`, which the eval subagent is instructed to write when it applies the skill. It is an instructed marker in the subagent's own output, not an independent tool-call log | `.claude/agents/skill-eval-agent.md` (the "Trigger token" rule) | Trigger accuracy depends on the subagent following that instruction honestly. A method question, not a harvester bug |
+
+## E1 repair (2026-10-15)
+
+- **Fix:** an artifact counts only when it resolves, links followed (`realpathSync`), to a regular file inside its side's own workspace. Rejected cases:
+  - a link to a file outside;
+  - a linked folder that leads outside;
+  - a spec path that climbs out (`../`);
+  - a sibling folder whose name starts with `workspace`.
+
+  Each one gives `exists: false` and a stderr warning. A link to another file inside the same workspace still counts. The `evidence.json` shape is unchanged, and artifact workflow steps follow automatically.
+- **Evidence:**
+  - Before the fix, the three escape tests failed (`exists: true`).
+  - After, 37/37 harvester tests and 27/27 suites pass, and `ci-scan-skills.js` is clean.
+  - 3 mutations (no separator in the prefix check, no containment check, no link resolution) each failed the suite.
+- **Scope:** E2–E5 (informational fields) and E6 (method) are unchanged and still open.
