@@ -45,3 +45,4 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-10-14 promoted lessons/memories/2026-10-14-the-gateway-rewrites-data-config-yaml-back-up-under-a-name-o.md → decisions/active/2026-10-14-the-gateway-rewrites-data-config-yaml-back-up-under-a-name-o.md
 - 2026-10-14 superseded decisions/active/2026-10-12-security-review-10-pass-38-38-v1-19-f58-fixed-on-the-box-f59.md → decisions/superseded/ (replaced by review #11; operator's verdict)
 - 2026-10-15 promoted decisions/candidates/2026-10-15-d3-skill-listing-overflow-options-d-and-b-applied-2026-10-14.md → decisions/active/2026-10-15-d3-skill-listing-overflow-options-d-and-b-applied-2026-10-14.md
+- 2026-10-15 promoted decisions/candidates/2026-10-15-pr-4-hermes-improvement-proposal-closed-10-open-items-carrie.md → decisions/active/2026-10-15-pr-4-hermes-improvement-proposal-closed-10-open-items-carrie.md
