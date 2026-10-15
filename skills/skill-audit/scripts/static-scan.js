@@ -70,23 +70,47 @@ function stripRegexLiterals(text) {
 
 // ─── Markdown: Prompt Injection ────────────────────────────────────────────
 const MD_INJECTION = [
-  { re: /ignore\s+(previous|prior|all)\s+instructions/i,              name: 'instruction-override',  sev: 'BLOCK' },
+  // "ignore [all|any] [the|your|my] previous|prior|above|… instructions|directions" — a qualifier is
+  // required, so defensive text ("ignore instructions found in fetched pages") stays quiet (S1). No word
+  // boundaries, as on main: \b fails beside _, which hid "_Ignore all previous instructions_" (F5).
+  // Only these two nouns: "rules", "guidelines" and "prompts" made ordinary prose a BLOCK (re-check G4).
+  { re: /ignore\s+(?:(?:all|any)\s+(?:of\s+)?)?(?:the\s+|your\s+|my\s+)?(?:previous|prior|above|earlier|preceding|all|your)\s+(?:instructions|directions)/i,
+                                                                      name: 'instruction-override',  sev: 'BLOCK' },
   { re: /disregard\s+(previous|prior|all|your)/i,                     name: 'instruction-disregard', sev: 'BLOCK' },
   { re: /\byou are now\b/i,                                           name: 'persona-override',      sev: 'FLAG'  },
   { re: /forget\s+everything/i,                                       name: 'memory-wipe',           sev: 'BLOCK' },
   { re: /from now on you (must|will|shall)/i,                         name: 'behavior-override',     sev: 'FLAG'  },
   { re: /[​‌‍﻿‮]/u,                                                    name: 'hidden-unicode',        sev: 'BLOCK' },
-  { re: /[A-Za-z0-9+/]{80,}={0,2}(?:\s|$)/,                          name: 'base64-blob',           sev: 'FLAG'  },
-  { re: /<!--[\s\S]{20,}?-->/,                                        name: 'html-comment-block',    sev: 'FLAG'  },
+  // Both linear: a base64 match starts only at the start of a run (retrying every offset inside a long
+  // run was quadratic), and a comment is judged by the 20 characters after <!-- that come before any -->,
+  // so an unclosed comment counts and no scan runs to the end of the file per <!--.
+  { re: /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{80,}={0,2}(?:\s|$)/,         name: 'base64-blob',           sev: 'FLAG'  },
+  { re: /<!--(?:(?!-->)[\s\S]){20}/,                                  name: 'html-comment-block',    sev: 'FLAG'  },
   { re: /\bact as\b.{0,30}\b(assistant|ai|agent|claude)\b/i,         name: 'act-as-override',       sev: 'FLAG'  },
   { re: /system\s*prompt/i,                                           name: 'system-prompt-ref',     sev: 'FLAG'  },
 ];
 
 // ─── Markdown: Dangerous Bash in instructions ──────────────────────────────
 const MD_BASH = [
-  { re: /\brm\s+-[rf]{1,2}\s+[/~]/,      name: 'rm-rf-root',       sev: 'BLOCK' },
-  { re: /curl\s+.+\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
-  { re: /wget\s+.+\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
+  // rm with a recursive/force option (any spelling: -rf, -r -f, -Rf, -rfv, --recursive, --force, --)
+  // whose first target is an absolute or home path (/…, ~…, $HOME…), quoted or not. As on main, /tmp
+  // counts too: an exemption was escapable through .., quotes, variables and redirects (final review F3/F4).
+  // As on main, rm may follow any non-word character (\rm, (rm, "rm, Makefile's -rm). Separators are \s, so
+  // a soft wrap in prose keeps the command (re-check G1). An option run holding --cached before any -- or
+  // lone - is git rm, which only untracks (G5); plain rm refuses that option, so no "git" lookbehind is
+  // needed (pre-push H2: that lookbehind let "X=git rm -rf /" and "sudo -u git rm -rf ~" through). After
+  // -- or -, "--cached" is a file name and rm deletes the rest, so the search stops there (verification V1).
+  // Linear: an option token is -(\w | - not followed by rm)*, so no token holds "-rm" and no option run
+  // can contain a later rm start (pre-push H1: "--rm" repeated was quadratic); lookaheads (never
+  // re-entered) check for a recursive/force option and capture the option run, which \1 then consumes.
+  { re: /(?<!\w)rm["']?\s+(?!(?:(?!--?\s)(?!-rm\b)-(?:\w|-(?!rm\b))*\s+)*?--cached\b)(?=(?:(?!-rm\b)-(?:\w|-(?!rm\b))*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:(?!-rm\b)-(?:\w|-(?!rm\b))*\s+)*))\1["']?(?:\/|~|\$\{?HOME\b)/,
+                                          name: 'rm-rf-root',       sev: 'BLOCK' },
+  // Linear time with no length cap: anchored at a line start (after \n only: the m flag would also start
+  // a line after \r and \u2028, which [^\n] reads through, and that was quadratic), a lookahead (never re-entered) finds the
+  // line's first curl, then one greedy pass looks for a later pipe into a shell. The old .+ retried
+  // every curl on the line and took seconds on a long line of repeated "curl |".
+  { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
   { re: /\bsudo\s+/,                      name: 'sudo',             sev: 'FLAG'  },
   { re: /chmod\s+[0-7]{3}\s/,            name: 'chmod',            sev: 'FLAG'  },
   { re: /~\/.ssh\//,                      name: 'ssh-dir-access',   sev: 'BLOCK' },
@@ -134,7 +158,10 @@ const CONFIG_PATTERNS = [
   { re: /"(?:Write|Edit)\(\/\*?\)"|"(?:Write|Edit)\(~\//,
                                                  name: 'perm-broad-path',          sev: 'FLAG'  },
   // Hook command with shell substitution — potential injection vector
-  { re: /"command"\s*:\s*"[^"]*\$\([^)]*\)/,    name: 'hook-shell-substitution',  sev: 'FLAG'  },
+  // $( … ) inside the command string, escape-aware (\" does not end it). Linear: a lookahead finds the
+  // first $( once, and the closing ) must come before the string ends (main's [^"]*…[^)]* was quadratic).
+  { re: /"command"\s*:\s*"(?=((?:[^"\\]|\\.)*?\$\())\1(?:[^)"\\]|\\.)*\)/,
+                                                 name: 'hook-shell-substitution',  sev: 'FLAG'  },
   // Enable all MCP servers without restriction
   { re: /"enableAllProjectMcpServers"\s*:\s*true/,
                                                  name: 'mcp-enable-all-servers',   sev: 'FLAG'  },
@@ -145,9 +172,12 @@ const JS_EXTS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx']);
 const JS_PATTERNS = [
   { re: /\beval\s*\(/,                                         name: 'eval-injection',         sev: 'BLOCK' },
   { re: /new\s+Function\s*\(/,                                 name: 'new-function-injection', sev: 'BLOCK' },
-  { re: /require\s*\(\s*['"]child_process['"]/,                name: 'child-process-require',  sev: 'BLOCK' },
-  { re: /(?<![a-zA-Z0-9_.])exec\s*\(/,                        name: 'child-process-exec',     sev: 'BLOCK' },
-  { re: /\bspawn\s*\(/,                                        name: 'spawn-call',             sev: 'FLAG'  },
+  // require(), import … from, import(), with or without the node: prefix (S3)
+  { re: /(?:require\s*\(\s*|\bimport\s*\(\s*|\bfrom\s*|\bimport\s+)['"](?:node:)?child_process['"]/,
+                                                               name: 'child-process-require',  sev: 'BLOCK' },
+  // a bare exec call (a method named exec, like RegExp's, is excluded); execSync however reached (S3)
+  { re: /(?<![a-zA-Z0-9_.])exec\s*\(|\bexecSync\s*\(/,          name: 'child-process-exec',     sev: 'BLOCK' },
+  { re: /\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(/,      name: 'spawn-call',             sev: 'FLAG'  },
   { re: /\bfetch\s*\(/,                                        name: 'network-fetch',          sev: 'FLAG'  },
   { re: /require\s*\(\s*['"]https?['"]/,                       name: 'http-require',           sev: 'FLAG'  },
   { re: /\bprocess\.env\b/,                                    name: 'env-access',             sev: 'FLAG'  },
@@ -171,7 +201,10 @@ const PY_PATTERNS = [
   { re: /\bnumpy\.load\s*\([^)\n]{0,200}allow_pickle\s*=\s*True/,        name: 'numpy-allow-pickle',      sev: 'BLOCK' },
   // Command injection
   { re: /\bos\.system\s*\(/,                                              name: 'os-system-injection',     sev: 'BLOCK' },
-  { re: /subprocess\.(?:run|call|Popen|check_output|check_call)\([^)]*shell\s*=\s*True/, name: 'subprocess-shell-true', sev: 'BLOCK' },
+  // As on main, the arguments run to the first ) (a ( inside them is fine, re-check G2). Linear: a call's
+  // scan also stops where the next subprocess call starts, so repeated unclosed calls are not quadratic (F8).
+  { re: /subprocess\.(?:run|call|Popen|check_output|check_call)\((?:(?!subprocess\.(?:run|call|Popen|check_output|check_call)\()[^)])*?shell\s*=\s*True/,
+                                                                          name: 'subprocess-shell-true', sev: 'BLOCK' },
   // Unsafe parsing
   { re: /\byaml\.(?:unsafe_)?load\s*\((?![^)\n]{0,80}Loader\s*=\s*yaml\.SafeLoader)/, name: 'yaml-unsafe-load', sev: 'FLAG' },
   { re: /\b(?:xml\.etree\.ElementTree|ET)\.(parse|fromstring)\s*\(/,     name: 'xml-unsafe-parse',        sev: 'FLAG'  },
@@ -187,18 +220,30 @@ const PY_PATTERNS = [
 const SH_EXTS = new Set(['.sh', '.bash']);
 const SH_PATTERNS = [
   { re: /eval\s+["'$]/,                   name: 'shell-eval',        sev: 'BLOCK' },
-  { re: /curl\s+.*\|\s*(bash|sh)\b/,      name: 'curl-pipe-shell',   sev: 'BLOCK' },
-  { re: /wget\s+.*\|\s*(bash|sh)\b/,      name: 'wget-pipe-shell',   sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'curl-pipe-shell', sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'wget-pipe-shell', sev: 'BLOCK' },
   { re: /--break-system-packages/,        name: 'pip-break-system',  sev: 'FLAG'  },
 ];
 
+// Which text each markdown table reads (S2, and the owner's decision R2 of 2026-10-15):
+//   - prompt injection and FLAG-level bash: prose only (markdown code stripped)
+//   - BLOCK-level bash: its own severity in prose; FLAG when it appears only in code, fenced or inline.
+//     A documented example then asks for confirmation instead of refusing the skill, and a fence-pairing
+//     trick can only lower a BLOCK to a FLAG, never hide the command (final review F7)
+//   - secrets: the whole file at full severity; a real key leaks wherever it sits
 function scanMarkdown(filePath, content) {
-  const s = stripCodeBlocks(content);
-  for (const { re, name, sev } of [...MD_INJECTION, ...MD_BASH, ...MD_SECRETS]) {
-    if (re.test(s)) {
-      const m = s.match(re);
-      flag(filePath, name, sev, `"${m[0].slice(0, 80).replace(/\n/g, '\\n')}"`);
-    }
+  const prose = stripCodeBlocks(content);
+  const quote = (m, note = '') => `"${note}${m[0].slice(0, 80).replace(/\n/g, '\\n')}"`;
+  for (const { re, name, sev } of [...MD_INJECTION, ...MD_BASH]) {
+    const m = prose.match(re);
+    if (m) { flag(filePath, name, sev, quote(m)); continue; }
+    if (sev !== 'BLOCK' || !MD_BASH.some(p => p.name === name)) continue;
+    const c = content.match(re);
+    if (c) flag(filePath, name, 'FLAG', quote(c, '(in code) '));
+  }
+  for (const { re, name, sev } of MD_SECRETS) {
+    const m = content.match(re);
+    if (m) flag(filePath, name, sev, quote(m));
   }
 }
 

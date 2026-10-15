@@ -48,7 +48,7 @@
 
 | Pattern | Severity | Risk |
 |---------|----------|------|
-| `ignore previous instructions` | BLOCK | Instruction override |
+| `ignore [all/any [of]] [the/your/my] previous/prior/above/earlier/preceding/all/your instructions/directions` | BLOCK | Instruction override |
 | `disregard` + instructions | BLOCK | Instruction override |
 | `forget everything` | BLOCK | Memory wipe |
 | Zero-width Unicode (U+200B, U+200C, U+200D, U+FEFF, U+202E) | BLOCK | Hidden text |
@@ -64,9 +64,9 @@
 | Pattern | Severity |
 |---------|----------|
 | `eval()` / `new Function()` | BLOCK |
-| `require('child_process')` | BLOCK |
-| `exec()` (child process) | BLOCK |
-| `spawn()` | FLAG |
+| `require`, `import … from` or `import()` of `child_process` (with or without `node:`) | BLOCK |
+| `exec()` (child process, not a method like `re.exec()`) / `execSync()` | BLOCK |
+| `spawn()` / `spawnSync()` / `execFile()` / `execFileSync()` | FLAG |
 | `fetch()` / `require('http')` / `require('https')` | FLAG |
 | `process.env` access | FLAG |
 | `fs.writeFile/appendFile/unlink/rmdir/rm()` | FLAG |
@@ -96,10 +96,12 @@
 
 ### Dangerous Bash in Markdown Instructions
 
+BLOCK rows are BLOCK in prose. When the command appears only in what the scanner reads as code (a ``` fenced block or an inline span), it is a FLAG instead: a documented example asks for confirmation rather than refusing the skill, and a fence-pairing trick can only lower a BLOCK to a FLAG, never hide the command (owner's decision, 2026-10-15). The scanner's code detection is a regex, not a markdown parser, so some prose can be read as code (escaped backticks, backticks inside HTML or link titles): such a command is a FLAG, not a BLOCK. Main gave those a PASS. FLAG rows apply to prose only. Secrets are matched everywhere in a markdown file, code included, at full severity. Prompt-injection rows apply to prose only.
+
 | Pattern | Severity |
 |---------|----------|
-| `rm -rf /` or `rm -rf ~` | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` | BLOCK |
+| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`), whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included; an option run holding `--cached` before any `--` (`git rm --cached`; plain `rm` refuses that option) is not matched | BLOCK |
+| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |
 | `sudo` | FLAG |
@@ -111,7 +113,7 @@
 | Pattern | Severity |
 |---------|----------|
 | `eval "..."` | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` | BLOCK |
+| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
 | `pip install --break-system-packages` | FLAG |
 
 ---

@@ -1,6 +1,6 @@
 // skills/agent-eval/scripts/generate-agent-evals.test.js
 'use strict';
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs   = require('fs');
 const path = require('path');
 const assert = require('assert');
@@ -59,9 +59,10 @@ function teardown() {
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 
-function run(extraArgs = '') {
-  execSync(
-    `node ${SCRIPT} ${AGENT_FILE} ${extraArgs}`,
+// execFileSync with an argument list: no shell in between.
+function run(extraArgs = []) {
+  execFileSync(
+    process.execPath, [SCRIPT, AGENT_FILE, ...extraArgs],
     { cwd: TMP, stdio: 'pipe' }
   );
   return JSON.parse(fs.readFileSync(path.join(EVALS_DIR, 'evals.json'), 'utf8'));
@@ -144,7 +145,7 @@ try {
     fs.writeFileSync(CTX_FILE, CTX_CONTENT);
     // remove prior output to avoid false positive
     fs.rmSync(EVALS_DIR, { recursive: true, force: true });
-    const result = run(`--context ${CTX_FILE}`);
+    const result = run(['--context', CTX_FILE]);
     assert.strictEqual(result.evals.length, 9, `Expected 9 scenarios, got ${result.evals.length}`);
 
     const types = result.evals.map(e => e.type);
@@ -159,7 +160,7 @@ try {
   // adversarial scoring guidance now lives in expected.judgment (not expected.note).
   {
     const CTX_FILE = path.join(TMP, 'evals', 'project-context.json');
-    const result = run(`--context ${CTX_FILE}`);
+    const result = run(['--context', CTX_FILE]);
     const direct = result.evals.find(e => e.type === 'direct');
     assert.ok(direct.prompt.length > 0, 'direct prompt must not be empty');
     assert.ok(/dispatch/i.test(direct.prompt), 'direct prompt should use dispatch vocabulary');
@@ -175,9 +176,9 @@ try {
   // target, and selection is deterministic across repeated runs.
   {
     const CTX_FILE = path.join(TMP, 'evals', 'project-context.json');
-    const result1 = run(`--context ${CTX_FILE}`);
+    const result1 = run(['--context', CTX_FILE]);
     fs.rmSync(EVALS_DIR, { recursive: true, force: true });
-    const result2 = run(`--context ${CTX_FILE}`);
+    const result2 = run(['--context', CTX_FILE]);
 
     assert.ok(result1.target_selection && result1.target_selection.target, 'target_selection.target must be set');
     assert.strictEqual(result1.target_selection.target, result2.target_selection.target,
@@ -194,7 +195,7 @@ try {
 
     // --target CLI override takes priority
     fs.rmSync(EVALS_DIR, { recursive: true, force: true });
-    const overridden = run(`--context ${CTX_FILE} --target skill-adapt`);
+    const overridden = run(['--context', CTX_FILE, '--target', 'skill-adapt']);
     assert.strictEqual(overridden.target_selection.target, 'skill-adapt', '--target override must win');
     assert.strictEqual(overridden.target_selection.source, 'cli', 'override source must be "cli"');
     console.log('✓ Test 4: target selection is concrete, deterministic, and overridable');
@@ -205,13 +206,13 @@ try {
   {
     const CTX_FILE = path.join(TMP, 'evals', 'project-context.json');
     fs.rmSync(EVALS_DIR, { recursive: true, force: true });
-    const result = run(`--context ${CTX_FILE}`);
+    const result = run(['--context', CTX_FILE]);
     // Every generated scenario must pass the lint (the generator itself aborts
     // on failure, so if we got here, generation succeeded — this double-checks
     // via --lint-only against the written file).
     let lintOutput = '';
     try {
-      lintOutput = execSync(`node ${SCRIPT} --lint-only ${path.join(EVALS_DIR, 'evals.json')}`, { cwd: TMP, stdio: 'pipe' }).toString();
+      lintOutput = execFileSync(process.execPath, [SCRIPT, '--lint-only', path.join(EVALS_DIR, 'evals.json')], { cwd: TMP, stdio: 'pipe' }).toString();
     } catch (e) {
       lintOutput = e.stdout ? e.stdout.toString() : '';
       throw new Error(`--lint-only unexpectedly failed on freshly generated evals: ${lintOutput}`);
@@ -229,7 +230,7 @@ try {
     }, null, 2));
     let failed = false;
     try {
-      execSync(`node ${SCRIPT} --lint-only ${badFile}`, { cwd: TMP, stdio: 'pipe' });
+      execFileSync(process.execPath, [SCRIPT, '--lint-only', badFile], { cwd: TMP, stdio: 'pipe' });
     } catch (e) {
       failed = true;
       const out = (e.stdout || '').toString();
@@ -244,7 +245,7 @@ try {
   {
     const CTX_FILE = path.join(TMP, 'evals', 'project-context.json');
     fs.rmSync(EVALS_DIR, { recursive: true, force: true });
-    const result = run(`--context ${CTX_FILE}`);
+    const result = run(['--context', CTX_FILE]);
 
     for (const sc of result.evals) {
       assert.ok(sc.expected.evidence, `${sc.type}: missing expected.evidence`);
@@ -275,7 +276,7 @@ try {
   {
     const CTX_FILE = path.join(TMP, 'evals', 'project-context.json');
     fs.rmSync(EVALS_DIR, { recursive: true, force: true });
-    const withCtx = run(`--context ${CTX_FILE}`);
+    const withCtx = run(['--context', CTX_FILE]);
     let errors = validateEvalsFile(withCtx);
     assert.deepStrictEqual(errors, [], `Schema validation errors (with context): ${errors.join('; ')}`);
 
