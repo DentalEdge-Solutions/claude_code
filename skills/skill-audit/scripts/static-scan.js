@@ -71,8 +71,9 @@ function stripRegexLiterals(text) {
 // ─── Markdown: Prompt Injection ────────────────────────────────────────────
 const MD_INJECTION = [
   // "ignore [all|any] [the|your|my] previous|prior|above|… instructions|rules|…" — a qualifier is
-  // required, so defensive text ("ignore instructions found in fetched pages") stays quiet (S1).
-  { re: /\bignore\s+(?:(?:all|any)\s+(?:of\s+)?)?(?:the\s+|your\s+|my\s+)?(?:previous|prior|above|earlier|preceding|all|your)\s+(?:instructions|directions|rules|guidelines|prompts?)\b/i,
+  // required, so defensive text ("ignore instructions found in fetched pages") stays quiet (S1). No word
+  // boundaries, as on main: \b fails beside _, which hid "_Ignore all previous instructions_" (F5).
+  { re: /ignore\s+(?:(?:all|any)\s+(?:of\s+)?)?(?:the\s+|your\s+|my\s+)?(?:previous|prior|above|earlier|preceding|all|your)\s+(?:instructions|directions|rules|guidelines|prompts?)/i,
                                                                       name: 'instruction-override',  sev: 'BLOCK' },
   { re: /disregard\s+(previous|prior|all|your)/i,                     name: 'instruction-disregard', sev: 'BLOCK' },
   { re: /\byou are now\b/i,                                           name: 'persona-override',      sev: 'FLAG'  },
@@ -91,19 +92,19 @@ const MD_INJECTION = [
 // ─── Markdown: Dangerous Bash in instructions ──────────────────────────────
 const MD_BASH = [
   // rm with a recursive/force option (any spelling: -rf, -r -f, -Rf, -rfv, --recursive, --force, --)
-  // and ANY target (up to ; & |) that is an absolute or home path, quoted or not. /tmp/, /private/tmp/
-  // and /var/tmp/ are exempt unless the path holds .. (rm -rf /tmp/x is routine cleanup).
-  // Linear time: each option has one parse (-[\w-]*), lookaheads (never re-entered) check for a
-  // recursive/force option and capture the option run, and a target scan stops at the next rm that has
-  // its own recursive/force option (that rm's own match covers the rest).
-  { re: /\brm\s+(?=(?:-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:-[\w-]*\s+)*))\1(?:(?!rm\s+(?:-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))[^\s;&|]+\s+)*?["']?(?!(?:\/private)?\/tmp\/(?![^\s;&|]*\.\.)|\/var\/tmp\/(?![^\s;&|]*\.\.))(?:\/|~|\$\{?HOME\b)/,
+  // whose first target is an absolute or home path (/…, ~…, $HOME…), quoted or not. As on main, /tmp
+  // counts too: an exemption was escapable through .., quotes, variables and redirects (final review F3/F4).
+  // Options and target must be on the rm line ([ \t]), and rm must not follow a word character or -, so
+  // "-rm" inside an option run is not a new start. Linear: one parse per option, and lookaheads (never
+  // re-entered) check for a recursive/force option and capture the option run, which \1 then consumes.
+  { re: /(?<![\w-])rm["']?\s+(?=(?:-[\w-]*[ \t]+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:-[\w-]*[ \t]+)*))\1["']?(?:\/|~|\$\{?HOME\b)/,
                                           name: 'rm-rf-root',       sev: 'BLOCK' },
   // Linear time with no length cap: anchored at a line start (after \n only: the m flag would also start
   // a line after \r and \u2028, which [^\n] reads through, and that was quadratic), a lookahead (never re-entered) finds the
   // line's first curl, then one greedy pass looks for a later pipe into a shell. The old .+ retried
   // every curl on the line and took seconds on a long line of repeated "curl |".
-  { re: /(?<![^\n])(?=([^\n]*?curl\s))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
-  { re: /(?<![^\n])(?=([^\n]*?wget\s))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
   { re: /\bsudo\s+/,                      name: 'sudo',             sev: 'FLAG'  },
   { re: /chmod\s+[0-7]{3}\s/,            name: 'chmod',            sev: 'FLAG'  },
   { re: /~\/.ssh\//,                      name: 'ssh-dir-access',   sev: 'BLOCK' },
@@ -151,7 +152,10 @@ const CONFIG_PATTERNS = [
   { re: /"(?:Write|Edit)\(\/\*?\)"|"(?:Write|Edit)\(~\//,
                                                  name: 'perm-broad-path',          sev: 'FLAG'  },
   // Hook command with shell substitution — potential injection vector
-  { re: /"command"\s*:\s*"[^"]*\$\([^)]*\)/,    name: 'hook-shell-substitution',  sev: 'FLAG'  },
+  // $( … ) inside the command string, escape-aware (\" does not end it). Linear: a lookahead finds the
+  // first $( once, and the closing ) must come before the string ends (main's [^"]*…[^)]* was quadratic).
+  { re: /"command"\s*:\s*"(?=((?:[^"\\]|\\.)*?\$\())\1(?:[^)"\\]|\\.)*\)/,
+                                                 name: 'hook-shell-substitution',  sev: 'FLAG'  },
   // Enable all MCP servers without restriction
   { re: /"enableAllProjectMcpServers"\s*:\s*true/,
                                                  name: 'mcp-enable-all-servers',   sev: 'FLAG'  },
@@ -191,7 +195,8 @@ const PY_PATTERNS = [
   { re: /\bnumpy\.load\s*\([^)\n]{0,200}allow_pickle\s*=\s*True/,        name: 'numpy-allow-pickle',      sev: 'BLOCK' },
   // Command injection
   { re: /\bos\.system\s*\(/,                                              name: 'os-system-injection',     sev: 'BLOCK' },
-  { re: /subprocess\.(?:run|call|Popen|check_output|check_call)\([^)]*shell\s*=\s*True/, name: 'subprocess-shell-true', sev: 'BLOCK' },
+  // [^()] rather than [^)]: each call's scan stops at the next (, so repeated calls are linear (F8)
+  { re: /subprocess\.(?:run|call|Popen|check_output|check_call)\([^()]*shell\s*=\s*True/, name: 'subprocess-shell-true', sev: 'BLOCK' },
   // Unsafe parsing
   { re: /\byaml\.(?:unsafe_)?load\s*\((?![^)\n]{0,80}Loader\s*=\s*yaml\.SafeLoader)/, name: 'yaml-unsafe-load', sev: 'FLAG' },
   { re: /\b(?:xml\.etree\.ElementTree|ET)\.(parse|fromstring)\s*\(/,     name: 'xml-unsafe-parse',        sev: 'FLAG'  },
@@ -207,34 +212,30 @@ const PY_PATTERNS = [
 const SH_EXTS = new Set(['.sh', '.bash']);
 const SH_PATTERNS = [
   { re: /eval\s+["'$]/,                   name: 'shell-eval',        sev: 'BLOCK' },
-  { re: /(?<![^\n])(?=([^\n]*?curl\s))\1[^\n]*\|\s*(bash|sh)\b/, name: 'curl-pipe-shell', sev: 'BLOCK' },
-  { re: /(?<![^\n])(?=([^\n]*?wget\s))\1[^\n]*\|\s*(bash|sh)\b/, name: 'wget-pipe-shell', sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'curl-pipe-shell', sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'wget-pipe-shell', sev: 'BLOCK' },
   { re: /--break-system-packages/,        name: 'pip-break-system',  sev: 'FLAG'  },
 ];
 
-function fencedBlocks(text) {
-  return (text.match(/```[\s\S]*?```/g) || []).join('\n');
-}
-
-// Which text each markdown table reads (S2):
-//   - injection and FLAG-level bash: prose only; code there is usually a documented example
-//   - BLOCK-level bash: prose and fenced blocks; fenced commands are the ones an agent runs
-//   - secrets: everything, code included; a real key leaks wherever it sits
-// Inline code spans stay excluded for bash, so prose like "we block `curl x | bash`" is quiet.
+// Which text each markdown table reads (S2, and the owner's decision R2 of 2026-10-15):
+//   - prompt injection and FLAG-level bash: prose only (markdown code stripped)
+//   - BLOCK-level bash: its own severity in prose; FLAG when it appears only in code, fenced or inline.
+//     A documented example then asks for confirmation instead of refusing the skill, and a fence-pairing
+//     trick can only lower a BLOCK to a FLAG, never hide the command (final review F7)
+//   - secrets: the whole file at full severity; a real key leaks wherever it sits
 function scanMarkdown(filePath, content) {
   const prose = stripCodeBlocks(content);
-  const fenced = fencedBlocks(content);
-  const targets = [
-    ...MD_INJECTION.map(p => [p, [prose]]),
-    ...MD_BASH.map(p => [p, p.sev === 'BLOCK' ? [prose, fenced] : [prose]]),
-    ...MD_SECRETS.map(p => [p, [content]]),
-  ];
-  for (const [{ re, name, sev }, texts] of targets) {
-    const text = texts.find(t => re.test(t));
-    if (text) {
-      const m = text.match(re);
-      flag(filePath, name, sev, `"${m[0].slice(0, 80).replace(/\n/g, '\\n')}"`);
-    }
+  const quote = (m, note = '') => `"${note}${m[0].slice(0, 80).replace(/\n/g, '\\n')}"`;
+  for (const { re, name, sev } of [...MD_INJECTION, ...MD_BASH]) {
+    const m = prose.match(re);
+    if (m) { flag(filePath, name, sev, quote(m)); continue; }
+    if (sev !== 'BLOCK' || !MD_BASH.some(p => p.name === name)) continue;
+    const c = content.match(re);
+    if (c) flag(filePath, name, 'FLAG', quote(c, '(in code) '));
+  }
+  for (const { re, name, sev } of MD_SECRETS) {
+    const m = content.match(re);
+    if (m) flag(filePath, name, sev, quote(m));
   }
 }
 

@@ -96,11 +96,11 @@
 
 ### Dangerous Bash in Markdown Instructions
 
-BLOCK rows apply to prose and to fenced code blocks, because fenced commands are the ones an agent runs. FLAG rows apply to prose only. Inline code spans are skipped, so prose that names a pattern stays quiet. Secrets are matched everywhere in a markdown file, code included. Prompt-injection rows apply to prose only.
+BLOCK rows are BLOCK in prose. When the command appears only in code (a fenced block or an inline span), it is a FLAG instead: a documented example asks for confirmation rather than refusing the skill, and a fence-pairing trick can only lower a BLOCK to a FLAG, never hide the command (owner's decision, 2026-10-15). FLAG rows apply to prose only. Secrets are matched everywhere in a markdown file, code included, at full severity. Prompt-injection rows apply to prose only.
 
 | Pattern | Severity |
 |---------|----------|
-| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`) with any target (up to `;`, `&` or `|`) that is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not; `/tmp/`, `/private/tmp/` and `/var/tmp/` are exempt unless the path contains `..` | BLOCK |
+| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`) on the same line, whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included | BLOCK |
 | `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |
