@@ -36,11 +36,11 @@ Frontmatter schema (required set): `type, title, description, tags, timestamp, s
 |---|---|---|---|
 | `brain-pre-compact.sh` | PreCompact | snapshot note into today's log before compaction | no |
 | `brain-session-end.sh` | SessionEnd + Stop | SessionEnd: run compile. Stop: suggest compile once/day if uncompiled entries | no |
-| `brain-security-guard.sh` | PreToolUse (`Write\|Edit\|NotebookEdit\|Bash`) | denies canon writes, capsule `rm`, direct installs from `sources/` | **yes (only blocking hook)** |
+| `brain-security-guard.sh` | PreToolUse (`Write\|Edit\|NotebookEdit\|Bash`) | denies canon writes, capsule deletes (`rm`/`find -delete`, also after `cd`), direct installs from `sources/` | **yes (only blocking hook)** |
 | `brain-post-lint.sh` | PostToolUse (`Write\|Edit`) | lint capsule edits; warn on sensitive content | no |
 | `brain-load.sh` | SessionStart | inject protocol + top-authority titles (≤ 8000 chars / < 2k tokens) | no |
 
-Every hook exits 0 always; the guard expresses denial via `hookSpecificOutput.permissionDecision: "deny"`. A crashed guard fails open.
+Every hook exits 0, except one case below; the guard expresses denial via `hookSpecificOutput.permissionDecision: "deny"`. The guard denies bad input (fail closed). If node cannot run, it fails open visibly: a stderr warning, a line in `.project-brain/reports/guard-failures.log`, and exit 1, which Claude Code shows as a non-blocking hook error. Details: `docs/SECOND_BRAIN_SECURITY.md`, "Hook gate".
 
 ## Skills
 

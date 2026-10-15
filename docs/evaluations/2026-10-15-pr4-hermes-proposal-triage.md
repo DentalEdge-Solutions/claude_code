@@ -28,7 +28,7 @@ The proposal's own `P` numbers are kept.
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
 | P9 | No guard before `rm -rf` in `uninstall.sh` | Open | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
 | P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
-| P11 | The brain security guard fails open on a parser error | Open | `hooks/brain/brain-security-guard.sh:52` |
+| P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
 | P13 | `test-runners.js` writes to real `evals/` paths | **Open, worse than stated** | see below |
 | P14 | The superseded architecture spec has no banner | Partly done | `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md` now has a "REVISED" banner, but it points to `~/.claude/plans/…`, a machine-local file and not a repo document |
@@ -64,7 +64,7 @@ The proposal's own `P` numbers are kept.
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"); S4–S9 are open.
    ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E6 are open.
-4. **P11:** make the brain security guard's fail-open visible (a log) or fail closed.
+4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. **P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`. Keep `install.sh` in sync.
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
 7. **P7:** replace the hand-rolled YAML parse with a real parser, with a test.
@@ -304,3 +304,42 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - After, 37/37 harvester tests and 27/27 suites pass, and `ci-scan-skills.js` is clean.
   - 3 mutations (no separator in the prefix check, no containment check, no link resolution) each failed the suite.
 - **Scope:** E2–E5 (informational fields) and E6 (method) are unchanged and still open.
+
+## P11 repair (2026-10-15)
+
+- **Owner decision (failure policy, hybrid):**
+  - Bad input fails closed: empty, not JSON, or no `tool_name` string and `tool_input` object. The guard denies and says why. Claude Code always sends valid input.
+  - If node cannot run, the guard fails open but visibly: a stderr warning, a line in `.project-brain/reports/guard-failures.log` (time and exit code only), and **exit 1**.
+  - Why exit 1: the [hooks reference](https://code.claude.com/docs/en/hooks) (Tier A, read 2026-10-15, Claude Code 2.1.300) says "Claude never sees stderr from a hook that exits 0". Another code (not 2) is "a non-blocking error": the user sees the notice, and the call proceeds. The old fallback warning was therefore invisible even when it fired.
+- **Problems found and fixed:**
+
+  | # | Problem | Before | After |
+  |---|---|---|---|
+  | 1 | Bad input allowed silently (`exit 0` inside node) | allow, no warning | deny with a reason |
+  | 2 | node failure warned on stderr with exit 0 | invisible | exit 1, stderr, log line |
+  | 3 | Input passed through an env var | a 2 MB Write into `canon/` exceeded the exec size limit, so the guard failed open | input on stdin; denied |
+  | 4 | NotebookEdit's path is `notebook_path`; the guard read `file_path` | NotebookEdit into `canon/` allowed | denied |
+  | 5 | The delete rule matched the word `rm` anywhere before `.project-brain` | `grep rm .project-brain/…` and `git add …-rm-rf-….md …` denied | allowed |
+  | 6 | `cd .project-brain && rm -rf …`, `find .project-brain -delete`, `… \| xargs rm`, `rmdir`/`unlink`/`shred`/`git clean` | allowed | denied |
+  | 7 | Four canon-rule regexes (`\d*>\s*/dev/null`, `\d*>&\d+`, `\bsed\b[^\|]*-i`, `brain-promote…[\s\S]*--approve`) and the old `rm` rule were quadratic | 1.8 s at 64 KB, minutes at 512 KB. A PreToolUse hook that times out "doesn't block the tool call", so this was a bypass | linear: indexOf, per-segment scans, no leading `\d*` |
+
+- **New delete rule:** the command is split into pipelines (`;`, `&&`, `\|\|`, `&`, newline, parentheses, braces, backticks) and stages (`\|`), with quotes dropped. It denies when a stage runs a deleting program and the capsule is the target. A stage runs one when:
+  - the deleting program is the command word (after env assignments and shell keywords);
+  - or it sits behind a runner such as `sudo`, `env`, `xargs` or `bash -c`;
+  - or it is `find` with `-delete` / `-exec rm`, or `git rm` / `git clean`.
+
+  The capsule is the target when `.project-brain` is named in the same pipeline, or an earlier `cd`/`pushd` entered it.
+- **Evidence:**
+  - **Tests first.** 31 new checks in `scripts/brain/brain-hooks.test.js` (6e–6j), each hook run with a 15 s timeout. Against `main`'s guard, 27 failed in the first batch. The second batch then failed on NotebookEdit and on 3 timing cases (two still running when the 15 s limit killed them, one 8.4 s). A later false-positive case (`sudo grep -e -delete …`) was also watched failing first.
+  - **After:** all hook tests pass; 27/27 suites pass; `brain-lint` shows 0 security findings (the 3 known stale-canon warnings).
+  - **Mutations:** 7 targeted mutations were each caught: no cd tracking, capsule only in the deleting stage, bad input allowed, input via env var, fail-open exit 0, no runners, and NotebookEdit reading `file_path`. The last one first survived and exposed a weak assertion, which was then tightened.
+  - **Timing:** 27 regexes × 40 adversarial 1 MB inputs, in-process: worst 34 ms. The whole guard end-to-end on 40 × 1 MB commands: worst 126 ms.
+  - **Differential:** 99,981 generated inputs (17 prefixes × 30 verbs × 14 targets × 14 suffixes, plus 21 Write/Edit/NotebookEdit paths), each run through `main`'s guard and the new one:
+    - 80,601 got the same decision: 26,204 deny and 54,397 allow.
+    - **4,368 went deny → allow**, all in two classes. The first is `rm` only as an argument (`grep rm`, `grep "rm"`, `grep -rn rm`, `git commit -m "rm stuff"`), which is the intended fix. The second is nonsense `git -C .project-brain <not-a-git-command> …` calls that git rejects. No input with a real deleting command changed to allow.
+    - **15,012 went allow → deny.** Each contains a deleting program on the capsule: the new programs (`rmdir`, `unlink`, `shred`, `git clean`), a delete after `cd`/`pushd` into the capsule, `find … -delete`, `… | xargs rm`, `git -C .project-brain rm`, or NotebookEdit into `canon/`. A filter for allow → deny inputs without a deleting command found none.
+    - A first run also flagged 605 runner + `-delete` cases (`sudo grep -e -delete …`). `-delete` now counts only when the command is `find`, with a test.
+- **Gaps left open (not in P11's probe table):**
+  - **G1:** the canon rule exempts any command that mentions `brain-promote … --approve` anywhere, so `brain-promote.js x --approve; echo x > .project-brain/canon/y.md` passes.
+  - **G2:** the delete rule does not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob, or globs that may expand to the capsule (`rm -rf .p*`).
+  - **G3:** the canon rule's mutation check still matches the word `rm` anywhere, so `grep rm .project-brain/canon/x.md` is denied (a conservative false positive, as documented).

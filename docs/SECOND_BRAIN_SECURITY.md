@@ -46,16 +46,39 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
 2. **Skill gate** — the `brain-promote` skill carries `disable-model-invocation: true`,
    so the platform itself prevents model-initiated promotion, and `risk_tier: critical`.
 3. **Hook gate** — `brain-security-guard.sh` (the only blocking hook) denies:
-   - direct `Write`/`Edit`/`NotebookEdit` into `.project-brain/canon/` (path-normalized)
+   - direct `Write`/`Edit`/`NotebookEdit` into `.project-brain/canon/` (path-normalized;
+     NotebookEdit's `notebook_path` is checked too)
    - `Bash` mutations of `canon/` not going through `brain-promote --approve`
      (covers `cd`+relative paths and interpreter writes)
-   - destructive `rm` targeting `.project-brain/`
+   - deleting the capsule: `rm`, `rmdir`, `unlink`, `shred`, `git rm` or `git clean` as
+     the command being run (also behind `sudo`, `env`, `xargs`, `bash -c` and similar),
+     or `find … -delete` / `-exec rm`, when the capsule is the target. The target counts
+     when `.project-brain` is named in the same pipeline (so `find .project-brain | xargs rm`
+     is caught) or the command first `cd`/`pushd`-ed into the capsule. The word `rm` as an
+     argument (`grep rm .project-brain/…`) or inside a file name (`…-rm-rf-….md`) is not a delete.
    - direct installs (`cp`/`mv`/`ln`/`rsync`) from `reference-repositories/sources/` into the skills dir
 
+   **When the guard itself fails** (owner decision P11, 2026-10-15):
+   - **Bad input fails closed.** Empty input, input that is not JSON, or JSON without a
+     `tool_name` string and a `tool_input` object is denied with a reason. Claude Code always
+     sends valid input, so this never blocks normal work; it points at a broken hook setup.
+   - **node missing or crashing fails open, visibly.** The guard prints a warning to stderr,
+     appends a line to `.project-brain/reports/guard-failures.log` (time and exit code only,
+     never the command), and exits 1. Claude Code shows exit 1 as a non-blocking hook error
+     and lets the call proceed. Denying here would block every Write, Edit and Bash call,
+     including the fix. Exit 0 would hide the warning: Claude Code ignores stderr on exit 0
+     ([hooks reference](https://code.claude.com/docs/en/hooks), checked 2026-10-15).
+   - The hook input reaches node on stdin, not through an environment variable: a large
+     Write used to exceed the exec size limit and slip through unchecked.
+   - Every pattern is linear-time and tested on 512 KB to 1 MB commands. A PreToolUse hook
+     that times out does not block the call, so a slow regex would be a bypass.
+
    The guard is **defense-in-depth**: `brain-promote --approve` + git history are the
-   real boundary. It fails open on parser errors (never bricks a session) and errs
-   toward denial — a read command mentioning `canon/` alongside a redirect/`node -e`
-   can be a conservative false-positive; split such commands.
+   real boundary. It errs toward denial — a read command mentioning `canon/` alongside a
+   redirect/`node -e` can be a conservative false-positive, as can a capsule path next to
+   `xargs grep rm` or `bash -c "… rm …"`; split such commands. Known limits: it does not
+   follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob, or
+   globs that could expand to the capsule (`rm -rf .p*`).
 
 ## Reference sources — documentation only
 

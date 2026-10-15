@@ -13,11 +13,15 @@ const TMP = path.join(__dirname, '__hooks_test_tmp__');
 const BRAIN = path.join(TMP, '.project-brain');
 const today = new Date().toISOString().slice(0, 10);
 
-function runHook(name, event, root = TMP) {
+// Every hook run has a timeout: a hanging hook (e.g. a ReDoS in the guard) must fail
+// the test, not stall it. A timed-out PreToolUse hook lets the tool call through.
+function runHook(name, event, root = TMP, { raw, env = {} } = {}) {
   const r = spawnSync('bash', [path.join(HOOKS, name)], {
-    encoding: 'utf8', input: JSON.stringify(event),
-    env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+    encoding: 'utf8', input: raw !== undefined ? raw : JSON.stringify(event),
+    env: { ...process.env, CLAUDE_PROJECT_DIR: root, ...env },
+    timeout: 15000, maxBuffer: 16 * 1024 * 1024,
   });
+  assert.ok(!r.error, `${name} failed to run or timed out: ${r.error && r.error.message}`);
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 function seedCapsule() {
@@ -123,6 +127,116 @@ try {
   // Reading/mapping a source card (no install) still passes.
   assert.strictEqual(denyBash('cat reference-repositories/sources/gstack/source-card.md 2>/dev/null').stdout.trim(), '',
     'reading a source card must pass');
+
+  // 6e. P11 — bad input fails CLOSED: Claude Code always sends a JSON object with a
+  // tool_name, so anything else is an anomaly and is denied with a reason.
+  seedCapsule();
+  const isDeny = res => res.stdout.includes('"permissionDecision":"deny"');
+  for (const [label, raw] of [['empty', ''], ['whitespace', ' \n'], ['malformed', '{not json'],
+    ['null', 'null'], ['array', '[]'], ['string', '"Bash"'], ['no tool_name', '{"tool_input":{}}'],
+    ['non-object tool_input', '{"tool_name":"Bash","tool_input":"rm -rf .project-brain"}'],
+    ['non-string command', '{"tool_name":"Bash","tool_input":{"command":["rm","-rf",".project-brain"]}}']]) {
+    r = runHook('brain-security-guard.sh', null, TMP, { raw });
+    assert.strictEqual(r.status, 0, `${label}: deny is expressed via JSON, exit 0`);
+    assert.ok(isDeny(r), `${label} input must be denied: ${r.stdout}`);
+    assert.ok(/malformed|unreadable/i.test(r.stdout), `${label}: the reason must say the input was bad: ${r.stdout}`);
+  }
+
+  // 6f. P11 — when node itself cannot run, the guard fails OPEN but VISIBLY: exit 1 (a
+  // non-blocking hook error the user sees), a stderr warning and a log line in the capsule.
+  // Allowing here is deliberate: denying would block every Write/Edit/Bash, the fix included.
+  for (const code of [1, 127]) {
+    seedCapsule();
+    const fakeBin = path.join(TMP, 'fakebin');
+    fs.mkdirSync(fakeBin, { recursive: true });
+    fs.writeFileSync(path.join(fakeBin, 'node'), `#!/bin/sh\nexit ${code}\n`, { mode: 0o755 });
+    r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Bash',
+      tool_input: { command: 'ls' } }, TMP, { env: { PATH: `${fakeBin}:${process.env.PATH}` } });
+    assert.strictEqual(r.status, 1, `node exit ${code}: guard must exit 1 so the failure is shown: ${r.stderr}`);
+    assert.strictEqual(r.stdout.trim(), '', `node exit ${code}: no decision is printed`);
+    assert.ok(/failing open/.test(r.stderr), `node exit ${code}: stderr warns: ${r.stderr}`);
+    const flog = path.join(BRAIN, 'reports', 'guard-failures.log');
+    assert.ok(fs.existsSync(flog), `node exit ${code}: a log line is written`);
+    assert.ok(/brain-security-guard.*failing open/.test(fs.readFileSync(flog, 'utf8')), 'log line names the guard');
+  }
+
+  // 6g. P11 — false positives: read-only commands where "rm" is an argument or part of a
+  // file name, not the command being run, must pass.
+  seedCapsule();
+  for (const cmd of [
+    'grep "rm" .project-brain/decisions',
+    'grep -rn rm .project-brain/',
+    'grep -e rm -- .project-brain/index.md',
+    'git add .project-brain/decisions/active/2026-10-15-static-scan-rm-rf-root-checks.md .project-brain/index.md',
+    'ls .project-brain/reports/rm-rf-notes.md',
+    'node scripts/brain/brain-search.js --query "rm -rf root" && cat .project-brain/index.md',
+    'cat .project-brain/log.md | grep rm',
+    'sudo grep -e -delete .project-brain/log.md',
+  ]) {
+    r = denyBash(cmd);
+    assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
+  }
+
+  // 6h. P11 — real deletes of the capsule must be denied, including the gaps
+  // (cd into the capsule first, find -delete, xargs rm) and the old rule's existing denials.
+  for (const cmd of [
+    'cd .project-brain && rm -rf decisions',
+    'cd .project-brain; rm -rf *',
+    'cd /tmp/x/.project-brain/decisions && rm candidates/a.md',
+    'pushd .project-brain && rm -f log.md',
+    'find .project-brain -name "*.md" -delete',
+    'find .project-brain -type f -exec rm {} +',
+    'find .project-brain -type f -execdir rm -f {} \\;',
+    'find .project-brain -type f | xargs rm -f',
+    'cd .project-brain && find . -delete',
+    'rm -rf .project-brain',
+    'rm -rf ".project-brain"',
+    '/bin/rm -rf .project-brain',
+    '\\rm -r .project-brain/sessions',
+    'sudo rm -rf .project-brain/canon',
+    'bash -c "rm -rf .project-brain"',
+    'ls; rm -rf ./.project-brain/decisions',
+    'rmdir .project-brain/synthesis',
+    'unlink .project-brain/log.md',
+    'git rm -r .project-brain/decisions',
+  ]) {
+    assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
+  }
+
+  // 6i. P11 — a large Write into canon is still denied (the input must not travel through an
+  // environment variable, where a big payload makes node fail to start and the guard fail open).
+  r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Write',
+    tool_input: { file_path: path.join(BRAIN, 'canon', 'big.md'), content: 'x'.repeat(2 * 1024 * 1024) } });
+  assert.ok(isDeny(r), `a 2 MB Write into canon must be denied: status ${r.status} ${r.stderr}`);
+
+  // 6i-b. NotebookEdit names its path notebook_path, not file_path — it must be checked too.
+  r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'NotebookEdit',
+    tool_input: { notebook_path: path.join(BRAIN, 'canon', 'n.ipynb'), new_source: 'x' } });
+  assert.ok(isDeny(r) && r.stdout.includes('Direct writes to .project-brain/canon/'),
+    `NotebookEdit into canon must be denied as a canon write: ${r.stdout}`);
+  r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'NotebookEdit',
+    tool_input: { notebook_path: path.join(TMP, 'n.ipynb'), new_source: 'x' } });
+  assert.strictEqual(r.stdout.trim(), '', 'NotebookEdit outside canon passes');
+
+  // 6j. P11 — timing: every rule must stay linear. 512 KB still fits the old env-var path,
+  // so these inputs reach the regexes (the old ones were quadratic: minutes, not ms).
+  const K = 1 << 19;
+  for (const [label, cmd] of [
+    ['rm + spaces', 'rm ' + ' '.repeat(K) + '.project-brain'],
+    ['many rm', 'rm '.repeat(K / 3) + '.project-brain'],
+    ['many separators', 'cd .project-brain' + ' && rm'.repeat(K / 6)],
+    ['find -exec', 'find .project-brain ' + '-exec '.repeat(K / 6) + 'x'],
+    ['quotes', 'grep "' + '"'.repeat(K) + ' .project-brain'],
+    ['canon redirects', '.project-brain/canon ' + '2>/dev/null '.repeat(K / 12)],
+    ['digits', '.project-brain/canon ' + '1'.repeat(K)],
+    ['many sed', '.project-brain/canon ' + 'sed '.repeat(K / 4)],
+    ['many brain-promote', '.project-brain/canon > x ' + 'brain-promote '.repeat(K / 14)],
+  ]) {
+    const t0 = Date.now();
+    denyBash(cmd);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 3000, `${label}: guard took ${ms} ms on a 512 KB command`);
+  }
 
   // 7. Post-lint: always exit 0; warns via additionalContext only on sensitive content
   seedCapsule();
