@@ -79,8 +79,11 @@ const MD_INJECTION = [
   { re: /forget\s+everything/i,                                       name: 'memory-wipe',           sev: 'BLOCK' },
   { re: /from now on you (must|will|shall)/i,                         name: 'behavior-override',     sev: 'FLAG'  },
   { re: /[​‌‍﻿‮]/u,                                                    name: 'hidden-unicode',        sev: 'BLOCK' },
-  { re: /[A-Za-z0-9+/]{80,}={0,2}(?:\s|$)/,                          name: 'base64-blob',           sev: 'FLAG'  },
-  { re: /<!--[\s\S]{20,}?-->/,                                        name: 'html-comment-block',    sev: 'FLAG'  },
+  // Both linear: a base64 match starts only at the start of a run (retrying every offset inside a long
+  // run was quadratic), and a comment is judged by the 20 characters after <!-- that come before any -->,
+  // so an unclosed comment counts and no scan runs to the end of the file per <!--.
+  { re: /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{80,}={0,2}(?:\s|$)/,         name: 'base64-blob',           sev: 'FLAG'  },
+  { re: /<!--(?:(?!-->)[\s\S]){20}/,                                  name: 'html-comment-block',    sev: 'FLAG'  },
   { re: /\bact as\b.{0,30}\b(assistant|ai|agent|claude)\b/i,         name: 'act-as-override',       sev: 'FLAG'  },
   { re: /system\s*prompt/i,                                           name: 'system-prompt-ref',     sev: 'FLAG'  },
 ];
