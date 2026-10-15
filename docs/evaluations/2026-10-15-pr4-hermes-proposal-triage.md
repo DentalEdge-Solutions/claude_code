@@ -20,7 +20,7 @@ The proposal's own `P` numbers are kept.
 |---|---|---|---|
 | P1 | The brain and telemetry secret-pattern lists diverge | **Done 2026-10-15** (see "P1 repair") | Before: the brain set (6 patterns) missed GitHub fine-grained, Slack, Google, JWT, Bearer and `key = value` secrets. The telemetry set (12) missed Anthropic admin keys, `ghs_` tokens, Google keys without the `AIzaSy` prefix, a lone private-key header and short passwords. **Correction to the first probe:** telemetry did catch `AIzaSy…` keys and complete private-key blocks, so its gaps were narrower than first reported. |
 | P2 | No test for `harvest-evidence.js` | Open | `git ls-files \| grep harvest-evidence.*test` → 0 |
-| P3 | No test for `static-scan.js` | Open | `git ls-files \| grep static-scan.*test` → 0 |
+| P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
 | P6 | BSD-only `sed -i ''` | Open | `uninstall.sh:108` |
@@ -62,7 +62,8 @@ The proposal's own `P` numbers are kept.
 
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
-3. **P3, then P2:** tests for the security scanner and the eval grader.
+3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S9 are open; S1–S3 come first.
+   **P2:** tests for the eval grader (`harvest-evidence.js`).
 4. **P11:** make the brain security guard's fail-open visible (a log) or fail closed.
 5. **P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`. Keep `install.sh` in sync.
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
@@ -90,3 +91,36 @@ The proposal's own `P` numbers are kept.
 - **Out of scope:**
   - `skills/skill-audit/scripts/static-scan.js` keeps its own severity-rated list. It is a different tool (it rates skills BLOCK/FLAG).
   - Hermes's Python code was not checked for a pattern list.
+
+## P3 repair (2026-10-15)
+
+- **Tests:** `scripts/static-scan.test.js` drives the real CLI (the scanner has no exports) in a scratch `mkdtemp` folder.
+  - One sample per pattern, 70 in all, each checked for its check name and severity.
+  - A coverage test reads the pattern tables out of `static-scan.js` and fails if a pattern or table has no case, or a severity changed.
+  - The verdict and exit-code contract (PASS 0, FLAG 1, BLOCK 2, usage errors 1), the summary counts and the finding shape.
+  - Where each table applies: config patterns only in `settings.json`/`settings.local.json`, `.txt` read as markdown, single-file mode, nested folders.
+  - The false-positive controls: fenced and inline code in markdown, JS regex literals, `RegExp.exec`, `yaml.load` with `SafeLoader`, and the scanner's own source.
+- **Location:** `scripts/`, not `skills/skill-audit/scripts/`. A file under `skills/` ships to target projects and `~/.claude/skills/`, and CI's static-scan-skills job would BLOCK on its samples.
+- **Evidence:**
+  - 99/99 pass; `node scripts/run-all-tests.js` passes 26/26.
+  - The tests cover code that already existed, so they passed at once. Their worth was checked with 8 mutations of the scanner, each made and reverted: a severity downgrade, no code-block stripping, no regex-literal stripping, FLAG exiting 0, a broken pattern, config patterns on any JSON, a new pattern with no case, and FLAG beating BLOCK. Each one failed the suite.
+  - The first regex-literal sample was too weak (only the self-scan test caught that mutation); it was strengthened and re-checked.
+- **No behavior change.** `static-scan.js` is untouched.
+
+### Scanner gaps found (S1–S9, open)
+
+Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK or FLAG was expected. None is pinned by a test, so a fix will not have to fight one.
+
+| # | Gap | Sample that passes | Impact |
+|---|---|---|---|
+| S1 | The commonest injection phrasing is missed: `ignore\s+(previous\|prior\|all)\s+instructions` allows one word only | "Ignore all previous instructions." and "ignore the above instructions" | BLOCK → PASS |
+| S2 | Markdown code is stripped before **every** markdown table, including secrets and dangerous Bash | a key, or `curl … \| bash`, inside a fenced block or backticks in SKILL.md | BLOCK → PASS. Instructions in code blocks are the ones an agent runs |
+| S3 | `node:child_process`, and calls made as methods, are missed | `require('node:child_process')` then `cp.execSync(…)`; ESM `import { execSync } from 'node:child_process'` | BLOCK → PASS |
+| S4 | A bare tool name in an allow rule is missed | `"allow": ["Bash"]`. Docs (code.claude.com/docs/en/permissions, "Match all uses of a tool", read 2026-10-15): "`Bash(*)` is equivalent to `Bash` and matches all Bash commands." The same patterns also fire on **deny** rules, a false positive | BLOCK → PASS |
+| S5 | Files with no extension (shebang scripts) are not scanned | `#!/bin/sh` + `curl … \| sh` in a file named `install` | BLOCK → PASS |
+| S6 | Secrets in JSON/YAML other than `settings*.json` are not scanned | a token in `config.json` or `config.yaml` | BLOCK → PASS |
+| S7 | Current key formats are missed | `sk-proj-…`, `sk-ant-oat01-…`, `ghs_…` | BLOCK → PASS. The repo's shared list (`scripts/telemetry/secret-patterns.js`, P1) catches all three |
+| S8 | `subprocess-shell-true` stops at the first `)` | `subprocess.run(build(cmd), shell=True)` | BLOCK → PASS |
+| S9 | In single-file mode every finding has `file: ""` | any single-file scan | Cosmetic; CI's fallback reads only the verdict |
+
+- **Doc drift:** `CLAUDE.md`, `README.md`, `docs/USER-GUIDE.md` and `skills/skill-audit/SKILL.md` call it a "47-pattern" scanner across 5 categories. The tables hold 70 patterns in 7 tables.
