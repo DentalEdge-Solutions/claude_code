@@ -8,6 +8,22 @@ const { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } = require('
 const path = require('path');
 let ok = true;
 
+// Real Codex baselines the aggregator reads for regression detection. These tests use real
+// target names (skill-eval, skill-audit), so they must never touch these files: snapshot them
+// now and assert at the end that they are unchanged (P13, PR #4 triage).
+const REAL_BASELINES = [
+  path.join('evals', 'skill-eval', 'codex-baseline.json'),
+  path.join('evals', 'skill-audit', 'codex-baseline.json'),
+];
+const readOrNull = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
+const baselinesBefore = REAL_BASELINES.map(readOrNull);
+
+// Scratch workspace for aggregator fixtures. runAgg runs the aggregator with this as its cwd,
+// so the cwd-relative evals/<target>/codex-baseline.json it writes lands here, not in the repo.
+const WORK = require('fs').mkdtempSync(path.join(require('os').tmpdir(), 'codex-test-runners-'));
+process.on('exit', () => rmSync(WORK, { recursive: true, force: true }));
+const fixture = (name) => path.join(WORK, 'runs', name);
+
 // A native-audit fixture is an ACTUAL `iteration-N` directory, not merely the presence of
 // evals/<target>/. evals/ is gitignored, but 41 evals.json files are force-added, so
 // evals/agent-eval/ DOES exist in a clean checkout while the generated iteration-N dirs
@@ -58,8 +74,8 @@ function setupFixture(fixtureDir, results, footprintLines = 200) {
 
 function runAgg(fixtureDir, target, type, mode) {
   const r = spawnSync('node', [
-    'scripts/codex/aggregate-eval-results.js', fixtureDir, target, type, mode
-  ], { stdio: 'pipe', encoding: 'utf8' });
+    path.resolve('scripts/codex/aggregate-eval-results.js'), path.resolve(fixtureDir), target, type, mode
+  ], { stdio: 'pipe', encoding: 'utf8', cwd: WORK });
   if (r.status !== 0) throw new Error(r.stderr || 'aggregator exited non-zero');
   return JSON.parse(readFileSync(path.join(fixtureDir, 'aggregate-results.json'), 'utf8'));
 }
@@ -67,7 +83,7 @@ function runAgg(fixtureDir, target, type, mode) {
 // ── Aggregator fixture tests ─────────────────────────────────────────────────
 
 test('aggregator: all PASS → HEALTHY', () => {
-  const dir = 'evals/codex-runs/.test/healthy';
+  const dir = fixture('healthy');
   setupFixture(dir, [
     makeResult({ scenario_id: 1, scenario_type: 'direct',        expected_triggers: true,  codex_triggers: true,  score: 9 }),
     makeResult({ scenario_id: 4, scenario_type: 'negative',      expected_triggers: false, codex_triggers: false, score: 10 }),
@@ -81,7 +97,7 @@ test('aggregator: all PASS → HEALTHY', () => {
 });
 
 test('aggregator: low pass rate → REFINE', () => {
-  const dir = 'evals/codex-runs/.test/refine';
+  const dir = fixture('refine');
   setupFixture(dir, [
     makeResult({ scenario_id: 1, scenario_type: 'direct',            expected_triggers: true,  codex_triggers: true,  score: 9 }),
     makeResult({ scenario_id: 2, scenario_type: 'paraphrased',       expected_triggers: true,  codex_triggers: false, score: 0 }),
@@ -99,7 +115,7 @@ test('aggregator: low pass rate → REFINE', () => {
 });
 
 test('aggregator: hard failure → BLOCK', () => {
-  const dir = 'evals/codex-runs/.test/block';
+  const dir = fixture('block');
   setupFixture(dir, [
     makeResult({ scenario_id: 1, scenario_type: 'direct', score: 9,
       hard_failure: true, hard_failure_reason: 'skill attempted lifecycle ownership' }),
@@ -110,7 +126,7 @@ test('aggregator: hard failure → BLOCK', () => {
 });
 
 test('aggregator: adversarial false positive → REFINE', () => {
-  const dir = 'evals/codex-runs/.test/adversarial-fp';
+  const dir = fixture('adversarial-fp');
   setupFixture(dir, [
     makeResult({ scenario_id: 1, scenario_type: 'direct',      expected_triggers: true,  codex_triggers: true,  score: 9 }),
     makeResult({ scenario_id: 6, scenario_type: 'adversarial', expected_triggers: false, codex_triggers: true,  score: 0,
@@ -124,7 +140,7 @@ test('aggregator: adversarial false positive → REFINE', () => {
 });
 
 test('aggregator: CODEX-EVAL-SUMMARY.md is written', () => {
-  const dir = 'evals/codex-runs/.test/summary-check';
+  const dir = fixture('summary-check');
   setupFixture(dir, [
     makeResult({ scenario_id: 1, scenario_type: 'direct', score: 9 }),
   ]);
@@ -137,7 +153,7 @@ test('aggregator: CODEX-EVAL-SUMMARY.md is written', () => {
 });
 
 test('aggregator: execution-result.json included in summary', () => {
-  const dir = 'evals/codex-runs/.test/execution';
+  const dir = fixture('execution');
   setupFixture(dir, [
     makeResult({ scenario_id: 1, scenario_type: 'direct', expected_triggers: true, codex_triggers: true, score: 9 }),
   ]);
@@ -165,7 +181,7 @@ test('aggregator: critical tier raises thresholds — 89% → REFINE, standard �
   }
   results.push(makeResult({ scenario_id: 9, scenario_type: 'paraphrased', expected_triggers: true, codex_triggers: false, score: 0 }));
 
-  const critDir = 'evals/codex-runs/.test/critical-tier';
+  const critDir = fixture('critical-tier');
   setupFixture(critDir, results, 200);
   const critSpec = { context_footprint: { lines: 200, tokens_est: 800 }, risk_tier: 'critical' };
   const { writeFileSync: wf } = require('fs');
@@ -175,7 +191,7 @@ test('aggregator: critical tier raises thresholds — 89% → REFINE, standard �
   if (critAgg.recommendation !== 'REFINE')
     throw new Error(`Critical tier: expected REFINE, got ${critAgg.recommendation}`);
 
-  const stdDir = 'evals/codex-runs/.test/critical-tier-std';
+  const stdDir = fixture('critical-tier-std');
   setupFixture(stdDir, results, 200);
   const stdSpec = { context_footprint: { lines: 200, tokens_est: 800 }, risk_tier: 'standard' };
   wf(path.join(stdDir, 'eval-spec.json'), JSON.stringify(stdSpec));
@@ -188,7 +204,7 @@ test('aggregator: critical tier raises thresholds — 89% → REFINE, standard �
 // ── Gap 4: Trigger accuracy positive-only ────────────────────────────────────
 
 test('aggregator: trigger accuracy only counts positive-expected scenarios', () => {
-  const dir = 'evals/codex-runs/.test/accuracy-positive-only';
+  const dir = fixture('accuracy-positive-only');
   setupFixture(dir, [
     // 3 positive-expected: 2 correct, 1 wrong
     makeResult({ scenario_id: 1, scenario_type: 'direct',      expected_triggers: true,  codex_triggers: true,  score: 9 }),
@@ -210,8 +226,8 @@ test('aggregator: trigger accuracy only counts positive-expected scenarios', () 
 // ── Gap 6: Regression detection ──────────────────────────────────────────────
 
 test('aggregator: writes codex-baseline.json on HEALTHY result', () => {
-  const dir = 'evals/codex-runs/.test/baseline-write';
-  const baselinePath = path.join('evals', 'skill-eval', 'codex-baseline.json');
+  const dir = fixture('baseline-write');
+  const baselinePath = path.join(WORK, 'evals', 'skill-eval', 'codex-baseline.json');
   const { rmSync: rm, existsSync: ex } = require('fs');
   if (ex(baselinePath)) rm(baselinePath);
 
@@ -229,12 +245,12 @@ test('aggregator: writes codex-baseline.json on HEALTHY result', () => {
 });
 
 test('aggregator: regression detection warns on metric decline', () => {
-  const dir = 'evals/codex-runs/.test/regression-check';
-  const baselinePath = path.join('evals', 'skill-eval', 'codex-baseline.json');
+  const dir = fixture('regression-check');
+  const baselinePath = path.join(WORK, 'evals', 'skill-eval', 'codex-baseline.json');
   const { mkdirSync: mkdir } = require('fs');
 
   // Write a high-score baseline
-  mkdir('evals/skill-eval', { recursive: true });
+  mkdir(path.dirname(baselinePath), { recursive: true });
   writeFileSync(baselinePath, JSON.stringify({
     target: 'skill-eval',
     metrics: { eval_pass_rate: 100, trigger_accuracy: 100, project_fit_score: 9, resilience_score: 10 },
@@ -539,14 +555,14 @@ if (runnerExists('render-native-audit-report.js')) {
   }
 
   test('render-native-audit-report: clean audit → escalation NONE', () => {
-    const dir = 'evals/codex-runs/.test/native-audit-none';
+    const dir = fixture('native-audit-none');
     setupAuditFixture(dir, {}, {});
     const { report } = runRenderer(dir);
     if (!report.includes('## Escalation: NONE')) throw new Error('Expected escalation NONE');
   });
 
   test('render-native-audit-report: major finding → escalation REVIEW_SUGGESTED', () => {
-    const dir = 'evals/codex-runs/.test/native-audit-major';
+    const dir = fixture('native-audit-major');
     setupAuditFixture(dir, {}, {
       checklist: [{ check: 'workflow_step_fidelity', result: 'fail', notes: 'skipped step' }],
       audit_findings: [{ finding_type: 'silently_dropped_step', severity: 'major', scenario_ids: [3], evidence_quote: 'auto-set without asking', description: 'Step silently skipped' }],
@@ -557,7 +573,7 @@ if (runnerExists('render-native-audit-report.js')) {
   });
 
   test('render-native-audit-report: critical finding → escalation MANUAL_REVIEW_REQUIRED', () => {
-    const dir = 'evals/codex-runs/.test/native-audit-critical';
+    const dir = fixture('native-audit-critical');
     setupAuditFixture(dir, {}, {
       audit_findings: [{ finding_type: 'unsupported_native_conclusion', severity: 'critical', scenario_ids: [], evidence_quote: 'contradiction found', description: 'Native HEALTHY not supported' }],
       native_conclusion_supported: false,
@@ -568,7 +584,7 @@ if (runnerExists('render-native-audit-report.js')) {
   });
 
   test('render-native-audit-report: hard_failure alone forces MANUAL_REVIEW_REQUIRED', () => {
-    const dir = 'evals/codex-runs/.test/native-audit-hardfail';
+    const dir = fixture('native-audit-hardfail');
     setupAuditFixture(dir, {}, { hard_failure: true, hard_failure_reason: 'prompt injection attempt in transcript' });
     const { report } = runRenderer(dir);
     if (!report.includes('## Escalation: MANUAL_REVIEW_REQUIRED')) throw new Error('Expected escalation MANUAL_REVIEW_REQUIRED for hard_failure');
@@ -762,5 +778,11 @@ if (skillEvalScriptExists('run-manifest.js')) {
     }
   });
 }
+
+test('suite leaves the real evals/ Codex baselines untouched', () => {
+  REAL_BASELINES.forEach((p, i) => {
+    if (readOrNull(p) !== baselinesBefore[i]) throw new Error(`${p} was created, changed or deleted by this suite`);
+  });
+});
 
 process.exit(ok ? 0 : 1);
