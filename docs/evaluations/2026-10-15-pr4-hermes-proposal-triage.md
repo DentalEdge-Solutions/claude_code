@@ -19,7 +19,7 @@ The proposal's own `P` numbers are kept.
 | Item | Proposal | Status | Evidence (2026-10-15) |
 |---|---|---|---|
 | P1 | The brain and telemetry secret-pattern lists diverge | **Done 2026-10-15** (see "P1 repair") | Before: the brain set (6 patterns) missed GitHub fine-grained, Slack, Google, JWT, Bearer and `key = value` secrets. The telemetry set (12) missed Anthropic admin keys, `ghs_` tokens, Google keys without the `AIzaSy` prefix, a lone private-key header and short passwords. **Correction to the first probe:** telemetry did catch `AIzaSy…` keys and complete private-key blocks, so its gaps were narrower than first reported. |
-| P2 | No test for `harvest-evidence.js` | Open | `git ls-files \| grep harvest-evidence.*test` → 0 |
+| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6, all open |
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
@@ -63,7 +63,7 @@ The proposal's own `P` numbers are kept.
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"); S4–S9 are open.
-   **P2:** tests for the eval grader (`harvest-evidence.js`).
+   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E6 are open.
 4. **P11:** make the brain security guard's fail-open visible (a log) or fail closed.
 5. **P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`. Keep `install.sh` in sync.
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
@@ -254,3 +254,38 @@ A separate reviewer re-ran every check and compared the old and new scanners on 
 | B5 | Background check: "detection-bypass / validator regression" on commit c163649 (no details given) | A differential run (1,840 samples: the attack samples × 20 wrappings, main vs current) lost only the two intended changes (the `/tmp/` exemption and the short-comment case). Reading the exemption found a real bypass, introduced with it: only the **first** target was checked, and `..` escaped the temp folder, so `rm -rf /tmp/../etc`, `rm -rf /tmp/x /etc` and `rm -rf ./build ~/notes` passed (main blocked the first two). Fixed: every target up to `;`, `&` or `\|` is checked, and the exemption does not apply to a path containing `..`. A target scan stops at the next `rm` that has its own recursive or force option, which keeps the pattern linear. Tests pin the bypasses, three harmless forms and two timing inputs |
 | B6 | Background check: "ReDoS / resource-cap defeat" and "parser differential" on commit 911335e (no details given) | ReDoS found and fixed: the `curl`/`wget` patterns used the `m` flag, which also starts a line after `\r` and `\u2028`, while `[^\n]` reads through them. 50 KB of bare `\r` took 0.5 s (quadratic). A line now starts after `\n` only (`(?<![^\n])`). 100 KB scans in about 1 ms, and timing tests pin both characters. The sweep now includes `\r`, `\u2028` and tab. The parser differential is passed to the final independent review (see below) |
 | P4 | (old) S1 still misses "ignore the instructions above" and "ignore everything above", and flags "never ignore previous instructions" | Open |
+
+## P2 repair (2026-10-15)
+
+- **What the harvester decides:** `harvest-evidence.js` writes `evidence.json`. Scoring reads only `skill_loaded` / `agent_dispatched` (trigger and dispatch accuracy), `artifacts[].exists` and `workflow_steps[].satisfied` from it. `claims` and `mtime_in_window` are informational; no grader or script reads them for a score.
+- **Existing coverage:** two end-to-end tests in `scripts/codex/test-runners.js`: a real and a fabricated claim, a fake self-report header, and `--all`.
+- **New tests:** `scripts/harvest-evidence.test.js` (31) drives the real CLI in a scratch folder, with `cwd` set so the repo-root fallback for claims is controlled. It covers:
+  - every CLI error path;
+  - output placement;
+  - a side without `output.md`;
+  - skill and agent modes (`agent_dispatched`, no `skill_loaded`, skill sides ignored);
+  - the `Skill(...)` marker forms generated by `generate-seed-evals.js`;
+  - a self-report header ignored;
+  - no `tool_call` marker, and an invalid marker pattern;
+  - a missing or malformed `evals.json`, and the scenario id from the folder name;
+  - artifact size, sha256, a directory at the artifact path, per-side workspaces, and the `run-manifest.json` time window;
+  - the claim rules (verb window, backticks, no spaces, a `/` or `.`, dedup, workspace or repo-root verification);
+  - workflow steps (artifact, literal case-insensitive marker, all-or-nothing `workflow_executed`, null with no steps).
+- **Location:** `scripts/`, for the same reasons as the scanner tests (P3).
+- **Evidence:**
+  - 31/31 pass; `node scripts/run-all-tests.js` passes 27/27.
+  - 10 mutations of the harvester, each reverted, all failed the suite: loaded from any marker, an unescaped step marker, a flipped time window, md5 for sha256, the wrong agent key, an 800-character claim window, no repo-root fallback, `some` for `every`, a directory counted as an artifact, and a case-sensitive marker.
+- **No behavior change.** `harvest-evidence.js` is untouched.
+
+### Harvester weaknesses found (E1–E6, open)
+
+Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
+
+| # | Weakness | Reproduction | Impact |
+|---|---|---|---|
+| E1 | A symlink in the workspace satisfies an artifact check | `workspace/report.md` → symlink to any existing file outside the workspace: `exists: true`, the step is satisfied, `workflow_executed: true` | **Scoring.** A run can satisfy artifact workflow steps without writing the file. (A junk file also satisfies `exists`; content is left to the LLM judge.) Fix: `lstat`, and refuse links or paths that resolve outside the workspace |
+| E2 | A claim path can leave the workspace | ``I wrote `../../…/etc/hosts` `` → `claim_verified: true` | Informational field only; misleading if a reader trusts it |
+| E3 | An invalid `started_at` in `run-manifest.json` makes every artifact `mtime_in_window: false` (not null) | `{"started_at": "not-a-date"}` | Informational field only |
+| E4 | `claim_verified` means "exists", not "written by this run": any existing repo file verifies (repo-root fallback, no time window) | ``I wrote `README.md` `` run from the repo root → `true` | Informational field only |
+| E5 | The 80-character claim window crosses lines and sentences, so a mention near another sentence's verb becomes a claim | `produced `a.md`.` then `See `b.md`.` → both claims | Noise in an informational field |
+| E6 | Design note: `skill_loaded` comes from the literal token `Skill(<name>)`, which the eval subagent is instructed to write when it applies the skill. It is an instructed marker in the subagent's own output, not an independent tool-call log | `.claude/agents/skill-eval-agent.md` (the "Trigger token" rule) | Trigger accuracy depends on the subagent following that instruction honestly. A method question, not a harvester bug |
