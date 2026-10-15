@@ -91,10 +91,12 @@ const MD_INJECTION = [
 // ─── Markdown: Dangerous Bash in instructions ──────────────────────────────
 const MD_BASH = [
   // rm with a recursive/force option (any spelling: -rf, -r -f, -Rf, -rfv, --recursive, --force, --)
-  // on an absolute or home path, quoted or not. Temp folders are exempt (rm -rf /tmp/x is routine cleanup).
-  // Linear time: each option has one parse (-[\w-]*), and lookaheads (never re-entered) check for a
-  // recursive/force option and capture the option run; \1 then consumes it without backtracking.
-  { re: /\brm\s+(?=(?:-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:-[\w-]*\s+)*))\1["']?(?!(?:\/private)?\/tmp\/|\/var\/tmp\/)(?:\/|~|\$\{?HOME\b)/,
+  // and ANY target (up to ; & |) that is an absolute or home path, quoted or not. /tmp/, /private/tmp/
+  // and /var/tmp/ are exempt unless the path holds .. (rm -rf /tmp/x is routine cleanup).
+  // Linear time: each option has one parse (-[\w-]*), lookaheads (never re-entered) check for a
+  // recursive/force option and capture the option run, and a target scan stops at the next rm that has
+  // its own recursive/force option (that rm's own match covers the rest).
+  { re: /\brm\s+(?=(?:-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:-[\w-]*\s+)*))\1(?:(?!rm\s+(?:-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))[^\s;&|]+\s+)*?["']?(?!(?:\/private)?\/tmp\/(?![^\s;&|]*\.\.)|\/var\/tmp\/(?![^\s;&|]*\.\.))(?:\/|~|\$\{?HOME\b)/,
                                           name: 'rm-rf-root',       sev: 'BLOCK' },
   // Linear time with no length cap: anchored at a line start, a lookahead (never re-entered) finds the
   // line's first curl, then one greedy pass looks for a later pipe into a shell. The old .+ retried

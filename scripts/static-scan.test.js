@@ -416,6 +416,8 @@ for (const cmd of [
   'rm -rf /etc', 'rm -rf /usr/local', 'rm -rf ~/Documents', 'rm -rf ~/.ssh', 'rm -rf //', 'rm -rf /*.*',
   // other spellings of the options and the target
   'rm -r -f /', 'rm -Rf /', 'rm -rfv /', 'rm -rf -- /', 'rm --recursive --force /', 'rm -rf "/"', 'rm -rf "$HOME"',
+  // the temp exemption cannot be used to escape, and every target counts, not just the first
+  'rm -rf /tmp/../etc', 'rm -rf /var/tmp/../../home', 'rm -rf /tmp/x /etc', 'rm -rf ./build ~/notes', 'rm -rf x rm /',
 ]) {
   test(`rm-rf-root: "${cmd}" is a BLOCK`, () => {
     const r = run([makeDir({ 'SKILL.md': `Then run ${cmd} to reset.\n` })]);
@@ -423,7 +425,8 @@ for (const cmd of [
   });
 }
 
-for (const cmd of ['rm -rf /tmp/repo-audit-x/', 'rm -rf /private/tmp/x', 'rm -rf /var/tmp/x', 'rm -rf ./dist', 'rm -rf build/', 'rm -i /etc/x']) {
+for (const cmd of ['rm -rf /tmp/repo-audit-x/', 'rm -rf /private/tmp/x', 'rm -rf /var/tmp/x', 'rm -rf ./dist', 'rm -rf build/', 'rm -i /etc/x',
+  'rm -rf /tmp/a /tmp/b', 'rm -rf build; ls /etc', 'rm -rf build && cat ~/notes']) {
   test(`rm-rf-root: "${cmd}" in a fenced block is not flagged`, () => {
     const r = run([makeDir({ 'SKILL.md': '```bash\n' + cmd + '\n```\n' })]);
     assert.ok(!checks(r.json).includes('rm-rf-root'), `got ${checks(r.json).join(', ')}`);
@@ -469,6 +472,8 @@ test('a newline between curl and the pipe is not a match', () => {
 for (const [label, line] of [
   ['many single-dash options', 'rm ' + '-r '.repeat(40000) + 'x'],
   ['many double-dash options', 'rm ' + '--a '.repeat(40000) + 'x'],
+  ['many targets', 'rm -rf ' + 'a '.repeat(50000) + 'x'],
+  ['many rm commands on one line', 'rm -rf a '.repeat(15000)],
 ]) {
   test(`rm-rf-root stays fast on ${label}`, () => {
     const t = Date.now();
