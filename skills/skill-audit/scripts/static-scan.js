@@ -98,11 +98,12 @@ const MD_BASH = [
   // its own recursive/force option (that rm's own match covers the rest).
   { re: /\brm\s+(?=(?:-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:-[\w-]*\s+)*))\1(?:(?!rm\s+(?:-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))[^\s;&|]+\s+)*?["']?(?!(?:\/private)?\/tmp\/(?![^\s;&|]*\.\.)|\/var\/tmp\/(?![^\s;&|]*\.\.))(?:\/|~|\$\{?HOME\b)/,
                                           name: 'rm-rf-root',       sev: 'BLOCK' },
-  // Linear time with no length cap: anchored at a line start, a lookahead (never re-entered) finds the
+  // Linear time with no length cap: anchored at a line start (after \n only: the m flag would also start
+  // a line after \r and \u2028, which [^\n] reads through, and that was quadratic), a lookahead (never re-entered) finds the
   // line's first curl, then one greedy pass looks for a later pipe into a shell. The old .+ retried
   // every curl on the line and took seconds on a long line of repeated "curl |".
-  { re: /^(?=([^\n]*?curl\s))\1[^\n]*\|\s*(bash|sh|zsh)\b/m, name: 'curl-pipe-shell',  sev: 'BLOCK' },
-  { re: /^(?=([^\n]*?wget\s))\1[^\n]*\|\s*(bash|sh|zsh)\b/m, name: 'wget-pipe-shell',  sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?curl\s))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?wget\s))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
   { re: /\bsudo\s+/,                      name: 'sudo',             sev: 'FLAG'  },
   { re: /chmod\s+[0-7]{3}\s/,            name: 'chmod',            sev: 'FLAG'  },
   { re: /~\/.ssh\//,                      name: 'ssh-dir-access',   sev: 'BLOCK' },
@@ -206,8 +207,8 @@ const PY_PATTERNS = [
 const SH_EXTS = new Set(['.sh', '.bash']);
 const SH_PATTERNS = [
   { re: /eval\s+["'$]/,                   name: 'shell-eval',        sev: 'BLOCK' },
-  { re: /^(?=([^\n]*?curl\s))\1[^\n]*\|\s*(bash|sh)\b/m, name: 'curl-pipe-shell', sev: 'BLOCK' },
-  { re: /^(?=([^\n]*?wget\s))\1[^\n]*\|\s*(bash|sh)\b/m, name: 'wget-pipe-shell', sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?curl\s))\1[^\n]*\|\s*(bash|sh)\b/, name: 'curl-pipe-shell', sev: 'BLOCK' },
+  { re: /(?<![^\n])(?=([^\n]*?wget\s))\1[^\n]*\|\s*(bash|sh)\b/, name: 'wget-pipe-shell', sev: 'BLOCK' },
   { re: /--break-system-packages/,        name: 'pip-break-system',  sev: 'FLAG'  },
 ];
 

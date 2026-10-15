@@ -487,6 +487,8 @@ for (const [label, line] of [
 for (const [label, text] of [
   ['a long run of base64 characters', '/'.repeat(100000) + '!'],
   ['many unclosed HTML comments', '<!--'.repeat(25000)],
+  ['carriage returns with no newline', '\r'.repeat(100000) + '!'],
+  ['Unicode line separators', '\u2028'.repeat(100000) + '!'],
 ]) {
   test(`markdown scan stays fast on ${label}`, () => {
     const t = Date.now();
