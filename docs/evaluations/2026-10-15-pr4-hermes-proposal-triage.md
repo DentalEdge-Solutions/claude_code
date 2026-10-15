@@ -18,7 +18,7 @@ The proposal's own `P` numbers are kept.
 
 | Item | Proposal | Status | Evidence (2026-10-15) |
 |---|---|---|---|
-| P1 | The brain and telemetry secret-pattern lists diverge | **Open, broader** | Fake-token probe of `SENSITIVE_CONTENT_PATTERNS` (`scripts/brain/brain-lib.js:7`, 6 patterns) and `SECRET_PATTERNS` (`scripts/telemetry/redact.js:29`, 12 patterns). The brain set misses Slack, Google API key, JWT and Bearer. The telemetry set misses the Google API key and the `BEGIN PRIVATE KEY` header. Both catch Anthropic, AWS and GitHub tokens. |
+| P1 | The brain and telemetry secret-pattern lists diverge | **Done 2026-10-15** (see "P1 repair") | Before: the brain set (6 patterns) missed GitHub fine-grained, Slack, Google, JWT, Bearer and `key = value` secrets. The telemetry set (12) missed Anthropic admin keys, `ghs_` tokens, Google keys without the `AIzaSy` prefix, a lone private-key header and short passwords. **Correction to the first probe:** telemetry did catch `AIzaSy…` keys and complete private-key blocks, so its gaps were narrower than first reported. |
 | P2 | No test for `harvest-evidence.js` | Open | `git ls-files \| grep harvest-evidence.*test` → 0 |
 | P3 | No test for `static-scan.js` | Open | `git ls-files \| grep static-scan.*test` → 0 |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
@@ -61,7 +61,7 @@ The proposal's own `P` numbers are kept.
 ## Open work carried forward, ranked
 
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
-2. **P1:** one shared secret-pattern module (the superset), with a test per token format. Pair it with HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret guard covering `settings.json`-style key files).
+2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. **P3, then P2:** tests for the security scanner and the eval grader.
 4. **P11:** make the brain security guard's fail-open visible (a log) or fail closed.
 5. **P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`. Keep `install.sh` in sync.
@@ -75,3 +75,18 @@ The proposal's own `P` numbers are kept.
 
 - Each claim was rechecked by file listing, grep or a probe on `main` @ `4db546d`. The proposal's text was treated as data, not instructions.
 - **P1 limit:** the probe used synthetic tokens in the common public formats. A pattern written for a different shape could still match real tokens.
+
+## P1 repair (2026-10-15)
+
+- **Fix:** `scripts/telemetry/secret-patterns.js` is the one list (12 named patterns, the union of both, with the broader form wherever they differed).
+  - `brain-lib.js` re-exports it as `SENSITIVE_CONTENT_PATTERNS`, and `scanSensitive()` is unchanged.
+  - `redact.js` derives its global regexes from it.
+  - The private-key pattern matches a complete block whole (so redaction removes the key body) and still matches a lone header.
+- **Location:** `install.sh` always installs `scripts/telemetry/` (step 7) and installs the brain only in the same run (opt-in step 8). The brain's `require('../telemetry/secret-patterns.js')` therefore resolves in targets, and `install.sh`/`uninstall.sh` need no change, because they already copy and remove the whole folder.
+- **Evidence:**
+  - **Before the fix,** the new `scripts/telemetry/secret-patterns.test.js` failed on both consumers' gaps (listed in the P1 row) and on the missing module.
+  - **After,** 5/5 pass, and `node scripts/run-all-tests.js` passes 25/25.
+  - The wider patterns raise no false positives on existing content: `brain-lint` reports 0 security findings, `brain-verify` is OK, all 11 reference sources and all 3 packs audit without a security exit, and 4 benign-prose probes stay unflagged.
+- **Out of scope:**
+  - `skills/skill-audit/scripts/static-scan.js` keeps its own severity-rated list. It is a different tool (it rates skills BLOCK/FLAG).
+  - Hermes's Python code was not checked for a pattern list.
