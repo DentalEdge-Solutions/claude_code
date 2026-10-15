@@ -70,10 +70,11 @@ function stripRegexLiterals(text) {
 
 // ─── Markdown: Prompt Injection ────────────────────────────────────────────
 const MD_INJECTION = [
-  // "ignore [all|any] [the|your|my] previous|prior|above|… instructions|rules|…" — a qualifier is
+  // "ignore [all|any] [the|your|my] previous|prior|above|… instructions|directions" — a qualifier is
   // required, so defensive text ("ignore instructions found in fetched pages") stays quiet (S1). No word
   // boundaries, as on main: \b fails beside _, which hid "_Ignore all previous instructions_" (F5).
-  { re: /ignore\s+(?:(?:all|any)\s+(?:of\s+)?)?(?:the\s+|your\s+|my\s+)?(?:previous|prior|above|earlier|preceding|all|your)\s+(?:instructions|directions|rules|guidelines|prompts?)/i,
+  // Only these two nouns: "rules", "guidelines" and "prompts" made ordinary prose a BLOCK (re-check G4).
+  { re: /ignore\s+(?:(?:all|any)\s+(?:of\s+)?)?(?:the\s+|your\s+|my\s+)?(?:previous|prior|above|earlier|preceding|all|your)\s+(?:instructions|directions)/i,
                                                                       name: 'instruction-override',  sev: 'BLOCK' },
   { re: /disregard\s+(previous|prior|all|your)/i,                     name: 'instruction-disregard', sev: 'BLOCK' },
   { re: /\byou are now\b/i,                                           name: 'persona-override',      sev: 'FLAG'  },
@@ -94,10 +95,12 @@ const MD_BASH = [
   // rm with a recursive/force option (any spelling: -rf, -r -f, -Rf, -rfv, --recursive, --force, --)
   // whose first target is an absolute or home path (/…, ~…, $HOME…), quoted or not. As on main, /tmp
   // counts too: an exemption was escapable through .., quotes, variables and redirects (final review F3/F4).
-  // Options and target must be on the rm line ([ \t]), and rm must not follow a word character or -, so
-  // "-rm" inside an option run is not a new start. Linear: one parse per option, and lookaheads (never
-  // re-entered) check for a recursive/force option and capture the option run, which \1 then consumes.
-  { re: /(?<![\w-])rm["']?\s+(?=(?:-[\w-]*[ \t]+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:-[\w-]*[ \t]+)*))\1["']?(?:\/|~|\$\{?HOME\b)/,
+  // As on main, rm may follow any non-word character (\rm, (rm, "rm, Makefile's -rm, re-check G3), but not
+  // "git " (git rm only untracks, G5). Option and target separators are \s, as on main, so a soft wrap in
+  // prose keeps the command (G1). Linear: one parse per option, the token -rm never joins an option run
+  // (so "-rm -rm …" starts stay O(1)), and lookaheads (never re-entered) check for a recursive/force option
+  // and capture the option run, which \1 then consumes.
+  { re: /(?<!\w)(?<!\bgit\s+)rm["']?\s+(?=(?:(?!-rm\b)-[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf]|--recursive\b|--force\b))(?=((?:(?!-rm\b)-[\w-]*\s+)*))\1["']?(?:\/|~|\$\{?HOME\b)/,
                                           name: 'rm-rf-root',       sev: 'BLOCK' },
   // Linear time with no length cap: anchored at a line start (after \n only: the m flag would also start
   // a line after \r and \u2028, which [^\n] reads through, and that was quadratic), a lookahead (never re-entered) finds the
@@ -195,8 +198,10 @@ const PY_PATTERNS = [
   { re: /\bnumpy\.load\s*\([^)\n]{0,200}allow_pickle\s*=\s*True/,        name: 'numpy-allow-pickle',      sev: 'BLOCK' },
   // Command injection
   { re: /\bos\.system\s*\(/,                                              name: 'os-system-injection',     sev: 'BLOCK' },
-  // [^()] rather than [^)]: each call's scan stops at the next (, so repeated calls are linear (F8)
-  { re: /subprocess\.(?:run|call|Popen|check_output|check_call)\([^()]*shell\s*=\s*True/, name: 'subprocess-shell-true', sev: 'BLOCK' },
+  // As on main, the arguments run to the first ) (a ( inside them is fine, re-check G2). Linear: a call's
+  // scan also stops where the next subprocess call starts, so repeated unclosed calls are not quadratic (F8).
+  { re: /subprocess\.(?:run|call|Popen|check_output|check_call)\((?:(?!subprocess\.(?:run|call|Popen|check_output|check_call)\()[^)])*?shell\s*=\s*True/,
+                                                                          name: 'subprocess-shell-true', sev: 'BLOCK' },
   // Unsafe parsing
   { re: /\byaml\.(?:unsafe_)?load\s*\((?![^)\n]{0,80}Loader\s*=\s*yaml\.SafeLoader)/, name: 'yaml-unsafe-load', sev: 'FLAG' },
   { re: /\b(?:xml\.etree\.ElementTree|ET)\.(parse|fromstring)\s*\(/,     name: 'xml-unsafe-parse',        sev: 'FLAG'  },

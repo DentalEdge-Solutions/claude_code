@@ -48,7 +48,7 @@
 
 | Pattern | Severity | Risk |
 |---------|----------|------|
-| `ignore [all/any [of]] [the/your/my] previous/prior/above/earlier/preceding/all/your instructions/rules/guidelines/directions/prompts` | BLOCK | Instruction override |
+| `ignore [all/any [of]] [the/your/my] previous/prior/above/earlier/preceding/all/your instructions/directions` | BLOCK | Instruction override |
 | `disregard` + instructions | BLOCK | Instruction override |
 | `forget everything` | BLOCK | Memory wipe |
 | Zero-width Unicode (U+200B, U+200C, U+200D, U+FEFF, U+202E) | BLOCK | Hidden text |
@@ -100,7 +100,7 @@ BLOCK rows are BLOCK in prose. When the command appears only in code (a fenced b
 
 | Pattern | Severity |
 |---------|----------|
-| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`) on the same line, whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included | BLOCK |
+| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`) on the same line, whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included; `git rm` is not matched | BLOCK |
 | `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |

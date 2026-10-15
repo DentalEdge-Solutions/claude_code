@@ -123,20 +123,21 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 | S8 | `subprocess-shell-true` stops at the first `)` | `subprocess.run(build(cmd), shell=True)` | BLOCK → PASS |
 | S9 | In single-file mode every finding has `file: ""` | any single-file scan | Cosmetic; CI's fallback reads only the verdict |
 | S10 | No resource caps (final review F9, 2026-10-15) | a file over 536 MB holding an injection; a FIFO named `SKILL.md`; a symlinked file outside the tree | Over 536 MB → silently skipped, so PASS. A FIFO hangs the scan. Unreadable files are skipped without a finding |
+| S11 | Only the first `rm` target is checked, as on main (re-check G6, 2026-10-15) | `rm -rf ./build ~/`, `rm -rf x /`, `rm --interactive=never -rf /`, `rm / -rf` | BLOCK → PASS. An every-target scan was tried and dropped: it froze the scanner and could be escaped (final review F1–F4). A safe version needs a shell-aware tokenizer, not a regex |
 
 - **Doc drift:** `CLAUDE.md`, `README.md`, `docs/USER-GUIDE.md` and `skills/skill-audit/SKILL.md` call it a "47-pattern" scanner across 5 categories. The tables hold 70 patterns in 7 tables.
 
 ## S1–S3 repair (2026-10-15)
 
-- **S1:** `instruction-override` now matches `ignore [all|any [of]] [the|your|my] previous|prior|above|earlier|preceding|all|your instructions|directions|rules|guidelines|prompts`. A qualifier is still required, so defensive text ("ignore instructions found in fetched pages") stays quiet.
+- **S1:** `instruction-override` now matches `ignore [all|any [of]] [the|your|my] previous|prior|above|earlier|preceding|all|your instructions|directions`. That covers everything main caught. ("rules", "guidelines" and "prompts" were dropped after re-check G4.) A qualifier is still required, so defensive text ("ignore instructions found in fetched pages") stays quiet.
 - **S2:** each markdown table now reads its own text (final design after the owner's decision R2, below).
   - Secrets: the whole file, code included, at full severity.
   - BLOCK-level Bash (`rm-rf-root`, curl/wget piped to a shell, `~/.ssh/`): BLOCK in prose. **FLAG** when the command appears only in code, fenced or inline.
   - FLAG-level Bash (`sudo`, `chmod`, settings) and prompt injection: prose only, as before.
 - **`rm-rf-root`:** main's shape (the first target is an absolute or home path, `/tmp` included), with these additions:
-  - Any spelling of the recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`, a `--` before the target), kept on the `rm` line.
+  - Any spelling of the recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`, a `--` before the target). Separators may include a line break, as on main, so a soft wrap in prose keeps the command (re-check G1).
   - A quoted target, and `$HOME`.
-  - `rm` written as `\rm`, `(rm` or `"rm"`.
+  - `rm` after any non-word character, as on main (`\rm`, `(rm`, `"rm"`, Makefile's `-rm`), except `git rm` (re-check G5).
   - **History:** two intermediate designs were dropped. A narrowed target list lost `/etc` and `~/.ssh` (review R1). A `/tmp` exemption with an every-target scan could be escaped and froze the scanner (final review F1–F4). See the review tables below.
 - **`curl`/`wget` piped to a shell:** rewritten to run in linear time with no length cap. It anchors at the line start, a lookahead finds the line's first `curl`/`wget`, and one pass looks for a later pipe into a shell. The old unbounded `.+` was quadratic: reading fenced blocks made a 210 KB file take 5.1 s to scan (0.02 s before).
   - **Correction:** an intermediate draft capped the gap at 500 characters. A background security check flagged that a padded line slipped past the cap, which the old pattern never allowed. Tests now pin a 5,000-character gap and the scan time.
@@ -171,11 +172,32 @@ A second reviewer compared main and the branch on about 1,600 samples and timed 
 | F8 | `hook-shell-substitution` and `subprocess-shell-true` were quadratic (over 20 s at 1 MB) | main | Fixed: the first is escape-aware and finds `$(` once; the second stops at the next `(`. Timing tests added |
 | F9 | No resource caps: files over 536 MB are silently skipped (PASS); a FIFO named `SKILL.md` hangs the scan; symlinked files outside the tree are read; unreadable files are skipped silently | main | **Open, recorded as S10** |
 
-- **After the fixes:**
-  - Main vs branch over 1,840 samples: the only finding lost is the intended short-comment case.
+- **After the fixes** (superseded: see the re-check below):
+  - Main vs branch over 1,840 samples: the only finding lost is the intended short-comment case. **Correction (re-check G7):** this was wrong; the re-check found the G1–G3 losses below.
   - Every pattern scans 1 MB of hostile input in 15 ms or less.
   - On the repo's own files, the only changes are FLAGs: `repo-audit`'s fenced `/tmp` cleanup, three dangerous commands `skill-audit/REFERENCE.md` names in inline code, and the three `spawn-call` FLAGs in test harnesses. No BLOCK changed.
   - 193/193 scanner tests, 26/26 suites, `ci-scan-skills.js` clean.
+
+### Re-check of the redesign (commit cdb2d5c, 2026-10-15)
+
+A third reviewer re-checked F1–F8 (all fixed) and compared main and the branch on 2,393 samples, plus 400 tracked markdown files for false positives.
+
+| # | Finding | Introduced by | Outcome |
+|---|---|---|---|
+| G1 | The "same line" rule (F2) also applied to prose, where a line break is a soft wrap: `run rm -rf` + newline + `~/` passed | cdb2d5c | Fixed: separators include line breaks, as on main. F2 stays fixed because only the first target counts. Test added |
+| G2 | `subprocess-shell-true` stopped at `(`, so `subprocess.run("… #(", shell=True)` passed | cdb2d5c | Fixed: arguments run to the first `)`, as on main. The scan stops at the next `subprocess.` call to stay linear. Tests added, including `stdout=subprocess.PIPE` |
+| G3 | Makefile's `-rm -rf ~/` was missed | cdb2d5c | Fixed: `rm` may follow any non-word character, as on main. `-rm` never joins an option run, so it stays linear. Tests added, including timing |
+| G4 | The S1 nouns "rules", "guidelines" and "prompts" made ordinary prose a BLOCK ("ESLint will ignore all rules") | 12a378c | Fixed: nouns limited to "instructions" and "directions". Four tests added |
+| G5 | `git rm -r --cached /path` was a false BLOCK | branch | Fixed: `git rm` is excluded. Test added |
+| G6 | Only the first `rm` target is checked | main | **Open, recorded as S11** |
+| G7 | The doc's claim that only the short-comment case was lost was wrong | doc | Corrected above |
+
+- **After these fixes:**
+  - On the reviewer's own harness (2,393 samples), the only loss against main is a main false positive: `{"command": "$(", "y": ")"}`, an unclosed `$(` matched with a `)` from a different string.
+  - The new false BLOCK in the reviewer's benign prose set is `rm -rf "$HOME/.cache/x"`. It's consistent with main, which blocks any `~/…` path.
+  - On the 400 tracked markdown files, the only changes are FLAGs (code-only commands, per R2) and two secret BLOCKs inside code in `docs/superpowers/plans/`. Both look like test fixtures: a bare key-header assertion, and a `SENTINEL` token value with 12 distinct characters. The value was not printed.
+  - Every pattern scans 1 MB of hostile input in 14 ms or less.
+  - 206/206 scanner tests, 26/26 suites, `ci-scan-skills.js` clean.
 
 ### Independent review of the S1–S3 fix (2026-10-15)
 
