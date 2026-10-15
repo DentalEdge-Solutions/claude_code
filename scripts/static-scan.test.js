@@ -458,6 +458,8 @@ for (const cmd of [
   // pre-push review H2: "git" before rm is not always git rm
   'X=git rm -rf /', 'ssh git rm -rf /', 'sudo -u git rm -rf ~', 'xargs -a git rm -rf /', 'echo git rm -rf / | sh',
   'git rm -rf /',
+  // pre-push verification V1: after -- (or a lone -) "--cached" is a file name, and rm deletes the rest
+  'rm -rf -- --cached ~', 'rm -rf -- --cached /etc', 'rm --recursive --force -- --cached /', 'rm -rf - --cached ~',
 ]) {
   test(`rm-rf-root: "${cmd}" in prose is a BLOCK`, () => {
     const r = run([makeDir({ 'SKILL.md': `Then run ${cmd} to reset.\n` })]);

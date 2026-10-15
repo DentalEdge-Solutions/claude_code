@@ -100,7 +100,7 @@ BLOCK rows are BLOCK in prose. When the command appears only in what the scanner
 
 | Pattern | Severity |
 |---------|----------|
-| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`), whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included; an option run holding `--cached` (`git rm --cached`) is not matched | BLOCK |
+| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`), whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included; an option run holding `--cached` before any `--` (`git rm --cached`; plain `rm` refuses that option) is not matched | BLOCK |
 | `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |

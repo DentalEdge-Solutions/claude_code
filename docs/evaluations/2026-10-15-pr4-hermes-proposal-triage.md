@@ -123,7 +123,7 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 | S8 | `subprocess-shell-true` stops at the first `)` | `subprocess.run(build(cmd), shell=True)` | BLOCK → PASS |
 | S9 | In single-file mode every finding has `file: ""` | any single-file scan | Cosmetic; CI's fallback reads only the verdict |
 | S10 | No resource caps (final review F9, 2026-10-15) | a file over 536 MB holding an injection; a FIFO named `SKILL.md`; a symlinked file outside the tree | Over 536 MB → silently skipped, so PASS. A FIFO hangs the scan. Unreadable files are skipped without a finding |
-| S11 | Only the first `rm` target is checked, as on main (re-check G6, 2026-10-15) | `rm -rf ./build ~/`, `rm -rf x /`, `rm --interactive=never -rf /`, `rm / -rf` | BLOCK → PASS. An every-target scan was tried and dropped: it froze the scanner and could be escaped (final review F1–F4). A safe version needs a shell-aware tokenizer, not a regex |
+| S11 | Only the first `rm` target is checked, as on main (re-check G6, 2026-10-15) | `rm -rf ./build ~/`, `rm -rf x /`, `rm --interactive=never -rf /`, `rm / -rf`; after `--`, a first target that starts with `-` or a quote: `rm -rf -- --foo-rm ~`, `rm -rf -- "--cached" ~` (verification V2) | BLOCK → PASS. An every-target scan was tried and dropped: it froze the scanner and could be escaped (final review F1–F4). A safe version needs a shell-aware tokenizer, not a regex |
 
 - **Doc drift:** `CLAUDE.md`, `README.md`, `docs/USER-GUIDE.md` and `skills/skill-audit/SKILL.md` call it a "47-pattern" scanner across 5 categories. The tables hold 70 patterns in 7 tables.
 
@@ -137,7 +137,7 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 - **`rm-rf-root`:** main's shape (the first target is an absolute or home path, `/tmp` included), with these additions:
   - Any spelling of the recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`, a `--` before the target). Separators may include a line break, as on main, so a soft wrap in prose keeps the command (re-check G1).
   - A quoted target, and `$HOME`.
-  - `rm` after any non-word character, as on main (`\rm`, `(rm`, `"rm"`, Makefile's `-rm`). An option run holding `--cached` is skipped, since that is `git rm`, which only untracks (re-check G5; pre-push H2 replaced a `git` lookbehind that let `X=git rm -rf /` through).
+  - `rm` after any non-word character, as on main (`\rm`, `(rm`, `"rm"`, Makefile's `-rm`). An option run holding `--cached` before any `--` or lone `-` is skipped: that is `git rm`, which only untracks, and plain `rm` refuses the option (re-check G5; pre-push H2 replaced a `git` lookbehind that let `X=git rm -rf /` through; verification V1 added the `--` stop).
   - **History:** two intermediate designs were dropped. A narrowed target list lost `/etc` and `~/.ssh` (review R1). A `/tmp` exemption with an every-target scan could be escaped and froze the scanner (final review F1–F4). See the review tables below.
 - **`curl`/`wget` piped to a shell:** rewritten to run in linear time with no length cap. It anchors at the line start, a lookahead finds the line's first `curl`/`wget`, and one pass looks for a later pipe into a shell. The old unbounded `.+` was quadratic: reading fenced blocks made a 210 KB file take 5.1 s to scan (0.02 s before).
   - **Correction:** an intermediate draft capped the gap at 500 characters. A background security check flagged that a padded line slipped past the cap, which the old pattern never allowed. Tests now pin a 5,000-character gap and the scan time.
@@ -210,6 +210,20 @@ A fourth reviewer re-ran everything, reused and extended the earlier harnesses, 
   - On the 2,393-sample harness, the only loss against main is main's false positive `{"command": "$(", "y": ")"}`.
   - The slowest pattern at 1 MB is 14 ms (`rm-rf-root`: 7 ms).
   - 219/219 scanner tests, 26/26 suites, `ci-scan-skills.js` clean.
+
+### Verification of the H fixes (2026-10-15)
+
+A fifth reviewer confirmed H1–H5 fixed. They timed 43 inputs at 1 MB (the worst was 9.2 ms) and ran four test-suite mutants in scratch, each of which failed the suite. The verdict was **NOT READY** because of V1:
+
+| # | Finding | Introduced by | Outcome |
+|---|---|---|---|
+| V1 | The `--cached` skip also counted tokens after `--` or a lone `-`, where `--cached` is a file name. `rm -rf -- --cached ~` deleted a scratch folder with real BSD and GNU `rm`, and the branch gave no finding (main gave none either). This was most likely the background check's "detection-bypass" on dbbd09a | dbbd09a | Fixed: the search stops at `--` and a lone `-`. Four tests added. The reviewer's probe script now shows BLOCK on all eight V1 lines |
+| V2 | `rm -rf -- --foo-rm ~` passes (first-target-only family) | dbbd09a (main also passes) | Recorded under S11 |
+
+- **After the fix:**
+  - On the 2,393-sample harness, the only loss against main is still main's false positive.
+  - At 1 MB, every `rm` input takes 7.3 ms or less.
+  - 223/223 scanner tests, 26/26 suites, `ci-scan-skills.js` clean.
 
 - **After these fixes:**
   - On the reviewer's own harness (2,393 samples), the only loss against main is a main false positive: `{"command": "$(", "y": ")"}`, an unclosed `$(` matched with a `)` from a different string.
