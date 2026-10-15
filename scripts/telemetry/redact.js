@@ -23,23 +23,12 @@ function sha256Hex(text) {
 }
 
 // ── Secret-pattern scan ──────────────────────────────────────────────────────
-// Common key/token shapes. Deliberately broad (false positives are cheap —
-// they just redact a bit more; false negatives leak a secret).
+// Common key/token shapes from the one shared list (secret-patterns.js, also used by the
+// brain's refusal gate). Deliberately broad (false positives are cheap — they just redact a
+// bit more; false negatives leak a secret). The shared patterns carry no `g` flag; add it here.
 
-const SECRET_PATTERNS = [
-  /sk-ant-api\d{2}-[A-Za-z0-9_-]{10,}/g,      // Anthropic API keys
-  /sk-[A-Za-z0-9]{20,}/g,                      // OpenAI-style API keys
-  /ghp_[A-Za-z0-9]{20,}/g,                     // GitHub personal access tokens
-  /github_pat_[A-Za-z0-9_]{20,}/g,             // GitHub fine-grained PATs
-  /gho_[A-Za-z0-9]{20,}/g,                     // GitHub OAuth tokens
-  /xox[baprs]-[A-Za-z0-9-]{10,}/g,             // Slack tokens
-  /AKIA[0-9A-Z]{16}/g,                         // AWS access key IDs
-  /AIzaSy[A-Za-z0-9_-]{20,}/g,                 // Google API keys
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, // JWT-shaped
-  /Bearer\s+[A-Za-z0-9._-]{15,}/gi,             // Bearer tokens
-  /(?:api[_-]?key|apikey|secret|token|password|passwd)["']?\s*[:=]\s*["']?[A-Za-z0-9_\-./+]{12,}["']?/gi,
-];
+const SECRET_PATTERNS = require('./secret-patterns.js').SECRET_PATTERNS
+  .map(({ re }) => new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'));
 
 function redactString(str) {
   if (typeof str !== 'string') return str;

@@ -6,15 +6,27 @@ document maps the threats to the controls that enforce them.
 
 ## Sensitive content — never stored
 
-`brain-lib.js` `scanSensitive()` scans all captured/promoted content against these
-patterns; a match refuses the write (exit 3):
+`brain-lib.js` `scanSensitive()` scans all captured or promoted content against the
+repo's one shared secret-pattern list, `scripts/telemetry/secret-patterns.js`. The
+same list drives telemetry redaction (`redact.js`). A match refuses the write (exit 3).
+The patterns are:
 
-- `anthropic-api-key` — `sk-ant-…`
-- `generic-sk-key` — `sk-…` (20+ chars)
+- `anthropic-api-key` — `sk-ant-…` (api, admin and other key types)
+- `openai-style-key` — `sk-…` (20+ chars)
+- `github-token` — `ghp_/gho_/ghu_/ghs_/ghr_…`
+- `github-fine-grained-pat` — `github_pat_…`
+- `slack-token` — `xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`
 - `aws-access-key-id` — `AKIA…`
-- `github-token` — `ghp_/gho_/…`
-- `private-key-block` — `-----BEGIN … PRIVATE KEY-----`
-- `password-assignment` — `password = …`
+- `google-api-key` — `AIza…`
+- `private-key` — `-----BEGIN … PRIVATE KEY-----` (a header alone, or the whole block)
+- `jwt` — three base64url segments starting `eyJ`
+- `bearer-token` — `Bearer <15+ chars>`
+- `secret-assignment` — `api_key/secret/token/password = <12+ chars>`
+- `password-assignment` — `password = <4+ chars>`
+
+Tests: `scripts/telemetry/secret-patterns.test.js`. It checks each format against both
+consumers, checks benign prose against the brain gate, and checks that both use the
+single list.
 
 Enforced at three points: `brain-capture` (before append), `brain-promote` (before
 promotion), and `brain-lint` (sweep of the whole capsule, second net). The

@@ -4,14 +4,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const SENSITIVE_CONTENT_PATTERNS = [
-  { name: 'anthropic-api-key', re: /\bsk-ant-[A-Za-z0-9_-]{10,}/ },
-  { name: 'generic-sk-key', re: /\bsk-[A-Za-z0-9]{20,}\b/ },
-  { name: 'aws-access-key-id', re: /\bAKIA[0-9A-Z]{16}\b/ },
-  { name: 'github-token', re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/ },
-  { name: 'private-key-block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
-  { name: 'password-assignment', re: /\bpassword\s*[:=]\s*['"]?[^\s'"]{4,}/i },
-];
+// The one secret-pattern list, shared with telemetry redaction (P1). install.sh always installs
+// scripts/telemetry/ whenever it installs the brain, so this require resolves in targets too.
+const { SECRET_PATTERNS: SENSITIVE_CONTENT_PATTERNS } = require('../telemetry/secret-patterns.js');
 
 function getArg(argv, name, def = null) {
   const i = argv.indexOf(name);
