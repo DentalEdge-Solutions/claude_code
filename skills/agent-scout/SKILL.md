@@ -74,7 +74,8 @@ User: source an agent for data extraction
 
 8. **No results fallback** — if no candidate scores > 5:
    - Tell the user no suitable agent was found.
-   - Offer to help define a custom agent definition inline.
+   - Offer to help define a custom agent definition inline; the draft then goes through `agent-audit` → `agent-eval`
+     before installing — a hand-written agent passes the same gates as a sourced one.
 
 ## Rules
 

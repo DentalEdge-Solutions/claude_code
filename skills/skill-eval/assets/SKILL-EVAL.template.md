@@ -1,6 +1,6 @@
 # Skill Eval: <skill-name>
 **Date:** YYYY-MM-DD  
-**Skill version:** <commit hash or "local">  
+**Subject revision:** <commit> · SKILL.md sha256 <first 12> (from run-manifest.json)  
 **Scenarios run:** N (trigger-type ×3 reps; non-trigger ×1)
 **Baseline:** no-skill | snapshot of previous version
 
@@ -36,6 +36,13 @@
 ## Issues Found
 
 (list scenarios scoring < 7, with root cause)
+
+## Evidence and Limits
+
+- **Subject revision:** <commit> · definition sha256 <first 12> — copied from `run-manifest.json` `subject`
+- **Evidence source:** `evidence.json` per scenario (harvest-evidence.js); subagent self-reports are not grading input
+- **Untested:** (every scenario type, rep or check not run, each with its reason — never omitted silently; "none" if complete)
+- **Limitations:** (anything that bounds these numbers — e.g. whether the subject's description was in the skill listing during the run, reduced reps, judge model)
 
 ## Recommendation
 

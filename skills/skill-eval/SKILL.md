@@ -60,8 +60,10 @@ User: evaluate the skill-adapt skill
    ```bash
    mkdir -p evals/<skill-name>/iteration-<N>
    node skills/skill-eval/scripts/run-manifest.js init evals/<skill-name>/iteration-<N> \
-     --baseline-method <none|snapshot> [--snapshot-path skills/<skill-name>-eval-snapshot/SKILL.md]
+     --baseline-method <none|snapshot> [--snapshot-path skills/<skill-name>-eval-snapshot/SKILL.md] \
+     --subject skills/<skill-name>/SKILL.md --commit <short SHA from git rev-parse --short HEAD>
    ```
+   `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    Re-running `init` on an existing manifest is refused by design — that's the guard against re-deciding the baseline method mid-run.
 
 6. **Run parallel evaluations** — for each not-yet-`graded` scenario, spawn two subagents **in the same turn**.

@@ -75,7 +75,11 @@ User: find a skill for code review that fits our GSD workflow
 9. **No results fallback** — if no candidate scores > 5 and no registry match was found:
    - Tell the user no suitable skill was found.
    - Offer to help with the task directly using general capabilities.
-   - Recommend building a new skill: invoke `write-a-skill`.
+   - Recommend building a new skill. If the Superpowers plugin is installed, invoke `superpowers:writing-skills`;
+     otherwise write the SKILL.md directly, following the official skills docs
+     (https://code.claude.com/docs/en/skills.md) and this pipeline's conventions: `name`, a `description` with a
+     "Use when" clause, `compatibility`. Either way, run `skill-audit` → `skill-eval` on the result before
+     installing — a generated skill passes the same gates as a sourced one.
 
 ## Scoring dimensions (0–10 each, weighted)
 
@@ -108,4 +112,4 @@ User: find a skill for code review that fits our GSD workflow
 - Always pin the source commit hash in your recommendation (never just a branch name).
 - Never write any files — that's skill-adapt's job (after skill-audit clears the candidate).
 - Prefer skills from trusted source orgs; explicitly flag unknown authors with low stars.
-- If no suitable candidate scores > 5, recommend building from scratch with `write-a-skill`.
+- If no suitable candidate scores > 5, recommend building from scratch (step 9: `superpowers:writing-skills` if installed, otherwise by hand), then `skill-audit` → `skill-eval`.

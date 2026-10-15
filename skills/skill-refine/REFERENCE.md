@@ -98,7 +98,7 @@ Stop the loop when ANY of:
 2. All three ≥ 95% for 3 consecutive experiments → **DONE** (diminishing returns)
 3. Budget exhausted with no improvement in last 2 iterations → **DONE**
 4. All generated hypotheses have been tested → **DONE**
-5. `eval_pass_rate < 40%` after 5 iterations → **REWRITE** — recommend `write-a-skill`
+5. `eval_pass_rate < 40%` after 5 iterations → **REWRITE** — recommend a rebuild (`superpowers:writing-skills` if installed, otherwise by hand), then `skill-audit` → `skill-eval`
 6. Project Fit Score < 7 AND (project-native or project-workflow failed) → **RE-ADAPT** — do not enter refinement loop
    Exception: if ONLY multi-turn failed, this is NOT an exit condition — continue with Lever B
 

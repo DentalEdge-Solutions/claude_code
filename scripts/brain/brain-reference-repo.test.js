@@ -129,6 +129,31 @@ try {
   md = fs.readFileSync(registryMdPath(), 'utf8');
   assert.ok(md.includes(today), 'registry.md regenerated with the new date');
 
+  // --use / --risk: one item per flag, kept verbatim (commas are prose, not
+  // separators — splitting them fragmented sentences into bogus items), and
+  // each flag may repeat to add more items.
+  seed();
+  r = run(ADD, ['--name', 'use-risk-repo', '--url', 'https://example.com/u', '--types', 'research-source',
+    '--use', 'Primary source for releases, docs, and security policy',
+    '--use', 'Code at the pinned tag',
+    '--risk', 'Ships weekly; pin by digest, re-audit on upgrade']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  entry = readRegistry().repositories.find(e => e.name === 'use-risk-repo');
+  assert.deepStrictEqual(entry.preferred_use,
+    ['Primary source for releases, docs, and security policy', 'Code at the pinned tag'],
+    'each --use is one item; commas inside it are kept');
+  assert.deepStrictEqual(entry.risk_notes, ['Ships weekly; pin by digest, re-audit on upgrade'],
+    'a single --risk with commas stays one item');
+  r = run(ADD, ['--name', 'no-use-repo', '--url', 'https://example.com/n', '--types', 'research-source']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  entry = readRegistry().repositories.find(e => e.name === 'no-use-repo');
+  assert.deepStrictEqual([entry.preferred_use, entry.risk_notes], [[], []], 'absent flags give empty arrays');
+
+  // R7: a flag cannot be swallowed as the previous flag's value.
+  r = run(ADD, ['--name', 'swallow-repo', '--url', 'https://example.com/s', '--types', 'research-source', '--use', '--risk', 'x']);
+  assert.notStrictEqual(r.status, 0, 'a flag given as a --use value is refused');
+  assert.match(r.stderr, /--use needs a value/);
+
   console.log('brain-reference-repo.test.js: all assertions passed');
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });

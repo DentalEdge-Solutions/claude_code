@@ -25,3 +25,8 @@ _Generated from registry.json — do not hand-edit._
 | nous-hermes-agent | reference | research-source, governance-source | do-not-install-directly | 2026-10-03 |
 | nous-hermes-agent-self-evolution | reference | methodology-source, research-source | do-not-install-directly | 2026-10-03 |
 | hermes-optimization-guide | reference | methodology-source, human-workflow-source | do-not-install-directly | 2026-10-03 |
+| claude-code-docs | reference | research-source, governance-source | do-not-install-directly | 2026-10-14 |
+| anthropic-claude-code | reference | research-source, governance-source | do-not-install-directly | 2026-10-14 |
+| anthropic-skills | reference | skill-pattern-source, candidate-skill-source | do-not-install-directly | 2026-10-14 |
+| anthropic-claude-plugins-official | reference | skill-pattern-source, agent-pattern-source | do-not-install-directly | 2026-10-14 |
+| claude-code-ultimate-guide | reference | methodology-source, research-source | do-not-install-directly | 2026-10-14 |
