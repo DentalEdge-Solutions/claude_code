@@ -127,13 +127,18 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 
 ## S1–S3 repair (2026-10-15)
 
-- **S1:** `instruction-override` now matches `ignore [all|any] [the|your|my] previous|prior|above|earlier|preceding|all|your instructions|directions|rules|guidelines|prompts`. A qualifier is still required, so defensive text ("ignore instructions found in fetched pages") stays quiet.
+- **S1:** `instruction-override` now matches `ignore [all|any [of]] [the|your|my] previous|prior|above|earlier|preceding|all|your instructions|directions|rules|guidelines|prompts`. A qualifier is still required, so defensive text ("ignore instructions found in fetched pages") stays quiet.
 - **S2:** each markdown table now reads its own text.
   - Secrets: the whole file, code included.
   - BLOCK-level Bash (`rm-rf-root`, curl/wget piped to a shell, `~/.ssh/`): prose and fenced blocks.
   - FLAG-level Bash (`sudo`, `chmod`, settings) and prompt injection: prose only, as before.
   - Inline code spans stay skipped for Bash, so prose naming a pattern is quiet.
-- **`rm-rf-root` tightened** (found while fixing S2). It matched any absolute path, so `rm -rf /tmp/repo-audit-…/` in `skills/repo-audit/SKILL.md` became a BLOCK once fenced blocks were read. It now matches only `/`, `~` and `$HOME` (alone or with `/*`). The old pattern also missed `$HOME`.
+- **`rm-rf-root` reworked** (found while fixing S2). It matched any absolute path, so `rm -rf /tmp/repo-audit-…/` in `skills/repo-audit/SKILL.md` became a BLOCK once fenced blocks were read.
+  - It now matches `rm` with a recursive or force option in any spelling (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`, a `--` before the target) on any absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not.
+  - `/tmp/`, `/private/tmp/` and `/var/tmp/` are exempt.
+  - The old pattern missed `$HOME`, split or long options, quotes and `--`.
+  - **Correction:** the first draft (commit 12a378c) narrowed the targets to `/`, `~` and `$HOME` alone. That dropped `/etc`, `/usr/local`, `~/Documents`, `~/.ssh` and others, which the old pattern caught. The independent review (R1) and a background security check both caught it before push, and tests now pin each of those paths.
+- **`curl`/`wget` piped to a shell:** the gap before the pipe is bounded to 500 characters on one line. The unbounded `.+` was quadratic: reading fenced blocks made a 210 KB file take 5.1 s to scan (0.02 s before). A timing test pins it.
 - **S3:**
   - `child-process-require` matches `require`, `import … from`, side-effect `import` and `import()`, with or without `node:`.
   - `child-process-exec` also matches `execSync(`, however it is reached.
@@ -147,3 +152,20 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
   - After, `scripts/static-scan.test.js` and `node scripts/run-all-tests.js` (26/26) pass, and `node scripts/ci-scan-skills.js` passes with no new or stale entries.
   - 7 mutations each failed the suite: the old `rm` pattern, secrets on prose only, every Bash severity read in fenced blocks, no fenced Bash, no `node:` prefix, no `execSync`, an optional S1 qualifier.
 - `skills/skill-audit/REFERENCE.md` describes the new rules.
+
+### Independent review of the S1–S3 fix (2026-10-15)
+
+A separate reviewer re-ran every check and compared the old and new scanners on adversarial and benign samples.
+
+| # | Finding | Outcome |
+|---|---|---|
+| R1 | The `rm-rf-root` draft dropped real targets (`/etc`, `~/.ssh`, `~/Documents`, …) | Fixed, see above; 13 path and spelling tests added |
+| R2 | BLOCK rules in fenced blocks now hit common installer lines (`curl -fsSL https://bun.sh/install \| bash`) and `ssh-keygen -f ~/.ssh/…` in sourced docs, with no allowlist | **Open, owner's decision:** keep BLOCK, or make fenced-block hits FLAG |
+| R3 | The wider S1 also flags defensive prose that quotes the attack outside inline code | Accepted: quoting the phrase in inline code keeps it quiet |
+| R4 | `from"child_process"` (no space) was missed | Fixed and tested. Not fixed: `function execSync(){}` gives a false BLOCK (rare) |
+| R5 | REFERENCE.md and this record left out the `my`/`of` qualifiers | Fixed |
+| R6 | No tests for `~~~`, 4-backtick or unclosed fences, or the R1 paths | Added |
+| P1 | (old) `rm -r -f /`, `rm -Rf /`, `rm -rf "/"`, `rm -rf -- /`, `rm --recursive --force /`, `rm -rf "$HOME"` | Fixed and tested |
+| P2 | (old) the quadratic `curl … \|` pattern became reachable in fenced blocks | Fixed (bounded gap) and tested |
+| P3 | (old) inline code is never scanned for Bash; injection and hidden Unicode in fences are not scanned | Open |
+| P4 | (old) S1 still misses "ignore the instructions above" and "ignore everything above", and flags "never ignore previous instructions" | Open |

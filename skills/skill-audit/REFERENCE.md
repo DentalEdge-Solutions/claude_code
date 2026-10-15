@@ -48,7 +48,7 @@
 
 | Pattern | Severity | Risk |
 |---------|----------|------|
-| `ignore [all/any] [the/your] previous/prior/above/earlier/preceding/all/your instructions/rules/guidelines/directions/prompts` | BLOCK | Instruction override |
+| `ignore [all/any [of]] [the/your/my] previous/prior/above/earlier/preceding/all/your instructions/rules/guidelines/directions/prompts` | BLOCK | Instruction override |
 | `disregard` + instructions | BLOCK | Instruction override |
 | `forget everything` | BLOCK | Memory wipe |
 | Zero-width Unicode (U+200B, U+200C, U+200D, U+FEFF, U+202E) | BLOCK | Hidden text |
@@ -100,8 +100,8 @@ BLOCK rows apply to prose and to fenced code blocks, because fenced commands are
 
 | Pattern | Severity |
 |---------|----------|
-| `rm -rf` of `/`, `~` or `$HOME` (or `/*`, `~/*`); other paths such as `/tmp/x` are not flagged | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` | BLOCK |
+| `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`) on any absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not; `/tmp/`, `/private/tmp/` and `/var/tmp/` are exempt | BLOCK |
+| `curl ... \| bash` / `wget ... \| sh` (on one line, at most 500 characters apart) | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |
 | `sudo` | FLAG |
@@ -113,7 +113,7 @@ BLOCK rows apply to prose and to fenced code blocks, because fenced commands are
 | Pattern | Severity |
 |---------|----------|
 | `eval "..."` | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` | BLOCK |
+| `curl ... \| bash` / `wget ... \| sh` (on one line, at most 500 characters apart) | BLOCK |
 | `pip install --break-system-packages` | FLAG |
 
 ---

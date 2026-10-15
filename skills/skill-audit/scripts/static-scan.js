@@ -87,11 +87,13 @@ const MD_INJECTION = [
 
 // ─── Markdown: Dangerous Bash in instructions ──────────────────────────────
 const MD_BASH = [
-  // the root, home or all of either, not any absolute path (rm -rf /tmp/x is routine cleanup)
-  { re: /\brm\s+-[rf]{1,2}\s+(?:\/|~\/?|\$\{?HOME\}?\/?)\*?(?=$|[\s;&|)"'])/,
+  // rm with a recursive/force option (any spelling: -rf, -r -f, -Rf, -rfv, --recursive, --force, --)
+  // on an absolute or home path, quoted or not. Temp folders are exempt (rm -rf /tmp/x is routine cleanup).
+  { re: /\brm\s+(?:-{1,2}[\w-]*\s+)*?(?:-[a-zA-Z]*[rRf][a-zA-Z]*|--recursive|--force)\s+(?:-{1,2}[\w-]*\s+)*["']?(?!(?:\/private)?\/tmp\/|\/var\/tmp\/)(?:\/|~|\$\{?HOME\b)/,
                                           name: 'rm-rf-root',       sev: 'BLOCK' },
-  { re: /curl\s+.+\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
-  { re: /wget\s+.+\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
+  // the gap is bounded: an unbounded .+ took seconds on a long line of repeated "curl |"
+  { re: /curl\s[^\n]{0,500}?\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
+  { re: /wget\s[^\n]{0,500}?\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
   { re: /\bsudo\s+/,                      name: 'sudo',             sev: 'FLAG'  },
   { re: /chmod\s+[0-7]{3}\s/,            name: 'chmod',            sev: 'FLAG'  },
   { re: /~\/.ssh\//,                      name: 'ssh-dir-access',   sev: 'BLOCK' },
@@ -151,7 +153,7 @@ const JS_PATTERNS = [
   { re: /\beval\s*\(/,                                         name: 'eval-injection',         sev: 'BLOCK' },
   { re: /new\s+Function\s*\(/,                                 name: 'new-function-injection', sev: 'BLOCK' },
   // require(), import … from, import(), with or without the node: prefix (S3)
-  { re: /(?:require\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|\bimport\s+)['"](?:node:)?child_process['"]/,
+  { re: /(?:require\s*\(\s*|\bimport\s*\(\s*|\bfrom\s*|\bimport\s+)['"](?:node:)?child_process['"]/,
                                                                name: 'child-process-require',  sev: 'BLOCK' },
   // a bare exec call (a method named exec, like RegExp's, is excluded); execSync however reached (S3)
   { re: /(?<![a-zA-Z0-9_.])exec\s*\(|\bexecSync\s*\(/,          name: 'child-process-exec',     sev: 'BLOCK' },
@@ -195,8 +197,8 @@ const PY_PATTERNS = [
 const SH_EXTS = new Set(['.sh', '.bash']);
 const SH_PATTERNS = [
   { re: /eval\s+["'$]/,                   name: 'shell-eval',        sev: 'BLOCK' },
-  { re: /curl\s+.*\|\s*(bash|sh)\b/,      name: 'curl-pipe-shell',   sev: 'BLOCK' },
-  { re: /wget\s+.*\|\s*(bash|sh)\b/,      name: 'wget-pipe-shell',   sev: 'BLOCK' },
+  { re: /curl\s[^\n]{0,500}?\|\s*(bash|sh)\b/, name: 'curl-pipe-shell', sev: 'BLOCK' },
+  { re: /wget\s[^\n]{0,500}?\|\s*(bash|sh)\b/, name: 'wget-pipe-shell', sev: 'BLOCK' },
   { re: /--break-system-packages/,        name: 'pip-break-system',  sev: 'FLAG'  },
 ];
 
