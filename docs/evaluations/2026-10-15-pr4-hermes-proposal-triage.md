@@ -29,7 +29,7 @@ The proposal's own `P` numbers are kept.
 | P9 | No guard before `rm -rf` in `uninstall.sh` | Open | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
 | P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
 | P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
-| P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
+| P12 | Tests missing for 3 scripts | **Done, in review** (see "P12 repair") | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
 | P13 | `test-runners.js` writes to real `evals/` paths | **Open, worse than stated** | see below |
 | P14 | The superseded architecture spec has no banner | Partly done | `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md` now has a "REVISED" banner, but it points to `~/.claude/plans/…`, a machine-local file and not a repo document |
 
@@ -76,6 +76,14 @@ The proposal's own `P` numbers are kept.
 
 - Each claim was rechecked by file listing, grep or a probe on `main` @ `4db546d`. The proposal's text was treated as data, not instructions.
 - **P1 limit:** the probe used synthetic tokens in the common public formats. A pattern written for a different shape could still match real tokens.
+
+## P12 repair (2026-10-16)
+
+`validate-skills` already had a test. Added `scripts/score-candidates.test.js` and `scripts/extract-project-context.test.js`. They live in `scripts/`, not next to the scripts, for the reason `harvest-evidence.test.js` gives: files under `skills/` ship to target projects, and CI's skill scan treats a `child_process` require there as a BLOCK finding. A first version placed in `skills/` failed `ci-scan-skills.test.js` with exactly that. A new baseline entry would need the owner's review, so the tests moved instead. Nothing under `skills/` changed, so no runtime redeploy is needed.
+
+- **score-candidates:** expected scores are worked out by hand from the weights. The tests cover every dimension at its extremes, sorting, the SKILL.md body search, plugin and description conflicts, the STRONG/GOOD bands, the weights themselves (a case whose total straddles a rounding point), and the CLI contract (`--help`, no argument, bad JSON).
+- **extract-project-context:** a fixture project with a fake `HOME`, so the real `~/.claude/settings.json` is never read. The tests cover each of the 9 contract fields and its source, stdout equal to the written file, preservation of project-audit's fields (including a score of 0), an empty project, `pyproject.toml`, malformed JSON, and `--help`.
+- **Evidence:** these test existing code, so instead of RED-first the check is a **mutation run**. 18 realistic bugs were planted one at a time, the test was run, and the file restored. The first run caught 17; the survivor (trigger weight 0.25 → 0.20) showed every total landed on the same rounded integer, so a rounding-straddling case was added. Second run: **18/18 caught**. `node scripts/run-all-tests.js` → 29/29.
 
 ## P1 repair (2026-10-15)
 
