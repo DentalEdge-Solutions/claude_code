@@ -23,7 +23,7 @@ The proposal's own `P` numbers are kept.
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
-| P6 | BSD-only `sed -i ''` | Open | `uninstall.sh:108` |
+| P6 | BSD-only `sed -i ''` | **Done** (see "P9 repair", P6 note) | `uninstall.sh:108` |
 | P7 | Hand-rolled YAML parsing | Open | `infra/hermes-agent/bin/make-review-board.py:39` |
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
 | P9 | No guard before `rm -rf` in `uninstall.sh` | **Done** (see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
@@ -313,6 +313,7 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 - **Fix:** right after the target is resolved, and before anything is shown or asked, the script compares the target's physical path (`pwd -P`) with `/`, the home directory and the toolkit repo, and refuses with exit 1 and a message on stderr. `install.sh` deletes nothing under the target, so it needs no mirror.
 - **Test** `scripts/uninstall.test.js` (written first; it failed on `target /: must exit non-zero`): refuses `/` and a symlink to `/` (always answered "n"), `$HOME` and a symlink to it (answered "y"; a canary in the fake home survives), the toolkit repo by path and as `.` from inside it; no target still exits 1; a normal project still loses the toolkit's skills, agents and runtime skills and keeps its own agent. It runs only on a copy inside a temp directory. `node scripts/run-all-tests.js` → 28/28.
 - **After:** the same probe prints `Refusing to uninstall from <home>: …` and deletes nothing.
+- **P6, same file:** step 5 removed the CLAUDE.md pipeline section with `sed -i ''`, which GNU sed reads as an empty script plus a file named after the real expression. RED in `node:24-slim` (GNU sed 4.9; CI runs on `ubuntu-latest`): `sed: can't read /^# >>> skill-builder >>>/…: No such file or directory`, the uninstall aborted. Now the same `awk` → temp file → `mv` form the second-brain step already uses. The test asserts the exact CLAUDE.md left behind; it passes on macOS and in the Linux container.
 - **Noted, not fixed here:** with no agents in the repo, `${AGENT_FILES[*]}` under `set -u` aborts the script on macOS bash 3.2 (`unbound variable`, line 48 on `d799f4f`). It stops before any removal, so it is a crash, not a data risk. The test repo always carries one agent.
 
 ## P11 repair (2026-10-15)

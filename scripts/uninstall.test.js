@@ -65,13 +65,18 @@ try {
   // 4. No target: usage, exit 1 (unchanged behaviour).
   assert.strictEqual(run(undefined, '').status, 1, 'no target exits 1');
 
-  // 5. A normal project: the installed pieces go, the project's own files stay.
+  // 5. A normal project: the installed pieces go, the project's own files stay. The CLAUDE.md
+  //    section removal must work with GNU sed too (P6: "sed -i ''" is BSD-only; CI is Linux).
+  const claudeMd = path.join(PROJECT, 'CLAUDE.md');
+  fs.writeFileSync(claudeMd, '# Own title\n\nown text\n\n# >>> skill-builder >>>\npipeline\n# <<< skill-builder <<<\n\nown tail\n');
   const r = run(PROJECT, 'y\n');
   assert.strictEqual(r.status, 0, `normal uninstall failed\n${r.stdout}\n${r.stderr}`);
   assert.ok(!fs.existsSync(path.join(PROJECT, 'skills')), 'project skills/ removed');
   assert.ok(!fs.existsSync(path.join(PROJECT, '.claude', 'agents', 'demo-agent.md')), 'toolkit agent removed');
   assert.ok(fs.existsSync(path.join(PROJECT, '.claude', 'agents', 'own-agent.md')), 'project agent kept');
   assert.ok(!fs.existsSync(path.join(FAKE_HOME, '.claude', 'skills', 'demo-skill')), 'runtime skill removed');
+  assert.strictEqual(fs.readFileSync(claudeMd, 'utf8'), '# Own title\n\nown text\n\n\nown tail\n',
+    'CLAUDE.md loses exactly the skill-builder section');
 
   console.log('uninstall.test.js: all assertions passed');
 } finally {

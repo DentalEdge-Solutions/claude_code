@@ -116,7 +116,9 @@ echo ""
 echo "→ [5/7] Removing pipeline section from CLAUDE.md"
 CLAUDE_MD="${TARGET}/CLAUDE.md"
 if [ -f "${CLAUDE_MD}" ] && grep -qF "# >>> skill-builder >>>" "${CLAUDE_MD}" 2>/dev/null; then
-    sed -i '' '/^# >>> skill-builder >>>/,/^# <<< skill-builder <<</d' "${CLAUDE_MD}"
+    # awk + mv, not "sed -i ''": that form is BSD-only and fails with GNU sed (P6).
+    awk '/^# >>> skill-builder >>>/{skip=1} !skip{print} /^# <<< skill-builder <<</{skip=0}' \
+        "${CLAUDE_MD}" > "${CLAUDE_MD}.tmp" && mv "${CLAUDE_MD}.tmp" "${CLAUDE_MD}"
     ok "removed pipeline section from CLAUDE.md"
 else
     skip "CLAUDE.md pipeline section not found"
