@@ -26,7 +26,7 @@ The proposal's own `P` numbers are kept.
 | P6 | BSD-only `sed -i ''` | Open | `uninstall.sh:108` |
 | P7 | Hand-rolled YAML parsing | Open | `infra/hermes-agent/bin/make-review-board.py:39` |
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
-| P9 | No guard before `rm -rf` in `uninstall.sh` | Open | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
+| P9 | No guard before `rm -rf` in `uninstall.sh` | **Done** (see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
 | P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
 | P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
@@ -304,6 +304,16 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - After, 37/37 harvester tests and 27/27 suites pass, and `ci-scan-skills.js` is clean.
   - 3 mutations (no separator in the prefix check, no containment check, no link resolution) each failed the suite.
 - **Scope:** E2–E5 (informational fields) and E6 (method) are unchanged and still open.
+
+## P9 repair (2026-10-16)
+
+`uninstall.sh` resolved its target only with `cd`, then ran seven `rm -rf "${TARGET}/<dir>"` calls. A target of `/`, `$HOME`, a symlink to either, or this toolkit itself (`./uninstall.sh .` from inside the repo) passed.
+
+- **Before** (branch base `d799f4f`): a copy of `uninstall.sh` in a temp fake repo, `HOME` set to a temp fake home, target = that home, answered "y": it printed `removed <home>/skills/`, `removed <home>/evals/`, `removed brain hooks, scripts, schemas, templates`, and the fake home was left empty of those files.
+- **Fix:** right after the target is resolved, and before anything is shown or asked, the script compares the target's physical path (`pwd -P`) with `/`, the home directory and the toolkit repo, and refuses with exit 1 and a message on stderr. `install.sh` deletes nothing under the target, so it needs no mirror.
+- **Test** `scripts/uninstall.test.js` (written first; it failed on `target /: must exit non-zero`): refuses `/` and a symlink to `/` (always answered "n"), `$HOME` and a symlink to it (answered "y"; a canary in the fake home survives), the toolkit repo by path and as `.` from inside it; no target still exits 1; a normal project still loses the toolkit's skills, agents and runtime skills and keeps its own agent. It runs only on a copy inside a temp directory. `node scripts/run-all-tests.js` → 28/28.
+- **After:** the same probe prints `Refusing to uninstall from <home>: …` and deletes nothing.
+- **Noted, not fixed here:** with no agents in the repo, `${AGENT_FILES[*]}` under `set -u` aborts the script on macOS bash 3.2 (`unbound variable`, line 48 on `d799f4f`). It stops before any removal, so it is a crash, not a data risk. The test repo always carries one agent.
 
 ## P11 repair (2026-10-15)
 

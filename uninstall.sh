@@ -25,6 +25,17 @@ TARGET="$(cd "${TARGET}" && pwd)"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GLOBAL_SKILLS="${HOME}/.claude/skills"
 
+# Every removal below is "${TARGET}/<dir>", so refuse a target where that would hit the
+# filesystem root, the home directory or this toolkit itself (P9). Compared by physical
+# path, so a symlink to one of them is refused too.
+TARGET_REAL="$(cd "${TARGET}" && pwd -P)"
+for forbidden in / "$(cd "${HOME}" 2>/dev/null && pwd -P)" "$(cd "${REPO_DIR}" && pwd -P)"; do
+    if [ "${TARGET_REAL}" = "${forbidden}" ]; then
+        echo "Refusing to uninstall from ${TARGET}: it is the filesystem root, the home directory or this toolkit itself." >&2
+        exit 1
+    fi
+done
+
 # ── Discover skills + agents from repo (same source as install.sh) ───────────
 SKILL_NAMES=()
 while IFS= read -r dir; do
