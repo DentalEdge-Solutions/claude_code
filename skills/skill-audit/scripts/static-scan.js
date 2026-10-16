@@ -331,8 +331,8 @@ function scanMarkdown(filePath, content) {
 // CONFIG_PATTERNS are applied only to Claude Code settings files.
 const CONFIG_FILENAMES = new Set(['settings.json', 'settings.local.json']);
 
-// Reads a settings file that is valid JSON. Returns null when it is not valid JSON or nests too deep to
-// read; then the permission checks read the raw text, as on main. Otherwise returns:
+// Reads a settings file that is valid JSON. Returns null when it is not valid JSON; then the permission
+// checks read the raw text, as on main. Otherwise returns:
 //   allow: the trimmed string rules of every permissions.allow, in every copy of a duplicate key (a
 //          reader may keep either copy; keys are compared decoded, so "permissions" counts)
 //   text:  the raw text with the permissions.deny and permissions.ask arrays (every copy) emptied, for
@@ -344,43 +344,59 @@ const CONFIG_FILENAMES = new Set(['settings.json', 'settings.local.json']);
 // could collide with a real key.
 const JSON_STRING = /"(?:[^"\\]|\\.)*"/y;
 const JSON_SCALAR = /[^,\]}\s]*/y;
+// Builds only what readSettings uses: the top-level object, each permissions object, and its allow,
+// deny and ask arrays with their string items and positions. Every other value is skipped by a loop
+// that counts brackets, so nesting depth costs nothing: a recursive reader gave up past a few thousand
+// levels, and the fallback text checks miss a bare tool name (independent review round 3, W1).
 function readJsonTree(text) {
   let i = 0;
   const ws = () => { while (i < text.length && ' \t\n\r'.includes(text[i])) i++; };
-  const str = () => { JSON_STRING.lastIndex = i; JSON_STRING.test(text); const s = JSON.parse(text.slice(i, JSON_STRING.lastIndex)); i = JSON_STRING.lastIndex; return s; };
-  function value() {
-    ws();
-    const c = text[i];
-    if (c === '{') {
-      i++; ws();
-      const entries = [];
-      if (text[i] === '}') { i++; return { type: 'object', entries }; }
-      for (;;) {
-        ws(); const key = str(); ws(); i++;            // the ':'
-        entries.push([key, value()]); ws();
-        if (text[i++] === '}') return { type: 'object', entries };
-      }
+  const peek = () => { ws(); return text[i]; };
+  const strEnd = () => { JSON_STRING.lastIndex = i; JSON_STRING.test(text); return JSON_STRING.lastIndex; };
+  const str = () => { const end = strEnd(); const s = JSON.parse(text.slice(i, end)); i = end; return s; };
+  function skip() {
+    const c = peek();
+    if (c === '"') { i = strEnd(); return { type: 'other' }; }
+    if (c !== '{' && c !== '[') { JSON_SCALAR.lastIndex = i; JSON_SCALAR.test(text); i = JSON_SCALAR.lastIndex; return { type: 'other' }; }
+    for (let depth = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '"') { i = strEnd() - 1; continue; }
+      if (ch === '{' || ch === '[') depth++;
+      else if ((ch === '}' || ch === ']') && --depth === 0) { i++; break; }
     }
-    if (c === '[') {
-      const start = i++; ws();
-      const items = [];
-      if (text[i] === ']') { i++; return { type: 'array', items, start, end: i }; }
-      for (;;) {
-        items.push(value()); ws();
-        if (text[i++] === ']') return { type: 'array', items, start, end: i };
-      }
-    }
-    if (c === '"') return { type: 'string', value: str() };
-    JSON_SCALAR.lastIndex = i; JSON_SCALAR.test(text); i = JSON_SCALAR.lastIndex;
-    return { type: 'scalar' };
+    return { type: 'other' };
   }
-  return value();
+  function object(readValue) {
+    i++;
+    const entries = [];
+    if (peek() === '}') { i++; return { type: 'object', entries }; }
+    for (;;) {
+      ws(); const key = str(); ws(); i++;              // the ':'
+      entries.push([key, readValue(key)]);
+      if (peek() === '}') { i++; return { type: 'object', entries }; }
+      i++;                                             // the ','
+    }
+  }
+  function array(readItem) {
+    const start = i++;
+    const items = [];
+    if (peek() === ']') { i++; return { type: 'array', items, start, end: i }; }
+    for (;;) {
+      items.push(readItem());
+      if (peek() === ']') { i++; return { type: 'array', items, start, end: i }; }
+      i++;                                             // the ','
+    }
+  }
+  const listItem = () => (peek() === '"' ? { type: 'string', value: str() } : skip());
+  const permValue = key => ((key === 'allow' || key === 'deny' || key === 'ask') && peek() === '[' ? array(listItem) : skip());
+  const rootValue = key => (key === 'permissions' && peek() === '{' ? object(permValue) : skip());
+  return peek() === '{' ? object(rootValue) : { type: 'other' };
 }
 
 function readSettings(content) {
   const text = content.replace(/^\uFEFF/, '');
   let root;
-  try { JSON.parse(text); root = readJsonTree(text); } catch { return null; }   // invalid, or too deep
+  try { JSON.parse(text); root = readJsonTree(text); } catch { return null; }   // not valid JSON
   const allow = [];
   const blank = [];
   for (const [key, perms] of root.type === 'object' ? root.entries : []) {

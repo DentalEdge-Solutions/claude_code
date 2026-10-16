@@ -798,6 +798,44 @@ test('U5: a digit glued before a wider sk-ant- form is prose, not a key', () => 
   assert.ok(!checks(r.json).includes('anthropic-api-key'), `got ${checks(r.json).join(', ')}`);
 });
 
+// Independent review round 3 of d2a82b2: W1 (nesting deeper than the recursive reader could follow
+// turned the bare-name check off), W2 (CRLF and tab whitespace untested), W3 (one finding per hit).
+for (const [label, deep] of [
+  ['8,000-deep arrays', '['.repeat(8000) + ']'.repeat(8000)],
+  ['500,000-deep arrays', '['.repeat(500000) + ']'.repeat(500000)],
+  ['200,000-deep objects', '{"a":'.repeat(200000) + '1' + '}'.repeat(200000)],
+]) {
+  test(`W1: ${label} beside the permissions do not switch off the bare-name check`, () => {
+    const r = run([makeDir({ 'settings.json': '{"permissions":{"allow":["Bash"]},"x":' + deep + '}' })]);
+    assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${r.json ? checks(r.json).join(', ') || 'none' : r.stderr.slice(0, 200)}`);
+  });
+}
+
+test('W1: deep nesting inside the allow list does not switch off the bare-name check', () => {
+  const r = run([makeDir({ 'settings.json': '{"permissions":{"allow":[' + '['.repeat(100000) + ']'.repeat(100000) + ',"Bash"]}}' })]);
+  assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${r.json ? checks(r.json).join(', ') || 'none' : r.stderr.slice(0, 200)}`);
+});
+
+test('W1: brackets and escaped quotes inside strings of a skipped value are not counted', () => {
+  const r = run([makeDir({ 'settings.json': '{"x":["]", "\\"]", {"y": "}"}],"permissions":{"allow":["Bash"]}}' })]);
+  assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+for (const [label, text] of [
+  ['CRLF', '{\r\n  "permissions": {\r\n    "allow": [\r\n      "Bash"\r\n    ]\r\n  }\r\n}\r\n'],
+  ['tab', '{\n\t"permissions": {\n\t\t"allow": [\n\t\t\t"Bash"\n\t\t]\n\t}\n}\n'],
+]) {
+  test(`W2: a ${label}-indented settings file is read, so a bare name is caught`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+test('W3: a rule the bare-name check and the text check both see is reported once', () => {
+  const r = settingsScan({ permissions: { allow: ['Bash(*)'] } });
+  assert.strictEqual(r.json.findings.filter(f => f.check === 'perm-bash-wildcard').length, 1, `got ${checks(r.json).join(', ')}`);
+});
+
 test('S4: equal keys in different objects are not duplicates', () => {
   const r = settingsScan({ permissions: { allow: ['Read(./a)'], deny: ['Bash(*)'] }, hooks: { deny: 1, allow: 2 } });
   assert.strictEqual(r.json.verdict, 'PASS', `got ${checks(r.json).join(', ')}`);
