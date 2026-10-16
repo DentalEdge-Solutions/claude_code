@@ -283,6 +283,7 @@ skills/
   reference-repo-add/, reference-repo-audit/, reference-repo-pattern-extract/, gstack-pattern-audit/
                      — register, audit and mine the reference library
 .claude/agents/      — installed runtime sub-agents
+.claude/skills/      — skills for working on this repo only (codex-eval); install.sh does not copy them
 .project-brain/      — this repo's own Second Brain capsule (canon changes only via brain-promote)
 hooks/brain/         — brain hooks, including the blocking brain-security-guard.sh
 templates/           — the second-brain capsule template that install copies

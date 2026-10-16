@@ -1,5 +1,9 @@
 # Hermes H0 — Walking Skeleton Implementation Plan
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a one-shot Node CLI, in Docker, that discovers governed targets, runs a credential-free one through the `claude` CLI headless, gates the result to a durable manifest, and fails closed on anything outside its read-only allow-list.
@@ -8,7 +12,7 @@
 
 **Tech Stack:** Node ≥18 (CommonJS, `'use strict'`), house-style tests (plain `assert`, standalone `node <file>` runner — see `scripts/run-calibration.test.js`), `child_process.spawnSync`, Docker. No new runtime dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-07-20-hermes-h0-walking-skeleton-design.md`
+**Spec:** `docs/superpowers/specs/archive/2026-07-20-hermes-h0-walking-skeleton-design.md`
 
 ## Global Constraints
 

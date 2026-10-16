@@ -1,5 +1,9 @@
 # Hermes H0.5 — Daemon + Scheduler Implementation Plan
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the H0 one-shot CLI into a persistent daemon with a durable SQLite run queue and a cron-like scheduler, without changing the H0 run core.
@@ -11,7 +15,7 @@ where `node:sqlite` is stable rather than experimental. CommonJS, house-style te
 standalone `node <file>` runner — see `scripts/run-calibration.test.js`). No new runtime
 dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-07-20-hermes-h05-daemon-scheduler-design.md` · **Master:** `docs/superpowers/specs/2026-07-20-hermes-master-architecture.md`
+**Spec:** `docs/superpowers/specs/archive/2026-07-20-hermes-h05-daemon-scheduler-design.md` · **Master:** `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md`
 
 ## Global Constraints
 

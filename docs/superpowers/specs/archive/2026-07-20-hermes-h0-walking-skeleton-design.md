@@ -1,5 +1,9 @@
 # Hermes H0 — Walking Skeleton (design spec)
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **Date:** 2026-07-20 · **Status:** design (awaiting implementation plan)
 > **Scope:** the first runnable slice of the Hermes orchestrator. H1–H3 are roadmap only.
 

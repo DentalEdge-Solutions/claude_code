@@ -1,5 +1,9 @@
 # Hermes H2 — Staging Enforcement + Budget Caps Implementation Plan
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **⚠ DEFERRED — Operate track.** Part of the credential-bearing **Hermes Operate track** (built
 > just-in-time with the first operator project), not the kernel v1. Roadmap:
 > `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
@@ -16,7 +20,7 @@
 
 **Tech Stack:** Node ≥22, CommonJS, `node:sqlite`, `node:test`. No new runtime dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-07-20-hermes-h2-staging-budget-design.md` · **Master:** `docs/superpowers/specs/2026-07-20-hermes-master-architecture.md`
+**Spec:** `docs/superpowers/specs/archive/2026-07-20-hermes-h2-staging-budget-design.md` · **Master:** `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md`
 
 ## Global Constraints
 

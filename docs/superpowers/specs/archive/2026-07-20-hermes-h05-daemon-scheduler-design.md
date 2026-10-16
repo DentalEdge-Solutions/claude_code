@@ -1,7 +1,11 @@
 # Hermes H0.5 — Daemon + Scheduler (design spec)
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **Date:** 2026-07-20 · **Status:** design (planning only) · **Depends on:** H0
-> **Master:** `specs/2026-07-20-hermes-master-architecture.md`
+> **Master:** `specs/archive/2026-07-20-hermes-master-architecture.md`
 
 ## Goal
 

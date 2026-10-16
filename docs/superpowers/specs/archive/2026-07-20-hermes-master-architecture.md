@@ -1,5 +1,9 @@
 # Hermes — Master Architecture & Roadmap
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **⚠ REVISED by the definitive roadmap.** This cross-cutting design is reframed into a credential-free
 > **kernel** (build now: K0–K3) and a deferred, multi-tenant **Operate track**; decisions **D12–D15**
 > were added and **D1/D9** revised. The roadmap: `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
@@ -19,13 +23,13 @@ plans stay consistent and DRY. Read this first; then each phase's own spec/plan 
 
 | Doc | Path | Status |
 |---|---|---|
-| Master architecture (this) | `specs/2026-07-20-hermes-master-architecture.md` | — |
-| H0 spec | `specs/2026-07-20-hermes-h0-walking-skeleton-design.md` | written |
-| H0 plan | `plans/2026-07-20-hermes-h0-walking-skeleton.md` | written |
-| H0.5 spec + plan | `specs/2026-07-20-hermes-h05-daemon-scheduler-design.md` · `plans/…-h05-daemon-scheduler.md` | this set |
-| H1 spec + plan | `specs/2026-07-20-hermes-h1-vault-hitl-design.md` · `plans/…-h1-vault-hitl.md` | this set |
-| H2 spec + plan | `specs/2026-07-20-hermes-h2-staging-budget-design.md` · `plans/…-h2-staging-budget.md` | this set |
-| H3 spec + plan | `specs/2026-07-20-hermes-h3-vps-deploy-design.md` · `plans/…-h3-vps-deploy.md` | this set |
+| Master architecture (this) | `specs/archive/2026-07-20-hermes-master-architecture.md` | — |
+| H0 spec | `specs/archive/2026-07-20-hermes-h0-walking-skeleton-design.md` | written |
+| H0 plan | `plans/archive/2026-07-20-hermes-h0-walking-skeleton.md` | written |
+| H0.5 spec + plan | `specs/archive/2026-07-20-hermes-h05-daemon-scheduler-design.md` · `plans/…-h05-daemon-scheduler.md` | this set |
+| H1 spec + plan | `specs/archive/2026-07-20-hermes-h1-vault-hitl-design.md` · `plans/…-h1-vault-hitl.md` | this set |
+| H2 spec + plan | `specs/archive/2026-07-20-hermes-h2-staging-budget-design.md` · `plans/…-h2-staging-budget.md` | this set |
+| H3 spec + plan | `specs/archive/2026-07-20-hermes-h3-vps-deploy-design.md` · `plans/…-h3-vps-deploy.md` | this set |
 
 ## 1. What Hermes is
 

@@ -1,5 +1,9 @@
 # Hermes H3 — VPS Deploy + Real Credentials (design spec)
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **⚠ SPLIT by the definitive roadmap.** The VPS provision/deploy mechanics are the **kernel phase K3**
 > (dummy creds, `ANTHROPIC_API_KEY` only); real credentials + staged rollout + the security-review gate
 > are the deferred **Operate track**. Roadmap: `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
@@ -9,7 +13,7 @@
 > described in `infra/hermes-agent/README.md`.
 
 > **Date:** 2026-07-20 · **Status:** design (planning only) · **Depends on:** H1, H2 (and H0.5 for scheduled runs)
-> **Master:** `specs/2026-07-20-hermes-master-architecture.md`
+> **Master:** `specs/archive/2026-07-20-hermes-master-architecture.md`
 
 The final phase: take the locally-built, security-hardened Hermes and run it on the Hostinger VPS
 with **real, money-spending, client-facing credentials** — but only after a security-review gate.

@@ -1,8 +1,12 @@
 # Hermes H1 — Credential Vault + Human-in-the-Loop (design spec)
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **⚠ DEFERRED — Operate track.** Per the definitive roadmap
-> (`.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
-> the session plan it cites was a machine-local file, never in the repo)), this phase is part of
+> (`.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md`;
+> itself superseded, and the session plan it cites was a machine-local file, never in the repo), this phase is part of
 > the credential-bearing **Hermes Operate track**, built just-in-time with the first spawned operator
 > project — **not** part of the credential-free kernel v1. Review findings A–R are tracked in the
 > roadmap and folded in when this track is built.
@@ -11,7 +15,7 @@
 > described in `infra/hermes-agent/README.md`.
 
 > **Date:** 2026-07-20 · **Status:** design (planning only) · **Depends on:** H0, H0.5
-> **Master:** `specs/2026-07-20-hermes-master-architecture.md`
+> **Master:** `specs/archive/2026-07-20-hermes-master-architecture.md`
 
 This is the "real engineering" the Eve adoption decision named: *"the folder pattern is easy; secure
 self-hosted code execution is the hard part."* H1 makes Hermes able to hold secrets safely and to

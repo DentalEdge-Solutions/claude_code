@@ -1,5 +1,9 @@
 # Hermes H3 — VPS Deploy + Real Credentials Implementation Plan
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **⚠ SPLIT by the definitive roadmap.** VPS provision/deploy = **kernel K3** (dummy creds only); real
 > credentials + staged rollout + security-review gate = deferred **Operate track**. Roadmap:
 > `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
@@ -16,7 +20,7 @@
 
 **Tech Stack:** Bash provisioning on Ubuntu, Docker + compose (from H0/H0.5), SSH-key access. Node ≥22 already in the image.
 
-**Spec:** `docs/superpowers/specs/2026-07-20-hermes-h3-vps-deploy-design.md` · **Master:** `docs/superpowers/specs/2026-07-20-hermes-master-architecture.md`
+**Spec:** `docs/superpowers/specs/archive/2026-07-20-hermes-h3-vps-deploy-design.md` · **Master:** `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md`
 
 ## Global Constraints
 
