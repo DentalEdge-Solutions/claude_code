@@ -55,8 +55,28 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        it (`sudo`, `busybox`, `ssh`, `xargs`, `bash -c`, a here-string, a git alias, `… | sh`).
        That includes one glued to a short option, read as the shell joins quotes (`-Orm`,
        `-O"r"m`);
-       `find … -delete`; `git rm`; `git clean` (but not a `-n` dry run); `fs.rmSync`,
-       `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
+       `find … -delete`; `git rm`; `git clean`, also behind a wrapper that runs it (`env`,
+       `command`, `nice`, `sudo`, `xargs`), nested in a git executor
+       (`git rebase -x "git clean …"`), or through `-c` (an alias, or a program such as
+       `core.editor`); a git subcommand spelled with `$`, a glob or a backtick
+       (`git $'cl\x65an'`); `fs.rmSync`, `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
+     - **A `git clean` dry run** is allowed only in a plain form, not by parsing git's options
+       (that was bypassed with quoting, `-e` values, `--` and `--end-of-options`): `git` as
+       the command (a leading `time` is fine), optionally `-C <dir>`, then `clean`, then only `-[dfnqxX]…`, `--dry-run`,
+       `--quiet`, `--force` and plain paths, with an `n` before any `--`, and no quote,
+       escape, variable, glob, redirect, comment or `=` in the stage. So `git clean -nd -- <path>`
+       passes, while `git clean -n -e foo …`, `env git clean -n …` or
+       `git clean -n … 2>/dev/null` are conservatively denied. So is any `git -c …` stage
+       containing the word `clean` (`git -c color.ui=never log --grep clean …`): a `-c`
+       value can run a program, so the guard does not try to tell them apart.
+     - **The git subcommand** is found from shell-split words after skipping git's global
+       options together with the value of those that take one (`-C`, `-c`, `--git-dir`,
+       `--work-tree`, `--namespace`, `--config-env`, `--attr-source`, `--shallow-file`; git
+       2.54), so in `git --namespace "x log" rebase -x …` the subcommand is `rebase`. The
+       words are read from the command word itself, never from an earlier `2>./git` or
+       `A=./git`. An
+       unrecognized global option, or a variable, glob or backtick before the subcommand,
+       ends the reader exemption.
      - **The one exemption:** a pipeline stage whose command never runs its arguments:
        `grep`, `cat`, `ls`, `echo`, `head`, `wc`, `find` without `-exec`, `git add` /
        `commit` / `log` / `diff` / `show` / `grep` and similar readers. Pagers (`less`, `more`,
@@ -88,7 +108,12 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        `cd /tmp` on its own still ends the inside-capsule state.
      - **Splitting follows the shell:** only `;`, `&`, `&&`, `||`, `|` and newlines outside
        quotes separate commands. A leading redirection (`>/dev/null rm …`) is skipped when
-       finding the command word.
+       finding the command word. Line continuations are joined first, as bash does, so
+       `r\⏎m` is `rm` for every rule, the floor included. Quotes are tracked as bash does:
+       the pair is kept inside single quotes and inside a `#` comment (where the newline still
+       ends the comment). A kept pair in a command that names the capsule is **denied
+       outright**, because where the guard reads quotes differently from bash (a heredoc body,
+       `$'\''`) it cannot know how the shell splits the command. Put such commands on one line.
      - **Superset-of-`main` floor:** the stage analysis above is parser-dependent, so as a
        floor the guard also keeps `main`'s blunt rule — any `rm` word followed by
        `.project-brain` within one `;`/`|`/`&`-free segment is a delete. This floor runs on the
@@ -114,14 +139,18 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
    - The hook input reaches node on stdin, not through an environment variable: a large
      Write used to exceed the exec size limit and slip through unchecked.
    - Every pattern is linear-time and tested on 512 KB to 1 MB commands. A PreToolUse hook
-     that times out does not block the call, so a slow regex would be a bypass.
+     that times out (default 600 s) does not block the call, so a slow regex would be a
+     bypass. The 2026-10-16 re-review found one the P11 sweep missed (the `git clean`
+     dry-run check, reached only after a `clean` subcommand): a timing input must actually
+     reach the pattern it targets.
 
    The guard is **defense-in-depth**: `brain-promote --approve` + git history are the
    real boundary. It errs toward denial — a read command mentioning `canon/` alongside a
    redirect/`node -e` can be a conservative false-positive. So can any program not on the
    reader list that carries the word `rm` next to a capsule path (`xargs grep rm …`,
    `sh -c "grep unlink …"`, `git rm --cached …`); split such commands. Known limits: it does
-   not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob
+   not follow shell variables (`D=.project-brain; rm -rf "$D"`), commands built at run time
+   (`$(printf …)`, a decoded string, a script an executor runs), loops over a capsule glob
    (`for f in .project-brain/*; do rm "$f"; done`), or globs that could expand to the
    capsule (`rm -rf .p*`). It does not treat moving or overwriting as deleting (`mv` of the
    capsule, `rsync --delete`, `cp -r` over it, `truncate`, `: >`). Code that deletes through

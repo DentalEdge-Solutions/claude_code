@@ -12,6 +12,8 @@ import os
 import subprocess
 import sys
 
+import changeset_lib
+
 ANALYSES = [
     ("analyze-architecture", "architect"),
     ("analyze-tests", "test-analyst"),
@@ -23,6 +25,8 @@ DEFAULT_REGISTRY = "/opt/registry/projects.yaml"
 
 
 def registry_path():
+    if os.environ.get("REVIEW_BOARD_REGISTRY"):
+        return os.environ["REVIEW_BOARD_REGISTRY"]
     if os.path.exists(DEFAULT_REGISTRY):
         return DEFAULT_REGISTRY
     here = os.path.dirname(os.path.abspath(__file__))
@@ -30,19 +34,16 @@ def registry_path():
 
 
 def resolve_workdir(project):
+    # The tier's one registry walker (P7): it skips comment lines, strips inline comments
+    # and refuses a duplicate workdir key. There is no stdlib YAML parser, and a private
+    # copy here had drifted from it.
     path = registry_path()
-    current = None
     try:
-        with open(path, encoding="utf-8") as f:
-            for raw in f:
-                line = raw.rstrip()
-                if line.startswith("  ") and not line.startswith("    ") and line.endswith(":"):
-                    current = line.strip()[:-1]
-                elif current == project and line.startswith("    workdir:"):
-                    return line.split(":", 1)[1].strip()
-    except OSError as e:
+        return changeset_lib.read_workdir(path, project)
+    except (OSError, UnicodeDecodeError) as e:   # UnicodeDecodeError is a ValueError: catch it first
         raise SystemExit(f"project registry unreadable: {path}: {e}")
-    raise SystemExit(f"project not registered: {project}")
+    except ValueError as e:
+        raise SystemExit(f"project not registered or ambiguous: {project}: {e}")
 
 
 def kanban_db():
