@@ -186,6 +186,22 @@ try {
     'rg rm .project-brain',
     // a quoted word that merely ends in "rm" is not a glued -Orm option (differential finding)
     "env -S'farm .project-brain'",
+    // P11 re-review RR1/RR2: a global option's value is skipped, so the real subcommand is seen
+    'git --work-tree . grep -n rm -- .project-brain',
+    'git --no-pager grep -n rm -- .project-brain',
+    // a real dry run of git clean stays allowed, wherever the -n sits
+    'git clean -nd .project-brain',
+    'git clean --dry-run -d .project-brain',
+    'git clean -fd .project-brain -n',
+    'git clean -nd -- .project-brain',
+    // a clean word that is not git clean (a message, a search pattern) is not a delete
+    'git commit -m "clean up .project-brain notes"',
+    'git log --grep clean -- .project-brain',
+    'grep "git clean" .project-brain/log.md',
+    // a line continuation in an ordinary command still passes
+    'git add .project-brain/decisions/a.md \\\n  .project-brain/index.md',
+    'grep -rn "rm -rf" \\\n  .project-brain/decisions',
+    'echo "a # b" \\\n  && ls .project-brain',
   ]) {
     r = denyBash(cmd);
     assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
@@ -325,6 +341,85 @@ try {
     "git grep -O'rm' x -- .project-brain",
     'git grep -O\\rm x -- .project-brain',
     'x=-O"r"m git grep $x x -- .project-brain',
+    // P11 re-review RR1: the value of a git global option is not the subcommand. Here "log" is
+    // the namespace (or work tree, ...) and the real subcommand runs rm through a shell.
+    'git --namespace log rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --git-dir=.git --work-tree log rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --attr-source show submodule foreach "rm -rf .project-brain"',
+    'git --shallow-file log bisect run rm -rf .project-brain',
+    // P11 re-review RR2: git clean deletes unless a dry run is really in effect. -e takes the
+    // rest of its word or the next word, -- ends the options, and a later --no-dry-run wins.
+    'git clean -f -en .project-brain',
+    'git clean -f -e -n .project-brain',
+    'git clean -fe n .project-brain',
+    'git clean -f -- -n .project-brain',
+    'git clean -f --exc -n .project-brain',
+    'git clean -n --no-dry-run -f .project-brain',
+    'git clean -n -fd --no-d .project-brain',
+    'git --work-tree .project-brain clean -fd',
+    'git --namespace x clean -fd .project-brain',
+    'git -C -n clean -fd .project-brain',
+    // re-review round 2 (V1): an option value with a space is one shell word, so "log" in
+    // "x log" is not the subcommand; a variable value may split, so it ends the exemption
+    'git --namespace "x log" rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --namespace x\\ log rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --namespace $V rebase -x "rm -rf .project-brain" HEAD~1',
+    // V2/V3: a dry run is recognized only in a plain grammar (no quotes, escapes, redirects,
+    // -e, --, --end-of-options); anything else counts as a delete
+    'git clean -fd .project-brain "x -n"',
+    'git clean -fd .project-brain x\\ -n',
+    'git clean -f -e "x -n" .project-brain',
+    'git clean -fd .project-brain > -n',
+    'git clean -fd .project-brain <<< -n',
+    'cd .project-brain && git clean -fdx . "a -n"',
+    'git clean -fd --end-of-options .project-brain -n',
+    'git clean -fd --end-of-options x -n .project-brain',
+    'git clean -n -e foo .project-brain',
+    // V4: git clean behind a wrapper, xargs or an alias
+    'env git clean -fd .project-brain',
+    'command git clean -fd .project-brain',
+    'nice git clean -fd .project-brain',
+    'echo .project-brain | xargs git clean -fd',
+    'git -c alias.x=clean x -fd .project-brain',
+    // review round 2 (W1): git words are read from the command word, not from the first word
+    // that merely ends in /git (a redirect target or an assignment)
+    '2>./git git clean -fd .project-brain',
+    'A=./git git clean -fd .project-brain',
+    '</usr/bin/git git clean -fd .project-brain',
+    'A=./git git -c alias.x=clean x -fd .project-brain',
+    // W2: a subcommand spelled with $, quoting or a glob is unknown, so it counts as a delete
+    "git $'cl\\x65an' -fd .project-brain",
+    "git cl$'e'an -fd .project-brain",
+    // X1: an executor running a nested git clean
+    'git rebase -x "git clean -fd .project-brain" HEAD~1',
+    // W3: bash removes backslash-newline, so these are rm and clean; inside a # comment the
+    // newline still ends the comment, so the next line is a command of its own
+    'r\\\nm -rf .project-brain',
+    'git cl\\\nean -fd .project-brain',
+    "echo 'a\\\nb' ; r\\\nm -rf .project-brain",
+    'cd .project-brain\nls # note \\\nrm -rf decisions',
+    'cd .project-brain && ls # x \\\nrm decisions',
+    // W3 follow-up: a # inside quotes is not a comment, so the continuation still joins
+    'echo " #"; r\\\nm -rf .project-brain',
+    "echo ' #'; r\\\nm -rf .project-brain",
+    'cd .project-brain; echo " #" && r\\\nm -rf decisions',
+    'echo "a\\\n#" ; r\\\nm -rf .project-brain',
+    'git log --grep " #"; git cl\\\nean -fd .project-brain',
+    // fail-closed: a continuation kept (single quotes, comment, or a quoting the guard misreads)
+    // with a deleter after it, in a command that names the capsule
+    "echo $'a\\'b #' ; r\\\nm -rf .project-brain",
+    // review X2: the kept-continuation check was a word list; a glued -O option or an
+    // ANSI-C subcommand slipped past it. A kept continuation in a command naming the capsule
+    // now denies outright.
+    "cat <<EOF\nit's\nEOF\ngit grep --untracked -Or\\\nm x -- .project-brain",
+    "echo $'\\' #' ; git grep --untracked -Or\\\nm x -- .project-brain",
+    "cat <<EOF\nit's\nEOF\ngit $'cl\\x65an' -fd \\\n.project-brain",
+    "echo $'\\' #' ; git $'cl\\x65an' -fd \\\n.project-brain",
+    // review X3: the kept pair can split the capsule name itself, so the capsule is looked
+    // for in the fully joined text
+    "cat <<EOF\nit's\nEOF\nrm -rf .project-\\\nbrain",
+    "echo $'\\' #' ; rm -rf .project-\\\nbrain",
+    "cat <<EOF\nit's\nEOF\ncd .project-\\\nbrain && rm -rf decisions",
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }
@@ -357,6 +452,12 @@ try {
     ['digits', '.project-brain/canon ' + '1'.repeat(K)],
     ['many sed', '.project-brain/canon ' + 'sed '.repeat(K / 4)],
     ['many brain-promote', '.project-brain/canon > x ' + 'brain-promote '.repeat(K / 14)],
+    // P11 re-review RR3: the git clean dry-run check was /^-[A-Za-z]*n[A-Za-z]*$/, quadratic
+    ['git clean option', 'git clean -' + 'n'.repeat(K) + '1 .project-brain'],
+    ['many git options', 'git ' + '--bare '.repeat(K / 7) + 'clean .project-brain'],
+    // joinLines once read the last character of the string it was building, which flattened it
+    // on every # (4 s at 512 KB, 16 s at 1 MB)
+    ['comments and continuations', 'ls # x ' + '\\\n#'.repeat(K / 3) + ' .project-brain'],
   ]) {
     const t0 = Date.now();
     denyBash(cmd);
