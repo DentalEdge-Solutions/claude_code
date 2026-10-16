@@ -143,27 +143,56 @@ if (tool === "Bash") {
     }
     return { cmd: prog((ws[i] || "").replace(/^[({!]+/, "")), rest: ws.slice(i + 1), env };
   };
+  // Global options that take the next word as their value (git 2.54). That value must never be
+  // read as the subcommand: in "git --namespace log rebase -x …" the subcommand is rebase.
+  const GIT_ARG_OPT = /^(-C|-c|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--shallow-file)$/;
+  const GIT_FLAG_OPT = /^(-p|-P|--paginate|--no-pager|--bare|--no-replace-objects|--(literal|glob|noglob|icase)-pathspecs|--no-optional-locks|--no-lazy-fetch|--no-advice|--(git-dir|work-tree|namespace|attr-source)=.*)$/;
+  // config is true when an option can make git run a program (-c, --config-env, --exec-path) or
+  // is not recognized (its value could pose as the subcommand); either ends the exemption.
   const gitSub = (rest) => {
     let i = 0, config = false;
     while (i < rest.length && rest[i].startsWith("-")) {
-      if (/^(-c|--config-env|--exec-path)/.test(rest[i])) config = true;
-      i += /^-(C|c)$/.test(rest[i]) ? 2 : 1;
+      const t = rest[i];
+      if (/^(-c|--config-env|--exec-path)/.test(t) || !(GIT_ARG_OPT.test(t) || GIT_FLAG_OPT.test(t))) config = true;
+      i += GIT_ARG_OPT.test(t) ? 2 : 1;
     }
-    return { sub: rest[i] || "", config };
+    return { sub: rest[i] || "", at: i, config };
   };
   // find is a reader unless it runs something (-exec family); -delete is checked separately.
   const nonExec = (h) => !h.env && !h.rest.some((t) => EXEC_OPT.test(t)) && (NON_EXEC.has(h.cmd)
     || (h.cmd === "find" && !h.rest.some((t) => /^-(exec|execdir|ok|okdir)$/.test(t)))
     || (h.cmd === "git" && ((g) => !g.config && GIT_NON_EXEC.has(g.sub))(gitSub(h.rest))));
-  // git clean with -n / --dry-run only lists what it would remove.
-  const gitCleanDryRun = (rest) => rest.some((t) => t === "--dry-run" || /^-[A-Za-z]*n[A-Za-z]*$/.test(t));
+  // git clean with -n / --dry-run only lists what it would remove. Parsed as git does, over the
+  // words after "clean": the last of -n / --dry-run / --no-dry-run wins; -e takes the rest of its
+  // word or the next word, and so does --exclude (abbreviable); -- ends the options. Abbreviations
+  // of --dry-run do not count as a dry run (a conservative denial). One linear pass.
+  const gitCleanDryRun = (args) => {
+    let dry = false;
+    for (let i = 0; i < args.length; i++) {
+      const t = args[i];
+      if (t === "--") break;
+      if (t === "--dry-run") dry = true;
+      else if (t.startsWith("--no-")) dry = false;
+      else if (t.startsWith("--")) { if (t.startsWith("--e") && !t.includes("=")) i++; }
+      else if (t.length > 1 && t[0] === "-") {
+        for (let k = 1; k < t.length; k++) {
+          if (t[k] === "n") dry = true;
+          else if (t[k] === "e") { if (k === t.length - 1) i++; break; }
+        }
+      }
+    }
+    return dry;
+  };
   const stageDeletes = (stage, h, exempt) => {
     const w = words(stage);
     // find -delete: when find is the command, or anywhere in a stage that runs commands.
     if ((h.cmd === "find" || !exempt) && w.some((t) => prog(t) === "find") && w.includes("-delete")) return true;
     if (h.cmd === "git") {
-      const sub = gitSub(h.rest).sub;
-      if (sub === "rm" || (sub === "clean" && !gitCleanDryRun(h.rest))) return true;
+      const g = gitSub(h.rest);
+      if (g.sub === "rm") return true;
+      // A clean word anywhere counts when the subcommand is not found (an unrecognized option).
+      const c = g.sub === "clean" ? g.at : h.rest.indexOf("clean");
+      if (c >= 0 && !gitCleanDryRun(h.rest.slice(c + 1))) return true;
     }
     // A deleter glued to a short option ("git grep -Orm", -O"r"m) counts too. Checked on
     // shell words, so env -S\x27farm .project-brain\x27 is the one word "-Sfarm .project-brain".

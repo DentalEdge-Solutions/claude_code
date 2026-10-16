@@ -55,8 +55,16 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        it (`sudo`, `busybox`, `ssh`, `xargs`, `bash -c`, a here-string, a git alias, `… | sh`).
        That includes one glued to a short option, read as the shell joins quotes (`-Orm`,
        `-O"r"m`);
-       `find … -delete`; `git rm`; `git clean` (but not a `-n` dry run); `fs.rmSync`,
-       `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
+       `find … -delete`; `git rm`; `git clean` (but not a real dry run: `-n` / `--dry-run`,
+       parsed as git does, so `-e` takes its value (`-en` is not `-n`), `--` ends the options,
+       and a later `--no-dry-run` wins; abbreviations of `--dry-run` are conservatively
+       denied); `fs.rmSync`, `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
+     - **The git subcommand** is found after skipping git's global options together with the
+       value of those that take one (`-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`,
+       `--config-env`, `--attr-source`, `--shallow-file`; git 2.54), so in
+       `git --namespace log rebase -x …` the subcommand is `rebase`, not `log`. An
+       unrecognized global option ends the reader exemption, and a `clean` word anywhere after
+       `git` counts when the subcommand cannot be found.
      - **The one exemption:** a pipeline stage whose command never runs its arguments:
        `grep`, `cat`, `ls`, `echo`, `head`, `wc`, `find` without `-exec`, `git add` /
        `commit` / `log` / `diff` / `show` / `grep` and similar readers. Pagers (`less`, `more`,
@@ -114,7 +122,10 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
    - The hook input reaches node on stdin, not through an environment variable: a large
      Write used to exceed the exec size limit and slip through unchecked.
    - Every pattern is linear-time and tested on 512 KB to 1 MB commands. A PreToolUse hook
-     that times out does not block the call, so a slow regex would be a bypass.
+     that times out (default 600 s) does not block the call, so a slow regex would be a
+     bypass. The 2026-10-16 re-review found one the P11 sweep missed (the `git clean`
+     dry-run check, reached only after a `clean` subcommand): a timing input must actually
+     reach the pattern it targets.
 
    The guard is **defense-in-depth**: `brain-promote --approve` + git history are the
    real boundary. It errs toward denial — a read command mentioning `canon/` alongside a

@@ -186,6 +186,14 @@ try {
     'rg rm .project-brain',
     // a quoted word that merely ends in "rm" is not a glued -Orm option (differential finding)
     "env -S'farm .project-brain'",
+    // P11 re-review RR1/RR2: a global option's value is skipped, so the real subcommand is seen
+    'git --work-tree . grep -n rm -- .project-brain',
+    'git --no-pager grep -n rm -- .project-brain',
+    // a real dry run of git clean stays allowed, wherever the -n sits
+    'git clean -nd .project-brain',
+    'git clean --dry-run -d .project-brain',
+    'git clean -n -e foo .project-brain',
+    'git clean -fd .project-brain -n',
   ]) {
     r = denyBash(cmd);
     assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
@@ -325,6 +333,24 @@ try {
     "git grep -O'rm' x -- .project-brain",
     'git grep -O\\rm x -- .project-brain',
     'x=-O"r"m git grep $x x -- .project-brain',
+    // P11 re-review RR1: the value of a git global option is not the subcommand. Here "log" is
+    // the namespace (or work tree, ...) and the real subcommand runs rm through a shell.
+    'git --namespace log rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --git-dir=.git --work-tree log rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --attr-source show submodule foreach "rm -rf .project-brain"',
+    'git --shallow-file log bisect run rm -rf .project-brain',
+    // P11 re-review RR2: git clean deletes unless a dry run is really in effect. -e takes the
+    // rest of its word or the next word, -- ends the options, and a later --no-dry-run wins.
+    'git clean -f -en .project-brain',
+    'git clean -f -e -n .project-brain',
+    'git clean -fe n .project-brain',
+    'git clean -f -- -n .project-brain',
+    'git clean -f --exc -n .project-brain',
+    'git clean -n --no-dry-run -f .project-brain',
+    'git clean -n -fd --no-d .project-brain',
+    'git --work-tree .project-brain clean -fd',
+    'git --namespace x clean -fd .project-brain',
+    'git -C -n clean -fd .project-brain',
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }
@@ -357,6 +383,9 @@ try {
     ['digits', '.project-brain/canon ' + '1'.repeat(K)],
     ['many sed', '.project-brain/canon ' + 'sed '.repeat(K / 4)],
     ['many brain-promote', '.project-brain/canon > x ' + 'brain-promote '.repeat(K / 14)],
+    // P11 re-review RR3: the git clean dry-run check was /^-[A-Za-z]*n[A-Za-z]*$/, quadratic
+    ['git clean option', 'git clean -' + 'n'.repeat(K) + '1 .project-brain'],
+    ['many git options', 'git ' + '--bare '.repeat(K / 7) + 'clean .project-brain'],
   ]) {
     const t0 = Date.now();
     denyBash(cmd);
