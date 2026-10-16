@@ -262,6 +262,47 @@ try {
     // a reader loses its exemption when it carries a command substitution
     'echo "$(rm -rf .project-brain)"',
     'cat <(rm -rf .project-brain)',
+    // inside the capsule, an rm NOT adjacent to .project-brain (floor does not fire) that still
+    // reaches a shell or runs via substitution — the downstream-stage and !SUBST exemption checks
+    'cd .project-brain; echo rm -rf decisions | sh',
+    'cd .project-brain; echo rm -rf decisions | bash',
+    'cd .project-brain; echo "$(rm -rf decisions)"',
+    'cd .project-brain; cat <(rm -rf decisions)',
+    // round 3: parser desync — a quote in a comment, ANSI-C quoting, a heredoc body
+    "echo hi # it's\nrm -rf .project-brain",
+    "ls # don't\nrm -rf .project-brain",
+    "echo $'\\'' ; rm -rf .project-brain ; echo ''",
+    "cat <<'EOF'\necho it's\nEOF\nrm -rf .project-brain",
+    'bash <<EOF\nrm -rf .project-brain\nEOF',
+    // round 3: write a delete script then run it (main denies the adjacency)
+    'echo rm -rf .project-brain > /tmp/x.sh && sh /tmp/x.sh',
+    'echo rm -rf .project-brain | tee /tmp/x.sh; sh /tmp/x.sh',
+    'printf "rm -rf .project-brain" >> /tmp/x.sh',
+    // round 3: a cd that does NOT change the parent shell's directory, then a delete
+    'cd .project-brain; (cd /tmp); rm -rf decisions',
+    'cd .project-brain; cd /tmp | cat; rm -rf decisions',
+    'cd .project-brain; cd /tmp & rm -rf decisions',
+    // round 3 (security review): a brace group { ...; } runs in the CURRENT shell, so its cd
+    // DOES move the parent directory — a later relative delete then hits the capsule
+    'cd /tmp; { cd .project-brain; }; rm -rf decisions',
+    '{ cd .project-brain; rm -rf decisions; }',
+    // round 3 (security review 2): a brace group inside a pipeline or background runs in a
+    // SUBSHELL, so its cd out does NOT move the parent — the parent stays in the capsule and the
+    // relative delete hits it. Leaving the capsule is honored only from a plain standalone cd, so
+    // these stay denied (the standalone-brace case is a documented conservative denial too).
+    'cd .project-brain; { cd /tmp; } | cat; rm -rf decisions',
+    'cd .project-brain; { cd /tmp; } & rm -rf decisions',
+    'cd .project-brain; { cd /tmp; }; rm -rf decisions',
+    // round 3 (security review 3-5): a cd can run inside a group that does not move the parent
+    // (a subshell, or a brace group that is piped/backgrounded), including when it is not the first
+    // statement in the group. Rather than parse nesting (fragile, repeatedly bypassed), any grouping
+    // construct anywhere on the line — ( ), { }, or a case statement — makes a capsule-LEAVING cd
+    // non-plain, so it is not honored. These stay denied; a line that leaves the capsule next to a
+    // harmless ( ) is a documented conservative denial.
+    'cd .project-brain; { true; cd /tmp; } | cat; rm -rf decisions',
+    'cd .project-brain; { true; cd /tmp; } & rm -rf decisions',
+    'cd .project-brain; (true; cd /tmp); rm -rf decisions',
+    'cd .project-brain; (ls); cd /tmp; rm -rf build',
     // readers that can run a command through an option or an environment variable
     'rg --pre rm x .project-brain',
     'rg --pre=rm x .project-brain',

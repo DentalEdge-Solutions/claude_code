@@ -189,46 +189,66 @@ if (tool === "Bash") {
   };
   // Split like the shell: ; & && || | |& and newline separate only outside quotes; a
   // backslash escapes the next character; \<newline> joins lines; &> >& <& are redirects.
+  // Returns one entry per pipeline: { stages, bg }. bg marks a pipeline ended by a single
+  // & (run in the background, i.e. in a subshell that cannot change the parent directory).
   const splitShell = (s) => {
     const pipelines = [];
     let stages = [], cur = "", q = "";
     const endStage = () => { stages.push(cur); cur = ""; };
-    const endPipeline = () => { endStage(); pipelines.push(stages); stages = []; };
+    const endPipeline = (bg) => { endStage(); pipelines.push({ stages, bg: !!bg }); stages = []; };
     for (let i = 0; i < s.length; i++) {
       const c = s[i];
       if (q === "\x27") { if (c === "\x27") q = ""; cur += c; continue; }
       if (c === "\\") { if (s[i + 1] === "\n") cur += " "; else cur += c + (s[i + 1] || ""); i++; continue; }
       if (q === "\"") { if (c === "\"") q = ""; cur += c; continue; }
       if (c === "\x27" || c === "\"") { q = c; cur += c; continue; }
-      if (c === ";" || c === "\n") { endPipeline(); continue; }
+      if (c === ";" || c === "\n") { endPipeline(false); continue; }
       if (c === "&") {
-        if (s[i + 1] === "&") { i++; endPipeline(); continue; }
+        if (s[i + 1] === "&") { i++; endPipeline(false); continue; }
         if (s[i + 1] === ">" || s[i - 1] === ">" || s[i - 1] === "<") { cur += c; continue; }
-        endPipeline(); continue;
+        endPipeline(true); continue;
       }
       if (c === "|") {
-        if (s[i + 1] === "|") { i++; endPipeline(); continue; }
+        if (s[i + 1] === "|") { i++; endPipeline(false); continue; }
         if (s[i + 1] === "&") i++;
         endStage(); continue;
       }
       cur += c;
     }
-    endPipeline();
+    endPipeline(false);
     return pipelines;
   };
   const SUBST = /\$\(|`|[<>]\(/;
   let depth = -1;
   const dirStack = [];
-  for (const stages of splitShell(cmd)) {
+  // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd
+  // in a context that does not move the parent shell (a subshell), or hide a cd that is not the
+  // first word of a group that is itself piped/backgrounded. Rather than parse nesting (fragile and
+  // repeatedly bypassed), a command line that contains ANY of these is treated as non-plain, so a
+  // capsule-LEAVING cd in it is never honored.
+  const hasGrouping = /[(){}]/.test(cmd) || /\bcase\b/.test(cmd);
+  for (const { stages, bg } of splitShell(cmd)) {
     const heads = stages.map(head);
-    for (const [k, h] of heads.entries()) {
+    // Directory tracking is fail-closed and direction-aware. A move that ENTERS or stays in the
+    // capsule (new depth >= 0) is always honored — erring toward a deny is safe. A move that LEAVES
+    // the capsule (new depth < 0) is honored only from a plain standalone foreground command: one
+    // stage, not backgrounded, and with no grouping construct anywhere on the line (see hasGrouping).
+    // So a cd hidden in a subshell, brace group, case, pipeline or the background can never make a
+    // later relative delete look safe; the cost is a conservative deny of some exotic "leave the
+    // capsule inside a group" forms. popd/pushd are honored only when plain.
+    const h0 = heads[0];
+    if (h0.cmd === "cd" || h0.cmd === "pushd" || h0.cmd === "popd") {
+      const plain = stages.length === 1 && !bg && !hasGrouping;
       // When the stage names the capsule ("cd \"$(git rev-parse …)/.project-brain\""),
       // take the target from the capsule name on; otherwise the first non-option word.
-      const named = unquote(stages[k]).match(/\.project-brain\S*/);
-      const target = named ? named[0] : h.rest.find((t) => !t.startsWith("-"));
-      if (h.cmd === "cd") depth = cdDepth(target, depth);
-      else if (h.cmd === "pushd") { dirStack.push(depth); depth = cdDepth(target, depth); }
-      else if (h.cmd === "popd" && dirStack.length) depth = dirStack.pop();
+      const named = unquote(stages[0]).match(/\.project-brain\S*/);
+      const target = named ? named[0] : h0.rest.find((t) => !t.startsWith("-"));
+      if (h0.cmd === "popd") { if (plain && dirStack.length) depth = dirStack.pop(); }
+      else {
+        if (h0.cmd === "pushd" && plain) dirStack.push(depth);
+        const nd = cdDepth(target, depth);
+        if (nd >= 0 || plain) depth = nd;
+      }
     }
     if (depth < 0 && !stages.some((s) => CAPSULE.test(s))) continue;
     // Walk back from the last stage: a stage keeps its exemption only if every later
@@ -240,6 +260,42 @@ if (tool === "Bash") {
         deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
       downstreamNonExec = downstreamNonExec && ne;
     }
+  }
+
+  // ── superset-of-main floor ───────────────────────────────────────────────────
+  // main denies any rm word followed by .project-brain inside one ;|&-free segment, with a
+  // blunt regex that does not depend on how the command is parsed. Keep it as a hard floor so
+  // this guard never allows a capsule delete that main would block, even when a quirk of shell
+  // parsing (a quote in a comment, ANSI-C quoting, a heredoc body) would otherwise hide the rm.
+  // The one exemption: a single foreground pipeline whose every stage is a pure reader (grep,
+  // cat, git add/commit/log, find without -exec, ...), with no command or process substitution,
+  // none of those parser-desyncing constructs, no background, and no file-writing redirect.
+  // There an rm can only be a literal argument, so "grep rm <capsule path>" and a git add of a
+  // path whose name contains rm stay allowed, while store-then-run forms stay denied.
+  // Gate the whole floor on the match first: the test is linear and skips the heavier
+  // exemption check (which re-parses the command) for any input that cannot be a delete.
+  // No leading \d* in the fd-merge scrub — it made the replace quadratic on long digit runs.
+  // Linear form of main\x27s /\brm\b[^|;&]*\.project-brain/. That regex is O(n^2): on input
+  // padded with many "rm" words the [^|;&]* backtracks from every rm, ~195 s on 1 MB, and a
+  // PreToolUse hook that times out does NOT block the call — so it was a bypass. Split on the
+  // shell separators first (linear), then in each segment look for an rm word that starts before
+  // a .project-brain mention. search(\brm\b) and lastIndexOf are each linear, so the whole check
+  // is O(n). Semantics match main: an rm word followed later by .project-brain in one segment.
+  const mainDelete = cmd.split(/[|;&]/).some((seg) => {
+    const bi = seg.lastIndexOf(".project-brain");
+    if (bi < 0) return false;
+    const ri = seg.search(/\brm\b/);
+    return ri >= 0 && ri < bi;
+  });
+  if (mainDelete) {
+    const WEIRD = /\$\x27|#|<<|\$\(|`|<\(|>\(/;
+    const scrubRedir = cmd.replace(/&>\s*\/dev\/null/g, " ")
+      .replace(/>\s*\/dev\/null/g, " ").replace(/>&\d+/g, " ");
+    const floorPls = splitShell(cmd);
+    const tinyExempt = floorPls.length === 1 && !floorPls[0].bg && !WEIRD.test(cmd)
+      && !/>/.test(scrubRedir) && floorPls[0].stages.every((stg) => nonExec(head(stg)));
+    if (!tinyExempt)
+      deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
   }
 
   // Reference sources are documentation only — block direct installs into the skills dir.

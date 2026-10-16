@@ -73,10 +73,32 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
      - **When the capsule is the target:** `.project-brain` is named in the same pipeline,
        including inside `"${CLAUDE_PROJECT_DIR}/…"`, `$(pwd)/…` or `{…,…}`. Or the shell is
        inside the capsule after a `cd`/`pushd`. The guard tracks `cd`, `pushd` and `popd`,
-       so `cd ..` or `cd /tmp` back out of the capsule ends that state.
+       **direction-aware and fail-closed:** a move that *enters or stays in* the capsule is
+       always recorded (erring toward a deny is safe), while a move that *leaves* the capsule
+       is recorded only from a plain standalone foreground command — one stage, not in the
+       background, and with **no grouping construct anywhere on the line**: no `( )`, no `{ }`,
+       and no `case`. Rather than parse group nesting (which proved fragile and was repeatedly
+       bypassed), the guard treats the presence of any of those as enough to withhold the
+       leave, because a `cd` can run in a subshell, or in a brace group that is itself
+       piped/backgrounded, without moving the parent shell. So a `cd` hidden in a group can
+       never make a later relative delete look safe. The cost is a conservative deny of some
+       exotic "leave the capsule on a line that also contains a group" forms (e.g.
+       `cd .project-brain; { cd /tmp; }; rm -rf decisions`, which in a real shell targets
+       `/tmp`, or `cd .project-brain; (ls); cd /tmp; rm -rf build`). A normal `cd ..` or
+       `cd /tmp` on its own still ends the inside-capsule state.
      - **Splitting follows the shell:** only `;`, `&`, `&&`, `||`, `|` and newlines outside
        quotes separate commands. A leading redirection (`>/dev/null rm …`) is skipped when
        finding the command word.
+     - **Superset-of-`main` floor:** the stage analysis above is parser-dependent, so as a
+       floor the guard also keeps `main`'s blunt rule — any `rm` word followed by
+       `.project-brain` within one `;`/`|`/`&`-free segment is a delete. This floor runs on the
+       raw command and so cannot be fooled by a parser desync (a quote inside a `#` comment,
+       ANSI-C `$'…'` quoting, a heredoc body). It never allows a capsule delete that `main`
+       blocks. Its one exemption is a single foreground pipeline whose every stage is a pure
+       reader, with no command or process substitution, none of those desyncing constructs,
+       no background, and no file-writing redirect — there an `rm` can only be a literal
+       argument (`grep rm .project-brain/log.md`), so it stays allowed, while store-then-run
+       forms (`echo rm -rf .project-brain > x.sh && sh x.sh`) stay denied.
    - direct installs (`cp`/`mv`/`ln`/`rsync`) from `reference-repositories/sources/` into the skills dir
 
    **When the guard itself fails** (owner decision P11, 2026-10-15):
