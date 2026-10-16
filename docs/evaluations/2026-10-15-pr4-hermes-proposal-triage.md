@@ -74,7 +74,7 @@ The proposal's own `P` numbers are kept.
 
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
-3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"); S4–S9 are open.
+3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"), and S4–S9 on 2026-10-16 (see "S4–S9 repair"); S10–S12 are open.
    ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E6 are open.
 4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. ~~**P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`.~~ Done on 2026-10-16 (PR #144; see "P9 repair").
@@ -128,7 +128,7 @@ The proposal's own `P` numbers are kept.
   - The first regex-literal sample was too weak (only the self-scan test caught that mutation); it was strengthened and re-checked.
 - **No behavior change.** `static-scan.js` is untouched.
 
-### Scanner gaps found (S1–S9; S1–S3 fixed, see "S1–S3 repair")
+### Scanner gaps found (S1–S12; S1–S3 fixed, see "S1–S3 repair"; S4–S9 fixed, see "S4–S9 repair")
 
 Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK or FLAG was expected. None is pinned by a test, so a fix will not have to fight one.
 
@@ -143,6 +143,7 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 | S7 | Current key formats are missed | `sk-proj-…`, `sk-ant-oat01-…`, `ghs_…` | BLOCK → PASS. The repo's shared list (`scripts/telemetry/secret-patterns.js`, P1) catches all three |
 | S8 | `subprocess-shell-true` stops at the first `)` | `subprocess.run(build(cmd), shell=True)` | BLOCK → PASS |
 | S9 | In single-file mode every finding has `file: ""` | any single-file scan | Cosmetic; CI's fallback reads only the verdict |
+| S12 | Script files are not read for the secrets table (found during the S4–S9 repair, 2026-10-16) | a `ghp_…` token in `install.sh` or `tool.js` | BLOCK → PASS. Python has only its own `hardcoded-secret` FLAG. Turning the table on for scripts adds 12 findings in this repo, all fake tokens in test fixtures outside `skills/` (4 BLOCK, 8 FLAG), and none in `skills/`, so CI's gate would not change. Needs an owner call on fixtures |
 | S10 | No resource caps (final review F9, 2026-10-15) | a file over 536 MB holding an injection; a FIFO named `SKILL.md`; a symlinked file outside the tree | Over 536 MB → silently skipped, so PASS. A FIFO hangs the scan. Unreadable files are skipped without a finding |
 | S11 | Only the first `rm` target is checked, as on main (re-check G6, 2026-10-15) | `rm -rf ./build ~/`, `rm -rf x /`, `rm --interactive=never -rf /`, `rm / -rf`; after `--`, a first target that starts with `-` or a quote: `rm -rf -- --foo-rm ~`, `rm -rf -- "--cached" ~` (verification V2) | BLOCK → PASS. An every-target scan was tried and dropped: it froze the scanner and could be escaped (final review F1–F4). A safe version needs a shell-aware tokenizer, not a regex |
 
@@ -275,6 +276,24 @@ A separate reviewer re-ran every check and compared the old and new scanners on 
 | B5 | Background check: "detection-bypass / validator regression" on commit c163649 (no details given) | A differential run (1,840 samples: the attack samples × 20 wrappings, main vs current) lost only the two intended changes (the `/tmp/` exemption and the short-comment case). Reading the exemption found a real bypass, introduced with it: only the **first** target was checked, and `..` escaped the temp folder, so `rm -rf /tmp/../etc`, `rm -rf /tmp/x /etc` and `rm -rf ./build ~/notes` passed (main blocked the first two). Fixed: every target up to `;`, `&` or `\|` is checked, and the exemption does not apply to a path containing `..`. A target scan stops at the next `rm` that has its own recursive or force option, which keeps the pattern linear. Tests pin the bypasses, three harmless forms and two timing inputs |
 | B6 | Background check: "ReDoS / resource-cap defeat" and "parser differential" on commit 911335e (no details given) | ReDoS found and fixed: the `curl`/`wget` patterns used the `m` flag, which also starts a line after `\r` and `\u2028`, while `[^\n]` reads through them. 50 KB of bare `\r` took 0.5 s (quadratic). A line now starts after `\n` only (`(?<![^\n])`). 100 KB scans in about 1 ms, and timing tests pin both characters. The sweep now includes `\r`, `\u2028` and tab. The parser differential is passed to the final independent review (see below) |
 | P4 | (old) S1 still misses "ignore the instructions above" and "ignore everything above", and flags "never ignore previous instructions" | Open |
+
+## S4–S9 repair (2026-10-16)
+
+All in `skills/skill-audit/scripts/static-scan.js`; tests in `scripts/static-scan.test.js`; `skills/skill-audit/REFERENCE.md` describes the new rules (which files are read, settings permissions, secrets).
+
+- **S4:** a settings file that parses as JSON has its permission checks matched against each trimmed entry of `permissions.allow` only. A bare `Bash`, `Write`, `Edit` or `Read`, or a specifier of only `*`, `:` and spaces (`Bash(*)`, `Bash(:*)`), is the wildcard rule. Deny and ask rules are no longer reported. `Edit(//…)` (any absolute path) joins `perm-broad-path`. A file that does not parse keeps main's text checks. Source: code.claude.com/docs/en/permissions, read 2026-10-16 ("`Bash(*)` is equivalent to `Bash` and matches all Bash commands"; the `:*` suffix "is an equivalent way to write a trailing wildcard"; `//path` is absolute, `/path` is relative to the settings source). The same page says current Claude Code skips an unanchored allow glob such as `"*"` with a warning; it stays a BLOCK for older versions.
+- **S5:** a file with no known script extension is read by its shebang: node, deno and bun use the JS table; python and pypy (with any version suffix) the Python table; sh, bash, zsh, dash, ksh and ash the shell table. `env`, its options (`-S`) and `VAR=x` words are skipped.
+- **S6:** JSON, JSONC, JSON5, YAML, TOML, INI, `.cfg`, `.conf`, `.env`, `.properties`, and the files `.env`, `.env.*`, `.npmrc`, `.pypirc` and `.netrc` are read for secrets. The settings permission checks still run on `settings*.json` only.
+- **S7:** `anthropic-api-key` and `anthropic-key-in-config` match any `sk-ant-<kind><digits>-` key (api03, admin01, oat01; main's `admin-` matched no real admin key). `hardcoded-llm-key` adds `sk-proj-`, `sk-svcacct-` and `sk-admin-`, with no letter or digit before `sk-`, so kebab-case prose stays quiet. A new `github-app-token` check (BLOCK) matches `ghs_`, `ghu_` and `ghr_`.
+- **S8:** `subprocess-shell-true` is now a function, not a regex. One linear pass over the file keeps a stack of open brackets and skips strings (single, double and triple quoted, with escapes) and `#` comments. `shell=True` counts anywhere inside a `subprocess.run/call/Popen/check_output/check_call(` call, nested calls included, as on main. Known limits, unchanged from main: `import subprocess as sp`, `from subprocess import run`, `**{"shell": True}`, `os.popen` and `asyncio.create_subprocess_shell` are not seen.
+- **S9:** a single-file scan names the file (`file: "settings.json"`), relative to its folder.
+- **Not done:** S10 (resource caps) and S11 (every `rm` target); S12 (secrets in scripts, above) is new and open. The "47-pattern" doc drift is still open.
+- **Evidence:**
+  - Tests first: run against main's scanner, 52 tests failed for the expected reasons (two of them pin main false positives: a quoted `"shell=True"` and `shell=True_flag`). After: `scripts/static-scan.test.js` 289/289, `node scripts/run-all-tests.js` → 30/30, `node scripts/ci-scan-skills.js` passes with no new or stale entries.
+  - **Differential, repo:** main vs branch over every top-level folder and `.claude/settings*.json`: 0 findings added, 0 removed (195 on the whole repo either way).
+  - **Differential, synthetic (924 samples):** Python calls (7 call forms × 11 argument forms × 10 `shell` forms) and settings rules (22 rules × allow/deny/ask × 2 layouts, plus invalid JSON). Added: 100 `subprocess-shell-true` (parentheses or `)` in strings or comments before `shell=True`, `shell = True`, `shell=\nTrue`, nested `wrap(shell=True)`, `subprocess . call`), and 16 permission findings (bare names, `Bash(:*)`, `Bash( * )`, `bash`, `Edit(//etc/**)`). Removed: 45 `subprocess-shell-true` (all main false positives: `shell=True_x`, `myshell=True`, a quoted `"shell=True"`), 28 permission findings on deny and ask rules, and 4 `perm-allow-wildcard` duplicates on `Bash(*)`/`Write(*)` in allow, which `perm-bash-wildcard`/`perm-write-wildcard` still report as BLOCK (verdict unchanged).
+  - **Timing:** 39 hostile 1 MB inputs (unclosed calls, strings, brackets, comments, `shell` runs, repeated key prefixes, a 60,000-rule allow list, 1 MB rules, 1 MB shebang lines): worst 65 ms end to end, node startup included (main's worst on the same set: 54 ms). Four timing tests pin the S8 inputs.
+  - **Mutation testing:** 23 mutants of the new code. 21 were caught at first; the two survivors (the `sk-` guards) showed that the prose tests did not reach them. The tests were strengthened, and all 23 are caught.
 
 ## P7 repair (2026-10-16)
 

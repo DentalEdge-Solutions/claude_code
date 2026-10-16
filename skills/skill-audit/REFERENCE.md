@@ -44,6 +44,36 @@
 
 ## Threat Patterns
 
+### Which files are read
+
+| File | Tables applied |
+|------|----------------|
+| `.md`, `.txt` | prompt injection, Bash in instructions, secrets |
+| `settings.json`, `settings.local.json` | settings permissions, secrets |
+| `.js` `.mjs` `.cjs` `.ts` `.tsx` / `.py` `.pyi` / `.sh` `.bash` | JS / Python / shell |
+| Any other file starting with a shebang (`#!/bin/sh`, `#!/usr/bin/env node`, `#!/usr/bin/env -S node …`, `#!/usr/bin/python3.12`) | the table for its interpreter: node, deno, bun → JS; python, pypy → Python; sh, bash, zsh, dash, ksh, ash → shell |
+| `.json` `.jsonc` `.json5` `.yaml` `.yml` `.toml` `.ini` `.cfg` `.conf` `.env` `.properties`, and `.env`, `.env.*`, `.npmrc`, `.pypirc`, `.netrc` | secrets |
+
+Script files (JS, Python, shell) are not read for the secrets table; Python has its own hardcoded-secret FLAG. In a single-file scan, each finding's `file` is the file's name.
+
+### Settings permissions (settings.json)
+
+When the file is valid JSON, the permission rows below are matched against each entry of `permissions.allow`, trimmed. Deny and ask rules grant nothing and are not reported. When the file is not valid JSON, the rows are matched against the raw text, deny and ask lists included. Per the [permissions docs](https://code.claude.com/docs/en/permissions) (read 2026-10-16), a bare tool name matches every use of the tool: "`Bash(*)` is equivalent to `Bash`", and `:*` is another way to write a trailing wildcard.
+
+| Allow rule | Severity |
+|-----------|----------|
+| `Bash`, `Write`, `Edit` bare, or with a specifier of only `*`, `:` and spaces (`Bash(*)`, `Bash(:*)`) | BLOCK |
+| `Read` in the same forms | FLAG |
+| `*` | BLOCK |
+| `Write`/`Edit` on `/` or `/*` (the settings source's root), `~/…` (home) or `//…` (any absolute path) | FLAG |
+| `defaultMode: "bypassPermissions"` (anywhere in the text) | BLOCK |
+| a hook command with `$(…)` | FLAG |
+| `enableAllProjectMcpServers: true` | FLAG |
+
+### Secrets (everywhere a file is read for secrets, code blocks included)
+
+Anthropic keys and tokens (`sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-ant-oat01-…`), OpenAI keys (`sk-…`, `sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), AWS access key IDs, Slack bot tokens, private-key headers and Bearer tokens are BLOCK. Generic `api_key`/`password`/`secret`/`token` assignments are FLAG.
+
 ### Prompt Injection (in .md files)
 
 | Pattern | Severity | Risk |
@@ -86,7 +116,7 @@
 | `joblib.load()` / `pandas.read_pickle()` | BLOCK |
 | `numpy.load(..., allow_pickle=True)` | BLOCK |
 | `os.system()` | BLOCK |
-| `subprocess.run/Popen(..., shell=True)` | BLOCK |
+| `shell=True` anywhere inside a `subprocess.run/call/Popen/check_output/check_call(...)` call, nested calls included; strings and `#` comments are skipped, so a `)` or a quoted `"shell=True"` does not count. Not seen: an aliased module (`import subprocess as sp`), `from subprocess import run`, `**{"shell": True}` | BLOCK |
 | `shelve.open()` | FLAG |
 | `yaml.load()` without `Loader=yaml.SafeLoader` | FLAG |
 | `xml.etree.ElementTree.parse()` | FLAG (XXE) |
