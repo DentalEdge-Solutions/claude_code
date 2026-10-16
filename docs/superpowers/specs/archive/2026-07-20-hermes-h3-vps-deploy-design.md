@@ -2,8 +2,11 @@
 
 > **⚠ SPLIT by the definitive roadmap.** The VPS provision/deploy mechanics are the **kernel phase K3**
 > (dummy creds, `ANTHROPIC_API_KEY` only); real credentials + staged rollout + the security-review gate
-> are the deferred **Operate track**. See `~/.claude/plans/iterative-squishing-church.md` and
-> `.project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md`.
+> are the deferred **Operate track**. Roadmap: `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
+> the session plan it cites was a machine-local file, never in the repo).
+> Authoritative now: the canon entries `.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`
+> and `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`; the running system is
+> described in `infra/hermes-agent/README.md`.
 
 > **Date:** 2026-07-20 · **Status:** design (planning only) · **Depends on:** H1, H2 (and H0.5 for scheduled runs)
 > **Master:** `specs/2026-07-20-hermes-master-architecture.md`

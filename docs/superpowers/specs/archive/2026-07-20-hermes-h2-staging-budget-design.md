@@ -1,10 +1,13 @@
 # Hermes H2 — Staging Enforcement + Budget Caps (design spec)
 
 > **⚠ DEFERRED — Operate track.** Per the definitive roadmap
-> (`~/.claude/plans/iterative-squishing-church.md`, brain candidate
-> `.project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md`), this phase is part of
+> (`.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
+> the session plan it cites was a machine-local file, never in the repo)), this phase is part of
 > the credential-bearing **Hermes Operate track**, built just-in-time with the first spawned operator
 > project — **not** part of the credential-free kernel v1.
+> Authoritative now: the canon entries `.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`
+> and `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`; the running system is
+> described in `infra/hermes-agent/README.md`.
 
 > **Date:** 2026-07-20 · **Status:** design (planning only) · **Depends on:** H1
 > **Master:** `specs/2026-07-20-hermes-master-architecture.md`

@@ -1,9 +1,12 @@
 # Hermes H2 — Staging Enforcement + Budget Caps Implementation Plan
 
 > **⚠ DEFERRED — Operate track.** Part of the credential-bearing **Hermes Operate track** (built
-> just-in-time with the first operator project), not the kernel v1. Authoritative:
-> `~/.claude/plans/iterative-squishing-church.md` and
-> `.project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md`.
+> just-in-time with the first operator project), not the kernel v1. Roadmap:
+> `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
+> the session plan it cites was a machine-local file, never in the repo).
+> Authoritative now: the canon entries `.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`
+> and `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`; the running system is
+> described in `infra/hermes-agent/README.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

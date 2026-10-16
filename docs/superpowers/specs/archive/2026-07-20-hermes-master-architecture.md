@@ -2,8 +2,11 @@
 
 > **⚠ REVISED by the definitive roadmap.** This cross-cutting design is reframed into a credential-free
 > **kernel** (build now: K0–K3) and a deferred, multi-tenant **Operate track**; decisions **D12–D15**
-> were added and **D1/D9** revised. Authoritative now: `~/.claude/plans/iterative-squishing-church.md`
-> and the brain candidate `.project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md`.
+> were added and **D1/D9** revised. The roadmap: `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
+> the session plan it cites was a machine-local file, never in the repo).
+> Authoritative now: the canon entries `.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`
+> and `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`; the running system is
+> described in `infra/hermes-agent/README.md`.
 
 > **Date:** 2026-07-20 · **Status:** design (planning only — nothing is built) · **Scope:** the full Hermes runtime, H0 → H3.
 

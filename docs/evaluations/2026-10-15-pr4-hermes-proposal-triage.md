@@ -31,7 +31,7 @@ The proposal's own `P` numbers are kept.
 | P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
 | P13 | `test-runners.js` writes to real `evals/` paths | **Open, worse than stated** | see below |
-| P14 | The superseded architecture spec has no banner | Partly done | `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md` now has a "REVISED" banner, but it points to `~/.claude/plans/…`, a machine-local file and not a repo document |
+| P14 | The superseded architecture spec has no banner | **Done, in review** (see "P14 and P10") | `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md` now has a "REVISED" banner, but it points to `~/.claude/plans/…`, a machine-local file and not a repo document |
 
 ### P13 in detail
 
@@ -57,6 +57,11 @@ The proposal's own `P` numbers are kept.
   - **`skill-eval`:** the fake file was removed. There is no baseline until a full (non-smoke) HEALTHY Codex run writes one.
 - The stale `evals/codex-runs/.test/` folder (15 fixture directories) was removed.
 - **Out of scope:** the runner, native-audit and harvest-evidence tests in the same file still write into `evals/` paths of their own (`evals/codex-runs/{skills,agents,native-audits}/…`, `evals/.test-*`). Those paths are dedicated to tests or cleaned up afterwards, and none is a baseline.
+
+## P14 and P10 (2026-10-16)
+
+- **P14.** The archived master spec's REVISED banner named `~/.claude/plans/iterative-squishing-church.md`, a machine-local file. Six sibling archived Hermes specs and plans (H1–H3) carried the same pointer. All seven also named a brain candidate, `2026-07-21-hermes-definitive-roadmap.md`, which has since moved to `decisions/superseded/`. Each banner now points at repo documents: the roadmap's current path, noting that the plan file it cites was machine-local and never in the repo; the two canon entries that supersede it (adopting the Nous Hermes Agent, and the D-1…D-5 corrections); and `infra/hermes-agent/README.md`. Every named path was checked to exist, and no machine-local or candidate pointer remains under `docs/superpowers/`. The canon entry and the superseded decision that also cite the plan file were not edited: canon changes only through `brain-promote`, and the superseded file is a historical record.
+- **P10.** Not a new `ARCHITECTURE.md`. README already has "Architecture at a glance" (the Phase 2 lanes and spine) and a "Directory Structure", and a third copy would drift. The actual gap was that the directory tree missed 14 skills (the brain, capture-learning and reference-library skills) and 7 top-level folders (`.project-brain/`, `hooks/`, `templates/`, `reference-repositories/`, `packs/`, `infra/hermes-agent/`, `.github/`). The tree now lists them, with one-liners taken from each SKILL.md description or the folder's own README, plus links to the guard's security rules and the Hermes README. Afterwards, every skill directory appears in the tree.
 
 ## Open work carried forward, ranked
 
