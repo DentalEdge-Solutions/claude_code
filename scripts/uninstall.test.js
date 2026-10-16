@@ -73,6 +73,13 @@ try {
   assertRefused(run(FAKE_REPO, 'y\n', TMP, { script: 'repo/uninstall.sh', env: { CDPATH: '.:/' } }),
     'toolkit repo with CDPATH set');
   assert.ok(fs.existsSync(path.join(FAKE_REPO, 'skills', 'demo-skill', 'SKILL.md')), 'repo skills/ survives');
+  // review U3: another clone of the toolkit (install.sh never copies uninstall.sh, so a target
+  // that has this uninstall.sh is a clone); its uncommitted work in skills/ would be lost
+  const CLONE = path.join(TMP, 'clone');
+  touch(path.join(CLONE, 'skills', 'wip-skill', 'SKILL.md'));
+  fs.copyFileSync(path.join(REPO, 'uninstall.sh'), path.join(CLONE, 'uninstall.sh'));
+  assertRefused(run(CLONE, 'y\n'), 'another toolkit clone');
+  assert.ok(fs.existsSync(path.join(CLONE, 'skills', 'wip-skill', 'SKILL.md')), 'clone skills/ survives');
 
   // 4. No target: usage, exit 1 (unchanged behaviour).
   assert.strictEqual(run(undefined, '').status, 1, 'no target exits 1');

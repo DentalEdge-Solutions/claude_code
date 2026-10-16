@@ -23,10 +23,10 @@ The proposal's own `P` numbers are kept.
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
-| P6 | BSD-only `sed -i ''` | **Fixed, in review** (see "P9 repair", P6 note) | `uninstall.sh:108` on `d799f4f` |
+| P6 | BSD-only `sed -i ''` | **Fixed** (reviewed; see "P9 repair", P6 note) | `uninstall.sh:108` on `d799f4f` |
 | P7 | Hand-rolled YAML parsing | Open | `infra/hermes-agent/bin/make-review-board.py:39` |
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
-| P9 | No guard before `rm -rf` in `uninstall.sh` | **Fixed, in review** (see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
+| P9 | No guard before `rm -rf` in `uninstall.sh` | **Fixed** (reviewed; see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
 | P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
 | P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
@@ -324,11 +324,19 @@ The reviewer reproduced the RED/GREEN claims and 28/28 (macOS bash 3.2, and `nod
 |---|---|---|---|---|
 | U1 | blocking | `pwd -P` keeps a leading `//`, so `//`, `//.` and `//<home>` passed the string compare. On a fake home, `"/<home>"` + "y" removed its `skills/` and `scripts/telemetry` | reproduced (`//` and `//<home>` reached the prompt; answered "n") | compare with `[ "${TARGET}" -ef … ]` (device and inode), which covers `//` and symlinks |
 | U2 | minor | An exported `CDPATH` makes `cd` print the path; with a relative script path `REPO_DIR` held two lines | reproduced on macOS as a crash (`SKILL_NAMES[*]: unbound variable`); the reviewer saw the prompt on Linux bash 5 | `unset CDPATH` at the top |
-| U3 | minor | Target `~/.claude` passed, and step 1 removes `~/.claude/skills`, every runtime skill, not only ours | reproduced (reached the prompt) | `$HOME/.claude` refused too. **Not adopted:** refusing any folder with `install.sh` + `skills/skill-eval`, since an installed target also has `skills/skill-eval`; a second toolkit clone stays accepted (its files are in git) |
+| U3 | minor | Target `~/.claude` passed, and step 1 removes `~/.claude/skills`, every runtime skill, not only ours | reproduced (reached the prompt) | `$HOME/.claude` refused too. A second toolkit clone: see round 2 |
 | U4 | minor | The awk + `mv` form replaced a symlinked `CLAUDE.md` with a regular file (the real file kept the section), reset the mode to the umask, and printed "removed" even on failure | the new symlink/mode assertions failed for that reason | written back with `cat >` (keeps link, inode and mode), success reported only when it happened, a warning otherwise. The awk output adds a final newline to a file without one (accepted). The second-brain step has the same `awk … && mv` form; left as is, out of scope |
 | U5 | minor | The P9 row said Done despite U1, and the P6 row had a stale line number | confirmed | rows now say "Fixed, in review", and the P6 row names the base commit |
 
 Tests first: each new assertion was watched failing in turn (`target //`, then the CDPATH case, then the symlinked `CLAUDE.md`). U3 went green in the same edit as U1, so its RED evidence is the probe (`~/.claude` reached the prompt). Now: `node scripts/uninstall.test.js` passes on macOS and in `node:24-slim`; the U1–U3 probe refuses all four; `node scripts/run-all-tests.js` → 28/28.
+
+### Independent re-review of P9/P6, round 2 (2026-10-16): both fixed
+
+The reviewer re-ran the suite on `aa427bd` (macOS bash 3.2 and `node:24-slim` bash 5.2/mawk, 28/28). It broke the script four ways (no `unset CDPATH`, no `~/.claude` check, a string compare instead of `-ef`, `mv` instead of `cat`), and the test failed at the matching assertion each time, on both platforms. Refused on both bash versions: `/`, `//`, `//.`, `///./`, `/..`, symlink chains to `/`, the home directory in five spellings, `~/.claude` in three, the repo as `.` and `//repo`, and the CDPATH case. `cat >` failure modes probed (read-only file, read-only link target, read-only folder, dangling link, hard link): none loses data.
+
+- **U1, U2, U4, U5: fixed.**
+- **U3: partly fixed, then closed.** The reviewer pushed back on the round-1 reason for accepting a second toolkit clone, and it was right. `install.sh` never copies `install.sh` or `uninstall.sh` (it copies only `skills/`, agents, `scripts|schemas/{codex,telemetry,brain}`, `hooks/brain` and `templates/second-brain`), so a clone can be told apart from an installed project. And "its files are in git" does not cover uncommitted work. **Fix:** a target whose `uninstall.sh` carries this script's `# Skill Builder — Uninstall` header is refused. The test was written first (RED: `another toolkit clone: must exit non-zero`) and checks that a work-in-progress skill in the clone survives. It passes on macOS and in `node:24-slim`; 28/28. This last change has not been re-reviewed.
+- **Accepted:** with `HOME` empty or pointing nowhere, there is no home directory to protect (`/` is still refused). The test covers a symlinked `CLAUDE.md` only; a plain file goes through the same `cat >`.
 
 ## P11 repair (2026-10-15)
 

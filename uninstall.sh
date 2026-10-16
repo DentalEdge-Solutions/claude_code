@@ -37,6 +37,12 @@ for forbidden in / "${HOME}" "${HOME}/.claude" "${REPO_DIR}"; do
         exit 1
     fi
 done
+# install.sh never copies this script, so a target that has it is another toolkit clone, where
+# the removals would hit its sources and any uncommitted work in them.
+if [ -f "${TARGET}/uninstall.sh" ] && grep -qF "# Skill Builder — Uninstall" "${TARGET}/uninstall.sh"; then
+    echo "Refusing to uninstall from ${TARGET}: it is a clone of this toolkit, not an installed project." >&2
+    exit 1
+fi
 
 # ── Discover skills + agents from repo (same source as install.sh) ───────────
 SKILL_NAMES=()
