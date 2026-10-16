@@ -62,6 +62,17 @@ class TestMakeReviewBoard(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("duplicate", r.stderr)
 
+    def test_undecodable_registry_is_reported_as_unreadable(self):
+        fd, reg = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "wb") as f:
+            f.write(b"projects:\n  demo:\n    workdir: /projects/\xff\xfe\n")
+        try:
+            r = run(["--project", "demo", "--dry-run"], registry=reg)
+        finally:
+            os.unlink(reg)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unreadable", r.stderr)
+
     def test_unknown_project_is_refused(self):
         reg = write_registry("projects:\n  demo:\n    workdir: /projects/demo\n")
         try:

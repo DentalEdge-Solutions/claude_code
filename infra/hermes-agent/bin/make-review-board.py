@@ -40,7 +40,7 @@ def resolve_workdir(project):
     path = registry_path()
     try:
         return changeset_lib.read_workdir(path, project)
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:   # UnicodeDecodeError is a ValueError: catch it first
         raise SystemExit(f"project registry unreadable: {path}: {e}")
     except ValueError as e:
         raise SystemExit(f"project not registered or ambiguous: {project}: {e}")

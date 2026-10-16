@@ -266,6 +266,7 @@ A separate reviewer re-ran every check and compared the old and new scanners on 
 - **After:** 5/5 tests pass. The real registry still gives `Workdir: /projects/claude_code`. `infra/hermes-agent/bin/run-bin-tests.sh` → 61/61.
 - **Deployment:** the container mounts all of `bin/` at `/opt/cc-bin` (`docker-compose.yml`), so `changeset_lib` is next to the script. It imports cleanly with an empty environment.
 - **Not done:** `run-ads-report.py` and `open-proposal-pr.py` still carry their own walkers. `run-ads-report.py`'s copy is marked frozen with Inc-3. Moving them is a separate change.
+- **Independent review (2026-10-16): approved.** The reviewer re-ran everything, including the dry run inside the `hermes-agent-claude` image with the real mounts. It compared the old parser with `read_workdir` on 18 inputs: same results, or differences that are all fixes or error-path only. It showed the tests fail for the parser reason on the old script once only the override is added. **P7-1** (minor): a registry that is not valid UTF-8 was reported as "not registered or ambiguous", because `UnicodeDecodeError` is a `ValueError`. Now reported as unreadable, test first. **P7-2** (nit): the commit message said the tests were red for the parser reason on `d799f4f` itself; on that commit they are red for the path reason, as this section says.
 - **Status row:** left as "Open" on this branch, because the P6/P9 branch edits the neighbouring rows and git would conflict. Flip it to Done when merging.
 
 ## P2 repair (2026-10-15)
