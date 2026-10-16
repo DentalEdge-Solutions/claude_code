@@ -415,6 +415,11 @@ try {
     "echo $'\\' #' ; git grep --untracked -Or\\\nm x -- .project-brain",
     "cat <<EOF\nit's\nEOF\ngit $'cl\\x65an' -fd \\\n.project-brain",
     "echo $'\\' #' ; git $'cl\\x65an' -fd \\\n.project-brain",
+    // review X3: the kept pair can split the capsule name itself, so the capsule is looked
+    // for in the fully joined text
+    "cat <<EOF\nit's\nEOF\nrm -rf .project-\\\nbrain",
+    "echo $'\\' #' ; rm -rf .project-\\\nbrain",
+    "cat <<EOF\nit's\nEOF\ncd .project-\\\nbrain && rm -rf decisions",
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }

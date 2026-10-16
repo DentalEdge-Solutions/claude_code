@@ -325,7 +325,8 @@ if (tool === "Bash") {
   // only inside single quotes or a comment, so where joinLines reads quotes as bash does this is
   // rare; where it does not (a heredoc body, $\x27\x5c\x27\x27), the rules below see a split command, and no
   // list of delete words is complete (a glued -Or…m, an ANSI-C subcommand). So deny outright.
-  if (joined.kept >= 0 && CAPSULE.test(cmd))
+  // The capsule is looked for in the fully joined text: the kept pair can split its name.
+  if (joined.kept >= 0 && CAPSULE.test(cmd.split("\\\n").join("")))
     deny("brain-security-guard: a line continuation (backslash-newline) inside quotes or a comment, in a command that names .project-brain, is denied — the guard cannot tell how the shell will split it. Put the command on one line.");
   let depth = -1;
   const dirStack = [];

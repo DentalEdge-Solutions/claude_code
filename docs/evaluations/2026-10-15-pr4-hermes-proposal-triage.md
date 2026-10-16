@@ -522,3 +522,17 @@ The reviewer re-ran everything on `1c9ca50`:
 - **Accepted low-severity false positives the reviewer listed:**
   - `git stash push -m "clean up git notes" <capsule>/x`, `git merge -m "clean" origin/git` inside the capsule, and `make clean GIT=git` inside the capsule (the X1 rule);
   - a single-quoted message or comment with a continuation next to a capsule path (this rule).
+
+### Independent review of the fix, round 4 (2026-10-16): X2 fixed; X3 found, then commit E
+
+The reviewer re-ran everything on `c261755`: 27/27 suites, 0 bypasses on every earlier probe set, worst 125 ms at 1 MB. **X2: fixed.**
+
+| ID | Sev | Finding | Author check | Commit E |
+|---|---|---|---|---|
+| X3 | blocking for W3 (old: `d799f4f` allows all forms too) | The outright denial tested for the capsule on text that still held the kept pair, so a pair that splits the capsule name (`rm -rf .project-\⏎brain` after a heredoc with `it's`, or after `$'\' #'`; also `cd .project-\⏎brain && rm -rf f`) went unnoticed | 3 forms reproduced: real bash deletes, guard allows | the capsule is looked for in the fully joined text (the reviewer's one-line fix) |
+
+**Evidence:**
+- Tests first: the 3 forms were red.
+- Every earlier case set holds; 27/27 suites.
+- The kept-pair path stays linear: 88 ms at 1 MB.
+- The base differential is unaffected, because its corpus has no kept pairs.
