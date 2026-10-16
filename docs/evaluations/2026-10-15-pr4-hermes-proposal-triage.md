@@ -23,10 +23,10 @@ The proposal's own `P` numbers are kept.
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
-| P6 | BSD-only `sed -i ''` | Open | `uninstall.sh:108` |
+| P6 | BSD-only `sed -i ''` | **Fixed** (reviewed; see "P9 repair", P6 note) | `uninstall.sh:108` on `d799f4f` |
 | P7 | Hand-rolled YAML parsing | Open | `infra/hermes-agent/bin/make-review-board.py:39` |
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
-| P9 | No guard before `rm -rf` in `uninstall.sh` | Open | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
+| P9 | No guard before `rm -rf` in `uninstall.sh` | **Fixed** (reviewed; see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
 | P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
 | P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
@@ -319,6 +319,39 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - 3 mutations (no separator in the prefix check, no containment check, no link resolution) each failed the suite.
 - **Scope:** E2–E5 (informational fields) and E6 (method) are unchanged and still open.
 
+## P9 repair (2026-10-16)
+
+`uninstall.sh` resolved its target only with `cd`, then ran seven `rm -rf "${TARGET}/<dir>"` calls. A target of `/`, `$HOME`, a symlink to either, or this toolkit itself (`./uninstall.sh .` from inside the repo) passed.
+
+- **Before** (branch base `d799f4f`): a copy of `uninstall.sh` in a temp fake repo, `HOME` set to a temp fake home, target = that home, answered "y": it printed `removed <home>/skills/`, `removed <home>/evals/`, `removed brain hooks, scripts, schemas, templates`, and the fake home was left empty of those files.
+- **Fix:** right after the target is resolved, and before anything is shown or asked, the script compares the target's physical path (`pwd -P`) with `/`, the home directory and the toolkit repo, and refuses with exit 1 and a message on stderr. `install.sh` deletes nothing under the target, so it needs no mirror.
+- **Test** `scripts/uninstall.test.js` (written first; it failed on `target /: must exit non-zero`): refuses `/` and a symlink to `/` (always answered "n"), `$HOME` and a symlink to it (answered "y"; a canary in the fake home survives), the toolkit repo by path and as `.` from inside it; no target still exits 1; a normal project still loses the toolkit's skills, agents and runtime skills and keeps its own agent. It runs only on a copy inside a temp directory. `node scripts/run-all-tests.js` → 28/28.
+- **After:** the same probe prints `Refusing to uninstall from <home>: …` and deletes nothing.
+- **P6, same file:** step 5 removed the CLAUDE.md pipeline section with `sed -i ''`, which GNU sed reads as an empty script plus a file named after the real expression. RED in `node:24-slim` (GNU sed 4.9; CI runs on `ubuntu-latest`): `sed: can't read /^# >>> skill-builder >>>/…: No such file or directory`, the uninstall aborted. Now the same `awk` → temp file → `mv` form the second-brain step already uses. The test asserts the exact CLAUDE.md left behind; it passes on macOS and in the Linux container.
+- **Noted, not fixed here:** with no agents in the repo, `${AGENT_FILES[*]}` under `set -u` aborts the script on macOS bash 3.2 (`unbound variable`, line 48 on `d799f4f`). It stops before any removal, so it is a crash, not a data risk. The test repo always carries one agent.
+
+### Independent review of P9/P6, round 1 (2026-10-16): P9 not fixed, P6 fixed
+
+The reviewer reproduced the RED/GREEN claims and 28/28 (macOS bash 3.2, and `node:24-slim` with bash 5.2 and mawk). Its mutation check showed that every assertion fails on the change it targets, including the old `sed` line on Linux.
+
+| ID | Sev | Finding | Author check | Fix |
+|---|---|---|---|---|
+| U1 | blocking | `pwd -P` keeps a leading `//`, so `//`, `//.` and `//<home>` passed the string compare. On a fake home, `"/<home>"` + "y" removed its `skills/` and `scripts/telemetry` | reproduced (`//` and `//<home>` reached the prompt; answered "n") | compare with `[ "${TARGET}" -ef … ]` (device and inode), which covers `//` and symlinks |
+| U2 | minor | An exported `CDPATH` makes `cd` print the path; with a relative script path `REPO_DIR` held two lines | reproduced on macOS as a crash (`SKILL_NAMES[*]: unbound variable`); the reviewer saw the prompt on Linux bash 5 | `unset CDPATH` at the top |
+| U3 | minor | Target `~/.claude` passed, and step 1 removes `~/.claude/skills`, every runtime skill, not only ours | reproduced (reached the prompt) | `$HOME/.claude` refused too. A second toolkit clone: see round 2 |
+| U4 | minor | The awk + `mv` form replaced a symlinked `CLAUDE.md` with a regular file (the real file kept the section), reset the mode to the umask, and printed "removed" even on failure | the new symlink/mode assertions failed for that reason | written back with `cat >` (keeps link, inode and mode), success reported only when it happened, a warning otherwise. The awk output adds a final newline to a file without one (accepted). The second-brain step has the same `awk … && mv` form; left as is, out of scope |
+| U5 | minor | The P9 row said Done despite U1, and the P6 row had a stale line number | confirmed | rows now say "Fixed, in review", and the P6 row names the base commit |
+
+Tests first: each new assertion was watched failing in turn (`target //`, then the CDPATH case, then the symlinked `CLAUDE.md`). U3 went green in the same edit as U1, so its RED evidence is the probe (`~/.claude` reached the prompt). Now: `node scripts/uninstall.test.js` passes on macOS and in `node:24-slim`; the U1–U3 probe refuses all four; `node scripts/run-all-tests.js` → 28/28.
+
+### Independent re-review of P9/P6, round 2 (2026-10-16): both fixed
+
+The reviewer re-ran the suite on `aa427bd` (macOS bash 3.2 and `node:24-slim` bash 5.2/mawk, 28/28). It broke the script four ways (no `unset CDPATH`, no `~/.claude` check, a string compare instead of `-ef`, `mv` instead of `cat`), and the test failed at the matching assertion each time, on both platforms. Refused on both bash versions: `/`, `//`, `//.`, `///./`, `/..`, symlink chains to `/`, the home directory in five spellings, `~/.claude` in three, the repo as `.` and `//repo`, and the CDPATH case. `cat >` failure modes probed (read-only file, read-only link target, read-only folder, dangling link, hard link): none loses data.
+
+- **U1, U2, U4, U5: fixed.**
+- **U3: partly fixed, then closed.** The reviewer pushed back on the round-1 reason for accepting a second toolkit clone, and it was right. `install.sh` never copies `install.sh` or `uninstall.sh` (it copies only `skills/`, agents, `scripts|schemas/{codex,telemetry,brain}`, `hooks/brain` and `templates/second-brain`), so a clone can be told apart from an installed project. And "its files are in git" does not cover uncommitted work. **Fix:** a target whose `uninstall.sh` carries this script's `# Skill Builder — Uninstall` header is refused. The test was written first (RED: `another toolkit clone: must exit non-zero`) and checks that a work-in-progress skill in the clone survives. It passes on macOS and in `node:24-slim`; 28/28. Re-reviewed (2026-10-16): **approved, U3 fixed**. The test fails without the check. A legitimate installed project cannot trip it. The substring also matches the first version's header ("# Skill Builder — Uninstaller"), byte for byte under the Linux locale. **U3-1** (minor, accepted): the check fails open for a clone whose `uninstall.sh` was deleted, made unreadable or had its header rewritten.
+- **Accepted:** with `HOME` empty or pointing nowhere, there is no home directory to protect (`/` is still refused). The test covers a symlinked `CLAUDE.md` only; a plain file goes through the same `cat >`.
+
 ## P11 repair (2026-10-15)
 
 - **Owner decision (failure policy, hybrid):**
@@ -417,3 +450,142 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - **Timing:** 41 regexes × 54 adversarial 1 MB inputs in-process: worst **40.5 ms** (before the floor fix, the copied `main` regex measured ≈195 s on this same sweep — see "The floor must be linear"). The whole guard end-to-end on 54 × 1 MB commands: worst **315 ms** (load average about 13 at the time). No pattern shows super-linear growth.
 - **Gaps left open (round 3 adds):**
   - **G5:** a capsule-leaving `cd` is not honored on any line that also contains a grouping construct (`( )`, `{ }`, or `case`), so such a line is conservatively denied even when the `cd` really does leave the capsule.
+
+## P11 re-review (2026-10-16)
+
+A re-review of the merged guard (`main` at `d799f4f`), per `docs/REVIEW_PROTOCOL.md`. Re-run on `d799f4f`: `node scripts/run-all-tests.js` → 27/27 suites pass; `node scripts/brain/brain-lint.js` → 0 security findings, 3 known stale-canon warnings. Installed Claude Code: 2.1.301. Git used for every behaviour check: 2.54.0, in a scratch repository (a directory named `cap`, never the capsule).
+
+| ID | Sev | Where (`d799f4f`) | Finding | Evidence |
+|---|---|---|---|---|
+| RR1 | blocking | `brain-security-guard.sh:146-153` (`gitSub`) | Only `-C`/`-c` were skipped with their value. The value of `--namespace`, `--work-tree`, `--git-dir`, `--config-env`, `--attr-source`, `--shallow-file` was read as the subcommand. When that value is a reader name (`log`, `show`), both the stage check and the floor exempt the stage, so an executing subcommand runs a capsule delete. | `git --namespace log rebase -x "rm -rf cap" HEAD~1` deleted `cap/` in the scratch repo; the guard **allowed** the same command on the capsule. Also allowed: `--attr-source show submodule foreach …`, `--shallow-file log bisect run rm -rf …` |
+| RR2 | blocking | `:159`, `:166` (`gitCleanDryRun`) | Any short-option word containing `n` counted as a dry run, but `-e` takes the rest of its word or the next word, `--` ends the options, and a later `--no-dry-run` wins. A `clean` behind a valued global option (RR1) was not seen at all. Only untracked (and with `-x`, ignored) capsule files are at risk; tracked files survive `git clean`. | Real deletes, all **allowed**: `git clean -f -en`, `-f -e -n`, `-f -- -n`, `-f --exc -n`, `-n --no-dry-run -f`, `-n -fd --no-d`, `git --work-tree <capsule> clean -fd`, `git --namespace x clean -fd <capsule>` |
+| RR3 | blocking (the P11 H1 standard) | `:159` | `/^-[A-Za-z]*n[A-Za-z]*$/` is O(n²) on `-nnn…n1`. End to end: 64 KB 2.2 s, 256 KB 34.5 s; ~1 MB extrapolates to ~9 min, ~1.5 MB to past the 600 s default. A timed-out PreToolUse hook does not block. The P11 sweep missed it because none of its inputs reached this check, which runs only after a `clean` subcommand. | `code.claude.com/docs/en/hooks` (read 2026-10-16): command hooks default to 600 s; "A timed-out `command` … hook doesn't block the tool call" |
+| RR4 | owner decision | `.claude/settings.local.json` (hook registration) | Claude Code v2.1.295+ supports `"onFailure": "block"` on a command hook. It would close the whole timeout class, but it also blocks on "can't start" and on any exit other than 0/2, which reverses the P11 decision that a node failure fails open, visibly (exit 1). Options: keep as is; or adopt it together with a recovery path for a broken node. Not changed. | Same page, "Block the action when a hook fails" |
+
+**Fix (branch `fix/p11-rereview-git-guard`).** `gitSub` skips the eight valued global options with their value (list confirmed on git 2.54: each one swallowed the next word), and any unrecognized global option ends the reader exemption. `gitCleanDryRun` parses the words after `clean` the way git does, in one linear pass (last of `-n`/`--dry-run`/`--no-…` wins; `-e`/`--e…` take their value; `--` stops; `--dry-run` abbreviations count as not dry, a conservative denial). If the subcommand cannot be found, a `clean` word anywhere after `git` counts. Tests first: 14 of 21 new cases failed on `d799f4f` for the expected reason (the 7 others are regression guards), plus two 512 KB timing cases (the first timed out the suite).
+
+- **Differential** (old vs new guard, 2,358 generated git commands × 19 global-option forms × 24 subcommands × 5 targets, plus controls): **11 deny → allow**, all `git --git-dir/--work-tree <value> grep -n rm …`, a reader the old parser misread (false positives fixed). **378 allow → deny**, each one of: a `git clean` form verified above to really delete; an executor (`rebase -x`, `bisect run`, `submodule foreach`) or `clean`/`rm` hidden behind a global option's value; or a conservative denial consistent with the unmasked case (`clean --dry`, `rm --cached`, an unknown `--bogus` option that git itself rejects). No real dry run (`clean -n`, `-nd`, `--dry-run`, `-n -e foo`) changed.
+- **Timing** (end to end, 10 adversarial shapes reaching the new code, 512 KB and 1 MB): worst **246 ms** at 1 MB, ~2× from 512 KB to 1 MB on every shape.
+
+### Independent review of the fix, round 1 (2026-10-16): request changes
+
+The reviewer re-ran the suites on `8a50ae1` (27/27, guard test passes), confirmed RR3 fixed (the `-nnn…1` shape: 130 ms at 1 MB; 13 shapes, instrumented to prove they reach the new code) and the 14 RR1/RR2 cases denied, and found:
+
+| ID | Sev | Finding | Author check (real git 2.54 deletes, guard on `8a50ae1` allows) |
+|---|---|---|---|
+| V1 | blocking, **new in `8a50ae1`** | Git words were whitespace-split after removing quotes, so `git --namespace "x log" rebase -x "rm -rf …"` (or `x\ log`) again showed `log` as the subcommand | reproduced |
+| V2 | blocking | The same split put an `-n` where git never gets one: `"x -n"`, `x\ -n`, `-e "x -n"`, `> -n`, `<<< -n` | reproduced (5 forms) |
+| V3 | blocking | `--end-of-options` was taken for an abbreviated `--exclude` | reproduced |
+| V4 | blocking, already on `d799f4f` | `git clean` behind `env`, `command`, `nice`, `xargs` or `-c alias.x=clean` was not checked | reproduced (4 forms) |
+| V5 | minor | Docs said "parsed as git does"; the code also checked a `clean` word whenever the subcommand was not `clean` | confirmed, and it caused two **new false positives** on `8a50ae1`: `git commit -m "clean up …"` and `git log --grep clean` were denied |
+
+**Round 2 fix.** The root cause was the approach: parsing git's options precisely, which P11 had already learned is a losing game (the grouping rule, G5). Round 2 allowlists instead:
+
+- Git's subcommand is read from shell-split words (quotes join, `\` escapes, stop at a redirect or `#`). A variable, glob or backtick before the subcommand ends the reader exemption.
+- A `git clean` dry run is allowed only in a plain form git cannot read another way (see `SECOND_BRAIN_SECURITY.md`). Anything else is a delete.
+- A `clean` word in a stage that runs git through a wrapper, or with an option that can define an alias, counts as `git clean`.
+- Conservative cost: dry runs outside the plain form are denied (`-n -e foo`, `env git clean -n`, `git clean -n … 2>/dev/null`, global options other than `-C`).
+
+Evidence:
+
+- Tests first: 18 of 26 round-2 cases red on `8a50ae1`, including the two false positives. A `--` dry run (`git clean -nd -- <path>`) was then added red-first.
+- `node scripts/run-all-tests.js` → 27/27.
+- **Differential vs `d799f4f`** (2,531 inputs; the corpus now has quoted and escaped values, wrappers, `--end-of-options`, redirects, and commit messages containing `clean`/`rm`):
+  - **20 deny → allow**, all `git <option> <value> grep -n rm …`, a reader with no program-running option.
+  - **667 allow → deny**, each one a `git clean`, an executor (`rebase -x`, `bisect run`, `submodule foreach`), or `rm --cached`. The 6 exceptions are an unknown option (`--bogus`) or a variable/glob option value.
+  - No commit message and no `--grep` was newly denied.
+- **Timing:** 17 shapes at 512 KB and 1 MB, end to end. Worst: 310 ms. Every shape took about 2× as long at 1 MB as at 512 KB.
+
+### Independent review of the fix, round 2 (2026-10-16): request changes, then round 3
+
+The first round-2 reviewer was stopped by a safety classifier before it ran anything. A fresh reviewer re-ran everything on `4beb000`:
+
+- Commands: 27/27 suites; the guard test passes; 0 bypasses on the round-1 probe sets (35 + 15 cases; for comparison, 20 + 11 on `d799f4f` and 13 + 12 on `8a50ae1`); timing worst 301 ms, linear.
+- **RR1, RR2, RR3, V1, V2, V3, V5: fixed.** **V4:** fixed, but reopened by W1.
+
+| ID | Sev | Finding | Author check (real git deletes, guard allows) | Round 3 |
+|---|---|---|---|---|
+| W1 | blocking, **new in `4beb000`** | `gitArgs` anchored on the first word whose basename is `git`, so a redirect target or assignment ending in `/git` (`2>./git git clean …`, `A=./git git clean …`, `</usr/bin/git git clean …`) made the subcommand read as `git` | reproduced (4 forms) | `gitArgs` skips the same prefixes as `head()` and anchors on the command word; `null` (counted as a delete) if the shell words disagree |
+| W2 | medium, on `d799f4f` | ANSI-C spelling: `git $'cl\x65an' -fd …`, `git cl$'e'an -fd …` | reproduced | a subcommand with `$`, a glob or a backtick counts as a delete |
+| W3 | high, on `d799f4f` | `splitShell` turns backslash-newline into a space where bash removes it: `r\⏎m -rf <capsule>` and `git cl\⏎ean -fd …`; the floor misses them too | reproduced | separate commit (below) |
+| W4 | low, new false positive | any `-c` plus a `clean` word denies (`git -c color.ui=never log --grep clean …`) | confirmed | **kept, documented:** `-c core.editor="git clean …"` shows that a `-c` value can run a program |
+| W5 | nit | the doc said "`git` directly", but a leading `time` is accepted | confirmed | doc reworded |
+| X1 | high, on `d799f4f`, found by the author while fixing W1 | a git executor running a nested clean: `git rebase -x "git clean -fd <capsule>" HEAD~1` | reproduced | a `clean` word next to a second `git` word in a non-reader stage counts as a delete |
+
+**Round 3, commit A (W1, W2, X1):**
+
+- Tests first: 7 deny cases red on `4beb000`, plus 5 allow regression guards.
+- A first attempt over-denied plain dry runs: `words()` holds every word twice, so one `git` counted as two. That was fixed by counting on a single quote-dropping split.
+- Results: 27/27 suites; the 26 round-2 cases and the 11 round-1 reviewer cases still hold.
+- **Differential vs `d799f4f`** (same 2,531 inputs):
+  - 20 deny → allow, the same `git <opt> <value> grep` readers as before;
+  - 652 allow → deny, no line new versus round 2;
+  - the 15 that round 2 denied and A allows are all plain dry runs with `-n`/`--dry-run` before a `--`, now accepted.
+- **Timing:** new shapes (many assignments, many redirects, nested git words, an unsafe subcommand) take 117–181 ms at 1 MB, about 1.7× their 512 KB time. Worst overall: 312 ms.
+
+**Round 3, commit B (W3):** `splitShell` turned a backslash-newline into a space; bash removes it.
+
+- Real bash deletes on 5 forms that the guard allowed on `b84e72f`: `r\⏎m -rf <capsule>`, `git cl\⏎ean -fd <capsule>`, `echo 'a\⏎b' ; r\⏎m -rf <capsule>`, and two comment forms (`cd <capsule>` then `ls # note \⏎rm -rf decisions`, where the comment ends at the newline and `rm` runs on its own line).
+- **Fix:** `joinLines` runs once on the raw command before every rule. It removes a backslash-newline the way bash does, keeps `\\` as a pair, and does not join inside a `#` comment. `splitShell` now lets a leftover backslash-newline (only possible in a comment) end the line.
+- **Evidence:**
+  - Tests first: the 5 forms were red, and 2 allow guards (an ordinary continuation in `git add` / `grep`) were added. 27/27 suites pass; the earlier case sets still hold.
+  - **Metamorphic differential:** every corpus command was compared with the same command where each space becomes ` \⏎ ` (the same command to bash). 0 allow → deny. 8 deny → allow, all from the transformation splitting an escaped space (`x\ log` → `x\ \⏎ log`), which bash also reads as two words, so `log` is the subcommand and nothing runs.
+  - **Timing** (continuations, backslash pairs, comments, `#` words): at most 193 ms at 1 MB.
+- **Background security-review notices.** Several automated commit reviews reported "parser-differential", "security-control-bypass" and "incomplete nested-executor check" in the guard, each without details. They are consistent with the classes fixed above. An executor can still run a command built at run time (`$(printf …)`, a decoded string, a script); that is the documented "commands built at run time" limit (G2 class), now named in `SECOND_BRAIN_SECURITY.md`.
+- **Test flake, unexplained:** one run of `brain-hooks.test.js` exited with an error while background reviewers were running timing sweeps; its output was not captured. Four later runs passed. The 3 s timing bound under load is the likely cause, but it is not confirmed.
+
+**Round 3, commit C (W3 follow-up, from an automated security review).** A background commit review flagged that `joinLines` detected comments without tracking quotes, so a `#` inside quotes stopped the join.
+
+- Real bash deletes on 5 forms the guard allowed at `d941d39`, for example `echo " #"; r\⏎m -rf <capsule>` and `git log --grep " #"; git cl\⏎ean -fd <capsule>`. A sixth form, `echo $'a\'b #' ; r\⏎m -rf <capsule>`, uses ANSI-C quoting the guard does not parse.
+- **Fix, following the review's suggestion:** `joinLines` tracks quotes as bash does. Single quotes are copied verbatim; double quotes and unquoted text are joined; a comment starts only at a word-initial `#` outside quotes. Fail closed: if a continuation is kept (in single quotes, a comment, or any quoting read differently from bash) and the command names the capsule, then a delete word, `clean`, a script-level delete or `-delete` anywhere from the start of that line, fully joined, denies.
+- **A timing regression, caught before commit:** the first version read the last character of the string it was building, which V8 flattens on every access. 4.2 s at 512 KB, 15.7 s at 1 MB on comment-plus-continuation input, the timeout class this work removes. It now tracks the last character in a variable: 182 ms at 1 MB. The shape was added to the guard suite's 512 KB timing block, where the quadratic version would exceed the 3 s bound.
+- **Evidence:** tests first (6 deny cases red, 2 allow guards), 27/27 suites, and every earlier case set still holds.
+  - **Differential vs `d799f4f`:** unchanged from commit A (652 / 20, no line added or removed).
+  - **Metamorphic:** 4 allow → deny, where the transformation put a continuation inside single quotes (`'x \⏎ show'`), followed by an `rm` word. That is the fail-closed rule's intended conservative cost. The 8 deny → allow are the same escaped-space artifacts as before.
+  - **Timing:** 7 continuation, quote and comment shapes, worst 182 ms at 1 MB, linear.
+
+### Independent review of the fix, round 3 (2026-10-16): request changes (X2), then commit D
+
+The reviewer re-ran everything on `1c9ca50`:
+
+- `bash -n`; the guard test passes; 27/27 suites.
+- All earlier probe sets give 0 bypasses. Its round-3 set gives 19 bypasses on `4beb000`.
+- Timing is linear, at most 313 ms at 1 MB.
+- It also saw one unexplained 26/27 run under load. Four reruns passed, the same pattern as the author's flake.
+
+**Verdicts:** W1, W2, X1 and W5 fixed. W4 no longer applies (the conservative denial is accepted for the `core.editor` reason). W3 partly fixed: the plain, comment and 5 quote forms are denied, with real deletes on each.
+
+| ID | Sev | Finding | Author check | Commit D |
+|---|---|---|---|---|
+| X2 | blocking for W3 | The kept-continuation backstop was a word list. Where `joinLines` still reads quotes differently from bash (a heredoc body with `it's`, `$'\''`), the command is split, the capsule lands on the next line, and the stage rules skip the first part. A glued `-Or\⏎m` and an ANSI-C subcommand were allowed. | 4 forms reproduced as allowed on `1c9ca50` | a kept continuation in a command naming the capsule now **denies outright**. A pair is kept only inside single quotes or a comment, so where the guard reads quotes correctly this is rare, and no word list is complete |
+
+- **Evidence:**
+  - Tests first: 4 forms red.
+  - `ls <capsule> # list \⏎ls` moved from the allow list to an intended denial.
+  - Every earlier case set holds; 27/27 suites.
+  - **Differential vs `d799f4f`:** unchanged (652 / 20, identical lines).
+  - **Metamorphic:** 8 allow → deny, all from a continuation placed inside a single-quoted value (the intended cost). 8 deny → allow, the same escaped-space artifacts as before.
+  - **Timing:** worst 146 ms at 1 MB.
+- **Accepted low-severity false positives the reviewer listed:**
+  - `git stash push -m "clean up git notes" <capsule>/x`, `git merge -m "clean" origin/git` inside the capsule, and `make clean GIT=git` inside the capsule (the X1 rule);
+  - a single-quoted message or comment with a continuation next to a capsule path (this rule).
+
+### Independent review of the fix, round 4 (2026-10-16): X2 fixed; X3 found, then commit E
+
+The reviewer re-ran everything on `c261755`: 27/27 suites, 0 bypasses on every earlier probe set, worst 125 ms at 1 MB. **X2: fixed.**
+
+| ID | Sev | Finding | Author check | Commit E |
+|---|---|---|---|---|
+| X3 | blocking for W3 (old: `d799f4f` allows all forms too) | The outright denial tested for the capsule on text that still held the kept pair, so a pair that splits the capsule name (`rm -rf .project-\⏎brain` after a heredoc with `it's`, or after `$'\' #'`; also `cd .project-\⏎brain && rm -rf f`) went unnoticed | 3 forms reproduced: real bash deletes, guard allows | the capsule is looked for in the fully joined text (the reviewer's one-line fix) |
+
+**Evidence:**
+- Tests first: the 3 forms were red.
+- Every earlier case set holds; 27/27 suites.
+- The kept-pair path stays linear: 88 ms at 1 MB.
+- The base differential is unaffected, because its corpus has no kept pairs.
+
+**Re-review of commit E (`5c91867`): approved.**
+- The reviewer re-ran `bash -n`, the guard test and 27/27 suites.
+- All 5 split-capsule forms are denied, and real bash deletes in each. Two more variants (a name split by two kept pairs, and `cd .project\⏎-brain`) are denied as well.
+- Every earlier probe set gives 0 bypasses. Worst timing is 144 ms at 1 MB.
+- **Final verdicts:** RR1–RR3, V1–V5, W1–W3, W5 and X1–X3 are fixed. W4 no longer applies (a documented conservative denial). The listed conservative false positives do not block. Merging is the owner's step.
