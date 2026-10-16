@@ -255,6 +255,19 @@ A separate reviewer re-ran every check and compared the old and new scanners on 
 | B6 | Background check: "ReDoS / resource-cap defeat" and "parser differential" on commit 911335e (no details given) | ReDoS found and fixed: the `curl`/`wget` patterns used the `m` flag, which also starts a line after `\r` and `\u2028`, while `[^\n]` reads through them. 50 KB of bare `\r` took 0.5 s (quadratic). A line now starts after `\n` only (`(?<![^\n])`). 100 KB scans in about 1 ms, and timing tests pin both characters. The sweep now includes `\r`, `\u2028` and tab. The parser differential is passed to the final independent review (see below) |
 | P4 | (old) S1 still misses "ignore the instructions above" and "ignore everything above", and flags "never ignore previous instructions" | Open |
 
+## P7 repair (2026-10-16)
+
+`infra/hermes-agent/bin/make-review-board.py` read `projects.yaml` with its own line parser. The item asked for "a real parser". The `bin/` tier is stdlib-only and Python's stdlib has no YAML parser, so this goes the way the tier already went: `changeset_lib._iter_project_lines` is documented as "the single registry walker for this tier … nothing NEW duplicates it", and its `read_workdir` skips comment lines, strips inline comments and refuses a duplicate `workdir`. The private copy had none of that.
+
+- **Before** (base `d799f4f`), new tests in `make-review-board.test.py`:
+  - a project line with an inline comment (`demo:  # a project`) was not recognised, so the script said "project not registered";
+  - two `workdir` keys were accepted, silently taking the first (exit 0).
+- **Fix:** `resolve_workdir` calls `changeset_lib.read_workdir` and turns its errors into the script's exits. A `REVIEW_BOARD_REGISTRY` override, the same pattern as `PR_REGISTRY` and `ADS_REGISTRY`, lets tests point at a temp registry. It was added first, so the tests failed for the parser reason, not the path.
+- **After:** 5/5 tests pass. The real registry still gives `Workdir: /projects/claude_code`. `infra/hermes-agent/bin/run-bin-tests.sh` → 61/61.
+- **Deployment:** the container mounts all of `bin/` at `/opt/cc-bin` (`docker-compose.yml`), so `changeset_lib` is next to the script. It imports cleanly with an empty environment.
+- **Not done:** `run-ads-report.py` and `open-proposal-pr.py` still carry their own walkers. `run-ads-report.py`'s copy is marked frozen with Inc-3. Moving them is a separate change.
+- **Status row:** left as "Open" on this branch, because the P6/P9 branch edits the neighbouring rows and git would conflict. Flip it to Done when merging.
+
 ## P2 repair (2026-10-15)
 
 - **What the harvester decides:** `harvest-evidence.js` writes `evidence.json`. Scoring reads only `skill_loaded` / `agent_dispatched` (trigger and dispatch accuracy), `artifacts[].exists` and `workflow_steps[].satisfied` from it. `claims` and `mtime_in_window` are informational; no grader or script reads them for a score.
