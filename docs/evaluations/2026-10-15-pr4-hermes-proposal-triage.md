@@ -23,15 +23,15 @@ The proposal's own `P` numbers are kept.
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
-| P6 | BSD-only `sed -i ''` | **Fixed** (reviewed; see "P9 repair", P6 note) | `uninstall.sh:108` on `d799f4f` |
-| P7 | Hand-rolled YAML parsing | Open | `infra/hermes-agent/bin/make-review-board.py:39` |
+| P6 | BSD-only `sed -i ''` | **Done 2026-10-16** (PR #144; see "P9 repair", P6 note) | `uninstall.sh:108` on `d799f4f` |
+| P7 | Hand-rolled YAML parsing | **Done 2026-10-16** (PR #145; see "P7 repair") | `infra/hermes-agent/bin/make-review-board.py:39` |
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
-| P9 | No guard before `rm -rf` in `uninstall.sh` | **Fixed** (reviewed; see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
-| P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
-| P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
-| P12 | Tests missing for 3 scripts | **Done, in review** (see "P12 repair") | all three have tests: `validate-skills.test.js`, and since 2026-10-16 `scripts/score-candidates.test.js` and `scripts/extract-project-context.test.js` |
+| P9 | No guard before `rm -rf` in `uninstall.sh` | **Done 2026-10-16** (PR #144; see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
+| P10 | No architecture map | **Done 2026-10-16** (PR #147; see "P14 and P10") | no `ARCHITECTURE.md` by design; README's "Architecture at a glance" stands and its directory tree is now complete |
+| P11 | The brain security guard fails open on a parser error | **Done** (PR #142; re-review fixes PR #143; see "P11 repair", "P11 re-review") | `hooks/brain/brain-security-guard.sh` |
+| P12 | Tests missing for 3 scripts | **Done 2026-10-16** (PR #146; see "P12 repair") | all three have tests: `validate-skills.test.js`, and since 2026-10-16 `scripts/score-candidates.test.js` and `scripts/extract-project-context.test.js` |
 | P13 | `test-runners.js` writes to real `evals/` paths | **Open, worse than stated** | see below |
-| P14 | The superseded architecture spec has no banner | **Done, in review** (see "P14 and P10") | all 13 archived Hermes custom-kernel docs now carry a RETIRED (canon D-3) headline and point at repo documents only; no machine-local or dead pointer remains under `docs/superpowers/` |
+| P14 | The superseded architecture spec has no banner | **Done 2026-10-16** (PR #147; see "P14 and P10") | all 13 archived Hermes custom-kernel docs now carry a RETIRED (canon D-3) headline and point at repo documents only; no machine-local or dead pointer remains under `docs/superpowers/` |
 
 ### P13 in detail
 
@@ -77,10 +77,10 @@ The proposal's own `P` numbers are kept.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"); S4–S9 are open.
    ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E6 are open.
 4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
-5. **P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`. Keep `install.sh` in sync.
+5. ~~**P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`.~~ Done on 2026-10-16 (PR #144; see "P9 repair").
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
-7. **P7:** replace the hand-rolled YAML parse with a real parser, with a test.
-8. **P12:** tests for `score-candidates.js` and `extract-project-context.js`.
+7. ~~**P7:** replace the hand-rolled YAML parse with a real parser, with a test.~~ Done on 2026-10-16 (PR #145; see "P7 repair"): the stdlib-only tier uses the shared registry walker.
+8. ~~**P12:** tests for `score-candidates.js` and `extract-project-context.js`.~~ Done on 2026-10-16 (PR #146; see "P12 repair").
 9. ~~**P14:** point the archived spec's banner at a repo document.~~ Done on 2026-10-16 (see "P14 and P10").
 10. ~~**P10:** an architecture map (low).~~ Done on 2026-10-16 (see "P14 and P10"): README's directory tree completed.
 
