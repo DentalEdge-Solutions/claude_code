@@ -152,9 +152,10 @@ const MD_SECRETS = [
 
 // ─── Config: Overly permissive settings.json rules ─────────────────────────
 // Applied only to files named settings.json / settings.local.json.
-// An entry with allowRule is a permission check. When the file parses as JSON, allowRule is tested
-// against each entry of permissions.allow (trimmed), and deny and ask rules, which grant nothing, are
-// not read (S4). When it does not parse, re is tested against the raw text, as on main.
+// An entry with allowRule is a permission check. When readSettings can read the file, allowRule is
+// tested against each permissions.allow rule (trimmed; the bare tool name, S4), and re against the raw
+// text with the permissions.deny and permissions.ask arrays emptied. Otherwise re is tested against the
+// raw text, as on main.
 // Docs (code.claude.com/docs/en/permissions, read 2026-10-16): "`Bash(*)` is equivalent to `Bash` and
 // matches all Bash commands"; ":*" is an equivalent way to write a trailing wildcard; "//path" is an
 // absolute path, "~/path" is under home, and "/path" is relative to the settings source.
@@ -330,58 +331,79 @@ function scanMarkdown(filePath, content) {
 // CONFIG_PATTERNS are applied only to Claude Code settings files.
 const CONFIG_FILENAMES = new Set(['settings.json', 'settings.local.json']);
 
-// permissions.allow as a list of trimmed strings, or null when the file is not valid JSON or has a shape
-// the schema rejects (then the permission checks read the raw text, as on main). A BOM is dropped first, as JSON.parse refuses it.
-// JSON.parse keeps only the last of two equal keys, and another reader may keep the first, so every
-// copy of a duplicate key is read: before parsing, the second and later copies of a key in the same
-// object (compared after decoding, so "perm\u0069ssions" counts) are renamed, and the allow lists of
-// every permissions/allow copy are joined (background security review of dc61b2c).
-const DUP_SUFFIX = '\u0000dup';
-const baseKey = k => k.split(DUP_SUFFIX)[0];
-function allowRules(content) {
-  const text = content.replace(/^\uFEFF/, '');
-  try { JSON.parse(text); } catch { return null; }
-  // Valid JSON, so every " outside a string opens one: tokens are whole strings and braces, in order.
-  const objects = [];
-  let out = '', last = 0;
-  const colon = /\s*:/y;
-  for (const m of text.matchAll(/"(?:[^"\\]|\\.)*"|[{}]/g)) {
-    if (m[0] === '{') { objects.push(new Map()); continue; }
-    if (m[0] === '}') { objects.pop(); continue; }
-    colon.lastIndex = m.index + m[0].length;
-    if (!colon.test(text) || !objects.length) continue;
-    const key = JSON.parse(m[0]);
-    const seen = objects[objects.length - 1];
-    const n = seen.get(key) || 0;
-    seen.set(key, n + 1);
-    if (n === 0) continue;
-    out += text.slice(last, m.index) + JSON.stringify(key + DUP_SUFFIX + n);
-    last = m.index + m[0].length;
+// Reads a settings file that is valid JSON. Returns null when it is not valid JSON or nests too deep to
+// read; then the permission checks read the raw text, as on main. Otherwise returns:
+//   allow: the trimmed string rules of every permissions.allow, in every copy of a duplicate key (a
+//          reader may keep either copy; keys are compared decoded, so "permissions" counts)
+//   text:  the raw text with the permissions.deny and permissions.ask arrays (every copy) emptied, for
+//          main's text checks: only deny and ask rules, which grant nothing, stop being reported (S4).
+//          A shape the schema rejects (allow as a string, a top-level array) adds no allow rules, and
+//          the text checks still read it, as on main (independent review T10)
+// A BOM is dropped first, as JSON.parse refuses it. Background security review of c136334: reading
+// permissions.allow alone lost main's matches elsewhere ("allowedTools"), and the earlier key renaming
+// could collide with a real key.
+const JSON_STRING = /"(?:[^"\\]|\\.)*"/y;
+const JSON_SCALAR = /[^,\]}\s]*/y;
+function readJsonTree(text) {
+  let i = 0;
+  const ws = () => { while (i < text.length && ' \t\n\r'.includes(text[i])) i++; };
+  const str = () => { JSON_STRING.lastIndex = i; JSON_STRING.test(text); const s = JSON.parse(text.slice(i, JSON_STRING.lastIndex)); i = JSON_STRING.lastIndex; return s; };
+  function value() {
+    ws();
+    const c = text[i];
+    if (c === '{') {
+      i++; ws();
+      const entries = [];
+      if (text[i] === '}') { i++; return { type: 'object', entries }; }
+      for (;;) {
+        ws(); const key = str(); ws(); i++;            // the ':'
+        entries.push([key, value()]); ws();
+        if (text[i++] === '}') return { type: 'object', entries };
+      }
+    }
+    if (c === '[') {
+      const start = i++; ws();
+      const items = [];
+      if (text[i] === ']') { i++; return { type: 'array', items, start, end: i }; }
+      for (;;) {
+        items.push(value()); ws();
+        if (text[i++] === ']') return { type: 'array', items, start, end: i };
+      }
+    }
+    if (c === '"') return { type: 'string', value: str() };
+    JSON_SCALAR.lastIndex = i; JSON_SCALAR.test(text); i = JSON_SCALAR.lastIndex;
+    return { type: 'scalar' };
   }
-  // A shape Claude Code's schema rejects (a top-level array, a permissions value that is not an object,
-  // an allow value that is not an array) gets the raw-text checks too, as on main (independent review T10).
-  const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
-  const doc = JSON.parse(out + text.slice(last));
-  if (!isObject(doc)) return null;
-  const rules = [];
-  for (const [pk, perms] of Object.entries(doc)) {
-    if (baseKey(pk) !== 'permissions') continue;
-    if (!isObject(perms)) return null;
-    for (const [ak, allow] of Object.entries(perms)) {
-      if (baseKey(ak) !== 'allow') continue;
-      if (!Array.isArray(allow)) return null;
-      rules.push(...allow);
+  return value();
+}
+
+function readSettings(content) {
+  const text = content.replace(/^\uFEFF/, '');
+  let root;
+  try { JSON.parse(text); root = readJsonTree(text); } catch { return null; }   // invalid, or too deep
+  const allow = [];
+  const blank = [];
+  for (const [key, perms] of root.type === 'object' ? root.entries : []) {
+    if (key !== 'permissions' || perms.type !== 'object') continue;
+    for (const [k, list] of perms.entries) {
+      if (list.type !== 'array') continue;
+      if (k === 'allow') for (const item of list.items) { if (item.type === 'string') allow.push(item.value.trim()); }
+      else if (k === 'deny' || k === 'ask') blank.push(list);
     }
   }
-  return rules.filter(r => typeof r === 'string').map(r => r.trim());
+  let out = '', last = 0;
+  for (const { start, end } of blank.sort((a, b) => a.start - b.start)) { out += text.slice(last, start) + '[]'; last = end; }
+  return { allow, text: out + text.slice(last) };
 }
 
 function scanConfig(filePath, content) {
-  const allow = allowRules(content);
+  const settings = readSettings(content);
   for (const { re, allowRule, name, sev } of CONFIG_PATTERNS) {
-    if (allowRule && allow) {
-      const rule = allow.find(r => allowRule.test(r));
-      if (rule !== undefined) flag(filePath, name, sev, `"allow: ${rule.slice(0, 72)}"`);
+    if (allowRule && settings) {
+      const rule = settings.allow.find(r => allowRule.test(r));
+      if (rule !== undefined) { flag(filePath, name, sev, `"allow: ${rule.slice(0, 72)}"`); continue; }
+      const m = settings.text.match(re);
+      if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
       continue;
     }
     if (re.test(content)) {

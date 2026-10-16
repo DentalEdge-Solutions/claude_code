@@ -728,6 +728,76 @@ for (const text of ['{"permissions":{"allow":"Bash(*)"}}', '[{"permissions":{"al
   });
 }
 
+// Background security review of c136334: reading only permissions.allow lost main's text matches
+// elsewhere in the file, and renaming duplicate keys with a marker could collide with a real key.
+// Now: bare-name checks over every permissions/allow copy, plus main's text checks on the raw file
+// with only the permissions.deny and permissions.ask arrays blanked.
+for (const [text, check] of [
+  ['{"allowedTools":["Bash(*)"]}', 'perm-bash-wildcard'],
+  ['{"permissions":{"allow":["Read(./a)"]},"allowedTools":["Bash(*)"]}', 'perm-bash-wildcard'],
+  ['{"env":{"permissions":{"allow":["Bash(*)"]}}}', 'perm-bash-wildcard'],
+  ['{"sandbox":{"network":{"allow":["*"]}}}', 'perm-allow-wildcard'],
+  ['{"permissions":{"deny":["Read(./a)"],"allow":["Edit(~/x)"]}}', 'perm-broad-path'],
+]) {
+  test(`B9: main's text match outside deny and ask is kept: ${text}`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.ok(checks(r.json).includes(check), `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+for (const text of [
+  '{"perm\\u0069ssions":{"deny":["Bash(*)"],"ask":["Write(*)"]}}',
+  '{"permissions":{"deny":["Bash(*)"],"deny":["Write(*)"]},"permissions":{"ask":["Edit(*)"]}}',
+  '{"permissions":{"deny":["Bash(*)", "Read(*)"], "allow":["Read(./a)"]}}',
+]) {
+  test(`B9: deny and ask lists of every permissions copy are blanked: ${text}`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.strictEqual(r.json.verdict, 'PASS', `got ${checks(r.json).join(', ')}`);
+  });
+}
+
+test('B9: a key that contains a marker-like suffix is not a permissions copy', () => {
+  const r = run([makeDir({ 'settings.json': '{"permissions\\u0000dup1":{"allow":["Bash"]}}' })]);
+  assert.ok(!checks(r.json).includes('perm-bash-wildcard'), `got ${checks(r.json).join(', ')}`);
+});
+
+for (const [label, text] of [
+  ['deep arrays', '{"permissions":{"allow":["Bash"]},"k":' + '['.repeat(200000) + ']'.repeat(200000) + '}'],
+  ['deep objects', '{"permissions":{"allow":["Bash"]},"k":' + '{"a":'.repeat(100000) + '1' + '}'.repeat(100000) + '}'],
+]) {
+  test(`B9: ${label} do not crash the scan, and the file still gets checked`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.ok(r.json, `no JSON output: ${r.stderr.slice(0, 200)}`);
+  });
+}
+
+// Independent review round 2 of c136334: U1 (a rename marker in the file hid a real copy) and U2 (a
+// spread of a 150,000-entry allow list crashed the scan, and CI's fallback reads a crash as a pass).
+for (const text of [
+  '{"permissions":{"allow":[]},"permissions":{"allow":["Bash(*)"]},"permissions\\u0000dup1":{"allow":[]}}',
+  '{"permissions":{"allow":[],"allow":["Bash(*)"],"allow\\u0000dup1":[]}}',
+  '{"permissions":{"allow":["Bash"]},"permissions\\u0000dup":1}',
+  '{"other":{"permissions":{"allow":["Bash(*)"]}},"permissions":{"allow":[]}}',
+]) {
+  test(`U1/U3/U4: a marker-like key or a nested copy hides nothing: ${text}`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+test('U2: a 250,000-entry allow list is read, not a crash', () => {
+  const allow = Array(250000).fill('x');
+  allow.push('Bash');
+  const r = settingsScan({ permissions: { allow } });
+  assert.ok(r.json, `no JSON output: ${r.stderr.slice(0, 200)}`);
+  assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+test('U5: a digit glued before a wider sk-ant- form is prose, not a key', () => {
+  const r = run([makeDir({ 'SKILL.md': 'Read the 2sk-ant-colony-simulation-framework-design notes.\n' })]);
+  assert.ok(!checks(r.json).includes('anthropic-api-key'), `got ${checks(r.json).join(', ')}`);
+});
+
 test('S4: equal keys in different objects are not duplicates', () => {
   const r = settingsScan({ permissions: { allow: ['Read(./a)'], deny: ['Bash(*)'] }, hooks: { deny: 1, allow: 2 } });
   assert.strictEqual(r.json.verdict, 'PASS', `got ${checks(r.json).join(', ')}`);
@@ -924,7 +994,7 @@ test('T5: an api03 key glued to a word is still caught, as on main', () => {
 });
 
 test('T7: a settings file with a BOM is parsed, so a bare name is caught', () => {
-  const r = run([makeDir({ 'settings.json': '﻿{"permissions":{"allow":["Bash"]}}' })]);
+  const r = run([makeDir({ 'settings.json': '\uFEFF{"permissions":{"allow":["Bash"]}}' })]);
   assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
 });
 
