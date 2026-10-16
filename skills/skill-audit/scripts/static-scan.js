@@ -129,8 +129,11 @@ const MD_SECRETS = [
   { re: /(?:password|passwd|secret|token)\s*[:=]\s*['"][^'"]{8,}/i,  name: 'hardcoded-secret',       sev: 'FLAG'  },
   { re: /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/,                          name: 'hardcoded-bearer-token', sev: 'BLOCK' },
   { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,          name: 'private-key-block',      sev: 'BLOCK' },
-  // Anthropic keys and tokens: api03, admin01, oat01 (OAuth) … (S7: main knew api03 and admin only)
-  { re: /sk-ant-[a-z]+\d*-[A-Za-z0-9_\-]{20,}/,                     name: 'anthropic-api-key',      sev: 'BLOCK' },
+  // Anthropic keys and tokens: api03, admin01, oat01 (OAuth) … (S7: main knew api03 and admin only). The
+  // wider form needs no letter or digit before sk-, so "task-ant-colony-…" prose is quiet (independent
+  // review T5); main's form keeps matching anywhere.
+  { re: /sk-ant-(?:api03|admin)-[A-Za-z0-9_\-]{20,}|(?<![A-Za-z0-9])sk-ant-[a-z]+\d*-[A-Za-z0-9_\-]{20,}/,
+                                                                      name: 'anthropic-api-key',      sev: 'BLOCK' },
   // OpenAI / generic LLM keys: legacy sk-…, and the dashed proj/svcacct/admin forms (S7). The dashed
   // forms need a known prefix and no letter or digit before sk-, so kebab-case prose ("risk-assess…") is quiet.
   { re: /sk-[A-Za-z0-9]{32,}|(?<![A-Za-z0-9])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}/,
@@ -168,7 +171,7 @@ const CONFIG_PATTERNS = [
   { re: /"allow"\s*:\s*\[\s*(?:[^[\]]*,\s*)?"(?:\*|Bash\(\*\)|Write\(\*\))"/, allowRule: /^\*+$/,
                                                  name: 'perm-allow-wildcard',      sev: 'BLOCK' },
   // Hardcoded Anthropic key or token anywhere in config (S7: oat01 and admin01 too)
-  { re: /sk-ant-[a-z]+\d*-[A-Za-z0-9_\-]{20,}/,
+  { re: /sk-ant-(?:api03|admin)-[A-Za-z0-9_\-]{20,}|(?<![A-Za-z0-9])sk-ant-[a-z]+\d*-[A-Za-z0-9_\-]{20,}/,
                                                  name: 'anthropic-key-in-config',  sev: 'BLOCK' },
   // Broad path permissions: the settings source's root, anything under home, any absolute path (//)
   { re: /"(?:Write|Edit)\(\/\*?\)"|"(?:Write|Edit)\(~\//, allowRule: /^(?:Write|Edit)\((?:\/\*?\)|~\/|\/\/)/,
@@ -211,21 +214,25 @@ const JS_PATTERNS = [
 // escapes) and # comments are skipped, which also stops a ) or a "shell=True" inside them from
 // counting. Returns a match-like array (m[0] is the call's start) or null.
 const PY_SUBPROCESS_CALL = /subprocess\s*\.\s*(?:run|call|Popen|check_output|check_call)\s*$/;
+const COMMENT_REST = /[^\r\n]*/y;
 const PY_SHELL_TRUE = /^shell\s*=\s*True(?![A-Za-z0-9_])/;
+// main's pattern (re-check G2 and F8), plus the word end after True
+const PY_SHELL_TRUE_MAIN = /subprocess\.(?:run|call|Popen|check_output|check_call)\((?:(?!subprocess\.(?:run|call|Popen|check_output|check_call)\()[^)])*?shell\s*=\s*True(?![A-Za-z0-9_])/;
 function findPyShellTrue(text) {
   const stack = [];     // one entry per open bracket: the call's start offset when it is a subprocess call, else -1
   let subDepth = 0;     // how many entries in the stack are subprocess calls
   let lastOpen = 0;     // where the text before the next ( starts, so the call-name check reads a short slice
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === '#') { const nl = text.indexOf('\n', i); if (nl < 0) break; i = nl; continue; }
+    // A comment runs to the line end; Python also ends a line at a lone \r (independent review T2).
+    if (c === '#') { COMMENT_REST.lastIndex = i; COMMENT_REST.test(text); i = COMMENT_REST.lastIndex - 1; continue; }
     if (c === '"' || c === "'") {
       const triple = text.startsWith(c.repeat(3), i);
       const end = triple ? c.repeat(3) : c;
       let j = i + end.length;
       for (; j < text.length; j++) {
         if (text[j] === '\\') { j++; continue; }
-        if (!triple && text[j] === '\n') break;
+        if (!triple && (text[j] === '\n' || text[j] === '\r')) break;
         if (text.startsWith(end, j)) { j += end.length - 1; break; }
       }
       i = j;
@@ -275,7 +282,9 @@ const PY_PATTERNS = [
   { re: /\bos\.system\s*\(/,                                              name: 'os-system-injection',     sev: 'BLOCK' },
   // shell=True as an argument anywhere inside a subprocess call, nested calls included. A regex stopped at
   // the first ), so subprocess.run(build(cmd), shell=True) passed (S8); findPyShellTrue reads the call.
-  { find: findPyShellTrue,                                                name: 'subprocess-shell-true', sev: 'BLOCK' },
+  // main's regex still runs, so a string the reader misreads can only add findings, never hide main's
+  // (background security review of dc61b2c: a Python 3.12 f-string nesting ''' hid the rest of the file).
+  { find: t => findPyShellTrue(t) || t.match(PY_SHELL_TRUE_MAIN),       name: 'subprocess-shell-true', sev: 'BLOCK' },
   // Unsafe parsing
   { re: /\byaml\.(?:unsafe_)?load\s*\((?![^)\n]{0,80}Loader\s*=\s*yaml\.SafeLoader)/, name: 'yaml-unsafe-load', sev: 'FLAG' },
   { re: /\b(?:xml\.etree\.ElementTree|ET)\.(parse|fromstring)\s*\(/,     name: 'xml-unsafe-parse',        sev: 'FLAG'  },
@@ -321,13 +330,50 @@ function scanMarkdown(filePath, content) {
 // CONFIG_PATTERNS are applied only to Claude Code settings files.
 const CONFIG_FILENAMES = new Set(['settings.json', 'settings.local.json']);
 
-// permissions.allow as a list of trimmed strings, or null when the file is not valid JSON (then the
-// permission checks read the raw text, as on main). A BOM is dropped first, as JSON.parse refuses it.
+// permissions.allow as a list of trimmed strings, or null when the file is not valid JSON or has a shape
+// the schema rejects (then the permission checks read the raw text, as on main). A BOM is dropped first, as JSON.parse refuses it.
+// JSON.parse keeps only the last of two equal keys, and another reader may keep the first, so every
+// copy of a duplicate key is read: before parsing, the second and later copies of a key in the same
+// object (compared after decoding, so "perm\u0069ssions" counts) are renamed, and the allow lists of
+// every permissions/allow copy are joined (background security review of dc61b2c).
+const DUP_SUFFIX = '\u0000dup';
+const baseKey = k => k.split(DUP_SUFFIX)[0];
 function allowRules(content) {
-  let doc;
-  try { doc = JSON.parse(content.replace(/^\uFEFF/, '')); } catch { return null; }
-  const allow = doc && doc.permissions && doc.permissions.allow;
-  return Array.isArray(allow) ? allow.filter(r => typeof r === 'string').map(r => r.trim()) : [];
+  const text = content.replace(/^\uFEFF/, '');
+  try { JSON.parse(text); } catch { return null; }
+  // Valid JSON, so every " outside a string opens one: tokens are whole strings and braces, in order.
+  const objects = [];
+  let out = '', last = 0;
+  const colon = /\s*:/y;
+  for (const m of text.matchAll(/"(?:[^"\\]|\\.)*"|[{}]/g)) {
+    if (m[0] === '{') { objects.push(new Map()); continue; }
+    if (m[0] === '}') { objects.pop(); continue; }
+    colon.lastIndex = m.index + m[0].length;
+    if (!colon.test(text) || !objects.length) continue;
+    const key = JSON.parse(m[0]);
+    const seen = objects[objects.length - 1];
+    const n = seen.get(key) || 0;
+    seen.set(key, n + 1);
+    if (n === 0) continue;
+    out += text.slice(last, m.index) + JSON.stringify(key + DUP_SUFFIX + n);
+    last = m.index + m[0].length;
+  }
+  // A shape Claude Code's schema rejects (a top-level array, a permissions value that is not an object,
+  // an allow value that is not an array) gets the raw-text checks too, as on main (independent review T10).
+  const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const doc = JSON.parse(out + text.slice(last));
+  if (!isObject(doc)) return null;
+  const rules = [];
+  for (const [pk, perms] of Object.entries(doc)) {
+    if (baseKey(pk) !== 'permissions') continue;
+    if (!isObject(perms)) return null;
+    for (const [ak, allow] of Object.entries(perms)) {
+      if (baseKey(ak) !== 'allow') continue;
+      if (!Array.isArray(allow)) return null;
+      rules.push(...allow);
+    }
+  }
+  return rules.filter(r => typeof r === 'string').map(r => r.trim());
 }
 
 function scanConfig(filePath, content) {
@@ -394,8 +440,9 @@ function scanFile(full, content) {
   const base = path.basename(full).toLowerCase();
   if (['.md', '.txt'].includes(ext))   scanMarkdown(full, content);
   else if (CONFIG_FILENAMES.has(base)) scanConfig(full, content);
-  else if (isDataFile(base, ext))      scanSecrets(full, content);
+  // Script extensions first: a script named .env.sh or .env.local.js keeps its table (independent review T3)
   else if (JS_EXTS.has(ext) || PY_EXTS.has(ext) || SH_EXTS.has(ext)) scanScript(full, content, ext);
+  else if (isDataFile(base, ext))      scanSecrets(full, content);
   else                                 scanScript(full, content, shebangExt(content));
 }
 

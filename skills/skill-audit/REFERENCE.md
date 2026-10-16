@@ -54,11 +54,11 @@
 | Any other file starting with a shebang (`#!/bin/sh`, `#!/usr/bin/env node`, `#!/usr/bin/env -S node …`, `#!/usr/bin/python3.12`) | the table for its interpreter: node, deno, bun → JS; python, pypy → Python; sh, bash, zsh, dash, ksh, ash → shell |
 | `.json` `.jsonc` `.json5` `.yaml` `.yml` `.toml` `.ini` `.cfg` `.conf` `.env` `.properties`, and `.env`, `.env.*`, `.npmrc`, `.pypirc`, `.netrc` | secrets |
 
-Script files (JS, Python, shell) are not read for the secrets table; Python has its own hardcoded-secret FLAG. In a single-file scan, each finding's `file` is the file's name.
+The first row that matches wins, top to bottom, so a script named `.env.sh` is a shell script. A shebang file with a data extension (`run.conf`) is read for secrets only. Shebangs with an `env` option that takes an argument (`env -u FOO python3`) or other interpreters (`tsx`, `pythonw`, `uv run`) are not recognised. Script files (JS, Python, shell) are not read for the secrets table; Python has its own hardcoded-secret FLAG. In a single-file scan, each finding's `file` is the file's name.
 
 ### Settings permissions (settings.json)
 
-When the file is valid JSON, the permission rows below are matched against each entry of `permissions.allow`, trimmed. Deny and ask rules grant nothing and are not reported. When the file is not valid JSON, the rows are matched against the raw text, deny and ask lists included. Per the [permissions docs](https://code.claude.com/docs/en/permissions) (read 2026-10-16), a bare tool name matches every use of the tool: "`Bash(*)` is equivalent to `Bash`", and `:*` is another way to write a trailing wildcard.
+When the file is valid JSON, the permission rows below are matched against each entry of `permissions.allow`, trimmed. Deny and ask rules grant nothing and are not reported. A key that appears twice in one object (`permissions` or `allow`, escaped spellings included) is read in every copy, since parsers differ on which copy wins. When the file is not valid JSON, or has a shape the settings schema rejects (a top-level array, `permissions` or `allow` of the wrong type), the rows are matched against the raw text, deny and ask lists included. Per the [permissions docs](https://code.claude.com/docs/en/permissions) (read 2026-10-16), a bare tool name matches every use of the tool: "`Bash(*)` is equivalent to `Bash`", and `:*` is another way to write a trailing wildcard.
 
 | Allow rule | Severity |
 |-----------|----------|
@@ -72,7 +72,7 @@ When the file is valid JSON, the permission rows below are matched against each 
 
 ### Secrets (everywhere a file is read for secrets, code blocks included)
 
-Anthropic keys and tokens (`sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-ant-oat01-…`), OpenAI keys (`sk-…`, `sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), AWS access key IDs, Slack bot tokens, private-key headers and Bearer tokens are BLOCK. Generic `api_key`/`password`/`secret`/`token` assignments are FLAG.
+Anthropic keys and tokens (`sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-ant-oat01-…`), OpenAI keys (`sk-…`, `sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), AWS access key IDs, Slack bot tokens, private-key headers and Bearer tokens are BLOCK. A generic `api_key`/`password`/`secret`/`token` assignment is a FLAG only when the name sits right before `:` or `=` and the value is quoted (`password = "…"`). So a JSON key (`"password": "…"`), an unquoted `.env` value (`PASSWORD=…`) and an npm `_authToken` are not matched.
 
 ### Prompt Injection (in .md files)
 
@@ -116,7 +116,7 @@ Anthropic keys and tokens (`sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-ant-oat
 | `joblib.load()` / `pandas.read_pickle()` | BLOCK |
 | `numpy.load(..., allow_pickle=True)` | BLOCK |
 | `os.system()` | BLOCK |
-| `shell=True` anywhere inside a `subprocess.run/call/Popen/check_output/check_call(...)` call, nested calls included; strings and `#` comments are skipped, so a `)` or a quoted `"shell=True"` does not count. Not seen: an aliased module (`import subprocess as sp`), `from subprocess import run`, `**{"shell": True}` | BLOCK |
+| `shell=True` anywhere inside a `subprocess.run/call/Popen/check_output/check_call(...)` call, nested calls included. A reader skips strings and `#` comments, so a `)` inside them does not end the call; the older regex (arguments up to the first `)`) also runs, so a string the reader misreads cannot hide a match. Not seen: an aliased module (`import subprocess as sp`), `from subprocess import run`, `**{"shell": True}`, a truthy value other than `True` (`shell=1`), a backslash line break after `shell=`, more than 64 spaces between the name and `(` | BLOCK |
 | `shelve.open()` | FLAG |
 | `yaml.load()` without `Loader=yaml.SafeLoader` | FLAG |
 | `xml.etree.ElementTree.parse()` | FLAG (XXE) |
