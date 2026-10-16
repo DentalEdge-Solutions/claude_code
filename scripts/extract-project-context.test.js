@@ -102,10 +102,31 @@ try {
   assert.strictEqual(out.project_name, 'broken');
   assert.deepStrictEqual(out.mcp_servers, []);
 
-  // 6. --help exits 0 and writes nothing.
-  const r = spawnSync('node', [SCRIPT, '--help'], { encoding: 'utf8', cwd: empty, env: { ...process.env, HOME } });
+  // 6. Other sources (review P12-4): CLAUDE.md under .claude/ when the root has none,
+  //    .planning/REQUIREMENTS.md terms and paths, and django from pyproject.toml.
+  const alt = path.join(TMP, 'alt-proj');
+  write(path.join(alt, '.claude', 'CLAUDE.md'), 'Follow the SPEC rules.\n');
+  write(path.join(alt, '.planning', 'REQUIREMENTS.md'), 'The Order Service owns `./orders/db`.\n');
+  write(path.join(alt, 'pyproject.toml'), '[project]\nname = "alt"\ndependencies = ["django"]\n');
+  out = extract(alt).file;
+  assert.ok(out.workflow_terms.includes('SPEC'), '.claude/CLAUDE.md fallback');
+  assert.ok(out.key_phrases.includes('The Order Service'), '.planning Title-Case phrase');
+  assert.ok(out.artifact_paths.includes('./orders/db'), '.planning backticked path');
+  assert.deepStrictEqual(out.stack, ['Django']);
+  // artifact_paths is capped at 10, in order of appearance.
+  const many = path.join(TMP, 'many-paths');
+  write(path.join(many, 'CLAUDE.md'), Array.from({ length: 12 }, (_, i) => `See \`./p${i}\`.`).join('\n'));
+  out = extract(many).file;
+  assert.deepStrictEqual(out.artifact_paths, Array.from({ length: 10 }, (_, i) => `./p${i}`), 'first 10 paths');
+
+  // 7. --help exits 0 and writes nothing (review P12-3: without the early exit the script
+  //    would treat "--help" as the project root and write --help/evals/).
+  const helpCwd = path.join(TMP, 'help-cwd');
+  fs.mkdirSync(helpCwd);
+  const r = spawnSync('node', [SCRIPT, '--help'], { encoding: 'utf8', cwd: helpCwd, env: { ...process.env, HOME } });
   assert.strictEqual(r.status, 0);
   assert.ok(r.stdout.includes('Usage'));
+  assert.deepStrictEqual(fs.readdirSync(helpCwd), [], '--help writes nothing');
 
   console.log('extract-project-context.test.js: all assertions passed');
 } finally {

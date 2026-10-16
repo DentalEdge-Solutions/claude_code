@@ -96,6 +96,46 @@ try {
   out = score([{ ...strong, skill_md_lines: 80, has_reference: false }]);
   assert.strictEqual(out[0].total_score, 9);
 
+  // 6b. Both sides of every band (review P12-1): SKIP ≤ 3 | 4 ≤ MARGINAL ≤ 5 | 6 ≤ GOOD ≤ 7 |
+  //     8 ≤ STRONG. Exact totals are asserted, so a moved threshold or a renamed band fails.
+  //     The weak candidate contributes clarity 6 (1.2), footprint 1 (0.15), provenance 1 (0.1),
+  //     reputation 1 (0.1) and conflict 10 (0.5); with no keywords, project fit is 5 (0.75).
+  const edge = (cand, total, rec, label) => {
+    const c = score([cand])[0];
+    assert.deepStrictEqual([c.total_score, c.recommendation], [total, rec], label);
+  };
+  edge({ ...weak, description: '', trigger_keywords: [] }, 3, 'SKIP', 'SKIP upper edge: 2.8 → 3');
+  edge({ ...weak, description: 'Use when x', trigger_keywords: [] }, 4, 'MARGINAL',
+    'MARGINAL lower edge: 1.25 + 2.8 = 4.05 → 4');
+  edge({ ...weak, description: 'Use when x, y; when user asks', trigger_keywords: [] }, 5, 'MARGINAL',
+    'MARGINAL upper edge: 2.5 + 2.8 = 5.3 → 5');
+  // GOOD lower edge (5.95 → 6) and STRONG lower edge (8.45 → 8) are asserted in 6 above.
+  edge({ ...strong, skill_md_lines: 120, has_reference: false, description: 'Reviews code, diffs' }, 7, 'GOOD',
+    'GOOD upper edge: 0.75 + 1.2 + 0.75 + 1.5 + 1 + 1 + 0.5 = 6.7 → 7');
+
+  // 6c. Middle tiers (review P12-2).
+  const rep = (over) => score([{ ...weak, ...over }])[0].breakdown.source_reputation;
+  assert.strictEqual(rep({ repo_stars: 600 }), 7, 'reputation: 500+ stars');
+  assert.strictEqual(rep({ repo_stars: 150 }), 5, 'reputation: 100+ stars');
+  assert.strictEqual(rep({ repo_stars: 50, repo_age_days: 400 }), 4, 'reputation: unknown org, some stars');
+  assert.strictEqual(rep({ source_url: 'https://github.com/multica-ai/x/tree/main/y' }), 10, 'tier 2 org');
+  assert.strictEqual(rep({ source_url: 'https://github.com/DentalEdgeSolutions/x/tree/main/y' }), 10, 'tier 3 org');
+  const prov = (over) => score([{ ...weak, ...over }])[0].breakdown.provenance;
+  assert.strictEqual(prov({ repo_stars: 150, repo_age_days: 100 }), 7, 'provenance: 100+ stars, 30-179 days');
+  assert.strictEqual(prov({ repo_stars: 20, repo_age_days: 20 }), 4, 'provenance: 10+ stars, under 30 days');
+  const fp = (lines) => score([{ ...weak, skill_md_lines: lines }])[0].breakdown;
+  assert.strictEqual(fp(180).context_footprint, 3, 'footprint: 151-200 lines');
+  assert.strictEqual(fp(25).clarity, 3, 'clarity: 20-39 lines');
+  assert.strictEqual(fp(10).clarity, 0, 'clarity: under 20 lines');
+  // Overlap math: description words longer than 4 letters are "reviewing", "auditing", "diffs"
+  // and "review" (4); the installed description shares "reviewing" (1) → (1 - 1/4) × 10 = 7.5 → 8.
+  out = score([{ ...strong, installed_skill_descriptions: ['Helps when reviewing pull requests'] }]);
+  assert.strictEqual(out[0].breakdown.conflict_risk, 8, 'conflict risk: one quarter overlap');
+  // A plugin name counts at 70%: "review-diffs" shares 2 of 4 words → 0.5 × 0.7 = 0.35
+  // → 6.5 → 7 (at full weight it would be 5).
+  out = score([{ ...strong, plugin_names: ['review-diffs'] }]);
+  assert.strictEqual(out[0].breakdown.conflict_risk, 7, 'plugin-name overlap weighs 70%');
+
   // 7. CLI contract: --help exits 0, a missing argument or unreadable JSON exits 1.
   let r = spawnSync('node', [SCRIPT, '--help'], { encoding: 'utf8' });
   assert.strictEqual(r.status, 0);
