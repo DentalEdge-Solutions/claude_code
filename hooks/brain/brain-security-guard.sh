@@ -321,14 +321,12 @@ if (tool === "Bash") {
     return pipelines;
   };
   const SUBST = /\$\(|`|[<>]\(/;
-  // Fail closed on a kept line continuation: if the text after it, fully joined, holds a delete
-  // word, a clean word or a script-level delete, and the command names the capsule, deny.
-  if (joined.kept >= 0 && CAPSULE.test(cmd)) {
-    // From the start of that line, so a word split by the pair ("r\<newline>m") is whole again.
-    const rest = cmd.slice(cmd.lastIndexOf("\n", joined.kept) + 1).split("\\\n").join("");
-    if (words(rest).some((t) => DELETERS.has(prog(t)) || t === "clean") || API_DELETE.test(rest) || /-delete\b/.test(rest))
-      deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
-  }
+  // Fail closed on a kept line continuation in a command that names the capsule. A pair is kept
+  // only inside single quotes or a comment, so where joinLines reads quotes as bash does this is
+  // rare; where it does not (a heredoc body, $\x27\x5c\x27\x27), the rules below see a split command, and no
+  // list of delete words is complete (a glued -Or…m, an ANSI-C subcommand). So deny outright.
+  if (joined.kept >= 0 && CAPSULE.test(cmd))
+    deny("brain-security-guard: a line continuation (backslash-newline) inside quotes or a comment, in a command that names .project-brain, is denied — the guard cannot tell how the shell will split it. Put the command on one line.");
   let depth = -1;
   const dirStack = [];
   // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd

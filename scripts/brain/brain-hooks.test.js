@@ -202,7 +202,6 @@ try {
     'git add .project-brain/decisions/a.md \\\n  .project-brain/index.md',
     'grep -rn "rm -rf" \\\n  .project-brain/decisions',
     'echo "a # b" \\\n  && ls .project-brain',
-    'ls .project-brain # list \\\nls',
   ]) {
     r = denyBash(cmd);
     assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
@@ -409,6 +408,13 @@ try {
     // fail-closed: a continuation kept (single quotes, comment, or a quoting the guard misreads)
     // with a deleter after it, in a command that names the capsule
     "echo $'a\\'b #' ; r\\\nm -rf .project-brain",
+    // review X2: the kept-continuation check was a word list; a glued -O option or an
+    // ANSI-C subcommand slipped past it. A kept continuation in a command naming the capsule
+    // now denies outright.
+    "cat <<EOF\nit's\nEOF\ngit grep --untracked -Or\\\nm x -- .project-brain",
+    "echo $'\\' #' ; git grep --untracked -Or\\\nm x -- .project-brain",
+    "cat <<EOF\nit's\nEOF\ngit $'cl\\x65an' -fd \\\n.project-brain",
+    "echo $'\\' #' ; git $'cl\\x65an' -fd \\\n.project-brain",
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }

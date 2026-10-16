@@ -496,3 +496,29 @@ The first round-2 reviewer was stopped by a safety classifier before it ran anyt
   - **Differential vs `d799f4f`:** unchanged from commit A (652 / 20, no line added or removed).
   - **Metamorphic:** 4 allow → deny, where the transformation put a continuation inside single quotes (`'x \⏎ show'`), followed by an `rm` word. That is the fail-closed rule's intended conservative cost. The 8 deny → allow are the same escaped-space artifacts as before.
   - **Timing:** 7 continuation, quote and comment shapes, worst 182 ms at 1 MB, linear.
+
+### Independent review of the fix, round 3 (2026-10-16): request changes (X2), then commit D
+
+The reviewer re-ran everything on `1c9ca50`:
+
+- `bash -n`; the guard test passes; 27/27 suites.
+- All earlier probe sets give 0 bypasses. Its round-3 set gives 19 bypasses on `4beb000`.
+- Timing is linear, at most 313 ms at 1 MB.
+- It also saw one unexplained 26/27 run under load. Four reruns passed, the same pattern as the author's flake.
+
+**Verdicts:** W1, W2, X1 and W5 fixed. W4 no longer applies (the conservative denial is accepted for the `core.editor` reason). W3 partly fixed: the plain, comment and 5 quote forms are denied, with real deletes on each.
+
+| ID | Sev | Finding | Author check | Commit D |
+|---|---|---|---|---|
+| X2 | blocking for W3 | The kept-continuation backstop was a word list. Where `joinLines` still reads quotes differently from bash (a heredoc body with `it's`, `$'\''`), the command is split, the capsule lands on the next line, and the stage rules skip the first part. A glued `-Or\⏎m` and an ANSI-C subcommand were allowed. | 4 forms reproduced as allowed on `1c9ca50` | a kept continuation in a command naming the capsule now **denies outright**. A pair is kept only inside single quotes or a comment, so where the guard reads quotes correctly this is rare, and no word list is complete |
+
+- **Evidence:**
+  - Tests first: 4 forms red.
+  - `ls <capsule> # list \⏎ls` moved from the allow list to an intended denial.
+  - Every earlier case set holds; 27/27 suites.
+  - **Differential vs `d799f4f`:** unchanged (652 / 20, identical lines).
+  - **Metamorphic:** 8 allow → deny, all from a continuation placed inside a single-quoted value (the intended cost). 8 deny → allow, the same escaped-space artifacts as before.
+  - **Timing:** worst 146 ms at 1 MB.
+- **Accepted low-severity false positives the reviewer listed:**
+  - `git stash push -m "clean up git notes" <capsule>/x`, `git merge -m "clean" origin/git` inside the capsule, and `make clean GIT=git` inside the capsule (the X1 rule);
+  - a single-quoted message or comment with a continuation next to a capsule path (this rule).

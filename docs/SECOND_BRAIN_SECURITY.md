@@ -109,8 +109,11 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
      - **Splitting follows the shell:** only `;`, `&`, `&&`, `||`, `|` and newlines outside
        quotes separate commands. A leading redirection (`>/dev/null rm …`) is skipped when
        finding the command word. Line continuations are joined first, as bash does, so
-       `r\⏎m` is `rm` for every rule, the floor included. Inside a `#` comment a
-       backslash-newline still ends the comment, so the next line counts as a command.
+       `r\⏎m` is `rm` for every rule, the floor included. Quotes are tracked as bash does:
+       the pair is kept inside single quotes and inside a `#` comment (where the newline still
+       ends the comment). A kept pair in a command that names the capsule is **denied
+       outright**, because where the guard reads quotes differently from bash (a heredoc body,
+       `$'\''`) it cannot know how the shell splits the command. Put such commands on one line.
      - **Superset-of-`main` floor:** the stage analysis above is parser-dependent, so as a
        floor the guard also keeps `main`'s blunt rule — any `rm` word followed by
        `.project-brain` within one `;`/`|`/`&`-free segment is a delete. This floor runs on the
