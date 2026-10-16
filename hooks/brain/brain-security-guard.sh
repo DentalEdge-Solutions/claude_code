@@ -128,11 +128,21 @@ if (tool === "Bash") {
   const shellWords = (s) => shellWordsRaw(s).flatMap((w) => w.split(/[(){}`$=!;<>|&,]+/)).filter(Boolean);
   // The words git receives: shell words after the git word, up to the first redirect or
   // comment. A quoted "x log" stays one word, so it can never pose as the subcommand.
+  // Anchored on the command word, skipping the same prefixes as head() (VAR=…, keywords, a
+  // leading redirection), never on the first word that merely ends in /git ("2>./git git …").
+  // null when the shell words do not show git there: the caller treats that as unknown.
   const gitArgs = (stage) => {
     const ws = shellWordsRaw(stage);
-    const g = ws.findIndex((t) => prog(t) === "git");
+    let i = 0;
+    for (; i < ws.length; i++) {
+      const w = ws[i];
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || KEYWORDS.has(w) || /^[({!]+$/.test(w)) continue;
+      if (/^\d*(<<?<?|>>?|&>>?|>&|<&)/.test(w)) { if (/^\d*(<<?<?|>>?|&>>?)$/.test(w)) i++; continue; }
+      break;
+    }
+    if (prog((ws[i] || "").replace(/^[({!]+/, "")) !== "git") return null;
     const out = [];
-    for (let i = g + 1; g >= 0 && i < ws.length && !/^(\d*[<>]|#)/.test(ws[i]); i++) out.push(ws[i]);
+    for (i++; i < ws.length && !/^(\d*[<>]|#)/.test(ws[i]); i++) out.push(ws[i]);
     return out;
   };
   const words = (s) => unquote(s).split(PUNCT).filter(Boolean).concat(quotedWords(s));
@@ -163,7 +173,10 @@ if (tool === "Bash") {
   // split into several words, so its value could pose as the subcommand). Each ends the exemption.
   // rest must be shell words (gitArgs), not whitespace-split text.
   const UNSAFE_WORD = /[$`*?[\]{}~]/;
+  // unsafeSub: the subcommand is spelled with $, a glob or a backtick ($\x27cl\x5cx65an\x27), or the
+  // git words could not be read; it may be clean or rm, so the caller counts it as a delete.
   const gitSub = (rest) => {
+    if (rest === null) return { sub: "", config: true, unsafeSub: true };
     let i = 0, config = false;
     while (i < rest.length && rest[i].startsWith("-")) {
       const t = rest[i];
@@ -172,8 +185,9 @@ if (tool === "Bash") {
       if (GIT_ARG_OPT.test(t)) { if (UNSAFE_WORD.test(rest[i + 1] || "")) config = true; i += 2; } else i++;
     }
     const sub = rest[i] || "";
-    if (UNSAFE_WORD.test(sub)) config = true;
-    return { sub, config };
+    const unsafeSub = UNSAFE_WORD.test(sub);
+    if (unsafeSub) config = true;
+    return { sub, config, unsafeSub };
   };
   // find is a reader unless it runs something (-exec family); -delete is checked separately.
   const nonExec = (h) => !h.env && !h.rest.some((t) => EXEC_OPT.test(t)) && (NON_EXEC.has(h.cmd)
@@ -208,13 +222,19 @@ if (tool === "Bash") {
     if ((h.cmd === "find" || !exempt) && w.some((t) => prog(t) === "find") && w.includes("-delete")) return true;
     if (h.cmd === "git") {
       const g = gitSub(h.git);
-      if (g.sub === "rm") return true;
-      // git clean, or a clean word when an option can hide the subcommand (-c alias.x=clean).
+      if (g.sub === "rm" || g.unsafeSub) return true;
+      // git clean, or a clean word when an option can hide the subcommand (-c alias.x=clean)
+      // or run a program (-c core.editor=…). A -c with an unrelated clean word ("-c x=y log
+      // --grep clean") is a conservative denial.
       if ((g.sub === "clean" || (g.config && w.includes("clean"))) && !plainCleanDryRun(stage, h)) return true;
-    } else if (!exempt && w.includes("clean") && w.some((t) => prog(t) === "git")) {
-      // git clean behind a wrapper that runs it (env, command, nice, sudo, xargs …).
-      return true;
     }
+    // git clean run by another program (env, command, nice, sudo, xargs) or nested in a git
+    // executor (rebase -x, submodule foreach, bisect run): a clean word next to a git word that
+    // is not the command itself.
+    // Counted on one splitting with quotes dropped, so a quoted "git clean …" argument shows its
+    // git word (words() holds every word twice, once per splitting).
+    if (!exempt && w.includes("clean")
+      && unquote(stage).split(PUNCT).filter((t) => prog(t) === "git").length >= (h.cmd === "git" ? 2 : 1)) return true;
     // A deleter glued to a short option ("git grep -Orm", -O"r"m) counts too. Checked on
     // shell words, so env -S\x27farm .project-brain\x27 is the one word "-Sfarm .project-brain".
     return !exempt && (w.some((t) => DELETERS.has(prog(t)))

@@ -377,6 +377,17 @@ try {
     'nice git clean -fd .project-brain',
     'echo .project-brain | xargs git clean -fd',
     'git -c alias.x=clean x -fd .project-brain',
+    // review round 2 (W1): git words are read from the command word, not from the first word
+    // that merely ends in /git (a redirect target or an assignment)
+    '2>./git git clean -fd .project-brain',
+    'A=./git git clean -fd .project-brain',
+    '</usr/bin/git git clean -fd .project-brain',
+    'A=./git git -c alias.x=clean x -fd .project-brain',
+    // W2: a subcommand spelled with $, quoting or a glob is unknown, so it counts as a delete
+    "git $'cl\\x65an' -fd .project-brain",
+    "git cl$'e'an -fd .project-brain",
+    // X1: an executor running a nested git clean
+    'git rebase -x "git clean -fd .project-brain" HEAD~1',
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }

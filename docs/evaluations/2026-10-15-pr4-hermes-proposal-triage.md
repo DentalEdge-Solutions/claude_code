@@ -448,3 +448,30 @@ Evidence:
   - **667 allow → deny**, each one a `git clean`, an executor (`rebase -x`, `bisect run`, `submodule foreach`), or `rm --cached`. The 6 exceptions are an unknown option (`--bogus`) or a variable/glob option value.
   - No commit message and no `--grep` was newly denied.
 - **Timing:** 17 shapes at 512 KB and 1 MB, end to end. Worst: 310 ms. Every shape took about 2× as long at 1 MB as at 512 KB.
+
+### Independent review of the fix, round 2 (2026-10-16): request changes, then round 3
+
+The first round-2 reviewer was stopped by a safety classifier before it ran anything. A fresh reviewer re-ran everything on `4beb000`:
+
+- Commands: 27/27 suites; the guard test passes; 0 bypasses on the round-1 probe sets (35 + 15 cases; for comparison, 20 + 11 on `d799f4f` and 13 + 12 on `8a50ae1`); timing worst 301 ms, linear.
+- **RR1, RR2, RR3, V1, V2, V3, V5: fixed.** **V4:** fixed, but reopened by W1.
+
+| ID | Sev | Finding | Author check (real git deletes, guard allows) | Round 3 |
+|---|---|---|---|---|
+| W1 | blocking, **new in `4beb000`** | `gitArgs` anchored on the first word whose basename is `git`, so a redirect target or assignment ending in `/git` (`2>./git git clean …`, `A=./git git clean …`, `</usr/bin/git git clean …`) made the subcommand read as `git` | reproduced (4 forms) | `gitArgs` skips the same prefixes as `head()` and anchors on the command word; `null` (counted as a delete) if the shell words disagree |
+| W2 | medium, on `d799f4f` | ANSI-C spelling: `git $'cl\x65an' -fd …`, `git cl$'e'an -fd …` | reproduced | a subcommand with `$`, a glob or a backtick counts as a delete |
+| W3 | high, on `d799f4f` | `splitShell` turns backslash-newline into a space where bash removes it: `r\⏎m -rf <capsule>` and `git cl\⏎ean -fd …`; the floor misses them too | reproduced | separate commit (below) |
+| W4 | low, new false positive | any `-c` plus a `clean` word denies (`git -c color.ui=never log --grep clean …`) | confirmed | **kept, documented:** `-c core.editor="git clean …"` shows that a `-c` value can run a program |
+| W5 | nit | the doc said "`git` directly", but a leading `time` is accepted | confirmed | doc reworded |
+| X1 | high, on `d799f4f`, found by the author while fixing W1 | a git executor running a nested clean: `git rebase -x "git clean -fd <capsule>" HEAD~1` | reproduced | a `clean` word next to a second `git` word in a non-reader stage counts as a delete |
+
+**Round 3, commit A (W1, W2, X1):**
+
+- Tests first: 7 deny cases red on `4beb000`, plus 5 allow regression guards.
+- A first attempt over-denied plain dry runs: `words()` holds every word twice, so one `git` counted as two. That was fixed by counting on a single quote-dropping split.
+- Results: 27/27 suites; the 26 round-2 cases and the 11 round-1 reviewer cases still hold.
+- **Differential vs `d799f4f`** (same 2,531 inputs):
+  - 20 deny → allow, the same `git <opt> <value> grep` readers as before;
+  - 652 allow → deny, no line new versus round 2;
+  - the 15 that round 2 denied and A allows are all plain dry runs with `-n`/`--dry-run` before a `--`, now accepted.
+- **Timing:** new shapes (many assignments, many redirects, nested git words, an unsafe subcommand) take 117–181 ms at 1 MB, about 1.7× their 512 KB time. Worst overall: 312 ms.
