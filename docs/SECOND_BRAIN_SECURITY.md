@@ -55,16 +55,22 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        it (`sudo`, `busybox`, `ssh`, `xargs`, `bash -c`, a here-string, a git alias, `… | sh`).
        That includes one glued to a short option, read as the shell joins quotes (`-Orm`,
        `-O"r"m`);
-       `find … -delete`; `git rm`; `git clean` (but not a real dry run: `-n` / `--dry-run`,
-       parsed as git does, so `-e` takes its value (`-en` is not `-n`), `--` ends the options,
-       and a later `--no-dry-run` wins; abbreviations of `--dry-run` are conservatively
-       denied); `fs.rmSync`, `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
-     - **The git subcommand** is found after skipping git's global options together with the
-       value of those that take one (`-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`,
-       `--config-env`, `--attr-source`, `--shallow-file`; git 2.54), so in
-       `git --namespace log rebase -x …` the subcommand is `rebase`, not `log`. An
-       unrecognized global option ends the reader exemption, and a `clean` word anywhere after
-       `git` counts when the subcommand cannot be found.
+       `find … -delete`; `git rm`; `git clean`, also behind a wrapper that runs it (`env`,
+       `command`, `nice`, `sudo`, `xargs`) or a git alias (`-c alias.x=clean`);
+       `fs.rmSync`, `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
+     - **A `git clean` dry run** is allowed only in a plain form, not by parsing git's options
+       (that was bypassed with quoting, `-e` values, `--` and `--end-of-options`): `git`
+       directly, optionally `-C <dir>`, then `clean`, then only `-[dfnqxX]…`, `--dry-run`,
+       `--quiet`, `--force` and plain paths, with an `n` before any `--`, and no quote,
+       escape, variable, glob, redirect, comment or `=` in the stage. So `git clean -nd -- <path>`
+       passes, while `git clean -n -e foo …`, `env git clean -n …` or
+       `git clean -n … 2>/dev/null` are conservatively denied.
+     - **The git subcommand** is found from shell-split words after skipping git's global
+       options together with the value of those that take one (`-C`, `-c`, `--git-dir`,
+       `--work-tree`, `--namespace`, `--config-env`, `--attr-source`, `--shallow-file`; git
+       2.54), so in `git --namespace "x log" rebase -x …` the subcommand is `rebase`. An
+       unrecognized global option, or a variable, glob or backtick before the subcommand,
+       ends the reader exemption.
      - **The one exemption:** a pipeline stage whose command never runs its arguments:
        `grep`, `cat`, `ls`, `echo`, `head`, `wc`, `find` without `-exec`, `git add` /
        `commit` / `log` / `diff` / `show` / `grep` and similar readers. Pagers (`less`, `more`,

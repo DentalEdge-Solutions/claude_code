@@ -192,8 +192,12 @@ try {
     // a real dry run of git clean stays allowed, wherever the -n sits
     'git clean -nd .project-brain',
     'git clean --dry-run -d .project-brain',
-    'git clean -n -e foo .project-brain',
     'git clean -fd .project-brain -n',
+    'git clean -nd -- .project-brain',
+    // a clean word that is not git clean (a message, a search pattern) is not a delete
+    'git commit -m "clean up .project-brain notes"',
+    'git log --grep clean -- .project-brain',
+    'grep "git clean" .project-brain/log.md',
   ]) {
     r = denyBash(cmd);
     assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
@@ -351,6 +355,28 @@ try {
     'git --work-tree .project-brain clean -fd',
     'git --namespace x clean -fd .project-brain',
     'git -C -n clean -fd .project-brain',
+    // re-review round 2 (V1): an option value with a space is one shell word, so "log" in
+    // "x log" is not the subcommand; a variable value may split, so it ends the exemption
+    'git --namespace "x log" rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --namespace x\\ log rebase -x "rm -rf .project-brain" HEAD~1',
+    'git --namespace $V rebase -x "rm -rf .project-brain" HEAD~1',
+    // V2/V3: a dry run is recognized only in a plain grammar (no quotes, escapes, redirects,
+    // -e, --, --end-of-options); anything else counts as a delete
+    'git clean -fd .project-brain "x -n"',
+    'git clean -fd .project-brain x\\ -n',
+    'git clean -f -e "x -n" .project-brain',
+    'git clean -fd .project-brain > -n',
+    'git clean -fd .project-brain <<< -n',
+    'cd .project-brain && git clean -fdx . "a -n"',
+    'git clean -fd --end-of-options .project-brain -n',
+    'git clean -fd --end-of-options x -n .project-brain',
+    'git clean -n -e foo .project-brain',
+    // V4: git clean behind a wrapper, xargs or an alias
+    'env git clean -fd .project-brain',
+    'command git clean -fd .project-brain',
+    'nice git clean -fd .project-brain',
+    'echo .project-brain | xargs git clean -fd',
+    'git -c alias.x=clean x -fd .project-brain',
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }

@@ -419,3 +419,32 @@ A re-review of the merged guard (`main` at `d799f4f`), per `docs/REVIEW_PROTOCOL
 
 - **Differential** (old vs new guard, 2,358 generated git commands × 19 global-option forms × 24 subcommands × 5 targets, plus controls): **11 deny → allow**, all `git --git-dir/--work-tree <value> grep -n rm …`, a reader the old parser misread (false positives fixed). **378 allow → deny**, each one of: a `git clean` form verified above to really delete; an executor (`rebase -x`, `bisect run`, `submodule foreach`) or `clean`/`rm` hidden behind a global option's value; or a conservative denial consistent with the unmasked case (`clean --dry`, `rm --cached`, an unknown `--bogus` option that git itself rejects). No real dry run (`clean -n`, `-nd`, `--dry-run`, `-n -e foo`) changed.
 - **Timing** (end to end, 10 adversarial shapes reaching the new code, 512 KB and 1 MB): worst **246 ms** at 1 MB, ~2× from 512 KB to 1 MB on every shape.
+
+### Independent review of the fix, round 1 (2026-10-16): request changes
+
+The reviewer re-ran the suites on `8a50ae1` (27/27, guard test passes), confirmed RR3 fixed (the `-nnn…1` shape: 130 ms at 1 MB; 13 shapes, instrumented to prove they reach the new code) and the 14 RR1/RR2 cases denied, and found:
+
+| ID | Sev | Finding | Author check (real git 2.54 deletes, guard on `8a50ae1` allows) |
+|---|---|---|---|
+| V1 | blocking, **new in `8a50ae1`** | Git words were whitespace-split after removing quotes, so `git --namespace "x log" rebase -x "rm -rf …"` (or `x\ log`) again showed `log` as the subcommand | reproduced |
+| V2 | blocking | The same split put an `-n` where git never gets one: `"x -n"`, `x\ -n`, `-e "x -n"`, `> -n`, `<<< -n` | reproduced (5 forms) |
+| V3 | blocking | `--end-of-options` was taken for an abbreviated `--exclude` | reproduced |
+| V4 | blocking, already on `d799f4f` | `git clean` behind `env`, `command`, `nice`, `xargs` or `-c alias.x=clean` was not checked | reproduced (4 forms) |
+| V5 | minor | Docs said "parsed as git does"; the code also checked a `clean` word whenever the subcommand was not `clean` | confirmed, and it caused two **new false positives** on `8a50ae1`: `git commit -m "clean up …"` and `git log --grep clean` were denied |
+
+**Round 2 fix.** The root cause was the approach: parsing git's options precisely, which P11 had already learned is a losing game (the grouping rule, G5). Round 2 allowlists instead:
+
+- Git's subcommand is read from shell-split words (quotes join, `\` escapes, stop at a redirect or `#`). A variable, glob or backtick before the subcommand ends the reader exemption.
+- A `git clean` dry run is allowed only in a plain form git cannot read another way (see `SECOND_BRAIN_SECURITY.md`). Anything else is a delete.
+- A `clean` word in a stage that runs git through a wrapper, or with an option that can define an alias, counts as `git clean`.
+- Conservative cost: dry runs outside the plain form are denied (`-n -e foo`, `env git clean -n`, `git clean -n … 2>/dev/null`, global options other than `-C`).
+
+Evidence:
+
+- Tests first: 18 of 26 round-2 cases red on `8a50ae1`, including the two false positives. A `--` dry run (`git clean -nd -- <path>`) was then added red-first.
+- `node scripts/run-all-tests.js` → 27/27.
+- **Differential vs `d799f4f`** (2,531 inputs; the corpus now has quoted and escaped values, wrappers, `--end-of-options`, redirects, and commit messages containing `clean`/`rm`):
+  - **20 deny → allow**, all `git <option> <value> grep -n rm …`, a reader with no program-running option.
+  - **667 allow → deny**, each one a `git clean`, an executor (`rebase -x`, `bisect run`, `submodule foreach`), or `rm --cached`. The 6 exceptions are an unknown option (`--bogus`) or a variable/glob option value.
+  - No commit message and no `--grep` was newly denied.
+- **Timing:** 17 shapes at 512 KB and 1 MB, end to end. Worst: 310 ms. Every shape took about 2× as long at 1 MB as at 512 KB.
