@@ -28,7 +28,7 @@ The proposal's own `P` numbers are kept.
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
 | P9 | No guard before `rm -rf` in `uninstall.sh` | Open | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
 | P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
-| P11 | The brain security guard fails open on a parser error | Open | `hooks/brain/brain-security-guard.sh:52` |
+| P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
 | P13 | `test-runners.js` writes to real `evals/` paths | **Open, worse than stated** | see below |
 | P14 | The superseded architecture spec has no banner | Partly done | `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md` now has a "REVISED" banner, but it points to `~/.claude/plans/…`, a machine-local file and not a repo document |
@@ -64,7 +64,7 @@ The proposal's own `P` numbers are kept.
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"); S4–S9 are open.
    ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E6 are open.
-4. **P11:** make the brain security guard's fail-open visible (a log) or fail closed.
+4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. **P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`. Keep `install.sh` in sync.
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
 7. **P7:** replace the hand-rolled YAML parse with a real parser, with a test.
@@ -304,3 +304,102 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - After, 37/37 harvester tests and 27/27 suites pass, and `ci-scan-skills.js` is clean.
   - 3 mutations (no separator in the prefix check, no containment check, no link resolution) each failed the suite.
 - **Scope:** E2–E5 (informational fields) and E6 (method) are unchanged and still open.
+
+## P11 repair (2026-10-15)
+
+- **Owner decision (failure policy, hybrid):**
+  - Bad input fails closed: empty, not JSON, or no `tool_name` string and `tool_input` object. The guard denies and says why. Claude Code always sends valid input.
+  - If node cannot run, the guard fails open but visibly: a stderr warning, a line in `.project-brain/reports/guard-failures.log` (time and exit code only), and **exit 1**.
+  - Why exit 1: the [hooks reference](https://code.claude.com/docs/en/hooks) (Tier A, read 2026-10-15, Claude Code 2.1.300) says "Claude never sees stderr from a hook that exits 0". Another code (not 2) is "a non-blocking error": the user sees the notice, and the call proceeds. The old fallback warning was therefore invisible even when it fired.
+- **Problems found and fixed:**
+
+  | # | Problem | Before | After |
+  |---|---|---|---|
+  | 1 | Bad input allowed silently (`exit 0` inside node) | allow, no warning | deny with a reason |
+  | 2 | node failure warned on stderr with exit 0 | invisible | exit 1, stderr, log line |
+  | 3 | Input passed through an env var | a 2 MB Write into `canon/` exceeded the exec size limit, so the guard failed open | input on stdin; denied |
+  | 4 | NotebookEdit's path is `notebook_path`; the guard read `file_path` | NotebookEdit into `canon/` allowed | denied |
+  | 5 | The delete rule matched the word `rm` anywhere before `.project-brain` | `grep rm .project-brain/…` and `git add …-rm-rf-….md …` denied | allowed |
+  | 6 | `cd .project-brain && rm -rf …`, `find .project-brain -delete`, `… \| xargs rm`, `rmdir`/`unlink`/`shred`/`git clean` | allowed | denied |
+  | 7 | Four canon-rule regexes (`\d*>\s*/dev/null`, `\d*>&\d+`, `\bsed\b[^\|]*-i`, `brain-promote…[\s\S]*--approve`) and the old `rm` rule were quadratic | 1.8 s at 64 KB, minutes at 512 KB. A PreToolUse hook that times out "doesn't block the tool call", so this was a bypass | linear: indexOf, per-segment scans, no leading `\d*` |
+  | 8 | The first version of the new delete rule (at `509ac1c`) let through capsule deletes that `main` denied (review round 1, R1–R3, below) | allowed | denied (round 2) |
+
+- **Delete rule (final):**
+  - **Splitting follows the shell.** Only `;`, `&`, `&&`, `||`, `|`, `|&` and newlines outside quotes separate commands. A backslash escapes the next character, and `\<newline>` joins lines. `&>`, `>&` and `<&` are redirections.
+  - **What counts as a delete:** as on `main`, any `rm`/`rmdir`/`unlink`/`shred` word, whoever runs it. Also: one glued to a short option (`-Orm`), `find … -delete`, `git rm`, `git clean` (except a `-n` dry run), and `rmSync`/`unlinkSync`/`rmdirSync`/`rmtree`/`rimraf`.
+  - **The one exemption** is a stage whose command never runs its arguments: `grep`, `rg`, `cat`, `ls`, `echo`, `find` without `-exec`, `git add`/`commit`/`log`/`diff`/`show`/`grep`, and similar readers. The exemption ends when the stage has any of these:
+    - a `VAR=value` prefix;
+    - an option that runs a program (`rg --pre`/`--hostname-bin`, `git grep -O`/`--ope…`, git `-c`, `--ext-diff`, …);
+    - `$(…)`, backticks or `<(…)`;
+    - a later stage in the pipeline that is not a reader.
+  - **The target:** `.project-brain` is named in the same pipeline (expansions included), or the shell is inside the capsule. `cd`, `pushd` and `popd` are tracked by depth, so leaving with `cd ..`, `cd /tmp` or `popd` ends that state.
+- **Review round 1** (independent reviewer, at `509ac1c`, verdict REQUEST CHANGES). The author answers each finding here; only the reviewer closes it.
+
+  | ID | Severity | Finding | Author's answer (round 2) |
+  |---|---|---|---|
+  | R1 | blocking | Splitting at `(){}` and backticks cut `${…}`, `$(…)`, backticks and `{…,…}` targets off the delete | Split only at real separators outside quotes; 9 tests (`"${CLAUDE_PROJECT_DIR}/.project-brain"`, `$(pwd)/…`, `{.project-brain,…}`, quoted `;` and newline) |
+  | R2 | blocking | A leading redirection became the command word | Redirections skipped when finding the command word, and any `rm` word counts anyway; 4 tests |
+  | R3 | blocking | A fixed runner list (`busybox`, `ssh`, `watch`, `flock`, `trap`, `su -c`, glued here-strings, `env -S'…'`, `git --git-dir … rm`) | Rule inverted: any deleter word counts unless the stage is an exempt reader. Words are split twice (quotes dropped / quotes as separators). 20 tests, including `echo rm … \| sh`, `git -c alias…`, `eval "$(…)"` |
+  | R4 | minor | `cd`/`pushd` into the capsule never reset | Directory depth tracked through `cd`/`pushd`/`popd`; 3 allow tests, plus `cd …/decisions && cd .. && rm` stays denied |
+  | R5 | minor | False positives: `xargs grep -l rm`, `sh -c "grep unlink …"`, `git clean -n` | `git clean -n` now allowed (test). The other two stay as documented conservative denials (programs that run commands) |
+  | R6 | minor | Gaps also on `main` (`xargs -I{} rm`, `bash -c 'cd … && rm'`, `cd "$(…)/.project-brain"`, `find -exec sh -c 'rm …'`, `r\m`, script-level deletes) | All denied now, with tests. `mv`, `rsync --delete`, `cp -r` over, `truncate`, `: >` are documented as limits (G2) |
+  | R7 | minor | Docs overstated coverage ("and similar") | `SECOND_BRAIN_SECURITY.md` rewritten: exact rule, exemption conditions, known limits |
+  | R8 | minor | The differential lacked expansion, redirection, runner and here-string forms | Corpus extended (see Evidence) |
+  | R9 | minor | `guard-failures.log` not gitignored | Added to `.gitignore` |
+
+  Automated background security reviews ran four times during the two rounds. They flagged:
+  - **the R1–R3 classes**;
+  - **readers that can execute:** `rg --pre`, `ag`/`ack --pager`, `sort --compress-program` (shortenable), `less`/`more`, `git fetch`/`push`/`pull` `--upload-pack`, `GIT_EXTERNAL_DIFF=`/`PAGER=` prefixes;
+  - **`git grep -O` / `--open-files-in-pager`** and `rg --hostname-bin`;
+  - **quote concatenation:** `git grep -O"r"m …` got past the glued-option check.
+
+  Each was reproduced and given a failing test before the fix. The pagers, `sort` and network git were removed from the readers. `VAR=` prefixes and program-running options end the exemption. The glued-option check reads shell words (quotes joined). The extended differential also found a false positive from an earlier form of that check: `env -S'farm …'` was read as `-Sfarm`. It now has a test.
+- **Evidence (round 2):**
+  - **Tests first, again.** The round-2 additions to `scripts/brain/brain-hooks.test.js` are the R1–R6 cases, the readers that can execute, two `$(…)`/`<(…)` cases, and the quote-concatenation and `env -S'farm …'` cases. Each batch was watched failing first:
+    - against `509ac1c`, 45 of the first 50 failed; the other 5 already passed there and stay as regression checks;
+    - then 8 of 11 execute-capable reader cases failed;
+    - then 5 more (`git grep -O…`, `sort --compress-prog`, `rg --hostname-bin`);
+    - then 1 (`env -S'farm …'` falsely denied);
+    - then 2 of 4 quote-concatenation cases.
+  - **After:** `brain-hooks.test.js` passes; 27/27 suites pass; `brain-lint` shows 0 security findings (the 3 known stale-canon warnings).
+  - **Mutations:** 23 targeted mutations, each caught by a behavioural failure. Timing failures under CPU load were not counted as kills. The mutations covered:
+    - cd tracking and leaving the capsule;
+    - bad input, env-var input, the fail-open exit code;
+    - NotebookEdit;
+    - the downstream-stage, substitution and `VAR=` conditions on the exemption;
+    - splitting at `(){}`, quotes ignored when splitting, the leading-redirect skip;
+    - quote-separated words, API deletes, `git clean -n`, `find` as a reader;
+    - program-running options, `git grep -O`, `sort` as a reader;
+    - the glued-option check and the shell-word reading it uses;
+    - deleter words only as the command word.
+  - **Timing:** 34 regexes × 54 adversarial 1 MB inputs in-process: worst 37 ms. The whole guard end-to-end on 54 × 1 MB commands: worst 317 ms (load average about 10 at the time).
+  - **Differential (R8, extended):** 228,021 generated inputs, each run through `main`'s guard and the final one:
+    - **The corpus.** 25 prefixes, now including leading redirections, `busybox`, `caffeinate`, `ssh h`, `env -S'`, `sh <<<'` and `git --git-dir`. 30 verbs. 19 targets, now including `"${CLAUDE_PROJECT_DIR}/.project-brain"`, `$(pwd)/…`, backticks and brace expansion. 16 suffixes, now including `| sh` and `| bash`. Plus 21 Write/Edit/NotebookEdit paths.
+    - **183,471 same decision** (65,310 deny, 118,161 allow).
+    - **6,600 deny → allow,** all in the four intended argument classes: `grep rm`, `grep "rm"`, `grep -rn rm`, `git commit -m "rm stuff"`. They appear only behind plain prefixes (`cd`, `ls;`, `time`, a redirect, `git -C … grep`). None sits behind a prefix that runs commands, and none pipes into `sh`, `bash` or `xargs`. The round-1 class of nonsense `git -C …` calls is denied again.
+    - **37,950 allow → deny.** A filter for inputs without a real deleting word, `-delete` or `git rm`/`git clean` found none (NotebookEdit into `canon/` aside).
+    - Round-1 numbers (99,981 inputs: 4,368 deny → allow, 15,012 allow → deny) were for `509ac1c`. The reviewer showed that run's corpus missed the R1–R3 forms.
+- **Gaps left open:**
+  - **G1:** the canon rule exempts any command that mentions `brain-promote … --approve` anywhere, so `brain-promote.js x --approve; echo x > .project-brain/canon/y.md` passes.
+  - **G2:** the delete rule does not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob, or globs that may expand to the capsule (`rm -rf .p*`). It does not treat moving or overwriting as deleting (`mv`, `rsync --delete`, `cp -r` over, `truncate`, `: >`).
+  - **G3:** the canon rule's mutation check still matches the word `rm` anywhere, so `grep rm .project-brain/canon/x.md` is denied (a conservative false positive, as documented).
+  - **G4:** the reader exemption depends on knowing each reader's program-running options. The list is kept small, and an option outside it ends nothing. A program-running option that isn't recognized would let a stage carrying `rm` next to a capsule path through.
+
+- **Review round 3 (2026-10-15).** Round 2 made the parser-based delete rule a superset of `main`, but the rule still depends on parsing the command the same way bash does. A fresh pass — the author re-examining the superset claim, plus five automated background security reviews — found two classes of defect that the parser-based rule alone could not close. Both were reproduced with a failing test first, then fixed.
+  - **Parser desync defeats the superset claim.** A quote inside a `#` comment, ANSI-C `$'…'` quoting, or a heredoc body can make the guard's splitter disagree with bash about where a command ends, so a real `rm … .project-brain` that `main` denies slipped past (e.g. `echo hi # it's`<br>`rm -rf .project-brain`). Store-then-run forms did the same by construction: `echo rm -rf .project-brain > x.sh && sh x.sh`, `… | tee x.sh; sh x.sh`, `git commit -m "rm -rf .project-brain" && git log -1 --format=%B | sh`, `printf … >> x.sh`.
+  - **Fix — a parser-immune floor.** Added a blunt check that reads the raw command and cannot be fooled by a parse desync: `main` denies any `rm` word followed by `.project-brain` within one `;`/`|`/`&`-free segment. It restores a true superset of `main`: if the check fires, the command is denied unless it is a single foreground pipeline of pure readers with no command/process substitution, none of the desyncing constructs, no background, and no file-writing redirect — the one shape where an `rm` next to the capsule can only be a literal argument (`grep rm .project-brain/log.md`). This closed eight bypasses where round 2 allowed a delete `main` denied.
+  - **The floor must be linear.** `main` writes that check as `/\brm\b[^|;&]*\.project-brain/`, which is **O(n²)**: on a command padded with many `rm` words, `[^|;&]*` backtracks from every `rm`. The timing sweep measured one `.test()` at ≈195 s on a 1 MB input and the whole guard timing out at 15 s. Because a PreToolUse hook that times out does not block the call, copying `main`'s regex verbatim would have been a bypass (pad a real `rm -rf .project-brain` with `rm ` filler → guard hangs → delete proceeds). The floor was rewritten to split on `[|;&]` first (linear) and then, per segment, find an `rm` word that starts before a `.project-brain` mention with `search(/\brm\b/)` and `lastIndexOf` — each linear, same semantics. After the rewrite the same 1 MB input is denied in ≈170 ms. (This is a latent defect in `main` too; noted for a separate fix.)
+  - **Five security-review findings, all on honoring a capsule-LEAVING `cd`.** The round-2 cd rule honored a leave unless the stage's first character was `(` or `{`. The reviews showed this was not enough: (1) a brace group `{ cd /tmp; }` runs in the *current* shell; (2) a braced group inside a pipeline/background (`{ cd /tmp; } | cat`) runs in a *subshell*, so its `cd` does not move the parent; (3) a `cd` that is not the first statement in such a group (`{ true; cd /tmp; } | cat`); (4) a nesting counter would be corrupted by a non-closing `}`/`)` such as a `case` arm; (5) the same in the background.
+  - **Fix — stop parsing group nesting.** A counter-based approach was attempted and abandoned (it was both fragile and, twice, the source of a self-inflicted hook breakage). The final rule is provably simple: a capsule-leaving `cd`/`pushd`/`popd` is honored only from a *plain* command — one stage, not backgrounded, and with **no grouping construct anywhere on the line** (`hasGrouping = /[(){}]/.test(cmd) || /\bcase\b/.test(cmd)`). A move that enters or stays in the capsule is always honored (deny is the safe direction). `splitShell` now also returns whether each pipeline was backgrounded.
+  - **Tradeoff.** The grouping rule conservatively denies a capsule-leaving `cd` that merely shares a line with a harmless group — e.g. `cd .project-brain; (ls); cd /tmp; rm -rf build` is now denied. A normal `cd ..`/`cd /tmp` on its own line still ends the inside-capsule state. Added as gap **G5**.
+- **Evidence (round 3):**
+  - **Tests first.** The round-3 additions to `scripts/brain/brain-hooks.test.js` are the parser-desync cases (comment-quote, ANSI-C, heredoc), the store-then-run cases, the cd-in-subshell/pipeline/background cases, and the five brace/group/`case` cases — each watched failing against the round-2 guard before its fix. The one case reclassified from allow to deny is `cd .project-brain; (ls); cd /tmp; rm -rf build` (the grouping tradeoff).
+  - **After:** `brain-hooks.test.js` passes; 27/27 suites pass; `brain-lint` shows 0 security findings (3 known stale-canon warnings).
+  - **Mutations:** 28 targeted mutations (the round-2 set plus the floor, the floor exemption, `hasGrouping` ignoring brace groups, and leave-honored-in-background / -in-pipeline). 27 were caught by a behavioural failure. The one survivor, M11, is security-equivalent: it only adds quote-separated word tokens that bash never executes, so it can create a false positive but never a bypass. Timing failures under CPU load were not counted as kills.
+  - **Differential (`main` vs. round-3 guard):** the same 228,021 generated inputs as round 2, each run through `main`'s guard and the round-3 guard.
+    - **188,001 same decision** (69,840 deny → deny, 118,161 allow → allow).
+    - **2,070 deny → allow** (down from round 2's 6,600). Every one starts with `grep` or `git commit` (a reader), with `rm` only as a literal argument; the scary-looking `-delete`/`-exec rm {} +` suffixes are inert arguments to a reader that never runs them, and the leading `(` forms are unclosed subshells. None pipes into `sh`, `bash` or `xargs`. The store-then-run and parser-desync forms that round 2 let through are now denied by the floor — the reason the count fell.
+    - **37,950 allow → deny** (new guard stricter than `main`). A filter for inputs with no real deleter word, `-delete`/`-exec`, `git rm`/`git clean`, `xargs rm`, or a NotebookEdit into `canon/` found **none** — every one is a real delete `main` missed or a documented conservative denial.
+  - **Timing:** 41 regexes × 54 adversarial 1 MB inputs in-process: worst **40.5 ms** (before the floor fix, the copied `main` regex measured ≈195 s on this same sweep — see "The floor must be linear"). The whole guard end-to-end on 54 × 1 MB commands: worst **315 ms** (load average about 13 at the time). No pattern shows super-linear growth.
+- **Gaps left open (round 3 adds):**
+  - **G5:** a capsule-leaving `cd` is not honored on any line that also contains a grouping construct (`( )`, `{ }`, or `case`), so such a line is conservatively denied even when the `cd` really does leave the capsule.

@@ -46,16 +46,86 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
 2. **Skill gate** — the `brain-promote` skill carries `disable-model-invocation: true`,
    so the platform itself prevents model-initiated promotion, and `risk_tier: critical`.
 3. **Hook gate** — `brain-security-guard.sh` (the only blocking hook) denies:
-   - direct `Write`/`Edit`/`NotebookEdit` into `.project-brain/canon/` (path-normalized)
+   - direct `Write`/`Edit`/`NotebookEdit` into `.project-brain/canon/` (path-normalized;
+     NotebookEdit's `notebook_path` is checked too)
    - `Bash` mutations of `canon/` not going through `brain-promote --approve`
      (covers `cd`+relative paths and interpreter writes)
-   - destructive `rm` targeting `.project-brain/`
+   - deleting the capsule, when the capsule is the target:
+     - **What counts as a delete:** any `rm`, `rmdir`, `unlink` or `shred` word, whatever runs
+       it (`sudo`, `busybox`, `ssh`, `xargs`, `bash -c`, a here-string, a git alias, `… | sh`).
+       That includes one glued to a short option, read as the shell joins quotes (`-Orm`,
+       `-O"r"m`);
+       `find … -delete`; `git rm`; `git clean` (but not a `-n` dry run); `fs.rmSync`,
+       `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
+     - **The one exemption:** a pipeline stage whose command never runs its arguments:
+       `grep`, `cat`, `ls`, `echo`, `head`, `wc`, `find` without `-exec`, `git add` /
+       `commit` / `log` / `diff` / `show` / `grep` and similar readers. Pagers (`less`, `more`,
+       `ag`/`ack`), `sort` and network git (`fetch`, `push`, `pull`) are not readers. The
+       exemption holds only when all of these are true:
+       - the stage has no `VAR=value` prefix (`PAGER=`, `GIT_EXTERNAL_DIFF=`);
+       - it has no option that runs a program (`rg --pre` / `--hostname-bin`, `git grep -O` /
+         `--open-files-in-pager` (also shortened), git `-c`, `--ext-diff` …);
+       - it has no `$(…)`, backticks or `<(…)`;
+       - it pipes only into other readers.
+
+       So
+       `grep rm .project-brain/…` and `git add …-rm-rf-….md` pass, but `echo rm … | sh` doesn't.
+     - **When the capsule is the target:** `.project-brain` is named in the same pipeline,
+       including inside `"${CLAUDE_PROJECT_DIR}/…"`, `$(pwd)/…` or `{…,…}`. Or the shell is
+       inside the capsule after a `cd`/`pushd`. The guard tracks `cd`, `pushd` and `popd`,
+       **direction-aware and fail-closed:** a move that *enters or stays in* the capsule is
+       always recorded (erring toward a deny is safe), while a move that *leaves* the capsule
+       is recorded only from a plain standalone foreground command — one stage, not in the
+       background, and with **no grouping construct anywhere on the line**: no `( )`, no `{ }`,
+       and no `case`. Rather than parse group nesting (which proved fragile and was repeatedly
+       bypassed), the guard treats the presence of any of those as enough to withhold the
+       leave, because a `cd` can run in a subshell, or in a brace group that is itself
+       piped/backgrounded, without moving the parent shell. So a `cd` hidden in a group can
+       never make a later relative delete look safe. The cost is a conservative deny of some
+       exotic "leave the capsule on a line that also contains a group" forms (e.g.
+       `cd .project-brain; { cd /tmp; }; rm -rf decisions`, which in a real shell targets
+       `/tmp`, or `cd .project-brain; (ls); cd /tmp; rm -rf build`). A normal `cd ..` or
+       `cd /tmp` on its own still ends the inside-capsule state.
+     - **Splitting follows the shell:** only `;`, `&`, `&&`, `||`, `|` and newlines outside
+       quotes separate commands. A leading redirection (`>/dev/null rm …`) is skipped when
+       finding the command word.
+     - **Superset-of-`main` floor:** the stage analysis above is parser-dependent, so as a
+       floor the guard also keeps `main`'s blunt rule — any `rm` word followed by
+       `.project-brain` within one `;`/`|`/`&`-free segment is a delete. This floor runs on the
+       raw command and so cannot be fooled by a parser desync (a quote inside a `#` comment,
+       ANSI-C `$'…'` quoting, a heredoc body). It never allows a capsule delete that `main`
+       blocks. Its one exemption is a single foreground pipeline whose every stage is a pure
+       reader, with no command or process substitution, none of those desyncing constructs,
+       no background, and no file-writing redirect — there an `rm` can only be a literal
+       argument (`grep rm .project-brain/log.md`), so it stays allowed, while store-then-run
+       forms (`echo rm -rf .project-brain > x.sh && sh x.sh`) stay denied.
    - direct installs (`cp`/`mv`/`ln`/`rsync`) from `reference-repositories/sources/` into the skills dir
 
+   **When the guard itself fails** (owner decision P11, 2026-10-15):
+   - **Bad input fails closed.** Empty input, input that is not JSON, or JSON without a
+     `tool_name` string and a `tool_input` object is denied with a reason. Claude Code always
+     sends valid input, so this never blocks normal work; it points at a broken hook setup.
+   - **node missing or crashing fails open, visibly.** The guard prints a warning to stderr,
+     appends a line to `.project-brain/reports/guard-failures.log` (time and exit code only,
+     never the command), and exits 1. Claude Code shows exit 1 as a non-blocking hook error
+     and lets the call proceed. Denying here would block every Write, Edit and Bash call,
+     including the fix. Exit 0 would hide the warning: Claude Code ignores stderr on exit 0
+     ([hooks reference](https://code.claude.com/docs/en/hooks), checked 2026-10-15).
+   - The hook input reaches node on stdin, not through an environment variable: a large
+     Write used to exceed the exec size limit and slip through unchecked.
+   - Every pattern is linear-time and tested on 512 KB to 1 MB commands. A PreToolUse hook
+     that times out does not block the call, so a slow regex would be a bypass.
+
    The guard is **defense-in-depth**: `brain-promote --approve` + git history are the
-   real boundary. It fails open on parser errors (never bricks a session) and errs
-   toward denial — a read command mentioning `canon/` alongside a redirect/`node -e`
-   can be a conservative false-positive; split such commands.
+   real boundary. It errs toward denial — a read command mentioning `canon/` alongside a
+   redirect/`node -e` can be a conservative false-positive. So can any program not on the
+   reader list that carries the word `rm` next to a capsule path (`xargs grep rm …`,
+   `sh -c "grep unlink …"`, `git rm --cached …`); split such commands. Known limits: it does
+   not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob
+   (`for f in .project-brain/*; do rm "$f"; done`), or globs that could expand to the
+   capsule (`rm -rf .p*`). It does not treat moving or overwriting as deleting (`mv` of the
+   capsule, `rsync --delete`, `cp -r` over it, `truncate`, `: >`). Code that deletes through
+   an API the guard doesn't name also gets through.
 
 ## Reference sources — documentation only
 
