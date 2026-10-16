@@ -536,3 +536,9 @@ The reviewer re-ran everything on `c261755`: 27/27 suites, 0 bypasses on every e
 - Every earlier case set holds; 27/27 suites.
 - The kept-pair path stays linear: 88 ms at 1 MB.
 - The base differential is unaffected, because its corpus has no kept pairs.
+
+**Re-review of commit E (`5c91867`): approved.**
+- The reviewer re-ran `bash -n`, the guard test and 27/27 suites.
+- All 5 split-capsule forms are denied, and real bash deletes in each. Two more variants (a name split by two kept pairs, and `cd .project\⏎-brain`) are denied as well.
+- Every earlier probe set gives 0 bypasses. Worst timing is 144 ms at 1 MB.
+- **Final verdicts:** RR1–RR3, V1–V5, W1–W3, W5 and X1–X3 are fixed. W4 no longer applies (a documented conservative denial). The listed conservative false positives do not block. Merging is the owner's step.
