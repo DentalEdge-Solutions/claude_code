@@ -201,6 +201,8 @@ try {
     // a line continuation in an ordinary command still passes
     'git add .project-brain/decisions/a.md \\\n  .project-brain/index.md',
     'grep -rn "rm -rf" \\\n  .project-brain/decisions',
+    'echo "a # b" \\\n  && ls .project-brain',
+    'ls .project-brain # list \\\nls',
   ]) {
     r = denyBash(cmd);
     assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
@@ -398,6 +400,15 @@ try {
     "echo 'a\\\nb' ; r\\\nm -rf .project-brain",
     'cd .project-brain\nls # note \\\nrm -rf decisions',
     'cd .project-brain && ls # x \\\nrm decisions',
+    // W3 follow-up: a # inside quotes is not a comment, so the continuation still joins
+    'echo " #"; r\\\nm -rf .project-brain',
+    "echo ' #'; r\\\nm -rf .project-brain",
+    'cd .project-brain; echo " #" && r\\\nm -rf decisions',
+    'echo "a\\\n#" ; r\\\nm -rf .project-brain',
+    'git log --grep " #"; git cl\\\nean -fd .project-brain',
+    // fail-closed: a continuation kept (single quotes, comment, or a quoting the guard misreads)
+    // with a deleter after it, in a command that names the capsule
+    "echo $'a\\'b #' ; r\\\nm -rf .project-brain",
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }
@@ -433,6 +444,9 @@ try {
     // P11 re-review RR3: the git clean dry-run check was /^-[A-Za-z]*n[A-Za-z]*$/, quadratic
     ['git clean option', 'git clean -' + 'n'.repeat(K) + '1 .project-brain'],
     ['many git options', 'git ' + '--bare '.repeat(K / 7) + 'clean .project-brain'],
+    // joinLines once read the last character of the string it was building, which flattened it
+    // on every # (4 s at 512 KB, 16 s at 1 MB)
+    ['comments and continuations', 'ls # x ' + '\\\n#'.repeat(K / 3) + ' .project-brain'],
   ]) {
     const t0 = Date.now();
     denyBash(cmd);

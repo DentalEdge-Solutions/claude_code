@@ -51,22 +51,37 @@ if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
 if (tool === "Bash") {
   if (typeof inp.command !== "string") malformed("Bash command is not a string");
   // Bash removes a backslash-newline (a line continuation), so "r\<newline>m" is rm. Join them
-  // first, so every rule below and the floor see the command bash runs. Not inside a # comment:
-  // there the newline still ends the comment and the next line is a command of its own. Quotes
-  // are not tracked: inside single quotes the pair is literal, and joining it there only shows
-  // more text (errs toward denial). An escaped backslash (\\) stays a pair. One linear pass.
+  // first, so every rule below and the floor see the command bash runs. Quotes are tracked as
+  // bash does: unquoted and inside double quotes the pair is removed; inside single quotes it
+  // is literal; a # starts a comment only at the start of a word outside quotes, and in a
+  // comment the newline ends the comment, so the next line is a command of its own. An escaped
+  // backslash (\\) stays a pair. kept is where the first pair was left in place (in single
+  // quotes or a comment); a fail-closed check below uses it, since a quoting form read
+  // differently from bash ($\x27…\x5c\x27…\x27) can only show up as a pair that was kept. One linear pass.
+  // prev is the last character emitted. Never index out: it is built with +=, and reading a
+  // character of such a string flattens it each time, which made this pass quadratic.
   const joinLines = (s) => {
-    let out = "", comment = false;
+    let out = "", q = "", comment = false, kept = -1, prev = "";
+    const emit = (t) => { out += t; prev = t[t.length - 1]; };
     for (let i = 0; i < s.length; i++) {
       const c = s[i];
-      if (comment) { out += c; if (c === "\n") comment = false; continue; }
-      if (c === "\\") { if (s[i + 1] !== "\n") out += c + (s[i + 1] || ""); i++; continue; }
-      if (c === "#" && (i === 0 || /[\s;&|()]/.test(s[i - 1]))) comment = true;
-      out += c;
+      if (comment || q === "\x27") {
+        if (c === "\\" && s[i + 1] === "\n" && kept < 0) kept = out.length;
+        emit(c);
+        if (comment && c === "\n") comment = false;
+        else if (q === "\x27" && c === "\x27") q = "";
+        continue;
+      }
+      if (c === "\\") { if (s[i + 1] !== "\n") emit(c + (s[i + 1] || "")); i++; continue; }
+      if (q === "\"") { if (c === "\"") q = ""; emit(c); continue; }
+      if (c === "\x27" || c === "\"") q = c;
+      else if (c === "#" && (!prev || /[\s;&|()]/.test(prev))) comment = true;
+      emit(c);
     }
-    return out;
+    return { text: out, kept };
   };
-  const cmd = joinLines(inp.command);
+  const joined = joinLines(inp.command);
+  const cmd = joined.text;
   const CAPSULE = /\.project-brain/;
 
   // ── canon mutations ────────────────────────────────────────────────────────
@@ -306,6 +321,14 @@ if (tool === "Bash") {
     return pipelines;
   };
   const SUBST = /\$\(|`|[<>]\(/;
+  // Fail closed on a kept line continuation: if the text after it, fully joined, holds a delete
+  // word, a clean word or a script-level delete, and the command names the capsule, deny.
+  if (joined.kept >= 0 && CAPSULE.test(cmd)) {
+    // From the start of that line, so a word split by the pair ("r\<newline>m") is whole again.
+    const rest = cmd.slice(cmd.lastIndexOf("\n", joined.kept) + 1).split("\\\n").join("");
+    if (words(rest).some((t) => DELETERS.has(prog(t)) || t === "clean") || API_DELETE.test(rest) || /-delete\b/.test(rest))
+      deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
+  }
   let depth = -1;
   const dirStack = [];
   // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd
