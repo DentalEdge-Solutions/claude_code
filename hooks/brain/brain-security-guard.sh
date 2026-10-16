@@ -50,7 +50,38 @@ if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
 
 if (tool === "Bash") {
   if (typeof inp.command !== "string") malformed("Bash command is not a string");
-  const cmd = inp.command;
+  // Bash removes a backslash-newline (a line continuation), so "r\<newline>m" is rm. Join them
+  // first, so every rule below and the floor see the command bash runs. Quotes are tracked as
+  // bash does: unquoted and inside double quotes the pair is removed; inside single quotes it
+  // is literal; a # starts a comment only at the start of a word outside quotes, and in a
+  // comment the newline ends the comment, so the next line is a command of its own. An escaped
+  // backslash (\\) stays a pair. kept is where the first pair was left in place (in single
+  // quotes or a comment); a fail-closed check below uses it, since a quoting form read
+  // differently from bash ($\x27…\x5c\x27…\x27) can only show up as a pair that was kept. One linear pass.
+  // prev is the last character emitted. Never index out: it is built with +=, and reading a
+  // character of such a string flattens it each time, which made this pass quadratic.
+  const joinLines = (s) => {
+    let out = "", q = "", comment = false, kept = -1, prev = "";
+    const emit = (t) => { out += t; prev = t[t.length - 1]; };
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (comment || q === "\x27") {
+        if (c === "\\" && s[i + 1] === "\n" && kept < 0) kept = out.length;
+        emit(c);
+        if (comment && c === "\n") comment = false;
+        else if (q === "\x27" && c === "\x27") q = "";
+        continue;
+      }
+      if (c === "\\") { if (s[i + 1] !== "\n") emit(c + (s[i + 1] || "")); i++; continue; }
+      if (q === "\"") { if (c === "\"") q = ""; emit(c); continue; }
+      if (c === "\x27" || c === "\"") q = c;
+      else if (c === "#" && (!prev || /[\s;&|()]/.test(prev))) comment = true;
+      emit(c);
+    }
+    return { text: out, kept };
+  };
+  const joined = joinLines(inp.command);
+  const cmd = joined.text;
   const CAPSULE = /\.project-brain/;
 
   // ── canon mutations ────────────────────────────────────────────────────────
@@ -111,7 +142,7 @@ if (tool === "Bash") {
   // Shell words: adjacent quoted and unquoted pieces join ("-O\"r\"m" is -Orm), whitespace
   // inside quotes stays in the word, a backslash escapes the next character. Each word is
   // then split at shell punctuation other than whitespace (x=-Orm gives -Orm).
-  const shellWords = (s) => {
+  const shellWordsRaw = (s) => {
     const out = [];
     let cur = "", q = "";
     for (let i = 0; i < s.length; i++) {
@@ -123,7 +154,27 @@ if (tool === "Bash") {
       cur += c;
     }
     if (cur) out.push(cur);
-    return out.flatMap((w) => w.split(/[(){}`$=!;<>|&,]+/)).filter(Boolean);
+    return out;
+  };
+  const shellWords = (s) => shellWordsRaw(s).flatMap((w) => w.split(/[(){}`$=!;<>|&,]+/)).filter(Boolean);
+  // The words git receives: shell words after the git word, up to the first redirect or
+  // comment. A quoted "x log" stays one word, so it can never pose as the subcommand.
+  // Anchored on the command word, skipping the same prefixes as head() (VAR=…, keywords, a
+  // leading redirection), never on the first word that merely ends in /git ("2>./git git …").
+  // null when the shell words do not show git there: the caller treats that as unknown.
+  const gitArgs = (stage) => {
+    const ws = shellWordsRaw(stage);
+    let i = 0;
+    for (; i < ws.length; i++) {
+      const w = ws[i];
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || KEYWORDS.has(w) || /^[({!]+$/.test(w)) continue;
+      if (/^\d*(<<?<?|>>?|&>>?|>&|<&)/.test(w)) { if (/^\d*(<<?<?|>>?|&>>?)$/.test(w)) i++; continue; }
+      break;
+    }
+    if (prog((ws[i] || "").replace(/^[({!]+/, "")) !== "git") return null;
+    const out = [];
+    for (i++; i < ws.length && !/^(\d*[<>]|#)/.test(ws[i]); i++) out.push(ws[i]);
+    return out;
   };
   const words = (s) => unquote(s).split(PUNCT).filter(Boolean).concat(quotedWords(s));
   // Script-level deletes: node fs.rmSync / unlinkSync / rmdirSync, python shutil.rmtree, rimraf.
@@ -141,30 +192,80 @@ if (tool === "Bash") {
       if (/^\d*(<<?<?|>>?|&>>?|>&|<&)/.test(w)) { i += /^\d*(<<?<?|>>?|&>>?)$/.test(w) ? 2 : 1; continue; }
       break;
     }
-    return { cmd: prog((ws[i] || "").replace(/^[({!]+/, "")), rest: ws.slice(i + 1), env };
+    const cmd = prog((ws[i] || "").replace(/^[({!]+/, ""));
+    return { cmd, rest: ws.slice(i + 1), env, git: cmd === "git" ? gitArgs(stage) : [] };
   };
+  // Global options that take the next word as their value (git 2.54). That value must never be
+  // read as the subcommand: in "git --namespace log rebase -x …" the subcommand is rebase.
+  const GIT_ARG_OPT = /^(-C|-c|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--shallow-file)$/;
+  const GIT_FLAG_OPT = /^(-p|-P|--paginate|--no-pager|--bare|--no-replace-objects|--(literal|glob|noglob|icase)-pathspecs|--no-optional-locks|--no-lazy-fetch|--no-advice|--(git-dir|work-tree|namespace|attr-source)=.*)$/;
+  // config is true when an option can make git run a program (-c, --config-env, --exec-path), is
+  // not recognized, or a word up to the subcommand holds a variable, glob or backtick (it may
+  // split into several words, so its value could pose as the subcommand). Each ends the exemption.
+  // rest must be shell words (gitArgs), not whitespace-split text.
+  const UNSAFE_WORD = /[$`*?[\]{}~]/;
+  // unsafeSub: the subcommand is spelled with $, a glob or a backtick ($\x27cl\x5cx65an\x27), or the
+  // git words could not be read; it may be clean or rm, so the caller counts it as a delete.
   const gitSub = (rest) => {
+    if (rest === null) return { sub: "", config: true, unsafeSub: true };
     let i = 0, config = false;
     while (i < rest.length && rest[i].startsWith("-")) {
-      if (/^(-c|--config-env|--exec-path)/.test(rest[i])) config = true;
-      i += /^-(C|c)$/.test(rest[i]) ? 2 : 1;
+      const t = rest[i];
+      if (/^(-c|--config-env|--exec-path)/.test(t) || !(GIT_ARG_OPT.test(t) || GIT_FLAG_OPT.test(t))
+        || UNSAFE_WORD.test(t)) config = true;
+      if (GIT_ARG_OPT.test(t)) { if (UNSAFE_WORD.test(rest[i + 1] || "")) config = true; i += 2; } else i++;
     }
-    return { sub: rest[i] || "", config };
+    const sub = rest[i] || "";
+    const unsafeSub = UNSAFE_WORD.test(sub);
+    if (unsafeSub) config = true;
+    return { sub, config, unsafeSub };
   };
   // find is a reader unless it runs something (-exec family); -delete is checked separately.
   const nonExec = (h) => !h.env && !h.rest.some((t) => EXEC_OPT.test(t)) && (NON_EXEC.has(h.cmd)
     || (h.cmd === "find" && !h.rest.some((t) => /^-(exec|execdir|ok|okdir)$/.test(t)))
-    || (h.cmd === "git" && ((g) => !g.config && GIT_NON_EXEC.has(g.sub))(gitSub(h.rest))));
-  // git clean with -n / --dry-run only lists what it would remove.
-  const gitCleanDryRun = (rest) => rest.some((t) => t === "--dry-run" || /^-[A-Za-z]*n[A-Za-z]*$/.test(t));
+    || (h.cmd === "git" && ((g) => !g.config && GIT_NON_EXEC.has(g.sub))(gitSub(h.git))));
+  // A git clean dry run is recognized only in a plain grammar that git cannot read another way,
+  // not by parsing git (that was bypassed with quoting, -e values, -- and --end-of-options). The
+  // stage has no quote, escape, variable, glob, redirect, comment or "="; before clean only
+  // "-C <dir>"; after it only -[dfnqxX]+, --dry-run, --quiet, --force and plain paths, with at
+  // least one n before any "--". No -e, --end-of-options or --no-… fits, and an -n after "--"
+  // is only a path, so git can only see a dry run.
+  // Anything else is a delete (a conservative denial when it was a dry run after all).
+  const PLAIN_CLEAN_OPT = /^(-[dfnqxX]+|--dry-run|--quiet|--force)$/;
+  const plainCleanDryRun = (stage, h) => {
+    if (h.cmd !== "git" || h.env || /["\x27\\$`<>#*?[\]{}()~=!;&|]/.test(stage)) return false;
+    const ws = stage.trim().split(/\s+/);
+    let i = ws.findIndex((t) => prog(t) === "git") + 1;
+    if (ws[i] === "-C" && ws[i + 1] && !ws[i + 1].startsWith("-")) i += 2;
+    if (ws[i] !== "clean") return false;
+    let dry = false;
+    for (const t of ws.slice(i + 1)) {
+      if (t === "--") break; // only paths follow; the dry run must already be set
+      if (!t.startsWith("-")) continue;
+      if (!PLAIN_CLEAN_OPT.test(t)) return false;
+      if (t === "--dry-run" || (t[1] !== "-" && t.includes("n"))) dry = true;
+    }
+    return dry;
+  };
   const stageDeletes = (stage, h, exempt) => {
     const w = words(stage);
     // find -delete: when find is the command, or anywhere in a stage that runs commands.
     if ((h.cmd === "find" || !exempt) && w.some((t) => prog(t) === "find") && w.includes("-delete")) return true;
     if (h.cmd === "git") {
-      const sub = gitSub(h.rest).sub;
-      if (sub === "rm" || (sub === "clean" && !gitCleanDryRun(h.rest))) return true;
+      const g = gitSub(h.git);
+      if (g.sub === "rm" || g.unsafeSub) return true;
+      // git clean, or a clean word when an option can hide the subcommand (-c alias.x=clean)
+      // or run a program (-c core.editor=…). A -c with an unrelated clean word ("-c x=y log
+      // --grep clean") is a conservative denial.
+      if ((g.sub === "clean" || (g.config && w.includes("clean"))) && !plainCleanDryRun(stage, h)) return true;
     }
+    // git clean run by another program (env, command, nice, sudo, xargs) or nested in a git
+    // executor (rebase -x, submodule foreach, bisect run): a clean word next to a git word that
+    // is not the command itself.
+    // Counted on one splitting with quotes dropped, so a quoted "git clean …" argument shows its
+    // git word (words() holds every word twice, once per splitting).
+    if (!exempt && w.includes("clean")
+      && unquote(stage).split(PUNCT).filter((t) => prog(t) === "git").length >= (h.cmd === "git" ? 2 : 1)) return true;
     // A deleter glued to a short option ("git grep -Orm", -O"r"m) counts too. Checked on
     // shell words, so env -S\x27farm .project-brain\x27 is the one word "-Sfarm .project-brain".
     return !exempt && (w.some((t) => DELETERS.has(prog(t)))
@@ -199,7 +300,8 @@ if (tool === "Bash") {
     for (let i = 0; i < s.length; i++) {
       const c = s[i];
       if (q === "\x27") { if (c === "\x27") q = ""; cur += c; continue; }
-      if (c === "\\") { if (s[i + 1] === "\n") cur += " "; else cur += c + (s[i + 1] || ""); i++; continue; }
+      // A backslash-newline left after joinLines sits in a comment: the newline ends the line.
+      if (c === "\\") { if (s[i + 1] === "\n") { cur += c; continue; } cur += c + (s[i + 1] || ""); i++; continue; }
       if (q === "\"") { if (c === "\"") q = ""; cur += c; continue; }
       if (c === "\x27" || c === "\"") { q = c; cur += c; continue; }
       if (c === ";" || c === "\n") { endPipeline(false); continue; }
@@ -219,6 +321,13 @@ if (tool === "Bash") {
     return pipelines;
   };
   const SUBST = /\$\(|`|[<>]\(/;
+  // Fail closed on a kept line continuation in a command that names the capsule. A pair is kept
+  // only inside single quotes or a comment, so where joinLines reads quotes as bash does this is
+  // rare; where it does not (a heredoc body, $\x27\x5c\x27\x27), the rules below see a split command, and no
+  // list of delete words is complete (a glued -Or…m, an ANSI-C subcommand). So deny outright.
+  // The capsule is looked for in the fully joined text: the kept pair can split its name.
+  if (joined.kept >= 0 && CAPSULE.test(cmd.split("\\\n").join("")))
+    deny("brain-security-guard: a line continuation (backslash-newline) inside quotes or a comment, in a command that names .project-brain, is denied — the guard cannot tell how the shell will split it. Put the command on one line.");
   let depth = -1;
   const dirStack = [];
   // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd
