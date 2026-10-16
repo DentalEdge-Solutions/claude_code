@@ -8,6 +8,8 @@
 #   ./uninstall.sh .   (current directory)
 
 set -euo pipefail
+# An exported CDPATH makes "cd" print the directory, which corrupts "$(cd … && pwd)".
+unset CDPATH
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RESET='\033[0m'
@@ -26,12 +28,12 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GLOBAL_SKILLS="${HOME}/.claude/skills"
 
 # Every removal below is "${TARGET}/<dir>", so refuse a target where that would hit the
-# filesystem root, the home directory or this toolkit itself (P9). Compared by physical
-# path, so a symlink to one of them is refused too.
-TARGET_REAL="$(cd "${TARGET}" && pwd -P)"
-for forbidden in / "$(cd "${HOME}" 2>/dev/null && pwd -P)" "$(cd "${REPO_DIR}" && pwd -P)"; do
-    if [ "${TARGET_REAL}" = "${forbidden}" ]; then
-        echo "Refusing to uninstall from ${TARGET}: it is the filesystem root, the home directory or this toolkit itself." >&2
+# filesystem root, the home directory, ~/.claude (its skills/ holds every runtime skill) or
+# this toolkit itself (P9). -ef compares device and inode, so a symlink or a "//" spelling
+# of one of them is refused too.
+for forbidden in / "${HOME}" "${HOME}/.claude" "${REPO_DIR}"; do
+    if [ "${TARGET}" -ef "${forbidden}" ]; then
+        echo "Refusing to uninstall from ${TARGET}: it is the filesystem root, the home directory, ~/.claude or this toolkit itself." >&2
         exit 1
     fi
 done
@@ -116,10 +118,15 @@ echo ""
 echo "→ [5/7] Removing pipeline section from CLAUDE.md"
 CLAUDE_MD="${TARGET}/CLAUDE.md"
 if [ -f "${CLAUDE_MD}" ] && grep -qF "# >>> skill-builder >>>" "${CLAUDE_MD}" 2>/dev/null; then
-    # awk + mv, not "sed -i ''": that form is BSD-only and fails with GNU sed (P6).
-    awk '/^# >>> skill-builder >>>/{skip=1} !skip{print} /^# <<< skill-builder <<</{skip=0}' \
-        "${CLAUDE_MD}" > "${CLAUDE_MD}.tmp" && mv "${CLAUDE_MD}.tmp" "${CLAUDE_MD}"
-    ok "removed pipeline section from CLAUDE.md"
+    # awk, not "sed -i ''": that form is BSD-only and fails with GNU sed (P6). Written back
+    # with cat, not mv, so a symlinked CLAUDE.md stays a link and the file keeps its mode.
+    if awk '/^# >>> skill-builder >>>/{skip=1} !skip{print} /^# <<< skill-builder <<</{skip=0}' \
+        "${CLAUDE_MD}" > "${CLAUDE_MD}.tmp" && cat "${CLAUDE_MD}.tmp" > "${CLAUDE_MD}"; then
+        ok "removed pipeline section from CLAUDE.md"
+    else
+        warn "could not rewrite CLAUDE.md; remove the skill-builder section by hand"
+    fi
+    rm -f "${CLAUDE_MD}.tmp"
 else
     skip "CLAUDE.md pipeline section not found"
 fi

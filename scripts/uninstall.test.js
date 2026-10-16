@@ -21,10 +21,10 @@ function touch(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, 'x\n');
 }
-function run(target, answer, cwd = TMP) {
-  const r = spawnSync('bash', target === undefined ? [SCRIPT] : [SCRIPT, target], {
+function run(target, answer, cwd = TMP, { script = SCRIPT, env = {} } = {}) {
+  const r = spawnSync('bash', target === undefined ? [script] : [script, target], {
     encoding: 'utf8', cwd, input: answer, timeout: 20000,
-    env: { ...process.env, HOME: FAKE_HOME },
+    env: { ...process.env, HOME: FAKE_HOME, ...env },
   });
   assert.ok(!r.error, `uninstall.sh failed to run: ${r.error && r.error.message}`);
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
@@ -50,16 +50,28 @@ try {
   // 1. The filesystem root, directly and through a symlink (answer "n": never proceed on "/").
   assertRefused(run('/', 'n\n'), 'target /');
   assertRefused(run(path.join(TMP, 'link-to-root'), 'n\n'), 'symlink to /');
+  // review U1: bash keeps a leading "//" in pwd -P, so a string compare missed these
+  assertRefused(run('//', 'n\n'), 'target //');
 
   // 2. The home directory, directly and through a symlink. Answer "y": a missing guard would
   //    delete the fake home's skills/ — the canary shows it.
   assertRefused(run(FAKE_HOME, 'y\n'), 'target $HOME');
   assertRefused(run(path.join(TMP, 'link-to-home'), 'y\n'), 'symlink to $HOME');
+  assertRefused(run('/' + FAKE_HOME, 'y\n'), '//$HOME');
   assert.ok(fs.existsSync(path.join(FAKE_HOME, 'skills', 'canary.md')), '$HOME/skills survives');
+  // review U3: ~/.claude would lose ~/.claude/skills, every runtime skill, not only ours
+  touch(path.join(FAKE_HOME, '.claude', 'skills', 'other-skill', 'SKILL.md'));
+  assertRefused(run(path.join(FAKE_HOME, '.claude'), 'y\n'), 'target $HOME/.claude');
+  assert.ok(fs.existsSync(path.join(FAKE_HOME, '.claude', 'skills', 'other-skill', 'SKILL.md')),
+    '$HOME/.claude/skills survives');
 
   // 3. The toolkit repo itself, by absolute path and as "." from inside it.
   assertRefused(run(FAKE_REPO, 'y\n'), 'target = toolkit repo');
   assertRefused(run('.', 'y\n', FAKE_REPO), '"." inside the toolkit repo');
+  // review U2: with CDPATH exported, cd prints the path and a relative script path made
+  // REPO_DIR two lines long, so the repo check compared against the wrong string
+  assertRefused(run(FAKE_REPO, 'y\n', TMP, { script: 'repo/uninstall.sh', env: { CDPATH: '.:/' } }),
+    'toolkit repo with CDPATH set');
   assert.ok(fs.existsSync(path.join(FAKE_REPO, 'skills', 'demo-skill', 'SKILL.md')), 'repo skills/ survives');
 
   // 4. No target: usage, exit 1 (unchanged behaviour).
@@ -67,8 +79,11 @@ try {
 
   // 5. A normal project: the installed pieces go, the project's own files stay. The CLAUDE.md
   //    section removal must work with GNU sed too (P6: "sed -i ''" is BSD-only; CI is Linux).
-  const claudeMd = path.join(PROJECT, 'CLAUDE.md');
+  //    Review U4: a symlinked CLAUDE.md stays a symlink and the file keeps its mode.
+  const claudeMd = path.join(PROJECT, 'docs-claude.md');
   fs.writeFileSync(claudeMd, '# Own title\n\nown text\n\n# >>> skill-builder >>>\npipeline\n# <<< skill-builder <<<\n\nown tail\n');
+  fs.chmodSync(claudeMd, 0o600);
+  fs.symlinkSync('docs-claude.md', path.join(PROJECT, 'CLAUDE.md'));
   const r = run(PROJECT, 'y\n');
   assert.strictEqual(r.status, 0, `normal uninstall failed\n${r.stdout}\n${r.stderr}`);
   assert.ok(!fs.existsSync(path.join(PROJECT, 'skills')), 'project skills/ removed');
@@ -77,6 +92,8 @@ try {
   assert.ok(!fs.existsSync(path.join(FAKE_HOME, '.claude', 'skills', 'demo-skill')), 'runtime skill removed');
   assert.strictEqual(fs.readFileSync(claudeMd, 'utf8'), '# Own title\n\nown text\n\n\nown tail\n',
     'CLAUDE.md loses exactly the skill-builder section');
+  assert.ok(fs.lstatSync(path.join(PROJECT, 'CLAUDE.md')).isSymbolicLink(), 'CLAUDE.md is still a symlink');
+  assert.strictEqual(fs.statSync(claudeMd).mode & 0o777, 0o600, 'CLAUDE.md keeps its mode');
 
   console.log('uninstall.test.js: all assertions passed');
 } finally {

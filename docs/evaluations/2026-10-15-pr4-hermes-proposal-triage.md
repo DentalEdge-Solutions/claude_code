@@ -23,10 +23,10 @@ The proposal's own `P` numbers are kept.
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
-| P6 | BSD-only `sed -i ''` | **Done** (see "P9 repair", P6 note) | `uninstall.sh:108` |
+| P6 | BSD-only `sed -i ''` | **Fixed, in review** (see "P9 repair", P6 note) | `uninstall.sh:108` on `d799f4f` |
 | P7 | Hand-rolled YAML parsing | Open | `infra/hermes-agent/bin/make-review-board.py:39` |
 | P8 | Hermes skills have no evals | **Open, grown** | `infra/hermes-agent/skills/` now has 6 skills and 0 `SKILL-EVAL.md` or `evals.json` files |
-| P9 | No guard before `rm -rf` in `uninstall.sh` | **Done** (see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
+| P9 | No guard before `rm -rf` in `uninstall.sh` | **Fixed, in review** (see "P9 repair") | `uninstall.sh:19-24`: TARGET is only resolved with `cd`, so `/` or `$HOME` passes. There are 7 `rm -rf` calls. |
 | P10 | No architecture map | Open (low) | there is no `ARCHITECTURE.md`; `CLAUDE.md` and `README.md` partly cover it |
 | P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | Partly done | `validate-skills` has a test; `score-candidates.js` and `extract-project-context.js` do not |
@@ -315,6 +315,20 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 - **After:** the same probe prints `Refusing to uninstall from <home>: …` and deletes nothing.
 - **P6, same file:** step 5 removed the CLAUDE.md pipeline section with `sed -i ''`, which GNU sed reads as an empty script plus a file named after the real expression. RED in `node:24-slim` (GNU sed 4.9; CI runs on `ubuntu-latest`): `sed: can't read /^# >>> skill-builder >>>/…: No such file or directory`, the uninstall aborted. Now the same `awk` → temp file → `mv` form the second-brain step already uses. The test asserts the exact CLAUDE.md left behind; it passes on macOS and in the Linux container.
 - **Noted, not fixed here:** with no agents in the repo, `${AGENT_FILES[*]}` under `set -u` aborts the script on macOS bash 3.2 (`unbound variable`, line 48 on `d799f4f`). It stops before any removal, so it is a crash, not a data risk. The test repo always carries one agent.
+
+### Independent review of P9/P6, round 1 (2026-10-16): P9 not fixed, P6 fixed
+
+The reviewer reproduced the RED/GREEN claims and 28/28 (macOS bash 3.2, and `node:24-slim` with bash 5.2 and mawk). Its mutation check showed that every assertion fails on the change it targets, including the old `sed` line on Linux.
+
+| ID | Sev | Finding | Author check | Fix |
+|---|---|---|---|---|
+| U1 | blocking | `pwd -P` keeps a leading `//`, so `//`, `//.` and `//<home>` passed the string compare. On a fake home, `"/<home>"` + "y" removed its `skills/` and `scripts/telemetry` | reproduced (`//` and `//<home>` reached the prompt; answered "n") | compare with `[ "${TARGET}" -ef … ]` (device and inode), which covers `//` and symlinks |
+| U2 | minor | An exported `CDPATH` makes `cd` print the path; with a relative script path `REPO_DIR` held two lines | reproduced on macOS as a crash (`SKILL_NAMES[*]: unbound variable`); the reviewer saw the prompt on Linux bash 5 | `unset CDPATH` at the top |
+| U3 | minor | Target `~/.claude` passed, and step 1 removes `~/.claude/skills`, every runtime skill, not only ours | reproduced (reached the prompt) | `$HOME/.claude` refused too. **Not adopted:** refusing any folder with `install.sh` + `skills/skill-eval`, since an installed target also has `skills/skill-eval`; a second toolkit clone stays accepted (its files are in git) |
+| U4 | minor | The awk + `mv` form replaced a symlinked `CLAUDE.md` with a regular file (the real file kept the section), reset the mode to the umask, and printed "removed" even on failure | the new symlink/mode assertions failed for that reason | written back with `cat >` (keeps link, inode and mode), success reported only when it happened, a warning otherwise. The awk output adds a final newline to a file without one (accepted). The second-brain step has the same `awk … && mv` form; left as is, out of scope |
+| U5 | minor | The P9 row said Done despite U1, and the P6 row had a stale line number | confirmed | rows now say "Fixed, in review", and the P6 row names the base commit |
+
+Tests first: each new assertion was watched failing in turn (`target //`, then the CDPATH case, then the symlinked `CLAUDE.md`). U3 went green in the same edit as U1, so its RED evidence is the probe (`~/.claude` reached the prompt). Now: `node scripts/uninstall.test.js` passes on macOS and in `node:24-slim`; the U1–U3 probe refuses all four; `node scripts/run-all-tests.js` → 28/28.
 
 ## P11 repair (2026-10-15)
 
