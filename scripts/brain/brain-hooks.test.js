@@ -198,6 +198,9 @@ try {
     'git commit -m "clean up .project-brain notes"',
     'git log --grep clean -- .project-brain',
     'grep "git clean" .project-brain/log.md',
+    // a line continuation in an ordinary command still passes
+    'git add .project-brain/decisions/a.md \\\n  .project-brain/index.md',
+    'grep -rn "rm -rf" \\\n  .project-brain/decisions',
   ]) {
     r = denyBash(cmd);
     assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
@@ -388,6 +391,13 @@ try {
     "git cl$'e'an -fd .project-brain",
     // X1: an executor running a nested git clean
     'git rebase -x "git clean -fd .project-brain" HEAD~1',
+    // W3: bash removes backslash-newline, so these are rm and clean; inside a # comment the
+    // newline still ends the comment, so the next line is a command of its own
+    'r\\\nm -rf .project-brain',
+    'git cl\\\nean -fd .project-brain',
+    "echo 'a\\\nb' ; r\\\nm -rf .project-brain",
+    'cd .project-brain\nls # note \\\nrm -rf decisions',
+    'cd .project-brain && ls # x \\\nrm decisions',
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }

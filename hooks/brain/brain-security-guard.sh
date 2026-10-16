@@ -50,7 +50,23 @@ if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
 
 if (tool === "Bash") {
   if (typeof inp.command !== "string") malformed("Bash command is not a string");
-  const cmd = inp.command;
+  // Bash removes a backslash-newline (a line continuation), so "r\<newline>m" is rm. Join them
+  // first, so every rule below and the floor see the command bash runs. Not inside a # comment:
+  // there the newline still ends the comment and the next line is a command of its own. Quotes
+  // are not tracked: inside single quotes the pair is literal, and joining it there only shows
+  // more text (errs toward denial). An escaped backslash (\\) stays a pair. One linear pass.
+  const joinLines = (s) => {
+    let out = "", comment = false;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (comment) { out += c; if (c === "\n") comment = false; continue; }
+      if (c === "\\") { if (s[i + 1] !== "\n") out += c + (s[i + 1] || ""); i++; continue; }
+      if (c === "#" && (i === 0 || /[\s;&|()]/.test(s[i - 1]))) comment = true;
+      out += c;
+    }
+    return out;
+  };
+  const cmd = joinLines(inp.command);
   const CAPSULE = /\.project-brain/;
 
   // ── canon mutations ────────────────────────────────────────────────────────
@@ -269,7 +285,8 @@ if (tool === "Bash") {
     for (let i = 0; i < s.length; i++) {
       const c = s[i];
       if (q === "\x27") { if (c === "\x27") q = ""; cur += c; continue; }
-      if (c === "\\") { if (s[i + 1] === "\n") cur += " "; else cur += c + (s[i + 1] || ""); i++; continue; }
+      // A backslash-newline left after joinLines sits in a comment: the newline ends the line.
+      if (c === "\\") { if (s[i + 1] === "\n") { cur += c; continue; } cur += c + (s[i + 1] || ""); i++; continue; }
       if (q === "\"") { if (c === "\"") q = ""; cur += c; continue; }
       if (c === "\x27" || c === "\"") { q = c; cur += c; continue; }
       if (c === ";" || c === "\n") { endPipeline(false); continue; }

@@ -108,7 +108,9 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        `cd /tmp` on its own still ends the inside-capsule state.
      - **Splitting follows the shell:** only `;`, `&`, `&&`, `||`, `|` and newlines outside
        quotes separate commands. A leading redirection (`>/dev/null rm …`) is skipped when
-       finding the command word.
+       finding the command word. Line continuations are joined first, as bash does, so
+       `r\⏎m` is `rm` for every rule, the floor included. Inside a `#` comment a
+       backslash-newline still ends the comment, so the next line counts as a command.
      - **Superset-of-`main` floor:** the stage analysis above is parser-dependent, so as a
        floor the guard also keeps `main`'s blunt rule — any `rm` word followed by
        `.project-brain` within one `;`/`|`/`&`-free segment is a delete. This floor runs on the
@@ -144,7 +146,8 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
    redirect/`node -e` can be a conservative false-positive. So can any program not on the
    reader list that carries the word `rm` next to a capsule path (`xargs grep rm …`,
    `sh -c "grep unlink …"`, `git rm --cached …`); split such commands. Known limits: it does
-   not follow shell variables (`D=.project-brain; rm -rf "$D"`), loops over a capsule glob
+   not follow shell variables (`D=.project-brain; rm -rf "$D"`), commands built at run time
+   (`$(printf …)`, a decoded string, a script an executor runs), loops over a capsule glob
    (`for f in .project-brain/*; do rm "$f"; done`), or globs that could expand to the
    capsule (`rm -rf .p*`). It does not treat moving or overwriting as deleting (`mv` of the
    capsule, `rsync --delete`, `cp -r` over it, `truncate`, `: >`). Code that deletes through

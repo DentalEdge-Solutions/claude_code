@@ -475,3 +475,14 @@ The first round-2 reviewer was stopped by a safety classifier before it ran anyt
   - 652 allow → deny, no line new versus round 2;
   - the 15 that round 2 denied and A allows are all plain dry runs with `-n`/`--dry-run` before a `--`, now accepted.
 - **Timing:** new shapes (many assignments, many redirects, nested git words, an unsafe subcommand) take 117–181 ms at 1 MB, about 1.7× their 512 KB time. Worst overall: 312 ms.
+
+**Round 3, commit B (W3):** `splitShell` turned a backslash-newline into a space; bash removes it.
+
+- Real bash deletes on 5 forms that the guard allowed on `b84e72f`: `r\⏎m -rf <capsule>`, `git cl\⏎ean -fd <capsule>`, `echo 'a\⏎b' ; r\⏎m -rf <capsule>`, and two comment forms (`cd <capsule>` then `ls # note \⏎rm -rf decisions`, where the comment ends at the newline and `rm` runs on its own line).
+- **Fix:** `joinLines` runs once on the raw command before every rule. It removes a backslash-newline the way bash does, keeps `\\` as a pair, and does not join inside a `#` comment. `splitShell` now lets a leftover backslash-newline (only possible in a comment) end the line.
+- **Evidence:**
+  - Tests first: the 5 forms were red, and 2 allow guards (an ordinary continuation in `git add` / `grep`) were added. 27/27 suites pass; the earlier case sets still hold.
+  - **Metamorphic differential:** every corpus command was compared with the same command where each space becomes ` \⏎ ` (the same command to bash). 0 allow → deny. 8 deny → allow, all from the transformation splitting an escaped space (`x\ log` → `x\ \⏎ log`), which bash also reads as two words, so `log` is the subcommand and nothing runs.
+  - **Timing** (continuations, backslash pairs, comments, `#` words): at most 193 ms at 1 MB.
+- **Background security-review notices.** Several automated commit reviews reported "parser-differential", "security-control-bypass" and "incomplete nested-executor check" in the guard, each without details. They are consistent with the classes fixed above. An executor can still run a command built at run time (`$(printf …)`, a decoded string, a script); that is the documented "commands built at run time" limit (G2 class), now named in `SECOND_BRAIN_SECURITY.md`.
+- **Test flake, unexplained:** one run of `brain-hooks.test.js` exited with an error while background reviewers were running timing sweeps; its output was not captured. Four later runs passed. The 3 s timing bound under load is the likely cause, but it is not confirmed.
