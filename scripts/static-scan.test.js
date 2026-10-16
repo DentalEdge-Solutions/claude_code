@@ -836,6 +836,26 @@ test('W3: a rule the bare-name check and the text check both see is reported onc
   assert.strictEqual(r.json.findings.filter(f => f.check === 'perm-bash-wildcard').length, 1, `got ${checks(r.json).join(', ')}`);
 });
 
+// Independent review round 4 of 93394ed: X1 (the string regex overflowed the stack on a string of about
+// 8 MB, and the reader gave up) and X2 (the JSON.parse precheck keeps a truncated file from aborting).
+test('X1: a 9 MB string beside the permissions does not switch off the bare-name check', () => {
+  const r = run([makeDir({ 'settings.json': '{"x":"' + 'a'.repeat(9 << 20) + '","permissions":{"allow":["Bash"]}}' })]);
+  assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${r.json ? checks(r.json).join(', ') || 'none' : r.stderr.slice(0, 200)}`);
+});
+
+test('X1: escaped quotes and backslash runs before a closing quote are read right', () => {
+  const r = run([makeDir({ 'settings.json': '{"x":"a\\\\\\"b\\\\\\\\","y":["\\\\\\\\\\\\"],"permissions":{"allow":["Bash"]}}' })]);
+  assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+});
+
+for (const text of ['{"permissions":{"allow":["Bash(*)"', '{"x":"abc', '{"permissions":{"allow":["Bash(*)"]}']) {
+  test(`X2: a truncated settings file falls back to the text checks without a crash: ${text}`, () => {
+    const r = run([makeDir({ 'settings.json': text })]);
+    assert.ok(r.json, `no JSON output (exit ${r.status}): ${r.stderr.slice(0, 200)}`);
+    if (text.includes('Bash(*)')) assert.strictEqual(sevOf(r.json, 'perm-bash-wildcard'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
 test('S4: equal keys in different objects are not duplicates', () => {
   const r = settingsScan({ permissions: { allow: ['Read(./a)'], deny: ['Bash(*)'] }, hooks: { deny: 1, allow: 2 } });
   assert.strictEqual(r.json.verdict, 'PASS', `got ${checks(r.json).join(', ')}`);

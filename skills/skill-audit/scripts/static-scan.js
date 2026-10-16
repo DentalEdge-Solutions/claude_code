@@ -342,7 +342,6 @@ const CONFIG_FILENAMES = new Set(['settings.json', 'settings.local.json']);
 // A BOM is dropped first, as JSON.parse refuses it. Background security review of c136334: reading
 // permissions.allow alone lost main's matches elsewhere ("allowedTools"), and the earlier key renaming
 // could collide with a real key.
-const JSON_STRING = /"(?:[^"\\]|\\.)*"/y;
 const JSON_SCALAR = /[^,\]}\s]*/y;
 // Builds only what readSettings uses: the top-level object, each permissions object, and its allow,
 // deny and ask arrays with their string items and positions. Every other value is skipped by a loop
@@ -352,7 +351,17 @@ function readJsonTree(text) {
   let i = 0;
   const ws = () => { while (i < text.length && ' \t\n\r'.includes(text[i])) i++; };
   const peek = () => { ws(); return text[i]; };
-  const strEnd = () => { JSON_STRING.lastIndex = i; JSON_STRING.test(text); return JSON_STRING.lastIndex; };
+  // The end of the string that starts at i: the first " after it with an even run of backslashes
+  // before it. A loop, not a regex: the regex overflowed the stack on a string of about 8 MB, and the
+  // reader then gave up (independent review round 4, X1). Each backslash run is counted once.
+  const strEnd = () => {
+    for (let q = text.indexOf('"', i + 1); q >= 0; q = text.indexOf('"', q + 1)) {
+      let b = q - 1;
+      while (text[b] === '\\') b--;                    // stops at the opening quote at the latest
+      if ((q - 1 - b) % 2 === 0) return q + 1;
+    }
+    return text.length;                                // unreachable on valid JSON
+  };
   const str = () => { const end = strEnd(); const s = JSON.parse(text.slice(i, end)); i = end; return s; };
   function skip() {
     const c = peek();
