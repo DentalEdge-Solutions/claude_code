@@ -1,13 +1,20 @@
 # Hermes H2 — Staging Enforcement + Budget Caps (design spec)
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **⚠ DEFERRED — Operate track.** Per the definitive roadmap
-> (`~/.claude/plans/iterative-squishing-church.md`, brain candidate
-> `.project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md`), this phase is part of
+> (`.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md`;
+> itself superseded, and the session plan it cites was a machine-local file, never in the repo), this phase is part of
 > the credential-bearing **Hermes Operate track**, built just-in-time with the first spawned operator
 > project — **not** part of the credential-free kernel v1.
+> Authoritative now: the canon entries `.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`
+> and `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`; the running system is
+> described in `infra/hermes-agent/README.md`.
 
 > **Date:** 2026-07-20 · **Status:** design (planning only) · **Depends on:** H1
-> **Master:** `specs/2026-07-20-hermes-master-architecture.md`
+> **Master:** `specs/archive/2026-07-20-hermes-master-architecture.md`
 
 H2 adds the last two policy rules the pack contract already declares but leaves to "the future
 Hermes runtime": **staging containment** (staging-autonomous packs may only write to their declared

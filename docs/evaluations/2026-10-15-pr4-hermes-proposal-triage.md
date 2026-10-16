@@ -31,7 +31,7 @@ The proposal's own `P` numbers are kept.
 | P11 | The brain security guard fails open on a parser error | **Done** (see "P11 repair") | `hooks/brain/brain-security-guard.sh` |
 | P12 | Tests missing for 3 scripts | **Done, in review** (see "P12 repair") | all three have tests: `validate-skills.test.js`, and since 2026-10-16 `scripts/score-candidates.test.js` and `scripts/extract-project-context.test.js` |
 | P13 | `test-runners.js` writes to real `evals/` paths | **Open, worse than stated** | see below |
-| P14 | The superseded architecture spec has no banner | Partly done | `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md` now has a "REVISED" banner, but it points to `~/.claude/plans/…`, a machine-local file and not a repo document |
+| P14 | The superseded architecture spec has no banner | **Done, in review** (see "P14 and P10") | all 13 archived Hermes custom-kernel docs now carry a RETIRED (canon D-3) headline and point at repo documents only; no machine-local or dead pointer remains under `docs/superpowers/` |
 
 ### P13 in detail
 
@@ -58,6 +58,18 @@ The proposal's own `P` numbers are kept.
 - The stale `evals/codex-runs/.test/` folder (15 fixture directories) was removed.
 - **Out of scope:** the runner, native-audit and harvest-evidence tests in the same file still write into `evals/` paths of their own (`evals/codex-runs/{skills,agents,native-audits}/…`, `evals/.test-*`). Those paths are dedicated to tests or cleaned up afterwards, and none is a baseline.
 
+## P14 and P10 (2026-10-16)
+
+- **P14.** The archived master spec's REVISED banner named `~/.claude/plans/iterative-squishing-church.md`, a machine-local file. Six sibling archived Hermes specs and plans (H1–H3) carried the same pointer. All seven also named a brain candidate, `2026-07-21-hermes-definitive-roadmap.md`, which has since moved to `decisions/superseded/`. Each banner now points at repo documents: the roadmap's current path, noting that the plan file it cites was machine-local and never in the repo; the two canon entries that supersede it (adopting the Nous Hermes Agent, and the D-1…D-5 corrections); and `infra/hermes-agent/README.md`. Every named path was checked to exist, and no machine-local or candidate pointer remains under `docs/superpowers/`. The canon entry and the superseded decision that also cite the plan file were not edited: canon changes only through `brain-promote`, and the superseded file is a historical record.
+- **P10.** Not a new `ARCHITECTURE.md`. README already has "Architecture at a glance" (the Phase 2 lanes and spine) and a "Directory Structure", and a third copy would drift. The actual gap was that the directory tree missed 14 skills (the brain, capture-learning and reference-library skills) and 7 top-level folders (`.project-brain/`, `hooks/`, `templates/`, `reference-repositories/`, `packs/`, `infra/hermes-agent/`, `.github/`). The tree now lists them, with one-liners taken from each SKILL.md description or the folder's own README, plus links to the guard's security rules and the Hermes README. Afterwards, every skill directory appears in the tree.
+- **Independent review (2026-10-16): approved with minor findings.** The author's answers are below; the re-review result follows them.
+  - **D-1:** the banner headlines still presented the superseded plan as current. All 13 archived Hermes custom-kernel docs (not only the 7 with banners: canon D-3 retires "custom-build master + H0–H3 + K2"; the two K2 docs were added after the re-review) now open with a RETIRED (canon D-3) headline naming the two canon entries.
+  - **D-2:** nested parentheses flattened.
+  - **D-3:** the P14 evidence column and the ranked list are updated. The P10 and P12 rows sit next to rows the P9 and P12 branches change, so they are flipped at merge time to avoid conflicts.
+  - **D-4:** 24 links in 13 archived docs pointed at their pre-archive paths (20, then 4 more in the K2 docs after the re-review); each now points at its existing `archive/` twin.
+  - **D-5:** `.claude/skills/` (codex-eval, never copied by install.sh) added to the tree.
+  - **Re-review:** D-2, D-3 and D-5 confirmed fixed. D-1 and D-4 were not fixed at first: the author's scripts selected files by a `2026-07-20` prefix and missed the two K2 docs dated `2026-07-21`. Both K2 docs now have the headline and repointed links. **D-6:** the record had claimed "all closed", "all 11" and "0 broken". Only the reviewer closes findings, so this entry is reworded. The P10 and P12 status rows must be flipped at merge; until then they disagree with the ranked list.
+
 ## Open work carried forward, ranked
 
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
@@ -69,8 +81,8 @@ The proposal's own `P` numbers are kept.
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
 7. **P7:** replace the hand-rolled YAML parse with a real parser, with a test.
 8. **P12:** tests for `score-candidates.js` and `extract-project-context.js`.
-9. **P14:** point the archived spec's banner at a repo document.
-10. **P10:** an architecture map (low).
+9. ~~**P14:** point the archived spec's banner at a repo document.~~ Done on 2026-10-16 (see "P14 and P10").
+10. ~~**P10:** an architecture map (low).~~ Done on 2026-10-16 (see "P14 and P10"): README's directory tree completed.
 
 ## Method and limits
 

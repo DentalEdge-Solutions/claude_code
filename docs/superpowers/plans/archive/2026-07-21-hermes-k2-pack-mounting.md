@@ -1,5 +1,9 @@
 # Hermes K2 — Pack Mounting + Knowledge Retrieval Implementation Plan
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give a Hermes run access to a domain pack's `knowledge/` and `skills/` as read context, and its `tools/*.tool.json` as declarative (never callable) documentation, plus a brain-search-style query surface over pack knowledge — all without adding a credential, a live write path, or a new database table.
@@ -8,7 +12,7 @@
 
 **Tech Stack:** Node ≥22 (already established by K1), CommonJS, `'use strict'`. Tests are plain `require('assert')`, run as a standalone `node <file>` process — this repo's house style (`scripts/brain/brain-search.test.js`, `scripts/run-calibration.test.js`), **not** `node:test`. No new runtime dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-07-21-hermes-k2-pack-mounting-design.md` · **Master:** `docs/superpowers/specs/2026-07-20-hermes-master-architecture.md`
+**Spec:** `docs/superpowers/specs/archive/2026-07-21-hermes-k2-pack-mounting-design.md` · **Master:** `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md`
 
 ## Global Constraints
 
@@ -817,5 +821,5 @@ git commit -m "test(hermes): boundary proof — mounted write-effect pack has no
 
 Tool execution adapter, credential vault, HITL approval, staging-target enforcement, budget caps,
 `clients/<client>/` binding resolution, `guardrails/policy.json` enforcement — all deferred to the
-Operate track (H1 → H3; see `specs/2026-07-20-hermes-h1-vault-hitl-design.md` and later). K2 ships
+Operate track (H1 → H3; see `specs/archive/2026-07-20-hermes-h1-vault-hitl-design.md` and later). K2 ships
 the declarative surface those phases will eventually bind to; it never binds anything itself.

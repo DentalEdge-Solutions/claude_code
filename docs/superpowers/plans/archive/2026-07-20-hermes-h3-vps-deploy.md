@@ -1,9 +1,16 @@
 # Hermes H3 — VPS Deploy + Real Credentials Implementation Plan
 
+> **⚠ RETIRED (canon D-3, 2026-07-23).** A custom-kernel Hermes document, superseded when the
+> Nous Hermes Agent was adopted instead (`.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`,
+> `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`). Kept for history only; nothing below is a plan of record.
+
 > **⚠ SPLIT by the definitive roadmap.** VPS provision/deploy = **kernel K3** (dummy creds only); real
-> credentials + staged rollout + security-review gate = deferred **Operate track**. Authoritative:
-> `~/.claude/plans/iterative-squishing-church.md` and
-> `.project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md`.
+> credentials + staged rollout + security-review gate = deferred **Operate track**. Roadmap:
+> `.project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md` (itself superseded;
+> the session plan it cites was a machine-local file, never in the repo).
+> Authoritative now: the canon entries `.project-brain/canon/2026-07-21-adopt-nous-hermes-agent-runtime.md`
+> and `.project-brain/canon/2026-07-23-hermes-memory-corrections-d1-d5.md`; the running system is
+> described in `infra/hermes-agent/README.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to work through this plan. H3 is infrastructure/ops, so tasks are script-authoring + command-verified checkpoints rather than unit-test TDD. Steps use checkbox (`- [ ]`) syntax. **Do not introduce any real credential until Task 5's security-review gate is fully signed.**
 
@@ -13,7 +20,7 @@
 
 **Tech Stack:** Bash provisioning on Ubuntu, Docker + compose (from H0/H0.5), SSH-key access. Node ≥22 already in the image.
 
-**Spec:** `docs/superpowers/specs/2026-07-20-hermes-h3-vps-deploy-design.md` · **Master:** `docs/superpowers/specs/2026-07-20-hermes-master-architecture.md`
+**Spec:** `docs/superpowers/specs/archive/2026-07-20-hermes-h3-vps-deploy-design.md` · **Master:** `docs/superpowers/specs/archive/2026-07-20-hermes-master-architecture.md`
 
 ## Global Constraints
 

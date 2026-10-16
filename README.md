@@ -276,13 +276,30 @@ skills/
   agent-eval/        — agent measurement (dispatch accuracy + 4 more metrics)
   agent-refine/      — agent autoresearch loop
   team-eval/         — orchestration measurement (dispatch-chain accuracy, handoff integrity)
+  project-brain-bootstrap/, second-brain-setup/   — create and personalize a brain capsule
+  brain-capture/, brain-compile/, brain-promote/  — record → distil → promote (promote is invoke-only)
+  brain-search/, brain-context-pack/, brain-kernel/, brain-weekly-review/ — query, load, route, maintain
+  capture-learning/  — turn a correction into a lesson (per-item confirmation)
+  reference-repo-add/, reference-repo-audit/, reference-repo-pattern-extract/, gstack-pattern-audit/
+                     — register, audit and mine the reference library
 .claude/agents/      — installed runtime sub-agents
+.claude/skills/      — skills for working on this repo only (codex-eval); install.sh does not copy them
+.project-brain/      — this repo's own Second Brain capsule (canon changes only via brain-promote)
+hooks/brain/         — brain hooks, including the blocking brain-security-guard.sh
+templates/           — the second-brain capsule template that install copies
+reference-repositories/ — governed source material (docs only, never installed directly)
+packs/               — domain packs registry (google-ads, google-analytics, wordpress)
+infra/hermes-agent/  — Hermes, the persistent runtime (Docker, stdlib-only bin/, registry)
 fixtures/            — committed calibration assets (known-defective mutant + golden target)
-schemas/             — JSON schemas (evals.json, telemetry events, Codex results)
-scripts/             — calibration, Codex, and telemetry orchestration
+schemas/             — JSON schemas (evals.json, telemetry events, Codex results, brain, packs)
+scripts/             — calibration, Codex, telemetry, brain, packs and CI-scan scripts; most tests
+.github/workflows/   — CI (ci.yml), required on main
 evals/               — project context and eval artifacts (generated, mostly gitignored)
-docs/                — design specs, evaluations, and implementation plans
+docs/                — design specs, evaluations, protocols and implementation plans
 ```
+
+Security rules for the brain guard: [`docs/SECOND_BRAIN_SECURITY.md`](docs/SECOND_BRAIN_SECURITY.md).
+Hermes: [`infra/hermes-agent/README.md`](infra/hermes-agent/README.md).
 
 ## Installation
 
