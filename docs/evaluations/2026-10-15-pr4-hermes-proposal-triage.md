@@ -535,6 +535,15 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **N6:** extends E14.
 - **E14 (open, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)"). Each skill's own `REFERENCE.md` threshold table ("**NEUTRAL → KEEP** | Within ±2–5%") also contradicts its step 8, which points to that table (review N6).
 - **E15 (open, found while fixing E13):** `agent-refine` `SKILL.md` step 8's "Sync to runtime: `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`" copies the agent into the root of `~/.claude/`, not `~/.claude/agents/`. CLAUDE.md says agents are project-scoped (installed to target projects only), so this leaves a stray file in `~/.claude/`.
+- **F1 (open, found 2026-10-19):** `scripts/brain/brain-hooks.test.js` fails intermittently, an `assert.ok` with `actual: false`. It failed in 1 of 25 full runs on `main`, plus one unlogged failure each in two review sessions.
+  - **Not reproduced:**
+    - 41 runs of the file alone;
+    - 6 runs with all 12 cores busy.
+  - **Ruled out:**
+    - shared temp folders, since the test's folder lives inside each checkout;
+    - a UTC/local date mismatch, since the hooks and the test both use UTC.
+  - **Why the assertion is unknown:** `run-all-tests.js` printed only the last 15 lines of a failing suite, which cut off node's assertion message.
+  - **Change:** the runner now keeps a failing suite's stderr whole up to 200 lines (head and tail beyond that), the last 40 stdout lines, and the signal or spawn error (`scripts/run-all-tests.test.js`). The next occurrence will name the assertion.
 - **E9 (fixed 2026-10-19, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
   - **Fix:** the "Subject revision" bullet now reads "definition sha256 · commit". It is changed in all six copies: the two templates, the two `REFERENCE.md` files and the two eval agents. It says three things:
     - the sha256 identifies the measured text;
