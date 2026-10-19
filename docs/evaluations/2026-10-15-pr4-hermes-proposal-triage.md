@@ -491,6 +491,9 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **L3:** the status test also requires that a recorded subject never prints `not recorded`.
     - **L4:** split in two. The bullet now also covers a null `commit`; re-hashing on resume is E10.
     - **L5:** recorded as E11.
+    - **Round 2:** approve.
+      - **L6:** the header test now pins `"not recorded" when missing`.
+      - **L7:** the bullet says to write "not recorded" for whichever of `subject` and its `commit` is null, keeping the other.
 - **E10 (open, from E9 review L4):** the subject's sha256 is taken once, at `init`. If the definition is edited between an interrupted run and its resume, the recorded hash no longer matches what the resumed scenarios measured, and `status` does not re-check.
   - Fix: `status` re-hashes `subject.path` and warns on a mismatch; the exit code is unchanged.
 - **E11 (open, from E9 review L5):** `docs/REVIEW_PROTOCOL.md` says a TEAM-EVAL report's revision is pinned by `run-manifest.js init --subject`. team-eval never calls `run-manifest.js`; `skills/team-eval/SKILL.md` step 7 only says "orchestrator and member revisions".

@@ -51,7 +51,7 @@ for (const { track, marker } of TRACKS) {
     // in it; the sha256 is what identifies the measured text, and a manifest without one says so.
     // Whole clauses, so a reworded line that reverses the meaning fails (E9 review L2).
     for (const clause of ['The sha256 identifies the measured text', 'so it does not contain an uncommitted definition',
-      'Write "not recorded" when `subject` or its `commit` is null']) {
+      'Write "not recorded" for whichever of `subject` and its `commit` is null, keeping the other']) {
       assert.ok(expected[0].includes(clause), `Subject revision must say: ${clause}\n  got: ${expected[0]}`);
     }
   });
@@ -64,7 +64,7 @@ for (const { track, marker } of TRACKS) {
     assert.strictEqual(headers[0][0], headers[1][0]);
     const h = headers[0][0];
     assert.ok(h.indexOf('sha256') !== -1 && h.indexOf('sha256') < h.indexOf('commit'), `sha256 must come before the commit: ${h}`);
-    assert.ok(h.includes('"not recorded"'), h);
+    assert.ok(h.includes('"not recorded" when missing'), h);   // the phrase alone passed `never "not recorded"` (L6)
   });
 
   for (const copy of copies) {
