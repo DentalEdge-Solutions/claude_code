@@ -8,6 +8,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const os = require('os');
 const { spawnSync } = require('child_process');
 
 const REPO = path.join(__dirname, '..');
@@ -53,6 +55,41 @@ for (const { files, snapshot, sample } of TRACKS) {
       assert.ok(mk !== -1, 'no mkdir of the iteration folder');
       assert.ok(cp !== -1, 'no cp into the snapshot folder');
       assert.ok(mk < cp, 'the copy must come after the iteration folder is created (step 5), or N is miscounted');
+    });
+
+    // Run the doc's own step-5 snapshot commands in a temp repo (review M1): only `mkdir -p` and `cp`
+    // are accepted, and they run without a shell. The recorded --snapshot-path must then exist and hold
+    // exactly the --subject definition.
+    test(`${file}: its step-5 commands create the recorded --snapshot-path, equal to the subject`, () => {
+      const iterDir = path.posix.dirname(path.posix.dirname(snapshot));
+      const start = text.indexOf('mkdir -p ' + iterDir);
+      const end = text.indexOf('run-manifest.js init', start);
+      assert.ok(start !== -1 && end > start, 'step 5 not found');
+      const fill = t => t.replace(/<skill-name>|<agent-name>/g, 'demo').replace(/<N>/g, '1');
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-snapshot-'));
+      fs.mkdirSync(path.join(tmp, 'skills', 'demo', 'references'), { recursive: true });
+      fs.writeFileSync(path.join(tmp, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\n---\nbody\n');
+      fs.writeFileSync(path.join(tmp, 'skills', 'demo', 'references', 'a.md'), 'ref\n');
+      fs.mkdirSync(path.join(tmp, '.claude', 'agents'), { recursive: true });
+      fs.writeFileSync(path.join(tmp, '.claude', 'agents', 'demo.md'), '---\nname: demo\n---\nagent\n');
+      const cmds = [...text.slice(start, end).matchAll(/\b(mkdir -p|cp -R|cp) ([^\s`]+)(?: ([^\s`]+))?/g)];
+      assert.ok(cmds.some(c => c[1].startsWith('cp')), 'no cp in step 5');
+      for (const [, op, a1, a2] of cmds) {
+        const args = op === 'mkdir -p' ? ['-p', fill(a1)] : [...(op === 'cp -R' ? ['-R'] : []), fill(a1), fill(a2 || '')];
+        const r = spawnSync(op.split(' ')[0], args, { cwd: tmp, encoding: 'utf8' });
+        assert.strictEqual(r.status, 0, `${op} ${args.join(' ')}: ${r.stderr}`);
+      }
+      const init = text.slice(end).split('\n')[0];
+      const snap = fill(init.match(/--snapshot-path (\S+?)\]/)[1]);
+      const subj = fill(init.match(/--subject (\S+)/)[1]);
+      const sha = f => crypto.createHash('sha256').update(fs.readFileSync(path.join(tmp, f))).digest('hex');
+      assert.ok(fs.existsSync(path.join(tmp, snap)) && fs.statSync(path.join(tmp, snap)).isFile(), `${snap} was not created`);
+      assert.strictEqual(sha(snap), sha(subj), 'the snapshot differs from the subject');
+    });
+
+    // The copy runs once per iteration, like init: re-running `cp -R` nests a second copy (review M2).
+    test(`${file}: on resume the snapshot copy is skipped together with init`, () => {
+      assert.ok(/skip the snapshot copy and this call|\(once per iteration — skip on resume\)/.test(text), 'resume wording');
     });
   }
 

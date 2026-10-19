@@ -490,10 +490,20 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - the harvester and `run-native-audit.js` skip the snapshot folder, because it has no `with_*` side;
     - `cp -R` creates the folder rather than nesting it;
     - `scripts/eval-snapshot-paths.test.js` pins the paths, the order (copy after the iteration folder exists) and the ignore rules. It failed before the change.
+  - **Independent review:** approve with changes (M1–M5).
+    - **M1:** the test now runs each document's step-5 `mkdir -p`/`cp` commands, without a shell, in a temp repo. It asserts that the recorded `--snapshot-path` exists and equals the subject. Three path bugs the first test missed now fail it, checked against a passing control: a wrong copy target, a copy to a file, and a dropped `mkdir`.
+    - **M2:** both agents now say "On resume, skip the snapshot copy and this call", because re-running `cp -R` nests a second copy. The test pins it.
+    - **M3:** corrects E12; see there.
+    - **M4:** extends E13.
+    - **M5:** `install.sh` keeps its `skills/*-eval-snapshot/` ignore rule on purpose, for snapshot folders left by earlier runs.
 - **E12 (open, owner decision, found while fixing E8):** both eval agents record `baseline_method = snapshot` for an existing skill or agent, but their step-6 baseline prompt always says "Do NOT load any skill" or "Do NOT dispatch the agent". So agent-run evals of an existing definition compare against no skill at all, while the manifest says they compared against the previous version.
   - The eval skills' own text says to use the snapshot as the baseline.
-  - Fixing it needs a design: how the baseline loads the snapshot, and how its trigger marker is graded. Planned separately.
-- **E13 (open, found while fixing E8):** the refine agents' per-iteration safety copies, `skills/<name>/SKILL.md.pre-iter-N` and `.claude/agents/<name>.md.pre-iter-N`, sit in the definition's own folder and are not ignored. Same class as E8.
+  - **Corrected by review M3:** the step-5 snapshot is taken at eval time, so it is byte-identical to `--subject` (same sha256 in simulation). This was already so before E8. So even a baseline that loaded it would compare the current version with itself, not with an earlier one, in all four flows. `skills/skill-eval/REFERENCE.md` and `skills/agent-eval/REFERENCE.md` call it a "snapshot of previous version", which is not what the steps produce.
+  - A real fix needs the pre-change definition, for example refine's `SKILL.md.baseline`, a git ref, or a snapshot taken before an edit, and a rule for grading its trigger marker. That is a methodology decision for the owner.
+- **E13 (open, found while fixing E8):** refine copies sit in the definition's own folder and are not ignored. Same class as E8.
+  - the refine agents' per-iteration safety copies, `skills/<name>/SKILL.md.pre-iter-N` and `.claude/agents/<name>.md.pre-iter-N`;
+  - skill-refine's `skills/<name>/SKILL.md.baseline`. `install.sh`'s `skills/*.baseline` does not match that nested path, and `git check-ignore` misses it here and in a target project (review M4).
+  - skill-refine-agent step 7d also runs `cp -r skills/<name> ~/.claude/skills/`, carrying the `pre-iter-N` files into the installed skill.
 - **E9 (fixed 2026-10-19, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
   - **Fix:** the "Subject revision" bullet now reads "definition sha256 · commit". It is changed in all six copies: the two templates, the two `REFERENCE.md` files and the two eval agents. It says three things:
     - the sha256 identifies the measured text;

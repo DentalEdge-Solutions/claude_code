@@ -80,7 +80,7 @@ method mid-iteration.
    Snapshot only: `cp -R skills/<skill-name> evals/<skill-name>/iteration-<N>/eval-snapshot`
    `node skills/skill-eval/scripts/run-manifest.js init evals/<skill-name>/iteration-<N> --baseline-method <none|snapshot> [--snapshot-path evals/<skill-name>/iteration-<N>/eval-snapshot/SKILL.md] --subject skills/<skill-name>/SKILL.md --commit <short SHA from git rev-parse --short HEAD>`
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
-   On resume, skip this call entirely — the manifest already exists and re-init is
+   On resume, skip the snapshot copy and this call entirely — the manifest already exists and re-init is
    refused by design. Every scenario in this iteration uses the recorded method.
 
 6. Dispatch ALL pairs simultaneously — spawn up to 42 subagents in ONE Agent call.
