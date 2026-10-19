@@ -83,5 +83,14 @@ test('a very long line is cut, so one huge line cannot flood the log (review R3)
   assert.match(out, /characters cut/);
 });
 
+test('"no output" is said only when there is none, and a 2,000-character line is kept whole (review R7, R8)', () => {
+  assert.doesNotMatch(formatFailure({ status: 1, stdout: 'x', stderr: '' }), /no output/);
+  assert.doesNotMatch(formatFailure({ status: 1, stdout: '', stderr: 'y' }), /no output/);
+  const msg = 'AssertionError [ERR_ASSERTION]: ' + 'm'.repeat(2000 - 32);
+  assert.strictEqual(msg.length, 2000);
+  assert.ok(formatFailure({ status: 1, stdout: '', stderr: msg }).includes(msg), 'a 2,000-character line must not be cut');
+  assert.match(formatFailure({ status: 1, stdout: '', stderr: 'z'.repeat(2001) }), /\[1 character cut\]/);
+});
+
 if (!ok) process.exit(1);
 console.log('\nAll run-all-tests tests passed.');

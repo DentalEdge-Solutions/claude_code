@@ -37,7 +37,7 @@ const STDERR_TAIL = 100;
 const STDOUT_TAIL = 40;
 const MAX_LINE = 2000;   // one huge line must not flood the log
 
-const cut = l => (l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)} … [${l.length - MAX_LINE} characters cut]` : l);
+const cut = l => (l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)} … [${l.length - MAX_LINE} character${l.length - MAX_LINE === 1 ? '' : 's'} cut]` : l);
 const lines = text => (text || '').replace(/\n$/, '').split('\n').map(cut);
 
 function formatFailure(r) {
