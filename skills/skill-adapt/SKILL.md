@@ -41,8 +41,10 @@ Rewrite a sourced skill so it fits your project like a native skill — not a tr
 
 4. **Snapshot existing skill** — if a skill with this name is already installed, back it up before touching anything:
    ```bash
-   cp -r skills/<skill-name> skills/<skill-name>-backup-$(date +%Y%m%d)
+   mkdir -p evals/<skill-name>
+   cp -R skills/<skill-name> evals/<skill-name>/adapt-backup-$(date +%Y%m%d-%H%M%S)
    ```
+   The backup lives under `evals/` (gitignored), never in `skills/`: install.sh syncs every folder there into `~/.claude/skills/`, where a backup would be a second copy of the skill. The time stamp keeps a second backup on the same day from nesting inside the first.
 
 5. **Adapt the description** — rewrite the `description:` frontmatter using project-specific terminology and "pushy" trigger phrases: include the exact words a user would say to activate this skill. Keep "Use when [X]" format. Target ≤ 1024 chars (Agent Skills spec limit).
 

@@ -24,10 +24,12 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 1. **Gather inputs** — load `.claude/agents/<name>-EVAL.md` and `evals/agents/<name>/refine-input.json`. Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each).
 
-2. **Back up and validate baseline** — copy the current agent before touching anything:
+2. **Back up and validate baseline** — copy the current agent before touching anything (once per refine session; never overwrite an existing `.md.baseline`):
    ```bash
-   cp .claude/agents/<name>.md .claude/agents/<name>.md.baseline
+   mkdir -p evals/agents/<name>/refine
+   cp .claude/agents/<name>.md evals/agents/<name>/refine/<name>.md.baseline
    ```
+   Refine copies live under `evals/agents/<name>/refine/` (gitignored), never in `.claude/agents/`.
    Then check staleness: if `refine-input.json` was written today **and** the agent file has not been modified since — trust the baseline scores directly, no re-run needed. If the agent was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as agent-eval) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.
 
 3. **Route by failing metric** — the correct lever depends on *which* metric is failing:

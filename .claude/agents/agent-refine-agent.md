@@ -70,8 +70,9 @@ your own eval logic.
    - eval_pass_rate < 80% (dispatch and resilience fine) → active_lever = "B–E" per iteration.
    - Multiple failing → fix Lever A first (resilience and dispatch issues share root cause).
 
-4. Create baseline backup (once, before first mutation):
-   `cp .claude/agents/<agent-name>.md .claude/agents/<agent-name>.md.baseline`
+4. Create baseline backup (once, before first mutation), outside `.claude/agents/`:
+   `mkdir -p evals/agents/<agent-name>/refine`
+   `cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/refine/<agent-name>.md.baseline`
    If .baseline already exists (prior session), do NOT overwrite.
 
 5. Train/test split from refine-input.json:
@@ -105,7 +106,7 @@ your own eval logic.
    Track coverage: vary levers in iters 1–4 (explore), exploit best lever in 5+.
    State hypothesis before mutating — log it first, then act.
 
-   7b. Safety snapshot: `cp .claude/agents/<agent-name>.md .claude/agents/<agent-name>.md.pre-iter-N`
+   7b. Safety snapshot: `cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/refine/<agent-name>.md.pre-iter-N`
    Make exactly ONE targeted edit (use Edit tool). Nothing else.
 
    **Lever E only:** After any edit to `model:` or `tools:` frontmatter fields, immediately run:
@@ -122,7 +123,7 @@ your own eval logic.
 
    7d. Keep or revert:
    - score > baseline + 2% → KEEP.
-   - score < baseline − 5% → REVERT. Restore: `cp .claude/agents/<agent-name>.md.pre-iter-N .claude/agents/<agent-name>.md`
+   - score < baseline − 5% → REVERT. Restore: `cp evals/agents/<agent-name>/refine/<agent-name>.md.pre-iter-N .claude/agents/<agent-name>.md`
    - within ±2–5% → NEUTRAL → KEEP (simpler is better).
    Mark lever as exhausted if reverted ≥ 2× with no improvement.
 
