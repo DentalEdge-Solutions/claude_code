@@ -33,7 +33,7 @@ execution. See the project plan for the full rationale.
 ## First run
 
 ```bash
-cp .env.example .env          # local dev / before Option B: set OPENROUTER_API_KEY + ANTHROPIC_API_KEY (on the box the gateway .env holds OPENROUTER_API_KEY only). A laptop stack uses its OWN OpenRouter key, never the box's (security review #7).
+cp .env.example .env          # set OPENROUTER_API_KEY only: the gateway needs no Anthropic key (drafts run in ads-drafter). Never put ANTHROPIC_API_KEY in this repo tree; a laptop keeps it in ~/.config/hermes-local/.env.anthropic (0600), as the box keeps /etc/hermes/.env.anthropic (HR1, docs/evaluations/2026-10-19-hr1-secret-read-controls.md). A laptop stack uses its OWN OpenRouter key, never the box's (security review #7).
 cp config.yaml.example data/config.yaml
 docker compose up -d --build
 docker compose exec hermes-agent hermes gateway status   # -> running

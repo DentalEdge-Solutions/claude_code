@@ -129,7 +129,7 @@ A Claude session started in `/opt/hermes-agent` would get the same rules, matchi
 
 **Residual gaps:** `grep -r` from a parent folder, interpreter one-liners, and scripts that open files themselves.
 
-## Layer B: user-level rules (proposed, not applied)
+## Layer B: user-level rules (applied 2026-10-19)
 
 The proposal adds `permissions.deny` to `~/.claude/settings.json`, current sha256 `f49cd288f07af1f3…`. It sets `Read` and `Edit` rules (30 entries) for:
 - `//**/.env`, `//**/.env.local`, `//**/.env.production`;
@@ -140,9 +140,17 @@ The proposal adds `permissions.deny` to `~/.claude/settings.json`, current sha25
 
 Nothing else changes.
 
+**Applied 2026-10-19** with the owner's approval:
+- the live sha256 matched `f49cd288f07af1f3…`;
+- backup at `~/.claude/settings.json.bak-hr1-2026-10-19` (mode 0600); the new file is installed with mode 0600;
+- only `permissions.deny` differs, with 30 entries.
+
+Live check: a session ran with `--setting-sources user`, hooks disabled (`disableAllHooks`) so the GSD guard could not interfere. On a fake `.env.production`, the Read tool and `cat` were refused; a plain file still read.
+Rollback: restore the backup.
+
 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is **not** proposed as a global default, because it breaks `ssh hermes-box` from Bash (measurement 5). The token it would hide from `printenv`, `CLAUDE_CODE_MESSAGING_TOKEN`, stays visible to Bash; that is an owner decision.
 
-## Layer C: remove the key from the repo tree (plan only)
+## Layer C: remove the key from the repo tree (done on the laptop 2026-10-19, except rotation)
 
 The VPS already does this (`deploy/BRING-UP.md`, part 1, steps 3 and 5):
 - the Anthropic key lives in a root-only `/etc/hermes/.env.anthropic`;
@@ -162,6 +170,32 @@ Plan, each step for the owner to approve:
    - this session compared hash prefixes only.
 
    However, it has sat in a readable file inside the project tree.
+
+**Done 2026-10-19** with the owner's approval. A script printed only booleans, hash prefixes and dates.
+1. **Need:** confirmed the local stack doesn't need the key in the gateway:
+   - the compose comment above;
+   - `.env.example` has no `ANTHROPIC_API_KEY`;
+   - audits read `/etc/hermes/.env.anthropic`, which is box-only.
+
+   No local container was running.
+2. **Copy:** the key (sha256 prefix `66504145`, the same value in both repo-tree files) was copied, not deleted, to `~/.config/hermes-local/.env.anthropic`:
+   - file mode 0600, folder mode 0700, outside the repo tree;
+   - written with `bin/install-env-secret.py set --stdin`, the value passed by pipe;
+   - verified equal by hash.
+3. **Strip:** `bin/install-env-secret.py strip` removed the one `ANTHROPIC_API_KEY` line from `infra/hermes-agent/.env`. Every other line was kept byte for byte; mode and owner were unchanged.
+4. **Container file:** `data/home/.claude/settings.json` held only that key and was last written 2026-09-19, so nothing still writes it. It was overwritten with zeros and deleted. On APFS (SSD), an overwrite does not guarantee the old blocks are erased; treat it as deletion.
+5. **Scan:** no file in the repo tree holds the key any more.
+6. **README:** `infra/hermes-agent/README.md` "First run" no longer tells a laptop to put `ANTHROPIC_API_KEY` in `.env`, and points to the out-of-tree file.
+
+**Open, owner decision:** rotate the key. Nothing shows it was read into a conversation, but it sat in a readable file in the project tree.
+
+**Still in the repo tree, by design** (they are the local stack's working credentials, read by host scripts):
+- the OpenRouter key in `.env`;
+- the Google refresh token in `.env.ga`;
+- `.env.pr`;
+- `data/auth.json`.
+
+Layers A and B deny Claude Code's tools on them. Moving them is a separate change.
 
 ## Review
 
