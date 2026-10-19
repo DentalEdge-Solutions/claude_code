@@ -56,5 +56,27 @@ for (const { track, marker } of TRACKS) {
   }
 }
 
+// The section's "Subject revision" is copied from run-manifest.json `subject`, which exists only when
+// `run-manifest.js init` gets `--subject` (E7 review K5). Every init line in the skill and the agent must
+// pass it, with the definition the track measures.
+const INIT_SUBJECT = [
+  { file: 'skills/skill-eval/SKILL.md', subject: 'skills/<skill-name>/SKILL.md' },
+  { file: '.claude/agents/skill-eval-agent.md', subject: 'skills/<skill-name>/SKILL.md' },
+  { file: 'skills/agent-eval/SKILL.md', subject: '.claude/agents/<agent-name>.md' },
+  { file: '.claude/agents/agent-eval-agent.md', subject: '.claude/agents/<agent-name>.md' },
+];
+for (const { file, subject } of INIT_SUBJECT) {
+  test(`${file}: run-manifest.js init passes --subject ${subject} and --commit`, () => {
+    const text = fs.readFileSync(path.join(REPO, file), 'utf8');
+    // An init command may continue over backslash-newline lines (the skills' fenced bash form).
+    const inits = text.replace(/\\\n\s*/g, ' ').split('\n').filter(l => /run-manifest\.js init /.test(l));
+    assert.ok(inits.length >= 1, 'no run-manifest.js init line');
+    for (const l of inits) {
+      assert.ok(l.includes(`--subject ${subject}`), `missing --subject ${subject}: ${l.trim()}`);
+      assert.ok(/--commit \S/.test(l), `missing --commit: ${l.trim()}`);
+    }
+  });
+}
+
 if (!ok) process.exit(1);
 console.log('\nAll eval-report-sections tests passed.');
