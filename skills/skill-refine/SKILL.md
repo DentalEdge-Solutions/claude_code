@@ -27,7 +27,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 2. **Back up and validate baseline** — copy the current skill before touching anything (once per refine session; never overwrite an existing `SKILL.md.baseline`):
    ```bash
    mkdir -p evals/<skill-name>/refine
-   cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline
+   [ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline
    ```
    Refine copies live under `evals/<skill-name>/refine/` (gitignored), never in the skill folder: the keep step syncs that folder into `~/.claude/skills/`.
    Then check staleness: if `refine-input.json` was written today **and** `SKILL.md` has not been modified since — trust the baseline scores directly, no re-run needed. If the skill was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as skill-eval) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.

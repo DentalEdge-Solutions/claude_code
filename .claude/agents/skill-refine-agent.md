@@ -71,7 +71,7 @@ own eval logic.
 4. Create baseline backup (once, before first mutation), outside the skill folder (step 7d
    syncs that folder into ~/.claude/skills/):
    `mkdir -p evals/<skill-name>/refine`
-   `cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline`
+   `[ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline`
    If .baseline already exists (prior session), do NOT overwrite.
 
 5. Train/test split from refine-input.json:

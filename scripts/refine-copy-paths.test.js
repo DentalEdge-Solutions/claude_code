@@ -5,6 +5,9 @@
 // step 2 syncs into ~/.claude/skills as a second copy of the skill). None was ignored here, and skill-refine-agent's
 // keep step (`cp -r skills/<name> ~/.claude/skills/`) carried them into the installed skill. They now live under
 // evals/<name>/, which is ignored here (evals/.gitignore) and in target projects (install.sh ignores evals/).
+//
+// Every check reads the paths from the documents themselves (review N1): a copy written anywhere git does not
+// ignore, a mkdir of the wrong folder, a missing or reversed restore, or an unguarded baseline fails.
 'use strict';
 const assert = require('assert');
 const fs = require('fs');
@@ -20,20 +23,27 @@ function test(label, fn) {
 }
 
 const DOCS = [
-  'skills/skill-refine/SKILL.md', '.claude/agents/skill-refine-agent.md',
-  'skills/agent-refine/SKILL.md', '.claude/agents/agent-refine-agent.md',
-  'skills/skill-adapt/SKILL.md',
+  { file: 'skills/skill-refine/SKILL.md' },
+  { file: '.claude/agents/skill-refine-agent.md', restoreTo: 'skills/<skill-name>/SKILL.md' },
+  { file: 'skills/agent-refine/SKILL.md' },
+  { file: '.claude/agents/agent-refine-agent.md', restoreTo: '.claude/agents/<agent-name>.md' },
+  { file: 'skills/skill-adapt/SKILL.md' },
 ];
 
-// Path-like tokens naming a refine/adapt safety copy.
+// Path-like tokens naming a refine/adapt safety copy; a bare name in prose ("never overwrite SKILL.md.baseline") is not one.
 const copyTokens = text => (text.match(/[^\s`'"()\[\]]*(?:\.baseline|\.pre-iter-[^\s`'"()\[\]]*|-backup-[^\s`'"()\[\]]*)/g) || [])
-  .filter(t => t.includes('/'));   // a path; a bare name in prose ("never overwrite SKILL.md.baseline") is not one
+  .filter(t => t.includes('/'));
 
 // `cp [-r|-R] <src> <dst>` commands in the text.
-const cps = text => [...text.matchAll(/\bcp(?: -[rR])? ([^\s`]+) ([^\s`]+)/g)].map(m => ({ src: m[1], dst: m[2], at: m.index }));
+const cps = text => [...text.matchAll(/\bcp(?: -[rR])? ([^\s`"]+) ([^\s`"]+)/g)].map(m => ({ src: m[1], dst: m[2], at: m.index }));
 
-for (const file of DOCS) {
+// Placeholders filled in, so git can be asked about a concrete path.
+const fill = p => p.replace(/<skill-name>|<agent-name>|<name>/g, 'demo').replace(/-N\b/g, '-3').replace(/\$TS\b/g, '20261019-120000');
+
+for (const { file, restoreTo } of DOCS) {
   const text = fs.readFileSync(path.join(REPO, file), 'utf8');
+  const all = cps(text);
+  const made = all.filter(c => c.dst.startsWith('evals/'));
 
   test(`${file}: every safety-copy path is under evals/`, () => {
     const tokens = copyTokens(text);
@@ -41,30 +51,49 @@ for (const file of DOCS) {
     assert.deepStrictEqual(tokens.filter(t => !t.startsWith('evals/')), []);
   });
 
-  test(`${file}: each copy into evals/ is preceded by a mkdir -p of its folder`, () => {
-    const made = cps(text).filter(c => c.dst.startsWith('evals/'));
+  test(`${file}: every copy it writes under evals/ is gitignored here`, () => {
     assert.ok(made.length > 0, 'no copy into evals/');
     for (const c of made) {
-      const dir = path.posix.dirname(c.dst);
-      const mk = text.indexOf(`mkdir -p ${dir}`);
+      const target = fill(c.dst.endsWith('/') ? c.dst + 'SKILL.md' : c.dst);
+      assert.strictEqual(spawnSync('git', ['check-ignore', '-q', target], { cwd: REPO }).status, 0, `${c.dst} → ${target} is not ignored`);
+    }
+  });
+
+  test(`${file}: each copy into evals/ is preceded by a mkdir -p of exactly its folder`, () => {
+    for (const c of made) {
+      const dir = c.dst.endsWith('/') ? c.dst.slice(0, -1) : path.posix.dirname(c.dst);
+      const re = new RegExp(`mkdir -p ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[\\s\`]|$)`, 'm');
+      const mk = text.search(re);
       assert.ok(mk !== -1 && mk < c.at, `no "mkdir -p ${dir}" before: cp ${c.src} ${c.dst}`);
     }
   });
 
+  test(`${file}: a .baseline copy never overwrites an existing one`, () => {
+    for (const c of made.filter(m => m.dst.endsWith('.baseline'))) {
+      const guard = `[ -e ${c.dst} ] || `;
+      assert.strictEqual(text.slice(c.at - guard.length, c.at), guard, `unguarded: cp ${c.src} ${c.dst}`);
+    }
+  });
+
   test(`${file}: every restore reads a copy this document creates`, () => {
-    const all = cps(text);
-    const created = new Set(all.filter(c => c.dst.startsWith('evals/')).map(c => c.dst));
+    const created = new Set(made.map(c => c.dst));
     for (const r of all.filter(c => c.src.startsWith('evals/'))) assert.ok(created.has(r.src), `restores from ${r.src}, never created`);
   });
+
+  if (restoreTo) {
+    test(`${file}: the revert step restores ${restoreTo} from its pre-iter copy`, () => {
+      const restores = all.filter(c => c.src.startsWith('evals/') && /\.pre-iter-N$/.test(c.src));
+      assert.ok(restores.length >= 1, 'no restore from a pre-iter copy');
+      for (const r of restores) assert.strictEqual(r.dst, restoreTo);
+    });
+  }
 }
 
-for (const sample of ['evals/demo/refine/SKILL.md.baseline', 'evals/demo/refine/SKILL.md.pre-iter-3',
-  'evals/agents/demo/refine/demo.md.baseline', 'evals/agents/demo/refine/demo.md.pre-iter-3',
-  'evals/demo/adapt-backup-20261019-120000/SKILL.md']) {
-  test(`${sample} is gitignored in this repo`, () => {
-    assert.strictEqual(spawnSync('git', ['check-ignore', '-q', sample], { cwd: REPO }).status, 0);
-  });
-}
+test('skill-adapt: the backup folder is stamped to the second and created before the copy', () => {
+  const text = fs.readFileSync(path.join(REPO, 'skills/skill-adapt/SKILL.md'), 'utf8');
+  assert.match(text, /^\s*TS=\$\(date \+%Y%m%d-%H%M%S\)$/m);
+  assert.match(text, /cp -R skills\/<skill-name>\/\. evals\/<skill-name>\/adapt-backup-\$TS\//);   // contents into the new folder: never nests
+});
 
 if (!ok) process.exit(1);
 console.log('\nAll refine-copy-paths tests passed.');

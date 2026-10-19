@@ -522,7 +522,18 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - no leftover copies existed in this checkout, in `~/.claude/skills/` or in `~/.claude/agents/`;
     - `scripts/refine-copy-paths.test.js` pins the paths, the `mkdir` before each copy, the restore-reads-what-was-written link and the ignore rules. It failed before the change, and six mutants fail it against a passing control;
     - two adapt backups a second apart land in separate folders.
-- **E14 (open, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)").
+  - **Independent review:** approve with changes (N1–N6).
+    - **N1:** the test read its ignore samples from a hard-coded list, so 7 of 11 mutants survived. It now reads everything from the documents:
+      - every `evals/` copy target, placeholders filled in, must be ignored;
+      - the `mkdir -p` must name exactly that folder;
+      - both refine agents must restore the definition from its `pre-iter-N` copy;
+      - the adapt time stamp is pinned to the second.
+    - **N2:** the adapt backup creates its stamped folder and copies the skill's contents into it (`cp -R skills/<n>/. …/`), so it can't nest even within the same second.
+    - **N3:** the `.baseline` copy is guarded (`[ -e … ] || cp …`), so it is never overwritten, and the test pins that.
+    - **N4:** `install.sh` no longer adds `skills/*.baseline`, which never matched the nested file. It keeps `skills/*-backup-*/` and `skills/*-eval-snapshot/` for folders that earlier versions may have left in target projects.
+    - **N5:** `uninstall.sh` says `evals/` also holds the refine and adapt safety copies.
+    - **N6:** extends E14.
+- **E14 (open, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)"). Each skill's own `REFERENCE.md` threshold table ("**NEUTRAL → KEEP** | Within ±2–5%") also contradicts its step 8, which points to that table (review N6).
 - **E15 (open, found while fixing E13):** `agent-refine` `SKILL.md` step 8's "Sync to runtime: `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`" copies the agent into the root of `~/.claude/`, not `~/.claude/agents/`. CLAUDE.md says agents are project-scoped (installed to target projects only), so this leaves a stray file in `~/.claude/`.
 - **E9 (fixed 2026-10-19, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
   - **Fix:** the "Subject revision" bullet now reads "definition sha256 · commit". It is changed in all six copies: the two templates, the two `REFERENCE.md` files and the two eval agents. It says three things:

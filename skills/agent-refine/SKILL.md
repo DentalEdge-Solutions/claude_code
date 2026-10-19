@@ -27,7 +27,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 2. **Back up and validate baseline** — copy the current agent before touching anything (once per refine session; never overwrite an existing `.md.baseline`):
    ```bash
    mkdir -p evals/agents/<name>/refine
-   cp .claude/agents/<name>.md evals/agents/<name>/refine/<name>.md.baseline
+   [ -e evals/agents/<name>/refine/<name>.md.baseline ] || cp .claude/agents/<name>.md evals/agents/<name>/refine/<name>.md.baseline
    ```
    Refine copies live under `evals/agents/<name>/refine/` (gitignored), never in `.claude/agents/`.
    Then check staleness: if `refine-input.json` was written today **and** the agent file has not been modified since — trust the baseline scores directly, no re-run needed. If the agent was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as agent-eval) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.

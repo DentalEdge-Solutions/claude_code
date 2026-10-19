@@ -140,7 +140,7 @@ echo ""
 
 echo "→ [6/7] Evals workspace"
 if [ -d "${TARGET}/evals" ]; then
-    echo "  evals/ contains generated data: scenario runs, timing, project-context.json."
+    echo "  evals/ contains generated data: scenario runs, timing, project-context.json, and refine/adapt safety copies (baselines, backups)."
     read -r -p "  Remove evals/ too? [y/N] " confirm_evals
     if [[ "${confirm_evals}" =~ ^[Yy]$ ]]; then
         rm -rf "${TARGET}/evals"

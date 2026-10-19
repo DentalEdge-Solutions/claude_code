@@ -72,7 +72,7 @@ your own eval logic.
 
 4. Create baseline backup (once, before first mutation), outside `.claude/agents/`:
    `mkdir -p evals/agents/<agent-name>/refine`
-   `cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/refine/<agent-name>.md.baseline`
+   `[ -e evals/agents/<agent-name>/refine/<agent-name>.md.baseline ] || cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/refine/<agent-name>.md.baseline`
    If .baseline already exists (prior session), do NOT overwrite.
 
 5. Train/test split from refine-input.json:
