@@ -470,6 +470,8 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **Round 2:**
       - **K5:** the same test now requires every `run-manifest.js init` line, in both skills and both agents, to pass `--subject <definition>` and `--commit`; removing either is caught.
       - **K6:** E8 and E9 are listed as open in the status lines.
+    - **Round 3:** approve.
+      - **K7:** the `--subject` check is anchored at the path's end, so pointing `--subject` at the snapshot file fails the test.
     - **K2:** recorded as E8.
     - **K3:** recorded as E9.
 - **E8 (open, from review K2):** `skill-eval-agent` snapshots the baseline to `skills/<name>/SKILL.md.eval-snapshot`, inside the skill folder. The skill-eval skill uses `skills/<name>-eval-snapshot/` instead.

@@ -72,7 +72,9 @@ for (const { file, subject } of INIT_SUBJECT) {
     const inits = text.replace(/\\\n\s*/g, ' ').split('\n').filter(l => /run-manifest\.js init /.test(l));
     assert.ok(inits.length >= 1, 'no run-manifest.js init line');
     for (const l of inits) {
-      assert.ok(l.includes(`--subject ${subject}`), `missing --subject ${subject}: ${l.trim()}`);
+      // Anchored at the path's end: `--subject …/SKILL.md.eval-snapshot` would pin the baseline, not the subject (K7).
+      const exact = new RegExp(`--subject ${subject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`);
+      assert.ok(exact.test(l), `missing --subject ${subject}: ${l.trim()}`);
       assert.ok(/--commit \S/.test(l), `missing --commit: ${l.trim()}`);
     }
   });
