@@ -78,7 +78,8 @@ method mid-iteration.
    Count existing `evals/agents/<agent-name>/iteration-*` dirs. N = count + 1 (or the
    resumed N from the check above).
    `mkdir -p evals/agents/<agent-name>/iteration-<N>`
-   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<agent-name>/iteration-<N> --baseline-method <none|snapshot> [--snapshot-path .claude/agents/<agent-name>.md.eval-snapshot]`
+   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<agent-name>/iteration-<N> --baseline-method <none|snapshot> [--snapshot-path .claude/agents/<agent-name>.md.eval-snapshot] --subject .claude/agents/<agent-name>.md --commit <short SHA from git rev-parse --short HEAD>`
+   `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    On resume, skip this call entirely — the manifest already exists and re-init is
    refused by design. Every scenario in this iteration uses the recorded method.
 
@@ -210,6 +211,12 @@ method mid-iteration.
 
     ## Analyst Observations
     [non-discriminating, unstable, regression, tool violation findings]
+
+    ## Evidence and Limits
+    - **Subject revision:** <commit> · definition sha256 <first 12> — copied from `run-manifest.json` `subject`
+    - **Evidence source:** `evidence.json` per scenario (harvest-evidence.js); subagent self-reports are not grading input. `agent_dispatched` is the `Agent(<agent-name>)` token the with-agent subagent is instructed to write when it runs the agent — a marker in its own output, not an independent tool-call log, so dispatch accuracy assumes the subagent follows that rule
+    - **Untested:** (every scenario type, rep or check not run, each with its reason — never omitted silently; "none" if complete)
+    - **Limitations:** (anything that bounds these numbers — e.g. whether the subject's description was in the skill listing during the run, reduced reps, judge model)
 
     ## Recommendation
     HEALTHY / REFINE: <metric> / REWRITE / RE-ADAPT
