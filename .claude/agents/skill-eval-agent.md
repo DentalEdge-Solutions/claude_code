@@ -213,7 +213,7 @@ method mid-iteration.
     [non-discriminating, unstable, regression findings]
 
     ## Evidence and Limits
-    - **Subject revision:** definition sha256 <first 12> · commit <short SHA> — copied from `run-manifest.json` `subject`. The sha256 identifies the measured text; the commit is HEAD when the run started, so it does not contain an uncommitted definition (a refine loop measures edits before they are committed). Write "not recorded" when `subject` is null
+    - **Subject revision:** definition sha256 <first 12> · commit <short SHA> — copied from `run-manifest.json` `subject`. The sha256 identifies the measured text; the commit is HEAD when the run started, so it does not contain an uncommitted definition (a refine loop measures edits before they are committed). Write "not recorded" when `subject` or its `commit` is null
     - **Evidence source:** `evidence.json` per scenario (harvest-evidence.js); subagent self-reports are not grading input. `skill_loaded` is the `Skill(<skill-name>)` token the with-skill subagent is instructed to write when it applies the skill — a marker in its own output, not an independent tool-call log, so trigger accuracy assumes the subagent follows that rule
     - **Untested:** (every scenario type, rep or check not run, each with its reason — never omitted silently; "none" if complete)
     - **Limitations:** (anything that bounds these numbers — e.g. whether the subject's description was in the skill listing during the run, reduced reps, judge model)

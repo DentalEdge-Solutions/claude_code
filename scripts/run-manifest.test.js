@@ -90,6 +90,7 @@ test('status prints the subject revision', () => {
   run('init', dir, '--baseline-method', 'none', '--subject', subject, '--commit', 'abcdef1');
   const r = run('status', dir);
   assert.match(r.out, /subject=.*SKILL\.md/);
+  assert.doesNotMatch(r.out, /subject=not recorded/);   // only when there is no subject (E9 review L3)
   assert.match(r.out, /commit=abcdef1/);
 });
 
