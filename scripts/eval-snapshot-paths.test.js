@@ -86,6 +86,7 @@ for (const { files, snapshot, sample } of TRACKS) {
       for (const [, op, a1, a2] of cmds) {
         for (const a of [a1, a2].filter(Boolean)) {   // stay inside the temp repo (review M6)
           assert.ok(!path.isAbsolute(a) && !a.split('/').includes('..'), `path leaves the repo: ${a}`);
+          assert.ok(!a.startsWith('-'), `an option where a path belongs: ${a}`);   // e.g. GNU --target-directory= (M9)
         }
         const args = op === 'mkdir -p' ? ['-p', fill(a1)] : [...(op === 'cp -R' ? ['-R'] : []), fill(a1), fill(a2 || '')];
         const r = spawnSync(op.split(' ')[0], args, { cwd: tmp, encoding: 'utf8' });
