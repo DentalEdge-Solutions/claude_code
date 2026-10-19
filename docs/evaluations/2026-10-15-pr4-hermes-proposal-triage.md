@@ -500,6 +500,9 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
       - **M6:** the test refuses absolute and `..` paths, and fails on any unexpected command in step 5 instead of skipping it.
       - **M7:** the test deletes its temp folders.
       - **M8:** E12's first sentence no longer says the baseline was the previous version.
+    - **Rounds 3 and 4:** **approve**.
+      - **M9:** the test also rejects option-like arguments, such as GNU `cp --target-directory=…`.
+      - M1–M9 are closed. Of 19 mutants, 17 fail the test; the 2 survivors are harmless and accepted.
 - **E12 (open, owner decision, found while fixing E8):** both eval agents record `baseline_method = snapshot` for an existing skill or agent, but their step-6 baseline prompt always says "Do NOT load any skill" or "Do NOT dispatch the agent". So agent-run evals of an existing definition compare against no skill at all, while the manifest records a snapshot baseline.
   - The eval skills' own text says to use the snapshot as the baseline.
   - **Corrected by review M3:** the step-5 snapshot is taken at eval time, so it is byte-identical to `--subject` (same sha256 in simulation). This was already so before E8. So even a baseline that loaded it would compare the current version with itself, not with an earlier one, in all four flows. `skills/skill-eval/REFERENCE.md` and `skills/agent-eval/REFERENCE.md` call it a "snapshot of previous version", which is not what the steps produce.
