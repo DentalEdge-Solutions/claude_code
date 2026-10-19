@@ -177,6 +177,8 @@ if (cmd === 'status') {
   console.log(`baseline_method=${manifest.baseline_method}  methodology_version=${manifest.methodology_version}  started_at=${manifest.started_at}`);
   if (manifest.subject) {
     console.log(`subject=${manifest.subject.path}  sha256=${manifest.subject.sha256.slice(0, 12)}  commit=${manifest.subject.commit || '-'}`);
+  } else {
+    console.log('subject=not recorded');   // init ran without --subject: the report must say so (E9)
   }
   console.log('');
 
