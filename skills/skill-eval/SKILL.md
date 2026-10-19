@@ -52,15 +52,17 @@ User: evaluate the skill-adapt skill
 
 4. **Establish baseline** — before running with-skill tests, determine what to compare against, and record it as the `baseline_method` for the whole iteration:
    - **New skill**: `none` — run each scenario with no skill loaded
-   - **Existing skill being improved**: `snapshot` (`cp -r skills/<skill-name> skills/<skill-name>-eval-snapshot`), then use the snapshot as baseline
+   - **Existing skill being improved**: `snapshot` — step 5 copies the skill folder into the iteration (`evals/<skill-name>/iteration-<N>/eval-snapshot/`), then that copy is the baseline. It stays out of `skills/`, because install.sh syncs every folder there into `~/.claude/skills/`, so a snapshot there would become a second copy of the skill; the iteration folder is gitignored
 
    **Resume check:** if `evals/<skill-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here.
 
 5. **Create the iteration dir and initialize the run manifest** (once per iteration — skip on resume):
    ```bash
    mkdir -p evals/<skill-name>/iteration-<N>
+   # snapshot only: the skill as it is now, before any change — this iteration's baseline
+   cp -R skills/<skill-name> evals/<skill-name>/iteration-<N>/eval-snapshot
    node skills/skill-eval/scripts/run-manifest.js init evals/<skill-name>/iteration-<N> \
-     --baseline-method <none|snapshot> [--snapshot-path skills/<skill-name>-eval-snapshot/SKILL.md] \
+     --baseline-method <none|snapshot> [--snapshot-path evals/<skill-name>/iteration-<N>/eval-snapshot/SKILL.md] \
      --subject skills/<skill-name>/SKILL.md --commit <short SHA from git rev-parse --short HEAD>
    ```
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.

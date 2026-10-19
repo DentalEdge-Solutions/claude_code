@@ -67,9 +67,8 @@ method mid-iteration.
 
 4. Establish baseline:
    - New agent (no prior AGENT-EVAL.md): baseline_method = `none` (no agent dispatched, general capabilities only)
-   - Existing agent being improved: snapshot first:
-     `cp .claude/agents/<agent-name>.md .claude/agents/<agent-name>.md.eval-snapshot`
-     baseline_method = `snapshot`.
+   - Existing agent being improved: baseline_method = `snapshot`; step 5 copies the agent
+     file into the iteration folder (gitignored; `.claude/agents/` is not).
    - Unchanged agent with current AGENT-EVAL.md: reuse prior baseline scores (no new
      manifest needed).
 
@@ -78,7 +77,9 @@ method mid-iteration.
    Count existing `evals/agents/<agent-name>/iteration-*` dirs. N = count + 1 (or the
    resumed N from the check above).
    `mkdir -p evals/agents/<agent-name>/iteration-<N>`
-   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<agent-name>/iteration-<N> --baseline-method <none|snapshot> [--snapshot-path .claude/agents/<agent-name>.md.eval-snapshot] --subject .claude/agents/<agent-name>.md --commit <short SHA from git rev-parse --short HEAD>`
+   Snapshot only: `mkdir -p evals/agents/<agent-name>/iteration-<N>/eval-snapshot` and
+   `cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md`
+   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<agent-name>/iteration-<N> --baseline-method <none|snapshot> [--snapshot-path evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md] --subject .claude/agents/<agent-name>.md --commit <short SHA from git rev-parse --short HEAD>`
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    On resume, skip this call entirely — the manifest already exists and re-init is
    refused by design. Every scenario in this iteration uses the recorded method.
