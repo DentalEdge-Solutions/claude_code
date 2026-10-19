@@ -35,17 +35,23 @@ function discoverTestFiles(dir, out) {
 const STDERR_HEAD = 100;
 const STDERR_TAIL = 100;
 const STDOUT_TAIL = 40;
+const MAX_LINE = 2000;   // one huge line must not flood the log
+
+const cut = l => (l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)} … [${l.length - MAX_LINE} characters cut]` : l);
+const lines = text => (text || '').replace(/\n$/, '').split('\n').map(cut);
 
 function formatFailure(r) {
   const parts = [];
-  if (r.error) parts.push(`(could not run: ${r.error.message})`);
+  if (r.error) parts.push(`(spawn error: ${r.error.message})`);
   if (r.status === null && r.signal) parts.push(`(killed by ${r.signal})`);
-  const out = (r.stdout || '').replace(/\n$/, '').split('\n');
+  const out = lines(r.stdout);
+  const err = lines(r.stderr);
+  if (r.status !== null && !out.join('') && !err.join('')) parts.push(`(exit ${r.status}, no output)`);
   if (out.join('')) parts.push(out.slice(-STDOUT_TAIL).join('\n'));
-  const err = (r.stderr || '').replace(/\n$/, '').split('\n');
   if (err.join('')) {
-    parts.push(err.length <= STDERR_HEAD + STDERR_TAIL ? err.join('\n')
-      : [...err.slice(0, STDERR_HEAD), `... ${err.length - STDERR_HEAD - STDERR_TAIL} lines omitted ...`, ...err.slice(-STDERR_TAIL)].join('\n'));
+    const n = err.length - STDERR_HEAD - STDERR_TAIL;
+    parts.push(n <= 0 ? err.join('\n')
+      : [...err.slice(0, STDERR_HEAD), `... ${n} line${n === 1 ? '' : 's'} omitted ...`, ...err.slice(-STDERR_TAIL)].join('\n'));
   }
   return parts.join('\n') + '\n';
 }
