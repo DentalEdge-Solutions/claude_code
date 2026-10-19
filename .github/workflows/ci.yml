@@ -26,8 +26,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Install jq
-        run: sudo apt-get install -y jq
       - name: Scan .claude/ configuration (AgentShield 1.4.0)
         run: |
           # Pinned to 1.4.0 — update deliberately, not via @latest
@@ -54,28 +52,8 @@ jobs:
           # Self-contained fallback using our own scanner (no external dependencies).
           # Covers: agent prompt injection, hardcoded secrets, overly broad permissions.
           # Not equivalent to the full 102-rule AgentShield scan — run project-audit locally for that.
-          FAILED=0
-          shopt -s nullglob
-
-          # Scan agent files (prompt injection, persona override, secrets)
-          for f in .claude/agents/*.md; do
-            verdict=$(node skills/skill-audit/scripts/static-scan.js "$f" 2>/dev/null | jq -r '.verdict // "ERROR"' 2>/dev/null || echo "ERROR")
-            [ "$verdict" = "BLOCK" ] && { echo "BLOCK: $(basename $f)"; FAILED=1; } || \
-            [ "$verdict" = "FLAG"  ] && echo "FLAG:  $(basename $f) (review)" || \
-            echo "PASS:  $(basename $f)"
-          done
-
-          # Scan settings files (wildcard permissions, hardcoded keys, hook injection)
-          for f in .claude/settings.json .claude/settings.local.json; do
-            [ -f "$f" ] || continue
-            verdict=$(node skills/skill-audit/scripts/static-scan.js "$f" 2>/dev/null | jq -r '.verdict // "ERROR"' 2>/dev/null || echo "ERROR")
-            [ "$verdict" = "BLOCK" ] && { echo "BLOCK: $(basename $f)"; FAILED=1; } || \
-            [ "$verdict" = "FLAG"  ] && echo "FLAG:  $(basename $f) (review)" || \
-            echo "PASS:  $(basename $f)"
-          done
-
-          [ $FAILED -eq 0 ] && echo "Static fallback: PASSED"
-          exit $FAILED
+          # Fails on BLOCK and on any scanner error (crash, no JSON, unknown verdict).
+          node scripts/ci-static-fallback.js
 
   tests:
     name: Test suites (node + hermes bin)
