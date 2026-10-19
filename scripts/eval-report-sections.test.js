@@ -47,6 +47,11 @@ for (const { track, marker } of TRACKS) {
     assert.deepStrictEqual(expected.map(b => b.match(/^- \*\*([^:*]+):\*\*/)?.[1]),
       ['Subject revision', 'Evidence source', 'Untested', 'Limitations']);
     assert.ok(expected[1].includes(marker), expected[1]);
+    // E9: the commit is HEAD when the run started, so a refine loop's uncommitted definition is not
+    // in it; the sha256 is what identifies the measured text, and a manifest without one says so.
+    for (const phrase of ['sha256', 'identifies the measured text', 'uncommitted', '"not recorded"']) {
+      assert.ok(expected[0].includes(phrase), `Subject revision must mention ${phrase}: ${expected[0]}`);
+    }
   });
 
   for (const copy of copies) {

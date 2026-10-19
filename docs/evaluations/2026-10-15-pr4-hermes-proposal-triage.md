@@ -19,7 +19,7 @@ The proposal's own `P` numbers are kept.
 | Item | Proposal | Status | Evidence (2026-10-15) |
 |---|---|---|---|
 | P1 | The brain and telemetry secret-pattern lists diverge | **Done 2026-10-15** (see "P1 repair") | Before: the brain set (6 patterns) missed GitHub fine-grained, Slack, Google, JWT, Bearer and `key = value` secrets. The telemetry set (12) missed Anthropic admin keys, `ghs_` tokens, Google keys without the `AIzaSy` prefix, a lone private-key header and short passwords. **Correction to the first probe:** telemetry did catch `AIzaSy…` keys and complete private-key blocks, so its gaps were narrower than first reported. |
-| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6: E1 fixed 2026-10-15, E2–E5 fixed and E6 disclosed 2026-10-19 (see "E2–E6 repair"); E7, found in that review, fixed the same day; E8 and E9, found in E7's review, are open |
+| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6: E1 fixed 2026-10-15, E2–E5 fixed and E6 disclosed 2026-10-19 (see "E2–E6 repair"); E7, found in that review, fixed the same day; E8, found in E7's review, is open; E9 is fixed |
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
@@ -75,7 +75,7 @@ The proposal's own `P` numbers are kept.
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"), and S4–S9 on 2026-10-16 (see "S4–S9 repair"); S10–S13 are open.
-   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E5 are fixed (see "E1 repair" and "E2–E6 repair"), and E6, a method question, is disclosed in the eval report instructions and waits on an owner decision. E7 (the eval agents' inline report templates lacked Evidence and Limits) is fixed; E8 and E9 are open.
+   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E5 are fixed (see "E1 repair" and "E2–E6 repair"), and E6, a method question, is disclosed in the eval report instructions and waits on an owner decision. E7 (the eval agents' inline report templates lacked Evidence and Limits) is fixed, as is E9; E8 is open.
 4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. ~~**P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`.~~ Done on 2026-10-16 (PR #144; see "P9 repair").
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
@@ -406,7 +406,7 @@ Verdict: **approve**. W1–W3 closed. A fuzz run of the settings reader against 
   - 10 mutations of the harvester, each reverted, all failed the suite: loaded from any marker, an unescaped step marker, a flipped time window, md5 for sha256, the wrong agent key, an 800-character claim window, no repo-root fallback, `some` for `every`, a directory counted as an artifact, and a case-sensitive marker.
 - **No behavior change.** `harvest-evidence.js` is untouched.
 
-### Harvester weaknesses found (E1–E6; E1–E5 fixed, E6 disclosed — see "E1 repair" and "E2–E6 repair"; E7 is recorded and fixed there, E8 and E9 recorded there as open)
+### Harvester weaknesses found (E1–E6; E1–E5 fixed, E6 disclosed — see "E1 repair" and "E2–E6 repair"; E7 is recorded and fixed there, E8 recorded there as open, E9 fixed)
 
 Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 
@@ -478,8 +478,13 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - `install.sh` gitignores only `skills/*-eval-snapshot/` in target projects, and this repo's own `.gitignore` doesn't cover `skills/*/SKILL.md.eval-snapshot` either. So the agent's snapshot is ignored neither here nor in target projects, and isn't kept out of a skill deploy.
   - agent-eval and its agent agree with each other.
   - Fix: move the agent to the skill's path, or ignore both forms.
-- **E9 (open, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
-  - Fix, in all four templates: say that the sha256 is authoritative, and write "not recorded" when `subject` is null.
+- **E9 (fixed 2026-10-19, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
+  - **Fix:** the "Subject revision" bullet now reads "definition sha256 · commit". It is changed in all six copies: the two templates, the two `REFERENCE.md` files and the two eval agents. It says three things:
+    - the sha256 identifies the measured text;
+    - the commit is HEAD when the run started, so it does not contain an uncommitted definition;
+    - write "not recorded" when `subject` is null.
+  - `run-manifest.js status` prints `subject=not recorded` in that case; all callers read only its exit code.
+  - **Tests:** `scripts/eval-report-sections.test.js` pins the wording, and `scripts/run-manifest.test.js` pins the status line. Both failed first.
 - **Evidence:**
   - **Tests:** 12 new tests in `scripts/harvest-evidence.test.js`, plus 2 existing tests updated for the side-folder rule. Before the fix, 7 of the round-1 tests failed; the rest pin behaviour that review mutants broke. Round 3 added cases for W1 (failed first) and W3 to the E5 tests. All 49 pass, and `node scripts/run-all-tests.js` passes 31/31, including the Codex end-to-end claim test.
   - **Mutants:** 22 were run on a copy, and all were killed. They covered:

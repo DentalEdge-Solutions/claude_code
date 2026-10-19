@@ -36,6 +36,12 @@ test('init without subject flags still works (backward compatible)', () => {
   assert.strictEqual(m.subject, null, 'subject recorded as null when not given');
 });
 
+test('status says "subject=not recorded" when the manifest has no subject (E9)', () => {
+  const dir = path.join(tmp(), 'iteration-1');
+  assert.strictEqual(run('init', dir, '--baseline-method', 'none').status, 0);
+  assert.match(run('status', dir).out, /^subject=not recorded$/m);
+});
+
 test('init --subject records the path and sha256 of the definition under test', () => {
   const root = tmp();
   const subject = path.join(root, 'SKILL.md');
