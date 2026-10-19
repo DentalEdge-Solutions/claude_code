@@ -19,7 +19,7 @@ The proposal's own `P` numbers are kept.
 | Item | Proposal | Status | Evidence (2026-10-15) |
 |---|---|---|---|
 | P1 | The brain and telemetry secret-pattern lists diverge | **Done 2026-10-15** (see "P1 repair") | Before: the brain set (6 patterns) missed GitHub fine-grained, Slack, Google, JWT, Bearer and `key = value` secrets. The telemetry set (12) missed Anthropic admin keys, `ghs_` tokens, Google keys without the `AIzaSy` prefix, a lone private-key header and short passwords. **Correction to the first probe:** telemetry did catch `AIzaSy…` keys and complete private-key blocks, so its gaps were narrower than first reported. |
-| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6: E1 fixed 2026-10-15, E2–E5 fixed and E6 disclosed 2026-10-19 (see "E2–E6 repair"); E7, found in that review, fixed the same day; E8 (from E7's review) and E9 are fixed; E10 and E11 (from E9's review) and E12 and E13 (from E8's) are open |
+| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6: E1 fixed 2026-10-15, E2–E5 fixed and E6 disclosed 2026-10-19 (see "E2–E6 repair"); E7, found in that review, fixed the same day; E8, E9 and E13 are fixed; E10 and E11 (from E9's review), E12 (from E8's) and E14 and E15 (from E13's) are open |
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
@@ -75,7 +75,7 @@ The proposal's own `P` numbers are kept.
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"), and S4–S9 on 2026-10-16 (see "S4–S9 repair"); S10–S13 are open.
-   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E5 are fixed (see "E1 repair" and "E2–E6 repair"), and E6, a method question, is disclosed in the eval report instructions and waits on an owner decision. E7 (the eval agents' inline report templates lacked Evidence and Limits) is fixed, as are E8 and E9; E10–E13 are open.
+   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E5 are fixed (see "E1 repair" and "E2–E6 repair"), and E6, a method question, is disclosed in the eval report instructions and waits on an owner decision. E7 (the eval agents' inline report templates lacked Evidence and Limits) is fixed, as are E8, E9 and E13; E10–E12, E14 and E15 are open.
 4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. ~~**P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`.~~ Done on 2026-10-16 (PR #144; see "P9 repair").
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
@@ -406,7 +406,7 @@ Verdict: **approve**. W1–W3 closed. A fuzz run of the settings reader against 
   - 10 mutations of the harvester, each reverted, all failed the suite: loaded from any marker, an unescaped step marker, a flipped time window, md5 for sha256, the wrong agent key, an 800-character claim window, no repo-root fallback, `some` for `every`, a directory counted as an artifact, and a case-sensitive marker.
 - **No behavior change.** `harvest-evidence.js` is untouched.
 
-### Harvester weaknesses found (E1–E6; E1–E5 fixed, E6 disclosed — see "E1 repair" and "E2–E6 repair"; E7 is recorded and fixed there, E8 and E9 fixed there, E10–E13 recorded there as open)
+### Harvester weaknesses found (E1–E6; E1–E5 fixed, E6 disclosed — see "E1 repair" and "E2–E6 repair"; E7 is recorded and fixed there, E8, E9 and E13 fixed there; E10–E12, E14 and E15 recorded there as open)
 
 Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 
@@ -507,10 +507,34 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - The eval skills' own text says to use the snapshot as the baseline.
   - **Corrected by review M3:** the step-5 snapshot is taken at eval time, so it is byte-identical to `--subject` (same sha256 in simulation). This was already so before E8. So even a baseline that loaded it would compare the current version with itself, not with an earlier one, in all four flows. `skills/skill-eval/REFERENCE.md` and `skills/agent-eval/REFERENCE.md` call it a "snapshot of previous version", which is not what the steps produce.
   - A real fix needs the pre-change definition, for example refine's `SKILL.md.baseline`, a git ref, or a snapshot taken before an edit, and a rule for grading its trigger marker. That is a methodology decision for the owner.
-- **E13 (open, found while fixing E8):** refine copies sit in the definition's own folder and are not ignored. Same class as E8.
+- **E13 (fixed 2026-10-19, found while fixing E8):** refine copies sit in the definition's own folder and are not ignored. Same class as E8.
   - the refine agents' per-iteration safety copies, `skills/<name>/SKILL.md.pre-iter-N` and `.claude/agents/<name>.md.pre-iter-N`;
   - skill-refine's `skills/<name>/SKILL.md.baseline`. `install.sh`'s `skills/*.baseline` does not match that nested path, and `git check-ignore` misses it here and in a target project (review M4).
   - skill-refine-agent step 7d also runs `cp -r skills/<name> ~/.claude/skills/`, carrying the `pre-iter-N` files into the installed skill.
+  - **Also found while fixing it:** `skill-adapt` step 4 backed up to `skills/<name>-backup-<date>/`. `install.sh` step 2 syncs every `skills/` folder into `~/.claude/skills/`, so that backup would become a second copy of the skill. A second backup the same day would also nest inside the first.
+  - **Fix:** every refine and adapt copy now lives under the definition's `evals/` folder, next to its `refine-input.json`:
+    - `evals/<skill>/refine/SKILL.md.baseline` and `…/SKILL.md.pre-iter-N`, restored from there;
+    - `evals/agents/<agent>/refine/<agent>.md.baseline` and `….pre-iter-N`;
+    - `evals/<skill>/adapt-backup-<YYYYmmdd-HHMMSS>/`.
+
+    The change covers both refine skills, both refine agents and `skill-adapt`. Each copy is preceded by `mkdir -p`. `evals/.gitignore` gains `*/refine/`, `agents/*/refine/` and `*/adapt-backup-*/`; target projects ignore all of `evals/`. The keep step's sync of the skill folder no longer carries any copy.
+  - **Checked:**
+    - no leftover copies existed in this checkout, in `~/.claude/skills/` or in `~/.claude/agents/`;
+    - `scripts/refine-copy-paths.test.js` pins the paths, the `mkdir` before each copy, the restore-reads-what-was-written link and the ignore rules. It failed before the change, and six mutants fail it against a passing control;
+    - two adapt backups a second apart land in separate folders.
+  - **Independent review:** approve with changes (N1–N6).
+    - **N1:** the test read its ignore samples from a hard-coded list, so 7 of 11 mutants survived. It now reads everything from the documents:
+      - every `evals/` copy target, placeholders filled in, must be ignored;
+      - the `mkdir -p` must name exactly that folder;
+      - both refine agents must restore the definition from its `pre-iter-N` copy;
+      - the adapt time stamp is pinned to the second.
+    - **N2:** the adapt backup creates its stamped folder and copies the skill's contents into it (`cp -R skills/<n>/. …/`), so it can't nest even within the same second.
+    - **N3:** the `.baseline` copy is guarded (`[ -e … ] || cp …`), so it is never overwritten, and the test pins that.
+    - **N4:** `install.sh` no longer adds `skills/*.baseline`, which never matched the nested file. It keeps `skills/*-backup-*/` and `skills/*-eval-snapshot/` for folders that earlier versions may have left in target projects.
+    - **N5:** `uninstall.sh` says `evals/` also holds the refine and adapt safety copies.
+    - **N6:** extends E14.
+- **E14 (open, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)"). Each skill's own `REFERENCE.md` threshold table ("**NEUTRAL → KEEP** | Within ±2–5%") also contradicts its step 8, which points to that table (review N6).
+- **E15 (open, found while fixing E13):** `agent-refine` `SKILL.md` step 8's "Sync to runtime: `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`" copies the agent into the root of `~/.claude/`, not `~/.claude/agents/`. CLAUDE.md says agents are project-scoped (installed to target projects only), so this leaves a stray file in `~/.claude/`.
 - **E9 (fixed 2026-10-19, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
   - **Fix:** the "Subject revision" bullet now reads "definition sha256 · commit". It is changed in all six copies: the two templates, the two `REFERENCE.md` files and the two eval agents. It says three things:
     - the sha256 identifies the measured text;

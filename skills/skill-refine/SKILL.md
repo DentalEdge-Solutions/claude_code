@@ -24,10 +24,12 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 1. **Gather inputs** — load `skills/<skill-name>/SKILL-EVAL.md` and `evals/<skill-name>/refine-input.json` (the structured handoff from skill-eval). Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each).
 
-2. **Back up and validate baseline** — copy the current skill before touching anything:
+2. **Back up and validate baseline** — copy the current skill before touching anything (once per refine session; never overwrite an existing `SKILL.md.baseline`):
    ```bash
-   cp skills/<skill-name>/SKILL.md skills/<skill-name>/SKILL.md.baseline
+   mkdir -p evals/<skill-name>/refine
+   [ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline
    ```
+   Refine copies live under `evals/<skill-name>/refine/` (gitignored), never in the skill folder: the keep step syncs that folder into `~/.claude/skills/`.
    Then check staleness: if `refine-input.json` was written today **and** `SKILL.md` has not been modified since — trust the baseline scores directly, no re-run needed. If the skill was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as skill-eval) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.
 
 3. **Route by failing metric** — the correct lever depends on *which* metric is failing:

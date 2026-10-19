@@ -136,7 +136,6 @@ IGNORE_ENTRIES=(
     "evals/"
     "skills/*-backup-*/"
     "skills/*-eval-snapshot/"
-    "skills/*.baseline"
 )
 
 GITIGNORE="${TARGET}/.gitignore"

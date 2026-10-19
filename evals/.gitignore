@@ -10,6 +10,10 @@ agents/*/iteration-*/
 teams/*/iteration-*/
 refine-input.json
 */refine-input.json
+# Refine and adapt safety copies (E13): baseline, pre-iter-N, adapt backups
+*/refine/
+agents/*/refine/
+*/adapt-backup-*/
 agents/*/refine-input.json
 teams/*/refine-input.json
 

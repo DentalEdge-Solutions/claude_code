@@ -68,8 +68,10 @@ own eval logic.
    - eval_pass_rate < 80% (triggers and resilience fine) → active_lever = "B–E" per iteration.
    - Multiple failing → fix Lever A first (resilience and trigger issues share the root cause).
 
-4. Create baseline backup (once, before first mutation):
-   `cp skills/<skill-name>/SKILL.md skills/<skill-name>/SKILL.md.baseline`
+4. Create baseline backup (once, before first mutation), outside the skill folder (step 7d
+   syncs that folder into ~/.claude/skills/):
+   `mkdir -p evals/<skill-name>/refine`
+   `[ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline`
    If .baseline already exists (prior session), do NOT overwrite.
 
 5. Train/test split from refine-input.json:
@@ -103,7 +105,7 @@ own eval logic.
    Track coverage: vary levers in iters 1–4 (explore), exploit best lever in 5+.
    State hypothesis before mutating — log it first, then act.
 
-   7b. Safety snapshot: `cp skills/<skill-name>/SKILL.md skills/<skill-name>/SKILL.md.pre-iter-N`
+   7b. Safety snapshot: `cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.pre-iter-N`
    Make exactly ONE targeted edit (use Edit tool). Nothing else.
 
    7c. Invoke skill-eval-agent as a subagent on training set only:
@@ -115,7 +117,7 @@ own eval logic.
 
    7d. Keep or revert:
    - score > baseline + 2% → KEEP. Sync: `cp -r skills/<skill-name> ~/.claude/skills/`
-   - score < baseline − 5% → REVERT. Restore: `cp skills/<skill-name>/SKILL.md.pre-iter-N skills/<skill-name>/SKILL.md`
+   - score < baseline − 5% → REVERT. Restore: `cp evals/<skill-name>/refine/SKILL.md.pre-iter-N skills/<skill-name>/SKILL.md`
    - within ±2–5% → NEUTRAL → KEEP (simpler is better).
    Mark lever as exhausted if reverted ≥ 2× with no improvement.
 
