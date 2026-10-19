@@ -74,7 +74,7 @@ The proposal's own `P` numbers are kept.
 
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
-3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"); S4–S9 are open.
+3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"), and S4–S9 on 2026-10-16 (see "S4–S9 repair"); S10–S13 are open.
    ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E6 are open.
 4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. ~~**P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`.~~ Done on 2026-10-16 (PR #144; see "P9 repair").
@@ -128,7 +128,7 @@ The proposal's own `P` numbers are kept.
   - The first regex-literal sample was too weak (only the self-scan test caught that mutation); it was strengthened and re-checked.
 - **No behavior change.** `static-scan.js` is untouched.
 
-### Scanner gaps found (S1–S9; S1–S3 fixed, see "S1–S3 repair")
+### Scanner gaps found (S1–S13; S1–S3 fixed, see "S1–S3 repair"; S4–S9 fixed, see "S4–S9 repair")
 
 Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK or FLAG was expected. None is pinned by a test, so a fix will not have to fight one.
 
@@ -143,6 +143,8 @@ Probed on 2026-10-15 with synthetic samples. Each passed as PASS where a BLOCK o
 | S7 | Current key formats are missed | `sk-proj-…`, `sk-ant-oat01-…`, `ghs_…` | BLOCK → PASS. The repo's shared list (`scripts/telemetry/secret-patterns.js`, P1) catches all three |
 | S8 | `subprocess-shell-true` stops at the first `)` | `subprocess.run(build(cmd), shell=True)` | BLOCK → PASS |
 | S9 | In single-file mode every finding has `file: ""` | any single-file scan | Cosmetic; CI's fallback reads only the verdict |
+| S12 | Script files are not read for the secrets table (found during the S4–S9 repair, 2026-10-16) | a `ghp_…` token in `install.sh` or `tool.js` | BLOCK → PASS. Python has only its own `hardcoded-secret` FLAG. Turning the table on for scripts adds 12 findings in this repo, all fake tokens in test fixtures outside `skills/` (4 BLOCK, 8 FLAG), and none in `skills/`, so CI's gate would not change. Needs an owner call on fixtures |
+| S13 | Generic secret forms in data files (independent review T6, 2026-10-16) | `{"password": "hunter2hunter2"}` in a `.json`; `PASSWORD=…` or `API_KEY=…` in `.env`; `_authToken=npm_…` in `.npmrc` | PASS. The generic FLAG patterns need the name right before `:`/`=` and a quoted value; npm tokens have no pattern |
 | S10 | No resource caps (final review F9, 2026-10-15) | a file over 536 MB holding an injection; a FIFO named `SKILL.md`; a symlinked file outside the tree | Over 536 MB → silently skipped, so PASS. A FIFO hangs the scan. Unreadable files are skipped without a finding |
 | S11 | Only the first `rm` target is checked, as on main (re-check G6, 2026-10-15) | `rm -rf ./build ~/`, `rm -rf x /`, `rm --interactive=never -rf /`, `rm / -rf`; after `--`, a first target that starts with `-` or a quote: `rm -rf -- --foo-rm ~`, `rm -rf -- "--cached" ~` (verification V2) | BLOCK → PASS. An every-target scan was tried and dropped: it froze the scanner and could be escaped (final review F1–F4). A safe version needs a shell-aware tokenizer, not a regex |
 
@@ -275,6 +277,98 @@ A separate reviewer re-ran every check and compared the old and new scanners on 
 | B5 | Background check: "detection-bypass / validator regression" on commit c163649 (no details given) | A differential run (1,840 samples: the attack samples × 20 wrappings, main vs current) lost only the two intended changes (the `/tmp/` exemption and the short-comment case). Reading the exemption found a real bypass, introduced with it: only the **first** target was checked, and `..` escaped the temp folder, so `rm -rf /tmp/../etc`, `rm -rf /tmp/x /etc` and `rm -rf ./build ~/notes` passed (main blocked the first two). Fixed: every target up to `;`, `&` or `\|` is checked, and the exemption does not apply to a path containing `..`. A target scan stops at the next `rm` that has its own recursive or force option, which keeps the pattern linear. Tests pin the bypasses, three harmless forms and two timing inputs |
 | B6 | Background check: "ReDoS / resource-cap defeat" and "parser differential" on commit 911335e (no details given) | ReDoS found and fixed: the `curl`/`wget` patterns used the `m` flag, which also starts a line after `\r` and `\u2028`, while `[^\n]` reads through them. 50 KB of bare `\r` took 0.5 s (quadratic). A line now starts after `\n` only (`(?<![^\n])`). 100 KB scans in about 1 ms, and timing tests pin both characters. The sweep now includes `\r`, `\u2028` and tab. The parser differential is passed to the final independent review (see below) |
 | P4 | (old) S1 still misses "ignore the instructions above" and "ignore everything above", and flags "never ignore previous instructions" | Open |
+
+## S4–S9 repair (2026-10-16)
+
+All in `skills/skill-audit/scripts/static-scan.js`; tests in `scripts/static-scan.test.js`; `skills/skill-audit/REFERENCE.md` describes the new rules (which files are read, settings permissions, secrets).
+
+- **S4:** a settings file that parses as JSON is read by a small reader that keeps duplicate keys and positions; it builds only `permissions` and its `allow`, `deny` and `ask` arrays and skips every other value with a loop, so nesting depth does not matter (review round 3, W1). A bare `Bash`, `Write`, `Edit` or `Read`, or a specifier of only `*`, `:` and spaces (`Bash(*)`, `Bash(:*)`), in any `permissions.allow` (every copy of a repeated key, compared decoded) is the wildcard rule. main's text checks still run on the raw text, with only the `permissions.deny` and `permissions.ask` arrays emptied, so deny and ask rules are no longer reported and nothing else is lost. `Edit(//…)` (any absolute path) joins `perm-broad-path`. A file that does not parse keeps main's text checks unchanged. Source: code.claude.com/docs/en/permissions, read 2026-10-16 ("`Bash(*)` is equivalent to `Bash` and matches all Bash commands"; the `:*` suffix "is an equivalent way to write a trailing wildcard"; `//path` is absolute, `/path` is relative to the settings source). The same page says current Claude Code skips an unanchored allow glob such as `"*"` with a warning; it stays a BLOCK for older versions.
+- **S5:** a file with no known script extension is read by its shebang: node, deno and bun use the JS table; python and pypy (with any version suffix) the Python table; sh, bash, zsh, dash, ksh and ash the shell table. `env`, its options (`-S`) and `VAR=x` words are skipped. An option that takes an argument (`env -u FOO python3`), `-Spython3`, and other interpreters (`tsx`, `pythonw`, `uv run --script`) are not recognised (review T8, open as on main).
+- **S6:** JSON, JSONC, JSON5, YAML, TOML, INI, `.cfg`, `.conf`, `.env`, `.properties`, and the files `.env`, `.env.*`, `.npmrc`, `.pypirc` and `.netrc` are read for secrets. A script extension wins over these names, so `.env.sh` is still a shell script (review T3). The settings permission checks still run on `settings*.json` only. Only the token formats are matched in these files: a JSON `"password": "…"`, an unquoted `.env` value and an npm `_authToken` are not (review T6; recorded as S13).
+- **S7:** `anthropic-api-key` and `anthropic-key-in-config` match any `sk-ant-<kind><digits>-` key (api03, admin01, oat01; main's `admin-` matched no real admin key) with no letter or digit before `sk-`, plus main's form anywhere (review T5). `hardcoded-llm-key` adds `sk-proj-`, `sk-svcacct-` and `sk-admin-`, with no letter or digit before `sk-`, so kebab-case prose stays quiet. A new `github-app-token` check (BLOCK) matches `ghs_`, `ghu_` and `ghr_`.
+- **S8:** `subprocess-shell-true` adds a reader to main's regex. One linear pass over the file keeps a stack of open brackets and skips strings (single, double and triple quoted, with escapes; a one-line string ends at `\n` or `\r`) and `#` comments (to `\n` or `\r`). `shell=True` counts anywhere inside a `subprocess.run/call/Popen/check_output/check_call(` call, nested calls included. main's regex still runs, so a misread string can only add findings (background review B8-2, review T1/T2). Known limits, as on main: `import subprocess as sp`, `from subprocess import run`, `**{"shell": True}`, `os.popen`, `asyncio.create_subprocess_shell`, `shell=1` and other truthy values, a backslash line break after `shell=`, more than 64 spaces before `(`, and a reader confused by a PEP 701 f-string still misses the S8 forms main's regex cannot see.
+- **S9:** a single-file scan names the file (`file: "settings.json"`), relative to its folder.
+- **Not done:** S10 (resource caps) and S11 (every `rm` target). New and open: S12 (secrets in scripts) and S13 (generic secret forms in data files). Outside S4's scope and open as on main (review T10): `defaultMode: acceptEdits`, `additionalDirectories: ["/"]`, `Bash(sh *)`, bare `PowerShell`, `Read(//**)`, `Edit(/**)`, `Edit(~)`, and `managed-settings.json` (secrets only). The "47-pattern" doc drift is still open.
+- **Evidence (final, after two background reviews and four independent review rounds):**
+  - Tests first: run against main's scanner, 52 tests failed for the expected reasons; each review fix also had its test fail first (the B9/U tests fail on c136334, the W1 tests on d2a82b2, the X1 test on 93394ed). After: `scripts/static-scan.test.js` 345/345, `node scripts/run-all-tests.js` → 30/30, `node scripts/ci-scan-skills.js` passes with no new or stale entries.
+  - **Differential, repo:** main vs branch over every top-level folder and `.claude/settings*.json`: 0 findings added, 0 removed (195 on the whole repo either way).
+  - **Differential, synthetic (924 samples):** Python calls (7 call forms × 11 argument forms × 10 `shell` forms) and settings rules (22 rules × allow/deny/ask × 2 layouts, plus invalid JSON). Added: 100 `subprocess-shell-true` (parentheses or `)` in strings or comments before `shell=True`, `shell = True`, `shell=\nTrue`, nested `wrap(shell=True)`, `subprocess . call`) and 16 permission findings (bare names, `Bash(:*)`, `Bash( * )`, `bash`, `Edit(//etc/**)`). Removed: 15 `subprocess-shell-true` on `shell=True_x` (not `shell=True`) and 28 permission findings on deny and ask rules. Nothing else.
+  - **The reviewer's 178 probe samples** (all four rounds), replayed on the final code: 58 are above main, and 8 are below. All 8 are intended: `shell=True_flag`, and 7 settings files whose only matching rule sits in `permissions.deny` or `permissions.ask` (escaped and duplicate `deny` keys, a deny string holding `"],"allow":[…`, `ask` holding `Bash(*)` or `Edit(~/…)`, and deep nesting beside a deny-only rule).
+  - **Timing:** 65 hostile inputs of about 1 MB or more (a 10 MB string beside the permissions: 62 ms; 1 MB backslash runs; 150,000 escaped-quote strings; unclosed calls, strings and brackets, CR-only comments, `shell` runs, repeated key prefixes, a 250,000-rule allow list, 100,000 deny rules, 60,000 duplicate `deny` keys, 500,000-deep arrays, 1 MB-deep arrays beside the permissions, 150,000-deep objects inside `allow`, 200,000 bracket-and-quote strings in a skipped value, 80,000 duplicate `permissions` keys at 2.75 MB, 1 MB keys, rules and shebang lines): worst 111 ms end to end, node startup included. The reviewer's sets: worst 66 ms (round 1), 103 ms (round 2, up to 10 MB), 441 ms (round 3, 10.3 MB) and 399 ms (round 4, 10.5 MB), all linear. Four timing tests pin the S8 inputs.
+  - **Mutation testing:** 53 mutants of the final code (the author's set), run on a copy, all caught.
+  - **Fuzzing:** the reviewer's fuzzer (its own position-keeping reader as the reference) on the final reader: 91,448 valid generated files over three seeds, 0 differences; on a flipped-parity mutant it fails every valid file. On the way, two `sk-` guards, three duplicate-key paths and one shape test were not reached at first, and two shape checks proved equivalent and were removed; each gap was closed with a test.
+  - **Hygiene:** two literal U+FEFF characters, which the authoring tool had decoded from `\uFEFF` escapes, were found by a scan for invisible characters and replaced with escapes. The changed files hold no other control or format characters beyond main's own hidden-Unicode pattern.
+
+### Background security review of dc61b2c (2026-10-16)
+
+The review named two issues without details; both were found and reproduced.
+
+| # | Finding | Introduced by | Outcome |
+|---|---|---|---|
+| B8-1 | Duplicate keys: `JSON.parse` keeps the last copy, so `{"permissions":{"allow":["Bash(*)"]},"permissions":{…}}` and `{"permissions":{"allow":["Bash(*)"],"allow":[]}}` passed (main: BLOCK). Claude Code's choice of copy is not documented | dc61b2c | First fixed in c136334 by renaming later copies with an in-band marker; that fix was itself broken (B9-2, U1). Final fix: the duplicate-keeping reader (see S4). Five tests, including a bare `Bash` hidden in either copy |
+| B8-2 | The `shell=True` reader read `'''` inside a PEP 701 f-string (`x = f"{"'''"}"`, valid Python 3.12+, checked on 3.14.6) or an unclosed `"""` as an open string, and skipped the rest of the file (main: BLOCK) | dc61b2c | Fixed: main's regex runs as well, so the reader can only add findings. A quoted `"shell=True"` and `myshell=True` are BLOCKs again, as on main. Three tests |
+
+### Independent review of dc61b2c (2026-10-16)
+
+The reviewer worked from a pinned `git archive` snapshot because the author's mutation runs were editing the shared worktree in place (process fix: mutants now run on a copy). Verdict: **changes needed** (T1–T3).
+
+| # | Sev | Finding | Outcome |
+|---|---|---|---|
+| T1 | blocker | PEP 701 f-string desync (as B8-2), also on one line: `x = f"{"'"}"; subprocess.run(cmd, shell=True)` | Fixed with B8-2 |
+| T2 | blocker | CR-only line ends: a `#` comment with no `\n` after it ended the whole scan | Fixed: comments and one-line strings end at `\n` or `\r` (linear sticky match). Two tests |
+| T3 | blocker | `.env.*` was checked before script extensions, so `.env.sh`, `.env.py`, `.env.local.js` got the secrets table only (main: BLOCK) | Fixed: script extensions first. Three tests |
+| T4 | minor | Duplicate keys (as B8-1) | Fixed with B8-1 |
+| T5 | minor | `sk-ant-[a-z]+…` without a lookbehind matched prose (`task-ant-colony-simulation-…`) | Fixed: the wider form needs no letter or digit before `sk-`; main's api03/admin form still matches anywhere. Three tests |
+| T6 | minor | REFERENCE.md overstated S6: JSON keys, unquoted `.env` values and npm tokens are not matched | Docs corrected; recorded as S13 |
+| T7 | minor | 7 of the reviewer's 32 mutants survived (BOM strip, newline end of strings, the `myshell` guard, deno, case-insensitive `bash`, `**`, data-before-script order) | Tests added; all 7 now caught |
+| T8 | minor | Shebang gaps (`env -u FOO python3`, `-Spython3`, `tsx`, `pythonw`, `uv run`, `busybox sh`; shebang files with data extensions) | Open as on main; documented |
+| T9 | minor | S8 known-limits list incomplete | Completed above and in REFERENCE.md |
+| T10 | note | Settings gaps outside S4 (see "Not done"); `allow` as a string or a top-level array went BLOCK → PASS | The two shapes now fall back to the text checks (three tests); the rest is open as on main |
+| T11 | note | Uncommitted edits in the worktree during review | Process: mutants now run on a copy. These fixes need a re-review |
+
+### Background security review of c136334 (2026-10-16)
+
+Two issues named without details; both found and reproduced.
+
+| # | Finding | Introduced by | Outcome |
+|---|---|---|---|
+| B9-1 | Detection regression: with a parsable file, the permission checks read `permissions.allow` only, so main's text matches elsewhere were lost: `{"allowedTools":["Bash(*)"]}`, `{"env":{"permissions":{"allow":["Bash(*)"]}}}`, `{"sandbox":{"network":{"allow":["*"]}}}` (main: BLOCK) | dc61b2c | Fixed: main's text checks run on the raw text with only `permissions.deny`/`permissions.ask` emptied. Five tests |
+| B9-2 | Parser differential: a key that literally holds the rename marker (`"permissions\u0000dup1"`) was read as a `permissions` copy | c136334 | Fixed: no renaming; the reader keeps duplicate keys as entries. Test added |
+
+### Independent review round 2, of c136334 (2026-10-16)
+
+The reviewer confirmed T1–T3, T5–T10 fixed (its 26 applicable round-1 mutants all killed; the 98 round-1 probes show only the intended deny-only case below main). Verdict: **changes needed** (U1, U2).
+
+| # | Sev | Finding | Outcome |
+|---|---|---|---|
+| U1 | blocker | The rename marker collided with a key in the file and hid a real copy: `{"permissions":{"allow":[]},"permissions":{"allow":["Bash(*)"]},"permissions\u0000dup1":{"allow":[]}}` (main: BLOCK) | Fixed by the redesign (no marker). Tests for both levels |
+| U2 | major | `rules.push(...allow)` threw `RangeError` on an allow list of 150,000+ entries; the scanner exited with no JSON, and CI's fallback prints that as a pass (U7) | Fixed: items are pushed one at a time. Test with 250,000 entries |
+| U3 | note | A marker-like key with a non-object value forced the text fallback, which misses a bare `Bash` | Fixed by the redesign. Test added |
+| U4 | note | Rules outside `permissions.allow` (as B9-1) | Fixed with B9-1. Test added |
+| U5 | minor | 4 of the reviewer's 19 new mutants survived: (a) `COMMENT_REST.lastIndex` without `- 1`; (b) the key check's `\s*:` removed; (c) the T5 lookbehind narrowed to letters; (d) main's form dropped from `anthropic-key-in-config` | (a) equivalent: the skipped character is the line end itself, which the reader ignores outside strings. (b) moot (code removed). (c) test added (a digit before `sk-ant-`). (d) equivalent: `anthropic-api-key` also runs on settings files |
+| U6 | note | `shell=True_flag` is below main | Declared exception (`True_flag` is not `True`) |
+| U7 | note | CI's static fallback (`.github/workflows/ci.yml`) prints a scanner crash (`ERROR`) as `PASS` | **Open** (on main): a separate change should fail on `ERROR` |
+
+### Independent review round 3, of d2a82b2 (2026-10-16)
+
+Verdict: **approve**. U1–U4 closed; the deny/ask blanking removes only arrays Claude Code reads as deny or ask (34 new settings probes, BOM offsets checked); no disagreement between the reader and `JSON.parse` on valid JSON; timing linear to 10.3 MB (worst 441 ms). Follow-ups, all done in the next commit:
+
+| # | Sev | Finding | Outcome |
+|---|---|---|---|
+| W1 | minor | The recursive reader gave up at a depth between 3,000 and 8,000, so 16 KB of nesting beside the permissions turned the bare-name check off (PASS; main also PASS) | Fixed: the reader builds only `permissions` and its `allow`/`deny`/`ask` arrays and skips every other value with a bracket-counting loop that steps over strings. Five tests (8,000- and 500,000-deep arrays, 200,000-deep objects, deep items inside `allow`, brackets and escaped quotes in skipped strings) |
+| W2 | minor | CRLF and tab whitespace in the reader were untested (mutants survived) | Two tests; both mutants now caught |
+| W3 | note | One finding per hit was untested | Test added; mutant caught |
+| W4 | note | The record's mutant count is the author's set; 11 of the reviewer's 20 survived (7 equivalent, 1 near-equivalent, W2, W3) | Noted; the W2/W3 survivors are now caught |
+
+### Independent review round 4, of 93394ed (2026-10-16)
+
+Verdict: **approve**. W1–W3 closed. A fuzz run of the settings reader against the reviewer's own position-keeping reader, on 152,391 valid generated files (whitespace, escaped and duplicate keys, strings with brackets, quotes, backslashes, U+2028, lone surrogates), found 0 differences; the fuzzer catches string-jump mutants. Timing linear to 10.5 MB (worst 399 ms). 11 of the reviewer's 12 mutants killed. Follow-ups, done in the next commit:
+
+| # | Sev | Finding | Outcome |
+|---|---|---|---|
+| X1 | minor | The string regex `/"(?:[^"\\]\|\\.)*"/y` overflowed the stack on a string of about 8 MB, so the reader gave up and a bare `Bash` passed (main also PASS) | Fixed: the string end is found by a loop over `"` positions that counts the backslashes before each, with no regex. Tests: a 9 MB string, and escaped quotes with backslash runs. The reviewer's fuzzer, rerun on the fix over 91,448 valid files, finds 0 differences, and finds the flipped-parity mutant on every file |
+| X2 | minor | No test pinned the `JSON.parse` precheck, which keeps a truncated file from aborting the scan (exit 134) | Three truncated-file tests; the mutant is caught |
+| X3 | note | The docs left out X1's case | Moot after X1 |
 
 ## P7 repair (2026-10-16)
 

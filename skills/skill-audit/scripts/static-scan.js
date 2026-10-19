@@ -6,7 +6,9 @@
 //   - Dangerous Bash in instructions (MD_BASH)
 //   - Hardcoded secrets in markdown/config (MD_SECRETS)
 //   - Overly permissive settings.json rules (CONFIG_PATTERNS)
-//   - Malicious JS/Python/Shell in scripts (JS/PY/SH_PATTERNS)
+//   - Malicious JS/Python/Shell in scripts (JS/PY/SH_PATTERNS); a file with no known extension is
+//     read by its shebang (S5)
+//   - Hardcoded secrets in data and config files: JSON, YAML, TOML, INI, .env, .npmrc … (S6)
 // Outputs JSON: { verdict, findings, scanned }
 
 const fs = require('fs');
@@ -51,9 +53,12 @@ if (!fs.existsSync(skillDir)) {
 }
 
 const findings = [];
+const isSingleFile = fs.statSync(skillDir).isFile();
+// A single-file scan names the file itself; relative to the file, every finding had file: "" (S9).
+const findingRoot = isSingleFile ? path.dirname(skillDir) : skillDir;
 
 function flag(file, check, severity, detail) {
-  findings.push({ file: path.relative(skillDir, file), check, severity, detail });
+  findings.push({ file: path.relative(findingRoot, file), check, severity, detail });
 }
 
 function stripCodeBlocks(text) {
@@ -124,14 +129,21 @@ const MD_SECRETS = [
   { re: /(?:password|passwd|secret|token)\s*[:=]\s*['"][^'"]{8,}/i,  name: 'hardcoded-secret',       sev: 'FLAG'  },
   { re: /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/,                          name: 'hardcoded-bearer-token', sev: 'BLOCK' },
   { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,          name: 'private-key-block',      sev: 'BLOCK' },
-  // Anthropic API keys
-  { re: /sk-ant-(?:api03|admin)-[A-Za-z0-9_\-]{20,}/,                name: 'anthropic-api-key',      sev: 'BLOCK' },
-  // OpenAI / generic LLM keys (sk- prefix)
-  { re: /sk-[A-Za-z0-9]{32,}/,                                        name: 'hardcoded-llm-key',      sev: 'BLOCK' },
+  // Anthropic keys and tokens: api03, admin01, oat01 (OAuth) … (S7: main knew api03 and admin only). The
+  // wider form needs no letter or digit before sk-, so "task-ant-colony-…" prose is quiet (independent
+  // review T5); main's form keeps matching anywhere.
+  { re: /sk-ant-(?:api03|admin)-[A-Za-z0-9_\-]{20,}|(?<![A-Za-z0-9])sk-ant-[a-z]+\d*-[A-Za-z0-9_\-]{20,}/,
+                                                                      name: 'anthropic-api-key',      sev: 'BLOCK' },
+  // OpenAI / generic LLM keys: legacy sk-…, and the dashed proj/svcacct/admin forms (S7). The dashed
+  // forms need a known prefix and no letter or digit before sk-, so kebab-case prose ("risk-assess…") is quiet.
+  { re: /sk-[A-Za-z0-9]{32,}|(?<![A-Za-z0-9])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}/,
+                                                                      name: 'hardcoded-llm-key',      sev: 'BLOCK' },
   // GitHub tokens
   { re: /ghp_[A-Za-z0-9]{36}/,                                        name: 'github-pat-classic',     sev: 'BLOCK' },
   { re: /github_pat_[A-Za-z0-9_]{82}/,                                name: 'github-pat-fine',        sev: 'BLOCK' },
   { re: /gho_[A-Za-z0-9]{36}/,                                        name: 'github-oauth-token',     sev: 'BLOCK' },
+  // GitHub App tokens: ghs_ (installation), ghu_ (user-to-server), ghr_ (refresh) (S7)
+  { re: /gh[usr]_[A-Za-z0-9]{36}/,                                    name: 'github-app-token',       sev: 'BLOCK' },
   // AWS
   { re: /AKIA[0-9A-Z]{16}/,                                           name: 'aws-access-key-id',      sev: 'BLOCK' },
   // Slack
@@ -140,22 +152,30 @@ const MD_SECRETS = [
 
 // ─── Config: Overly permissive settings.json rules ─────────────────────────
 // Applied only to files named settings.json / settings.local.json.
+// An entry with allowRule is a permission check. When readSettings can read the file, allowRule is
+// tested against each permissions.allow rule (trimmed; the bare tool name, S4), and re against the raw
+// text with the permissions.deny and permissions.ask arrays emptied. Otherwise re is tested against the
+// raw text, as on main.
+// Docs (code.claude.com/docs/en/permissions, read 2026-10-16): "`Bash(*)` is equivalent to `Bash` and
+// matches all Bash commands"; ":*" is an equivalent way to write a trailing wildcard; "//path" is an
+// absolute path, "~/path" is under home, and "/path" is relative to the settings source.
 const CONFIG_PATTERNS = [
-  // Wildcard tool allow rules — grants Claude unrestricted access
-  { re: /"Bash\(\*\)"/,                          name: 'perm-bash-wildcard',       sev: 'BLOCK' },
-  { re: /"Write\(\*\)"/,                         name: 'perm-write-wildcard',      sev: 'BLOCK' },
-  { re: /"Edit\(\*\)"/,                          name: 'perm-edit-wildcard',       sev: 'BLOCK' },
-  { re: /"Read\(\*\)"/,                          name: 'perm-read-wildcard',       sev: 'FLAG'  },
+  // Wildcard tool allow rules — grants Claude unrestricted access. The bare name is the same rule (S4).
+  { re: /"Bash\(\*\)"/,  allowRule: /^Bash(?:\([\s*:]*\))?$/i,   name: 'perm-bash-wildcard',       sev: 'BLOCK' },
+  { re: /"Write\(\*\)"/, allowRule: /^Write(?:\([\s*:]*\))?$/i,  name: 'perm-write-wildcard',      sev: 'BLOCK' },
+  { re: /"Edit\(\*\)"/,  allowRule: /^Edit(?:\([\s*:]*\))?$/i,   name: 'perm-edit-wildcard',       sev: 'BLOCK' },
+  { re: /"Read\(\*\)"/,  allowRule: /^Read(?:\([\s*:]*\))?$/i,   name: 'perm-read-wildcard',       sev: 'FLAG'  },
   // Permission bypass mode — removes all confirmation prompts
   { re: /"bypassPermissions"/,                   name: 'perm-bypass-mode',         sev: 'BLOCK' },
-  // Wildcard in allow array
-  { re: /"allow"\s*:\s*\[\s*(?:[^[\]]*,\s*)?"(?:\*|Bash\(\*\)|Write\(\*\))"/,
+  // Wildcard in allow array (current Claude Code skips an unanchored allow glob with a warning; older
+  // versions may not, so it stays a BLOCK)
+  { re: /"allow"\s*:\s*\[\s*(?:[^[\]]*,\s*)?"(?:\*|Bash\(\*\)|Write\(\*\))"/, allowRule: /^\*+$/,
                                                  name: 'perm-allow-wildcard',      sev: 'BLOCK' },
-  // Hardcoded Anthropic key anywhere in config
-  { re: /sk-ant-(?:api03|admin)-[A-Za-z0-9_\-]{20,}/,
+  // Hardcoded Anthropic key or token anywhere in config (S7: oat01 and admin01 too)
+  { re: /sk-ant-(?:api03|admin)-[A-Za-z0-9_\-]{20,}|(?<![A-Za-z0-9])sk-ant-[a-z]+\d*-[A-Za-z0-9_\-]{20,}/,
                                                  name: 'anthropic-key-in-config',  sev: 'BLOCK' },
-  // Broad path permissions
-  { re: /"(?:Write|Edit)\(\/\*?\)"|"(?:Write|Edit)\(~\//,
+  // Broad path permissions: the settings source's root, anything under home, any absolute path (//)
+  { re: /"(?:Write|Edit)\(\/\*?\)"|"(?:Write|Edit)\(~\//, allowRule: /^(?:Write|Edit)\((?:\/\*?\)|~\/|\/\/)/,
                                                  name: 'perm-broad-path',          sev: 'FLAG'  },
   // Hook command with shell substitution — potential injection vector
   // $( … ) inside the command string, escape-aware (\" does not end it). Linear: a lookahead finds the
@@ -189,6 +209,66 @@ const JS_PATTERNS = [
   { re: /NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*['"]?0/,           name: 'tls-env-disabled',       sev: 'FLAG'  },
 ];
 
+// Finds a shell=True keyword argument inside a subprocess.run/call/Popen/check_output/check_call
+// call, at any depth (subprocess.run(wrap(shell=True)) counts, as on main). One pass over the file
+// with a stack of open brackets, so it is linear: strings (', ", triple-quoted, with backslash
+// escapes) and # comments are skipped, which also stops a ) or a "shell=True" inside them from
+// counting. Returns a match-like array (m[0] is the call's start) or null.
+const PY_SUBPROCESS_CALL = /subprocess\s*\.\s*(?:run|call|Popen|check_output|check_call)\s*$/;
+const COMMENT_REST = /[^\r\n]*/y;
+const PY_SHELL_TRUE = /^shell\s*=\s*True(?![A-Za-z0-9_])/;
+// main's pattern (re-check G2 and F8), plus the word end after True
+const PY_SHELL_TRUE_MAIN = /subprocess\.(?:run|call|Popen|check_output|check_call)\((?:(?!subprocess\.(?:run|call|Popen|check_output|check_call)\()[^)])*?shell\s*=\s*True(?![A-Za-z0-9_])/;
+function findPyShellTrue(text) {
+  const stack = [];     // one entry per open bracket: the call's start offset when it is a subprocess call, else -1
+  let subDepth = 0;     // how many entries in the stack are subprocess calls
+  let lastOpen = 0;     // where the text before the next ( starts, so the call-name check reads a short slice
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    // A comment runs to the line end; Python also ends a line at a lone \r (independent review T2).
+    if (c === '#') { COMMENT_REST.lastIndex = i; COMMENT_REST.test(text); i = COMMENT_REST.lastIndex - 1; continue; }
+    if (c === '"' || c === "'") {
+      const triple = text.startsWith(c.repeat(3), i);
+      const end = triple ? c.repeat(3) : c;
+      let j = i + end.length;
+      for (; j < text.length; j++) {
+        if (text[j] === '\\') { j++; continue; }
+        if (!triple && (text[j] === '\n' || text[j] === '\r')) break;
+        if (text.startsWith(end, j)) { j += end.length - 1; break; }
+      }
+      i = j;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') {
+      let start = -1;
+      if (c === '(') {
+        const before = text.slice(Math.max(lastOpen, i - 64), i);
+        const m = before.match(PY_SUBPROCESS_CALL);
+        if (m) start = i - before.length + m.index;
+      }
+      stack.push(start);
+      if (start >= 0) subDepth++;
+      lastOpen = i + 1;
+      continue;
+    }
+    if (c === ')' || c === ']' || c === '}') {
+      if (stack.length && stack.pop() >= 0) subDepth--;
+      lastOpen = i + 1;
+      continue;
+    }
+    if (c === 's' && subDepth > 0 && !/[A-Za-z0-9_.]/.test(text[i - 1] || '')) {
+      const m = text.slice(i, i + 64).match(PY_SHELL_TRUE);
+      if (m) {
+        const start = stack.find(s => s >= 0);
+        const hit = [text.slice(start, i + m[0].length)];
+        hit.index = start;
+        return hit;
+      }
+    }
+  }
+  return null;
+}
+
 // ─── Python patterns (Anthropic security-guidance rules 8–10, 12, 15–19, 24–25)
 const PY_EXTS = new Set(['.py', '.pyi']);
 const PY_PATTERNS = [
@@ -201,10 +281,11 @@ const PY_PATTERNS = [
   { re: /\bnumpy\.load\s*\([^)\n]{0,200}allow_pickle\s*=\s*True/,        name: 'numpy-allow-pickle',      sev: 'BLOCK' },
   // Command injection
   { re: /\bos\.system\s*\(/,                                              name: 'os-system-injection',     sev: 'BLOCK' },
-  // As on main, the arguments run to the first ) (a ( inside them is fine, re-check G2). Linear: a call's
-  // scan also stops where the next subprocess call starts, so repeated unclosed calls are not quadratic (F8).
-  { re: /subprocess\.(?:run|call|Popen|check_output|check_call)\((?:(?!subprocess\.(?:run|call|Popen|check_output|check_call)\()[^)])*?shell\s*=\s*True/,
-                                                                          name: 'subprocess-shell-true', sev: 'BLOCK' },
+  // shell=True as an argument anywhere inside a subprocess call, nested calls included. A regex stopped at
+  // the first ), so subprocess.run(build(cmd), shell=True) passed (S8); findPyShellTrue reads the call.
+  // main's regex still runs, so a string the reader misreads can only add findings, never hide main's
+  // (background security review of dc61b2c: a Python 3.12 f-string nesting ''' hid the rest of the file).
+  { find: t => findPyShellTrue(t) || t.match(PY_SHELL_TRUE_MAIN),       name: 'subprocess-shell-true', sev: 'BLOCK' },
   // Unsafe parsing
   { re: /\byaml\.(?:unsafe_)?load\s*\((?![^)\n]{0,80}Loader\s*=\s*yaml\.SafeLoader)/, name: 'yaml-unsafe-load', sev: 'FLAG' },
   { re: /\b(?:xml\.etree\.ElementTree|ET)\.(parse|fromstring)\s*\(/,     name: 'xml-unsafe-parse',        sev: 'FLAG'  },
@@ -250,14 +331,117 @@ function scanMarkdown(filePath, content) {
 // CONFIG_PATTERNS are applied only to Claude Code settings files.
 const CONFIG_FILENAMES = new Set(['settings.json', 'settings.local.json']);
 
+// Reads a settings file that is valid JSON. Returns null when it is not valid JSON; then the permission
+// checks read the raw text, as on main. Otherwise returns:
+//   allow: the trimmed string rules of every permissions.allow, in every copy of a duplicate key (a
+//          reader may keep either copy; keys are compared decoded, so "permissions" counts)
+//   text:  the raw text with the permissions.deny and permissions.ask arrays (every copy) emptied, for
+//          main's text checks: only deny and ask rules, which grant nothing, stop being reported (S4).
+//          A shape the schema rejects (allow as a string, a top-level array) adds no allow rules, and
+//          the text checks still read it, as on main (independent review T10)
+// A BOM is dropped first, as JSON.parse refuses it. Background security review of c136334: reading
+// permissions.allow alone lost main's matches elsewhere ("allowedTools"), and the earlier key renaming
+// could collide with a real key.
+const JSON_SCALAR = /[^,\]}\s]*/y;
+// Builds only what readSettings uses: the top-level object, each permissions object, and its allow,
+// deny and ask arrays with their string items and positions. Every other value is skipped by a loop
+// that counts brackets, so nesting depth costs nothing: a recursive reader gave up past a few thousand
+// levels, and the fallback text checks miss a bare tool name (independent review round 3, W1).
+function readJsonTree(text) {
+  let i = 0;
+  const ws = () => { while (i < text.length && ' \t\n\r'.includes(text[i])) i++; };
+  const peek = () => { ws(); return text[i]; };
+  // The end of the string that starts at i: the first " after it with an even run of backslashes
+  // before it. A loop, not a regex: the regex overflowed the stack on a string of about 8 MB, and the
+  // reader then gave up (independent review round 4, X1). Each backslash run is counted once.
+  const strEnd = () => {
+    for (let q = text.indexOf('"', i + 1); q >= 0; q = text.indexOf('"', q + 1)) {
+      let b = q - 1;
+      while (text[b] === '\\') b--;                    // stops at the opening quote at the latest
+      if ((q - 1 - b) % 2 === 0) return q + 1;
+    }
+    return text.length;                                // unreachable on valid JSON
+  };
+  const str = () => { const end = strEnd(); const s = JSON.parse(text.slice(i, end)); i = end; return s; };
+  function skip() {
+    const c = peek();
+    if (c === '"') { i = strEnd(); return { type: 'other' }; }
+    if (c !== '{' && c !== '[') { JSON_SCALAR.lastIndex = i; JSON_SCALAR.test(text); i = JSON_SCALAR.lastIndex; return { type: 'other' }; }
+    for (let depth = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '"') { i = strEnd() - 1; continue; }
+      if (ch === '{' || ch === '[') depth++;
+      else if ((ch === '}' || ch === ']') && --depth === 0) { i++; break; }
+    }
+    return { type: 'other' };
+  }
+  function object(readValue) {
+    i++;
+    const entries = [];
+    if (peek() === '}') { i++; return { type: 'object', entries }; }
+    for (;;) {
+      ws(); const key = str(); ws(); i++;              // the ':'
+      entries.push([key, readValue(key)]);
+      if (peek() === '}') { i++; return { type: 'object', entries }; }
+      i++;                                             // the ','
+    }
+  }
+  function array(readItem) {
+    const start = i++;
+    const items = [];
+    if (peek() === ']') { i++; return { type: 'array', items, start, end: i }; }
+    for (;;) {
+      items.push(readItem());
+      if (peek() === ']') { i++; return { type: 'array', items, start, end: i }; }
+      i++;                                             // the ','
+    }
+  }
+  const listItem = () => (peek() === '"' ? { type: 'string', value: str() } : skip());
+  const permValue = key => ((key === 'allow' || key === 'deny' || key === 'ask') && peek() === '[' ? array(listItem) : skip());
+  const rootValue = key => (key === 'permissions' && peek() === '{' ? object(permValue) : skip());
+  return peek() === '{' ? object(rootValue) : { type: 'other' };
+}
+
+function readSettings(content) {
+  const text = content.replace(/^\uFEFF/, '');
+  let root;
+  try { JSON.parse(text); root = readJsonTree(text); } catch { return null; }   // not valid JSON
+  const allow = [];
+  const blank = [];
+  for (const [key, perms] of root.type === 'object' ? root.entries : []) {
+    if (key !== 'permissions' || perms.type !== 'object') continue;
+    for (const [k, list] of perms.entries) {
+      if (list.type !== 'array') continue;
+      if (k === 'allow') for (const item of list.items) { if (item.type === 'string') allow.push(item.value.trim()); }
+      else if (k === 'deny' || k === 'ask') blank.push(list);
+    }
+  }
+  let out = '', last = 0;
+  for (const { start, end } of blank.sort((a, b) => a.start - b.start)) { out += text.slice(last, start) + '[]'; last = end; }
+  return { allow, text: out + text.slice(last) };
+}
+
 function scanConfig(filePath, content) {
-  for (const { re, name, sev } of CONFIG_PATTERNS) {
+  const settings = readSettings(content);
+  for (const { re, allowRule, name, sev } of CONFIG_PATTERNS) {
+    if (allowRule && settings) {
+      const rule = settings.allow.find(r => allowRule.test(r));
+      if (rule !== undefined) { flag(filePath, name, sev, `"allow: ${rule.slice(0, 72)}"`); continue; }
+      const m = settings.text.match(re);
+      if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
+      continue;
+    }
     if (re.test(content)) {
       const m = content.match(re);
       flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
     }
   }
   // Also check for generic secrets in config files
+  scanSecrets(filePath, content);
+}
+
+// Data and config files other than settings*.json are read for secrets only (S6).
+function scanSecrets(filePath, content) {
   for (const { re, name, sev } of MD_SECRETS) {
     if (re.test(content)) {
       const m = content.match(re);
@@ -274,12 +458,39 @@ function scanScript(filePath, content, ext) {
   if (SH_EXTS.has(ext)) patterns = SH_PATTERNS;
   if (patterns.length === 0) return;
 
-  for (const { re, name, sev } of patterns) {
-    if (re.test(scanContent)) {
-      const m = scanContent.match(re);
-      flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
-    }
+  for (const { re, find, name, sev } of patterns) {
+    const m = find ? find(scanContent) : scanContent.match(re);
+    if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
   }
+}
+
+// Data and config files read for secrets (S6), by extension or, for dotfiles, by name.
+const DATA_EXTS = new Set(['.json', '.jsonc', '.json5', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env', '.properties']);
+const DATA_FILENAMES = new Set(['.env', '.npmrc', '.pypirc', '.netrc']);
+const isDataFile = (base, ext) => DATA_EXTS.has(ext) || DATA_FILENAMES.has(base) || base.startsWith('.env.');
+
+// A file with no known script extension is read by its shebang (S5): "#!/bin/sh", "#!/usr/bin/env node",
+// "#!/usr/bin/env -S node --flag", "#!/usr/bin/python3.12". Returns the extension whose patterns apply.
+const SHEBANG_EXT = { node: '.js', nodejs: '.js', deno: '.js', bun: '.js', python: '.py', pypy: '.py',
+                      sh: '.sh', bash: '.sh', zsh: '.sh', dash: '.sh', ksh: '.sh', ash: '.sh' };
+function shebangExt(content) {
+  const m = content.match(/^#!\s*([^\n]*)/);
+  if (!m) return '';
+  const words = m[1].trim().split(/\s+/);
+  let prog = path.basename(words[0] || '');
+  if (prog === 'env') prog = path.basename(words.slice(1).find(w => !w.startsWith('-') && !w.includes('=')) || '');
+  return SHEBANG_EXT[prog.replace(/^(python|pypy)[\d.]*$/, '$1')] || '';
+}
+
+function scanFile(full, content) {
+  const ext  = path.extname(full).toLowerCase();
+  const base = path.basename(full).toLowerCase();
+  if (['.md', '.txt'].includes(ext))   scanMarkdown(full, content);
+  else if (CONFIG_FILENAMES.has(base)) scanConfig(full, content);
+  // Script extensions first: a script named .env.sh or .env.local.js keeps its table (independent review T3)
+  else if (JS_EXTS.has(ext) || PY_EXTS.has(ext) || SH_EXTS.has(ext)) scanScript(full, content, ext);
+  else if (isDataFile(base, ext))      scanSecrets(full, content);
+  else                                 scanScript(full, content, shebangExt(content));
 }
 
 function walkDir(dir) {
@@ -287,26 +498,17 @@ function walkDir(dir) {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) { walkDir(full); continue; }
-    const ext  = path.extname(entry.name).toLowerCase();
-    const base = entry.name.toLowerCase();
     let content;
     try { content = fs.readFileSync(full, 'utf8'); } catch { continue; }
-    if (['.md', '.txt'].includes(ext))   scanMarkdown(full, content);
-    else if (CONFIG_FILENAMES.has(base)) scanConfig(full, content);
-    else                                 scanScript(full, content, ext);
+    scanFile(full, content);
   }
 }
 
 // Support single-file scanning (agent .md, settings.json) as well as directories
-const stat = fs.statSync(skillDir);
-if (stat.isFile()) {
-  const ext  = path.extname(skillDir).toLowerCase();
-  const base = path.basename(skillDir).toLowerCase();
+if (isSingleFile) {
   let content;
   try { content = fs.readFileSync(skillDir, 'utf8'); } catch { content = ''; }
-  if (['.md', '.txt'].includes(ext))   scanMarkdown(skillDir, content);
-  else if (CONFIG_FILENAMES.has(base)) scanConfig(skillDir, content);
-  else                                 scanScript(skillDir, content, ext);
+  scanFile(skillDir, content);
 } else {
   walkDir(skillDir);
 }
