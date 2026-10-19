@@ -496,7 +496,11 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **M3:** corrects E12; see there.
     - **M4:** extends E13.
     - **M5:** `install.sh` keeps its `skills/*-eval-snapshot/` ignore rule on purpose, for snapshot folders left by earlier runs.
-- **E12 (open, owner decision, found while fixing E8):** both eval agents record `baseline_method = snapshot` for an existing skill or agent, but their step-6 baseline prompt always says "Do NOT load any skill" or "Do NOT dispatch the agent". So agent-run evals of an existing definition compare against no skill at all, while the manifest says they compared against the previous version.
+    - **Round 2 (M6–M8):**
+      - **M6:** the test refuses absolute and `..` paths, and fails on any unexpected command in step 5 instead of skipping it.
+      - **M7:** the test deletes its temp folders.
+      - **M8:** E12's first sentence no longer says the baseline was the previous version.
+- **E12 (open, owner decision, found while fixing E8):** both eval agents record `baseline_method = snapshot` for an existing skill or agent, but their step-6 baseline prompt always says "Do NOT load any skill" or "Do NOT dispatch the agent". So agent-run evals of an existing definition compare against no skill at all, while the manifest records a snapshot baseline.
   - The eval skills' own text says to use the snapshot as the baseline.
   - **Corrected by review M3:** the step-5 snapshot is taken at eval time, so it is byte-identical to `--subject` (same sha256 in simulation). This was already so before E8. So even a baseline that loaded it would compare the current version with itself, not with an earlier one, in all four flows. `skills/skill-eval/REFERENCE.md` and `skills/agent-eval/REFERENCE.md` call it a "snapshot of previous version", which is not what the steps produce.
   - A real fix needs the pre-change definition, for example refine's `SKILL.md.baseline`, a git ref, or a snapshot taken before an edit, and a rule for grading its trigger marker. That is a methodology decision for the owner.

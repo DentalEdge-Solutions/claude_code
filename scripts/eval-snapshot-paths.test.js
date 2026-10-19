@@ -66,7 +66,16 @@ for (const { files, snapshot, sample } of TRACKS) {
       const end = text.indexOf('run-manifest.js init', start);
       assert.ok(start !== -1 && end > start, 'step 5 not found');
       const fill = t => t.replace(/<skill-name>|<agent-name>/g, 'demo').replace(/<N>/g, '1');
+      // Every line in that span must be a mkdir/cp command, a `# comment` or prose whose backticked spans are
+      // mkdir/cp commands: anything else (an added `rm -rf`, say) fails instead of being skipped (review M6).
+      const CMD = /^(mkdir -p|cp -R|cp) /;
+      for (const line of text.slice(start, text.lastIndexOf('\n', end)).split('\n').map(l => l.trim()).filter(Boolean)) {
+        const spans = [...line.matchAll(/`([^`]*)`/g)].map(m => m[1]);
+        const ok = spans.length ? spans.every(x => CMD.test(x)) : (line.startsWith('#') || CMD.test(line));
+        assert.ok(ok, `unexpected command in step 5: ${line}`);
+      }
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-snapshot-'));
+      try {
       fs.mkdirSync(path.join(tmp, 'skills', 'demo', 'references'), { recursive: true });
       fs.writeFileSync(path.join(tmp, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\n---\nbody\n');
       fs.writeFileSync(path.join(tmp, 'skills', 'demo', 'references', 'a.md'), 'ref\n');
@@ -75,6 +84,9 @@ for (const { files, snapshot, sample } of TRACKS) {
       const cmds = [...text.slice(start, end).matchAll(/\b(mkdir -p|cp -R|cp) ([^\s`]+)(?: ([^\s`]+))?/g)];
       assert.ok(cmds.some(c => c[1].startsWith('cp')), 'no cp in step 5');
       for (const [, op, a1, a2] of cmds) {
+        for (const a of [a1, a2].filter(Boolean)) {   // stay inside the temp repo (review M6)
+          assert.ok(!path.isAbsolute(a) && !a.split('/').includes('..'), `path leaves the repo: ${a}`);
+        }
         const args = op === 'mkdir -p' ? ['-p', fill(a1)] : [...(op === 'cp -R' ? ['-R'] : []), fill(a1), fill(a2 || '')];
         const r = spawnSync(op.split(' ')[0], args, { cwd: tmp, encoding: 'utf8' });
         assert.strictEqual(r.status, 0, `${op} ${args.join(' ')}: ${r.stderr}`);
@@ -85,6 +97,9 @@ for (const { files, snapshot, sample } of TRACKS) {
       const sha = f => crypto.createHash('sha256').update(fs.readFileSync(path.join(tmp, f))).digest('hex');
       assert.ok(fs.existsSync(path.join(tmp, snap)) && fs.statSync(path.join(tmp, snap)).isFile(), `${snap} was not created`);
       assert.strictEqual(sha(snap), sha(subj), 'the snapshot differs from the subject');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });   // review M7
+      }
     });
 
     // The copy runs once per iteration, like init: re-running `cp -R` nests a second copy (review M2).
