@@ -1,4 +1,24 @@
 {
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(/infra/hermes-agent/.env.ga)",
+      "Read(/infra/hermes-agent/.env.gaw)",
+      "Read(/infra/hermes-agent/.env.pr)",
+      "Read(/infra/hermes-agent/data/auth.json)",
+      "Read(/infra/hermes-agent/data/home/**)",
+      "Read(/infra/hermes-agent/data/.claude/**)",
+      "Read(/infra/hermes-agent/data/.claude.json)",
+      "Edit(**/.env)",
+      "Edit(/infra/hermes-agent/.env.ga)",
+      "Edit(/infra/hermes-agent/.env.gaw)",
+      "Edit(/infra/hermes-agent/.env.pr)",
+      "Edit(/infra/hermes-agent/data/auth.json)",
+      "Edit(/infra/hermes-agent/data/home/**)",
+      "Edit(/infra/hermes-agent/data/.claude/**)",
+      "Edit(/infra/hermes-agent/data/.claude.json)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {

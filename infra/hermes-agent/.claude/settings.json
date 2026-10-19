@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(/.env.ga)",
+      "Read(/.env.gaw)",
+      "Read(/.env.pr)",
+      "Read(/data/auth.json)",
+      "Read(/data/home/**)",
+      "Read(/data/.claude/**)",
+      "Read(/data/.claude.json)",
+      "Edit(**/.env)",
+      "Edit(/.env.ga)",
+      "Edit(/.env.gaw)",
+      "Edit(/.env.pr)",
+      "Edit(/data/auth.json)",
+      "Edit(/data/home/**)",
+      "Edit(/data/.claude/**)",
+      "Edit(/data/.claude.json)"
+    ]
+  }
+}
