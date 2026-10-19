@@ -309,6 +309,15 @@ test('an unreadable run-manifest.json leaves mtime_in_window null', () => {
   assert.strictEqual(s.evidence('with_skill').artifacts[0].mtime_in_window, null);
 });
 
+test('E3: an invalid started_at warns and leaves mtime_in_window null, for found and missing artifacts', () => {
+  const s = makeScenario({ evals: evalWith({ artifacts: [{ path: 'a.md' }, { path: 'gone.md' }], transcript_markers: [], workflow_steps: [] }),
+    manifest: { started_at: 'not-a-date' }, sides: { with_skill: { output: 'x', files: { 'a.md': 'a' } } } });
+  const r = harvest(s);
+  assert.strictEqual(r.status, 0);
+  assert.deepStrictEqual(s.evidence('with_skill').artifacts.map(a => a.mtime_in_window), [null, null]);
+  assert.match(r.stderr, /started_at/);
+});
+
 // E1 (P2 findings): an artifact counts only when it resolves to a regular file inside the side's own
 // workspace. A link to a file outside, a linked folder that leads outside, or a spec path that climbs out
 // would otherwise satisfy an artifact workflow step without the run writing anything.
@@ -403,11 +412,180 @@ test('backtick tokens with spaces or without a / or . are not claims, and repeat
   assert.deepStrictEqual(claims.map(c => c.claimed_path), ['x.md']);
 });
 
-test('a claim is verified when the file exists in the workspace or under the repo root (cwd)', () => {
-  const claims = claimsFor('I wrote `ws.md`, saved `docs/repo.md` and created `nowhere.md`.',
-    { 'ws.md': 'w' }, { 'docs/repo.md': 'r' });
+test('a claim is verified by a file in the workspace, or by a repo-root (cwd) path into this side\'s folder', () => {
+  const claims = claimsFor('I wrote `ws.md`, saved `evals/demo/iteration-1/s1-direct-r1/with_skill/workspace/ws.md`, '
+    + 'saved `docs/repo.md` and created `nowhere.md`.', { 'ws.md': 'w' }, { 'docs/repo.md': 'r' });
   const byPath = Object.fromEntries(claims.map(c => [c.claimed_path, c.claim_verified]));
-  assert.deepStrictEqual(byPath, { 'ws.md': true, 'docs/repo.md': true, 'nowhere.md': false });
+  assert.deepStrictEqual(byPath, { 'ws.md': true, 'evals/demo/iteration-1/s1-direct-r1/with_skill/workspace/ws.md': true,
+    'docs/repo.md': false, 'nowhere.md': false });
+});
+
+// E2–E5 (P2 findings): a claim is verified only by a file the run could have written: inside the
+// side's workspace or the repo root, links followed, and changed since started_at when it is known.
+// The claim window stops at the end of the previous sentence.
+
+// Like claimsFor, plus a run-manifest and per-file ages: ages = { 'ws:a.md' | 'repo:docs/a.md': ms before now }.
+function claimsWithWindow(output, { files = {}, repoFiles = {}, startedAt, ages = {} } = {}) {
+  const s = makeScenario({ evals: evalWith({ artifacts: [], transcript_markers: [], workflow_steps: [] }),
+    manifest: startedAt === undefined ? null : { started_at: startedAt },
+    sides: { with_skill: { output, files } } });
+  for (const [rel, content] of Object.entries(repoFiles)) {
+    fs.mkdirSync(path.dirname(path.join(s.root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(s.root, rel), content);
+  }
+  for (const [key, ms] of Object.entries(ages)) {
+    const [where, rel] = key.split(/:(.*)/s);
+    const p = where === 'ws' ? path.join(s.sideDir('with_skill'), 'workspace', rel) : path.join(s.root, rel);
+    const t = new Date(Date.now() - ms);
+    fs.utimesSync(p, t, t);
+  }
+  const r = harvest(s);
+  return { s, r, byPath: Object.fromEntries(s.evidence('with_skill').claims.map(c => [c.claimed_path, c.claim_verified])) };
+}
+
+test('E2: a claim path that climbs out of the workspace and the repo root is not verified', () => {
+  const s = makeScenario({ evals: evalWith({ artifacts: [], transcript_markers: [], workflow_steps: [] }),
+    sides: { with_skill: { output: 'x' } } });
+  const outside = path.join(WORK, `outside-${seq++}.md`);
+  fs.writeFileSync(outside, 'o');
+  const ws = path.join(s.sideDir('with_skill'), 'workspace');
+  fs.mkdirSync(ws, { recursive: true });
+  const fromWs = path.relative(ws, outside);
+  const fromRepo = path.relative(s.root, outside);
+  fs.writeFileSync(path.join(s.sideDir('with_skill'), 'output.md'),
+    `I wrote \`${fromWs}\` and saved \`${fromRepo}\` and created \`${outside}\`.`);
+  harvest(s);
+  const claims = s.evidence('with_skill').claims;
+  assert.strictEqual(claims.length, 3, JSON.stringify(claims));
+  for (const c of claims) assert.strictEqual(c.claim_verified, false, c.claimed_path);
+});
+
+test('E2: a workspace link to a file outside does not verify a claim; a link inside still does', () => {
+  const s = makeScenario({ evals: evalWith({ artifacts: [], transcript_markers: [], workflow_steps: [] }),
+    sides: { with_skill: { output: 'I wrote `out.md` and saved `in.md`.', files: { 'real.md': 'r' } } } });
+  const outside = path.join(WORK, `outside-${seq++}.md`);
+  fs.writeFileSync(outside, 'o');
+  const ws = path.join(s.sideDir('with_skill'), 'workspace');
+  fs.symlinkSync(outside, path.join(ws, 'out.md'));
+  fs.symlinkSync(path.join(ws, 'real.md'), path.join(ws, 'in.md'));
+  harvest(s);
+  const byPath = Object.fromEntries(s.evidence('with_skill').claims.map(c => [c.claimed_path, c.claim_verified]));
+  assert.deepStrictEqual(byPath, { 'out.md': false, 'in.md': true });
+});
+
+test('E2: an absolute claim path inside the workspace is verified', () => {
+  const s = makeScenario({ evals: evalWith({ artifacts: [], transcript_markers: [], workflow_steps: [] }),
+    sides: { with_skill: { output: 'x', files: { 'abs.md': 'a' } } } });
+  const abs = path.join(s.sideDir('with_skill'), 'workspace', 'abs.md');
+  fs.writeFileSync(path.join(s.sideDir('with_skill'), 'output.md'), `I wrote \`${abs}\`.`);
+  harvest(s);
+  assert.strictEqual(s.evidence('with_skill').claims[0].claim_verified, true);
+});
+
+test('E4: with a run window, a claimed file not changed since started_at is not verified', () => {
+  const startedAt = new Date(Date.now() - 60 * 1000).toISOString();
+  const { byPath } = claimsWithWindow(
+    'I wrote `new.md`, saved `old.md`, created `README.md` and generated `docs/fresh.md`.',
+    { files: { 'new.md': 'n', 'old.md': 'o' }, repoFiles: { 'README.md': 'r', 'docs/fresh.md': 'f' }, startedAt,
+      ages: { 'ws:old.md': 3600 * 1000, 'repo:README.md': 3600 * 1000 } });
+  // docs/fresh.md changed in the window but is outside this side's folder (review V3)
+  assert.deepStrictEqual(byPath, { 'new.md': true, 'old.md': false, 'README.md': false, 'docs/fresh.md': false });
+});
+
+test('E4: without a run window, an existing old file is still verified (existence is all that can be checked)', () => {
+  const { byPath } = claimsWithWindow('I wrote `old.md`.', { files: { 'old.md': 'o' }, ages: { 'ws:old.md': 3600 * 1000 } });
+  assert.deepStrictEqual(byPath, { 'old.md': true });
+});
+
+test('E5: the claim window stops at the end of the previous sentence', () => {
+  const claims = claimsFor([
+    'I produced `a.md`.',
+    'See `b.md` for details.',
+    'I wrote `c.md`. Then read `d.md` again!',
+    'Saved it? Open `e.md` next.',
+  ].join('\n'));
+  assert.deepStrictEqual(claims.map(c => c.claimed_path).sort(), ['a.md', 'c.md']);
+});
+
+
+test('E5: list, heading and abbreviation formats keep their claims (review V1)', () => {
+  const cases = {
+    'Created:\n1. `n1.md`\n2. `n2.md`': ['n1.md', 'n2.md'],
+    'I created the following files:\n\n- `report.md`\n- `summary.md`': ['report.md', 'summary.md'],
+    '## Files created\n\n`h.md`': ['h.md'],
+    'I wrote, e.g. `eg.md`, etc. `etc.md`': ['eg.md', 'etc.md'],
+    'Files created:\n- `d1.md`.\n- `d2.md`.': ['d1.md', 'd2.md'],
+    'I created these files:\n1. Main report `m1.md`\n2. Summary `m2.md`': ['m1.md', 'm2.md'],
+    'Created:\n  10. Report: `m3.md`': ['m3.md'],
+    'I created files, e.g. the `lc.md`': ['lc.md'],
+  };
+  for (const [output, expected] of Object.entries(cases)) {
+    assert.deepStrictEqual(claimsFor(output).map(c => c.claimed_path).sort(), expected, JSON.stringify(output));
+  }
+});
+
+test('E5: a sentence ends at ! or ?, after a closing quote or bracket, and across CRLF (review V2, V5)', () => {
+  const cases = {
+    'Done! I produced `a.md`. See `b.md`.': ['a.md'],
+    'I wrote it all! See `x.md`.': [],
+    'I wrote `a2.md`. Éste es `b2.md`.': ['a2.md'],
+    'I wrote it.") See `q.md`.': [],
+    'I wrote it.) See `r.md`.': [],
+    'I produced `c.md`.\r\nSee `d.md`.\r\n': ['c.md'],
+  };
+  for (const [output, expected] of Object.entries(cases)) {
+    assert.deepStrictEqual(claimsFor(output).map(c => c.claimed_path).sort(), expected, JSON.stringify(output));
+  }
+});
+
+test('E4: only paths inside this side\'s folder verify — not evals.json, the other side or other repo files (review V3)', () => {
+  const startedAt = new Date(Date.now() - 60 * 1000).toISOString();
+  const s = makeScenario({ evals: evalWith({ artifacts: [], transcript_markers: [], workflow_steps: [] }),
+    manifest: { started_at: startedAt },
+    sides: { with_skill: { output: 'x', files: { 'mine.md': 'm' } }, without_skill: { output: 'y', files: { 'theirs.md': 't' } } } });
+  fs.mkdirSync(path.join(s.root, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(s.root, 'docs', 'touched.md'), 'changed during the run');
+  const rel = p => path.relative(s.root, p);
+  const ws = path.join(s.sideDir('with_skill'), 'workspace');
+  const claimed = {
+    [rel(path.join(ws, 'mine.md'))]: true,
+    [rel(path.join(s.sideDir('with_skill'), 'output.md'))]: true,
+    [rel(path.join(s.root, 'evals', 'demo', 'evals.json'))]: false,
+    [rel(path.join(s.sideDir('without_skill'), 'workspace', 'theirs.md'))]: false,
+    'docs/touched.md': false,
+  };
+  fs.writeFileSync(path.join(s.sideDir('with_skill'), 'output.md'),
+    Object.keys(claimed).map(p => `I wrote \`${p}\`.`).join('\n'));
+  harvest(s);
+  const byPath = Object.fromEntries(s.evidence('with_skill').claims.map(c => [c.claimed_path, c.claim_verified]));
+  assert.deepStrictEqual(byPath, claimed);
+});
+
+test('E4: a new link to an old file is not "written" in the run window (the file\'s time counts, review V5)', () => {
+  const startedAt = new Date(Date.now() - 60 * 1000).toISOString();
+  const s = makeScenario({ evals: evalWith({ artifacts: [], transcript_markers: [], workflow_steps: [] }),
+    manifest: { started_at: startedAt },
+    sides: { with_skill: { output: 'I wrote `link.md`.', files: { 'old.md': 'o' } } } });
+  const ws = path.join(s.sideDir('with_skill'), 'workspace');
+  const old = new Date(Date.now() - 3600 * 1000);
+  fs.utimesSync(path.join(ws, 'old.md'), old, old);
+  fs.symlinkSync(path.join(ws, 'old.md'), path.join(ws, 'link.md'));
+  harvest(s);
+  assert.strictEqual(s.evidence('with_skill').claims[0].claim_verified, false);
+});
+
+test('the run window allows 2 s for coarse file times: 1 s before started_at is in, 3 s before is out (review V6)', () => {
+  const started = Date.now() - 60 * 1000;
+  const s = makeScenario({ evals: evalWith({ artifacts: [{ path: 'near.md' }, { path: 'far.md' }], transcript_markers: [], workflow_steps: [] }),
+    manifest: { started_at: new Date(started).toISOString() },
+    sides: { with_skill: { output: 'I wrote `near.md` and `far.md`.', files: { 'near.md': 'n', 'far.md': 'f' } } } });
+  const ws = path.join(s.sideDir('with_skill'), 'workspace');
+  fs.utimesSync(path.join(ws, 'near.md'), new Date(started - 1000), new Date(started - 1000));
+  fs.utimesSync(path.join(ws, 'far.md'), new Date(started - 3000), new Date(started - 3000));
+  harvest(s);
+  const e = s.evidence('with_skill');
+  assert.deepStrictEqual(e.artifacts.map(a => a.mtime_in_window), [true, false]);
+  assert.deepStrictEqual(Object.fromEntries(e.claims.map(c => [c.claimed_path, c.claim_verified])), { 'near.md': true, 'far.md': false });
 });
 
 // ── Workflow steps ─────────────────────────────────────────────────────────
