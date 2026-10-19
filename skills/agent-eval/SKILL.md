@@ -49,19 +49,18 @@ User: check how well skill-refine-agent is working
 
 4. **Establish baseline** — before running with-agent tests, determine what to compare against, and record it as the `baseline_method` for the whole iteration:
    - **New agent**: `none` — run each scenario with general capabilities only, no Agent tool call
-   - **Existing agent being improved**: `snapshot` first:
-     ```bash
-     cp .claude/agents/<name>.md .claude/agents/<name>.md.eval-snapshot
-     ```
-     then use the snapshot as the baseline version.
+   - **Existing agent being improved**: `snapshot` — step 5 copies the agent file into the iteration (`evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md`), then that copy is the baseline version. The iteration folder is gitignored; a copy in `.claude/agents/` was not
 
    **Resume check:** if `evals/agents/<agent-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/agents/<agent-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here.
 
 5. **Create the iteration dir and initialize the run manifest** (once per iteration — skip on resume):
    ```bash
    mkdir -p evals/agents/<agent-name>/iteration-<N>
+   # snapshot only: the agent as it is now, before any change — this iteration's baseline
+   mkdir -p evals/agents/<agent-name>/iteration-<N>/eval-snapshot
+   cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md
    node skills/skill-eval/scripts/run-manifest.js init evals/agents/<agent-name>/iteration-<N> \
-     --baseline-method <none|snapshot> [--snapshot-path .claude/agents/<name>.md.eval-snapshot] \
+     --baseline-method <none|snapshot> [--snapshot-path evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md] \
      --subject .claude/agents/<agent-name>.md --commit <short SHA from git rev-parse --short HEAD>
    ```
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
@@ -73,7 +72,7 @@ User: check how well skill-refine-agent is working
    convention going forward; do not use the legacy `<id>_rep<N>` or bare `<id>` forms.
    - Mark each scenario `dispatched`: `node skills/skill-eval/scripts/run-manifest.js mark evals/agents/<agent-name>/iteration-<N> s<id>-<type>-r<rep> dispatched`
    - **With-agent**: dispatch the named agent, execute the prompt, save output to `evals/agents/<agent-name>/iteration-<N>/s<id>-<type>-r<rep>/with_agent/`. Any file the prompt asks the subagent to produce must be written under that scenario's `with_agent/workspace/` subdirectory — never to the repo root or a real skill/agent directory.
-   - **Baseline**: use whichever baseline was established in step 4 — **new agent**: no agent dispatched (general capabilities only); **existing agent being improved**: dispatch the `.eval-snapshot` version instead of the current one — same prompt either way, save to `evals/agents/<agent-name>/iteration-<N>/s<id>-<type>-r<rep>/without_agent/`, with its own `without_agent/workspace/` sandbox.
+   - **Baseline**: use whichever baseline was established in step 4 — **new agent**: no agent dispatched (general capabilities only); **existing agent being improved**: dispatch the snapshot (`evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md`) instead of the current one — same prompt either way, save to `evals/agents/<agent-name>/iteration-<N>/s<id>-<type>-r<rep>/without_agent/`, with its own `without_agent/workspace/` sandbox.
    - Mark each completed pair `complete`: `node skills/skill-eval/scripts/run-manifest.js mark evals/agents/<agent-name>/iteration-<N> s<id>-<type>-r<rep> complete`
 
    Run dispatch-type scenarios (direct, paraphrased, semantic, negative, adversarial) 3 times each to measure dispatch consistency. Record `total_tokens` and `duration_ms` from each run — save to `timing.json` in the run directory. A self-reported status header (`did_trigger`, `workflow_steps_executed`) in a transcript is narrative color only — it is never read for scoring.
