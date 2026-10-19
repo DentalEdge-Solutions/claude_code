@@ -113,11 +113,23 @@ function loadManifestStartedAt(scenarioDir) {
   if (!fs.existsSync(manifestPath)) return null;
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    return manifest.started_at ? new Date(manifest.started_at) : null;
+    if (!manifest.started_at) return null;
+    const startedAt = new Date(manifest.started_at);
+    // An unparseable started_at means the window is unknown (null), not that every file is outside it (E3).
+    if (Number.isNaN(startedAt.getTime())) {
+      console.error(`Warning: started_at ${JSON.stringify(manifest.started_at)} in ${manifestPath} is not a date — mtime checks skipped.`);
+      return null;
+    }
+    return startedAt;
   } catch { return null; }
 }
 
 // ── Artifact evidence ──────────────────────────────────────────────────────────
+// Some filesystems keep file times to 1–2 s, so a file written in the second started_at was set
+// can carry an earlier mtime. Times within this margin before started_at count as in the run.
+const WINDOW_SLACK_MS = 2000;
+const changedInWindow = (stat, windowStart) => stat.mtime.getTime() >= windowStart.getTime() - WINDOW_SLACK_MS;
+
 function sha256File(filePath) {
   const buf = fs.readFileSync(filePath);
   return crypto.createHash('sha256').update(buf).digest('hex');
@@ -126,9 +138,9 @@ function sha256File(filePath) {
 // An artifact counts only when it resolves, links followed, to a file inside this side's own workspace.
 // Otherwise a link to an existing file, a linked folder or a path that climbs out (../) would satisfy an
 // artifact workflow step without the run writing anything (E1, PR #4 triage P2 findings).
-function insideWorkspace(resolved, workspaceDir) {
+function insideDir(resolved, dir) {
   try {
-    const root = fs.realpathSync(workspaceDir);
+    const root = fs.realpathSync(dir);
     return fs.realpathSync(resolved).startsWith(root + path.sep);
   } catch { return false; }
 }
@@ -137,7 +149,7 @@ function harvestArtifacts(artifactSpecs, workspaceDir, windowStart) {
   return artifactSpecs.map(spec => {
     const resolved = path.join(workspaceDir, spec.path);
     let exists = fs.existsSync(resolved) && fs.statSync(resolved).isFile();
-    if (exists && !insideWorkspace(resolved, workspaceDir)) {
+    if (exists && !insideDir(resolved, workspaceDir)) {
       console.error(`Warning: artifact "${spec.path}" resolves outside the workspace (${workspaceDir}) — not counted.`);
       exists = false;
     }
@@ -145,7 +157,7 @@ function harvestArtifacts(artifactSpecs, workspaceDir, windowStart) {
       return { path: spec.path, exists: false, size: null, sha256: null, mtime_in_window: windowStart ? false : null };
     }
     const stat = fs.statSync(resolved);
-    const mtimeInWindow = windowStart ? stat.mtime.getTime() >= windowStart.getTime() : null;
+    const mtimeInWindow = windowStart ? changedInWindow(stat, windowStart) : null;
     return {
       path: spec.path,
       exists: true,
@@ -168,9 +180,15 @@ function harvestMarkers(markerSpecs, transcript) {
 
 // ── Claim extraction + verification ───────────────────────────────────────────
 // Looks for "wrote/created/saved/generated ... `path`" phrasing (and gerund/past
-// forms) within ~80 chars before a backtick-quoted, path-like token. Backticks are
+// forms) within ~80 chars before a backtick-quoted, path-like token, and within the
+// same sentence (E5): the window starts after the last . ! or ? (plus any closing quote
+// or bracket) that is followed by whitespace and a capital letter, so "See `b.md`" after
+// "produced `a.md`." is no claim. A list number at the start of a line ("1. Report `a.md`")
+// is no sentence end, and "e.g. `x.md`", blank lines and headings start no sentence, so a
+// list under one verb stays one window. Backticks are
 // required for precision — prose mentions of a path without them are too noisy to
 // reliably distinguish from ordinary narration.
+const SENTENCE_END_RE = /(?<!(?:^|\n)[ \t]*\d{1,3})[.!?]["'`)\]]*\s+(?=\p{Lu})/gu;
 const CLAIM_VERB_RE = /\b(wrote|writing|written|create[sd]?|creating|save[sd]?|saving|generate[sd]?|generating|produce[sd]?|producing)\b/i;
 
 function extractClaims(transcript) {
@@ -182,15 +200,29 @@ function extractClaims(transcript) {
     if (!token || token.includes(' ')) continue; // paths don't contain spaces
     if (!/[\/.]/.test(token)) continue;          // must look path-like
     const contextStart = Math.max(0, m.index - 80);
-    const context = transcript.slice(contextStart, m.index);
+    let context = transcript.slice(contextStart, m.index);
+    let sentenceStart = 0;
+    for (const end of context.matchAll(SENTENCE_END_RE)) sentenceStart = end.index + end[0].length;
+    context = context.slice(sentenceStart);
     if (CLAIM_VERB_RE.test(context)) claims.add(token);
   }
   return [...claims];
 }
 
-function verifyClaim(claimedPath, workspaceDir, repoRoot) {
-  if (fs.existsSync(path.join(workspaceDir, claimedPath))) return true;
-  if (fs.existsSync(path.join(repoRoot, claimedPath))) return true;
+// A claim is verified when the path names something this side's run could have written.
+// The path is read against the workspace, then the repo root (cwd), and must resolve, links
+// followed, inside this side's own folder (its workspace, output.md, timing.json): not
+// `../../etc/hosts`, not evals.json, not the other side's workspace (E2). When
+// run-manifest.json gives a start time, the file must also have changed since then (E4: an
+// untouched file is not "written"). Without a start time, existence is all it checks.
+// So false means "not found as written in this side's folder", not necessarily fabricated.
+function verifyClaim(claimedPath, workspaceDir, repoRoot, sideDir, windowStart) {
+  for (const base of [workspaceDir, repoRoot]) {
+    const resolved = path.resolve(base, claimedPath);
+    if (!fs.existsSync(resolved) || !insideDir(resolved, sideDir)) continue;
+    if (windowStart && !changedInWindow(fs.statSync(resolved), windowStart)) continue;
+    return true;
+  }
   return false;
 }
 
@@ -241,7 +273,7 @@ function harvestScenario(scenarioDir) {
     const claimPaths = extractClaims(transcript);
     const claims = claimPaths.map(p => ({
       claimed_path: p,
-      claim_verified: verifyClaim(p, workspaceDir, repoRoot),
+      claim_verified: verifyClaim(p, workspaceDir, repoRoot, sideDir, windowStart),
     }));
 
     // skill_loaded/agent_dispatched comes from the tool_call marker's actual regex

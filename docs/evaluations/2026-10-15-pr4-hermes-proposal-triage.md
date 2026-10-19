@@ -19,7 +19,7 @@ The proposal's own `P` numbers are kept.
 | Item | Proposal | Status | Evidence (2026-10-15) |
 |---|---|---|---|
 | P1 | The brain and telemetry secret-pattern lists diverge | **Done 2026-10-15** (see "P1 repair") | Before: the brain set (6 patterns) missed GitHub fine-grained, Slack, Google, JWT, Bearer and `key = value` secrets. The telemetry set (12) missed Anthropic admin keys, `ghs_` tokens, Google keys without the `AIzaSy` prefix, a lone private-key header and short passwords. **Correction to the first probe:** telemetry did catch `AIzaSy…` keys and complete private-key blocks, so its gaps were narrower than first reported. |
-| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6, all open |
+| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6: E1 fixed 2026-10-15, E2–E5 fixed and E6 disclosed 2026-10-19 (see "E2–E6 repair"); E7, found in that review, is open |
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
@@ -75,7 +75,7 @@ The proposal's own `P` numbers are kept.
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"), and S4–S9 on 2026-10-16 (see "S4–S9 repair"); S10–S13 are open.
-   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E6 are open.
+   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E5 are fixed (see "E1 repair" and "E2–E6 repair"), and E6, a method question, is disclosed in the eval report instructions and waits on an owner decision. E7 (the eval agents' inline report templates lack Evidence and Limits) is open.
 4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. ~~**P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`.~~ Done on 2026-10-16 (PR #144; see "P9 repair").
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
@@ -406,18 +406,18 @@ Verdict: **approve**. W1–W3 closed. A fuzz run of the settings reader against 
   - 10 mutations of the harvester, each reverted, all failed the suite: loaded from any marker, an unescaped step marker, a flipped time window, md5 for sha256, the wrong agent key, an 800-character claim window, no repo-root fallback, `some` for `every`, a directory counted as an artifact, and a case-sensitive marker.
 - **No behavior change.** `harvest-evidence.js` is untouched.
 
-### Harvester weaknesses found (E1–E6; E1 fixed, see "E1 repair")
+### Harvester weaknesses found (E1–E6; E1–E5 fixed, E6 disclosed — see "E1 repair" and "E2–E6 repair"; E7 is recorded there)
 
 Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 
 | # | Weakness | Reproduction | Impact |
 |---|---|---|---|
 | E1 | A symlink in the workspace satisfies an artifact check | `workspace/report.md` → symlink to any existing file outside the workspace: `exists: true`, the step is satisfied, `workflow_executed: true` | **Fixed 2026-10-15** (see "E1 repair"). Before the fix, a run could satisfy artifact workflow steps without writing the file (a junk file still satisfies `exists`; content is left to the LLM judge) |
-| E2 | A claim path can leave the workspace | ``I wrote `../../…/etc/hosts` `` → `claim_verified: true` | Informational field only; misleading if a reader trusts it |
-| E3 | An invalid `started_at` in `run-manifest.json` makes every artifact `mtime_in_window: false` (not null) | `{"started_at": "not-a-date"}` | Informational field only |
-| E4 | `claim_verified` means "exists", not "written by this run": any existing repo file verifies (repo-root fallback, no time window) | ``I wrote `README.md` `` run from the repo root → `true` | Informational field only |
-| E5 | The 80-character claim window crosses lines and sentences, so a mention near another sentence's verb becomes a claim | `produced `a.md`.` then `See `b.md`.` → both claims | Noise in an informational field |
-| E6 | Design note: `skill_loaded` comes from the literal token `Skill(<name>)`, which the eval subagent is instructed to write when it applies the skill. It is an instructed marker in the subagent's own output, not an independent tool-call log | `.claude/agents/skill-eval-agent.md` (the "Trigger token" rule) | Trigger accuracy depends on the subagent following that instruction honestly. A method question, not a harvester bug |
+| E2 | A claim path can leave the workspace | ``I wrote `../../…/etc/hosts` `` → `claim_verified: true` | **Fixed 2026-10-19** (see "E2–E6 repair"). Informational field only; misleading if a reader trusts it |
+| E3 | An invalid `started_at` in `run-manifest.json` makes every artifact `mtime_in_window: false` (not null) | `{"started_at": "not-a-date"}` | **Fixed 2026-10-19.** Informational field only |
+| E4 | `claim_verified` means "exists", not "written by this run": any existing repo file verifies (repo-root fallback, no time window) | ``I wrote `README.md` `` run from the repo root → `true` | **Fixed 2026-10-19**: only files in the side's own folder verify, and, when `run-manifest.json` gives `started_at`, only files changed since then. Informational field only |
+| E5 | The 80-character claim window crosses lines and sentences, so a mention near another sentence's verb becomes a claim | `produced `a.md`.` then `See `b.md`.` → both claims | **Fixed 2026-10-19.** Noise in an informational field |
+| E6 | Design note: `skill_loaded` comes from the literal token `Skill(<name>)`, which the eval subagent is instructed to write when it applies the skill. It is an instructed marker in the subagent's own output, not an independent tool-call log | `.claude/agents/skill-eval-agent.md` (the "Trigger token" rule) | Trigger accuracy depends on the subagent following that instruction honestly. A method question, not a harvester bug. **Disclosed 2026-10-19** in the skill-eval, agent-eval and team-eval report instructions (not yet in the eval agents' inline templates, E7); replacing the marker is an owner decision (see "E2–E6 repair") |
 
 ## E1 repair (2026-10-15)
 
@@ -433,6 +433,48 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - After, 37/37 harvester tests and 27/27 suites pass, and `ci-scan-skills.js` is clean.
   - 3 mutations (no separator in the prefix check, no containment check, no link resolution) each failed the suite.
 - **Scope:** E2–E5 (informational fields) and E6 (method) are unchanged and still open.
+
+## E2–E6 repair (2026-10-19)
+
+`skills/skill-eval/scripts/harvest-evidence.js` (shared by skill-eval and agent-eval). The `evidence.json` shape is unchanged.
+
+- **E2:** a claim is verified only when its path resolves, links followed, inside the side's own folder: its workspace, `output.md` and `timing.json`. The path is read against the workspace first, then the repo root (cwd); the usual form is a repo-relative path into the workspace. Rejected cases:
+  - `../` paths and absolute paths outside the side's folder;
+  - a workspace link to a file outside it;
+  - `evals.json`, the other side's workspace, and any other repo file (independent review V3).
+
+  An absolute path inside the workspace now verifies. Before, it was joined onto the workspace path and never matched.
+- **E3:** an unparseable `started_at` gives a stderr warning and `mtime_in_window: null`, the same as an unreadable manifest. Before, it gave `false` for every artifact.
+- **E4:** when `run-manifest.json` gives `started_at`, a claimed file must also have changed since then, judged by the file's own time (a new link to an old file does not count). An untouched `README.md` is then not "written". Without a start time, existence inside the side's folder is all that can be checked.
+  - Artifacts and claims both allow 2 s before `started_at`, for filesystems that keep coarse file times (review V6).
+  - `claim_verified: false` therefore means "not found as written in this side's folder", not "fabricated": a file the run really wrote elsewhere, against its instructions (for example `skills/demo/SKILL.md`), is also `false` (review W4).
+- **E5:** the 80-character claim window starts after the last `.`, `!` or `?` (plus any closing quote or bracket) that is followed by whitespace and a capital letter. A list number at the start of a line (`1. `, up to 3 digits) is not a sentence end. Formats that keep their claims (review V1, W1):
+  - numbered and dashed lists, including items that start with a capital (`1. Main report …`) and lists after a blank line under `…created:`;
+  - headings;
+  - `e.g.`, `etc.`;
+  - list items ending in `.`.
+
+  Known misses (review W2):
+  - a sentence is not split when it starts with lower case, a backticked path, a digit, `#`, `**` or a quote;
+  - an abbreviation followed by a capitalised word (`e.g. See`) is split;
+  - a `./` claim resolves to the workspace folder itself and verifies whenever the run wrote any file there. Folder claims (`out/`) verify from the folder's time; this was already so before.
+- **E6:** the marker is still the instructed `Skill(<name>)` / `Agent(<name>)` token. The following now say so:
+  - the "Evidence source" line in the skill-eval and agent-eval report templates (`REFERENCE.md` and `assets/*-EVAL.template.md`);
+  - team-eval's report step (`skills/team-eval/SKILL.md` step 7), whose Dispatch-Chain Accuracy reads the same kind of `Agent(<member>)` marker.
+
+  An independent signal would need a different method, for example real auto-invocation in a sandbox with the tool calls read from the session log. That is a methodology change, which is the owner's call.
+- **E7 (new, open):** the inline report templates in `.claude/agents/skill-eval-agent.md` and `agent-eval-agent.md` (step 12) have no Evidence and Limits section at all. Reports written through those agents therefore carry neither the E6 disclosure nor the other evidence fields (found by review V4).
+- **Evidence:**
+  - **Tests:** 12 new tests in `scripts/harvest-evidence.test.js`, plus 2 existing tests updated for the side-folder rule. Before the fix, 7 of the round-1 tests failed; the rest pin behaviour that review mutants broke. Round 3 added cases for W1 (failed first) and W3 to the E5 tests. All 49 pass, and `node scripts/run-all-tests.js` passes 31/31, including the Codex end-to-end claim test.
+  - **Mutants:** 22 were run on a copy, and all were killed. They covered:
+    - E2/V3: containment dropped, base instead of side folder, `join` in place of `resolve`.
+    - E4: window ignored, flipped or not passed; `lstat`.
+    - V6: slack removed, 0.5 s, 5 s.
+    - E3: the NaN check dropped.
+    - E5: no cut, first end in place of last, no capital-letter check, no closing characters, no `!`, any newline an end, no list-number exemption, no indented list numbers, ASCII-only capitals, any letter in place of a capital.
+    - E1: the containment control.
+  - **Timing:** linear. 6.3 MB of dense backticks: 169 ms. 150,000 distinct claims, each checked on disk: 680 ms. The sentence-end pattern runs only on slices of 80 characters or less.
+  - **Independent review:** round 1 approved with changes (V1–V8). V1–V3, V5, V6 and V7 are addressed here; V4 is addressed for team-eval and recorded as E7 for the agent templates; V8, the skill deploy, follows merge. Round 2 confirmed V2–V6 closed and approved with changes (W1–W5); W1–W5 are addressed here. Round 3 confirmed W1–W5 closed (and V7 with W2) and **approved** with no new findings; open after merge: V8 (deploy) and E7.
 
 ## P9 repair (2026-10-16)
 
