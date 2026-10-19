@@ -417,7 +417,7 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 | E3 | An invalid `started_at` in `run-manifest.json` makes every artifact `mtime_in_window: false` (not null) | `{"started_at": "not-a-date"}` | **Fixed 2026-10-19.** Informational field only |
 | E4 | `claim_verified` means "exists", not "written by this run": any existing repo file verifies (repo-root fallback, no time window) | ``I wrote `README.md` `` run from the repo root → `true` | **Fixed 2026-10-19**: only files in the side's own folder verify, and, when `run-manifest.json` gives `started_at`, only files changed since then. Informational field only |
 | E5 | The 80-character claim window crosses lines and sentences, so a mention near another sentence's verb becomes a claim | `produced `a.md`.` then `See `b.md`.` → both claims | **Fixed 2026-10-19.** Noise in an informational field |
-| E6 | Design note: `skill_loaded` comes from the literal token `Skill(<name>)`, which the eval subagent is instructed to write when it applies the skill. It is an instructed marker in the subagent's own output, not an independent tool-call log | `.claude/agents/skill-eval-agent.md` (the "Trigger token" rule) | Trigger accuracy depends on the subagent following that instruction honestly. A method question, not a harvester bug. **Disclosed 2026-10-19** in the skill-eval, agent-eval and team-eval report instructions (not yet in the eval agents' inline templates, E7); replacing the marker is an owner decision (see "E2–E6 repair") |
+| E6 | Design note: `skill_loaded` comes from the literal token `Skill(<name>)`, which the eval subagent is instructed to write when it applies the skill. It is an instructed marker in the subagent's own output, not an independent tool-call log | `.claude/agents/skill-eval-agent.md` (the "Trigger token" rule) | Trigger accuracy depends on the subagent following that instruction honestly. A method question, not a harvester bug. **Disclosed 2026-10-19** in the skill-eval, agent-eval and team-eval report instructions and, since the E7 fix, in the eval agents' inline templates; replacing the marker is an owner decision (see "E2–E6 repair") |
 
 ## E1 repair (2026-10-15)
 
@@ -463,7 +463,18 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
   - team-eval's report step (`skills/team-eval/SKILL.md` step 7), whose Dispatch-Chain Accuracy reads the same kind of `Agent(<member>)` marker.
 
   An independent signal would need a different method, for example real auto-invocation in a sandbox with the tool calls read from the session log. That is a methodology change, which is the owner's call.
-- **E7 (fixed 2026-10-19):** the inline report templates in `.claude/agents/skill-eval-agent.md` and `agent-eval-agent.md` (step 12) have no Evidence and Limits section at all. Reports written through those agents therefore carry neither the E6 disclosure nor the other evidence fields (found by review V4). **Fix:** both step-12 templates now carry the Evidence and Limits section, its four bullets identical to the skill templates (`skills/*-eval/assets/*-EVAL.template.md`), including the E6 marker disclosure. Both agents' `run-manifest.js init` now pass `--subject <definition> --commit <sha>`, as the skills do, so the "Subject revision" line has a pinned value to cite. Noted, not changed: the agents snapshot to `<name>/SKILL.md.eval-snapshot` / `<name>.md.eval-snapshot` while the skill-eval skill copies to `skills/<name>-eval-snapshot/`; each document is consistent with its own copy step.
+- **E7 (fixed 2026-10-19):** the inline report templates in `.claude/agents/skill-eval-agent.md` and `agent-eval-agent.md` (step 12) have no Evidence and Limits section at all. Reports written through those agents therefore carry neither the E6 disclosure nor the other evidence fields (found by review V4). **Fix:** both step-12 templates now carry the Evidence and Limits section, its four bullets identical to the skill templates (`skills/*-eval/assets/*-EVAL.template.md`), including the E6 marker disclosure. Both agents' `run-manifest.js init` now pass `--subject <definition> --commit <sha>`, as the skills do, so the "Subject revision" line has a pinned value to cite. `scripts/eval-report-sections.test.js` now checks that the section's bullets are identical in the template, the `REFERENCE.md` copy and the agent, for both tracks. Against the pre-fix agents it fails, as it does on a one-word drift or a dropped marker.
+  - Independent review: approve with changes (K1–K4).
+    - **K1:** a stale "E7" phrase in the E6 row; fixed.
+    - **K4:** the sync test above.
+    - **K2:** recorded as E8.
+    - **K3:** recorded as E9.
+- **E8 (open, from review K2):** `skill-eval-agent` snapshots the baseline to `skills/<name>/SKILL.md.eval-snapshot`, inside the skill folder. The skill-eval skill uses `skills/<name>-eval-snapshot/` instead.
+  - `install.sh` gitignores only `skills/*-eval-snapshot/` in target projects, so the agent's snapshot is neither ignored nor kept out of a skill deploy.
+  - agent-eval and its agent agree with each other.
+  - Fix: move the agent to the skill's path, or ignore both forms.
+- **E9 (open, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
+  - Fix, in all four templates: say that the sha256 is authoritative, and write "not recorded" when `subject` is null.
 - **Evidence:**
   - **Tests:** 12 new tests in `scripts/harvest-evidence.test.js`, plus 2 existing tests updated for the side-folder rule. Before the fix, 7 of the round-1 tests failed; the rest pin behaviour that review mutants broke. Round 3 added cases for W1 (failed first) and W3 to the E5 tests. All 49 pass, and `node scripts/run-all-tests.js` passes 31/31, including the Codex end-to-end claim test.
   - **Mutants:** 22 were run on a copy, and all were killed. They covered:
@@ -474,7 +485,7 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - E5: no cut, first end in place of last, no capital-letter check, no closing characters, no `!`, any newline an end, no list-number exemption, no indented list numbers, ASCII-only capitals, any letter in place of a capital.
     - E1: the containment control.
   - **Timing:** linear. 6.3 MB of dense backticks: 169 ms. 150,000 distinct claims, each checked on disk: 680 ms. The sentence-end pattern runs only on slices of 80 characters or less.
-  - **Independent review:** round 1 approved with changes (V1–V8). V1–V3, V5, V6 and V7 are addressed here; V4 is addressed for team-eval and recorded as E7 for the agent templates; V8, the skill deploy, follows merge. Round 2 confirmed V2–V6 closed and approved with changes (W1–W5); W1–W5 are addressed here. Round 3 confirmed W1–W5 closed (and V7 with W2) and **approved** with no new findings; open after merge: V8 (deploy) and E7.
+  - **Independent review:** round 1 approved with changes (V1–V8). V1–V3, V5, V6 and V7 are addressed here; V4 is addressed for team-eval and recorded as E7 for the agent templates; V8, the skill deploy, follows merge. Round 2 confirmed V2–V6 closed and approved with changes (W1–W5); W1–W5 are addressed here. Round 3 confirmed W1–W5 closed (and V7 with W2) and **approved** with no new findings; open after merge: V8 (deploy) and E7 (E7 since fixed).
 
 ## P9 repair (2026-10-16)
 
