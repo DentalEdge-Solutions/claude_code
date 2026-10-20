@@ -64,8 +64,11 @@ Content the scanner cannot fully check is a finding, never a silent PASS. Conten
 |-------|----------|------|--------------|
 | `unreadable` | BLOCK | a file or directory that cannot be read (permissions, I/O error) | the rest of the tree is still scanned |
 | `special-file` | BLOCK | a FIFO, socket or device, or a symlink to one | never opened (a FIFO would hang the scan) |
-| `file-too-large` | FLAG | a file too large to read whole (past about 536 MB, node's string limit) | scanned in 64 MB chunks that overlap by 1 MB, one finding per check; a match longer than the overlap can be missed |
+| `file-over-scan-limit` | BLOCK | a file over 2 GiB | not read (a 2.5 GB scan took 45 s) |
+| `file-too-large` | FLAG | a file too large to read whole (past about 536 MB, node's string limit), up to 2 GiB | scanned in 64 MB chunks that overlap by 1 MB, keeping the most severe finding per check; a match longer than the overlap, or a code fence that spans chunks, can be misread |
 | `symlink-outside-tree` | FLAG | a symlink whose target is outside the scanned directory, missing, or a loop | a file target is still scanned, under the link's name, and its matches are not quoted; a directory target is not walked |
+
+For a symlink target outside the tree, only quoted content is hidden; a size or error detail is kept. A finding for the scanned directory itself (an unreadable root) has `file: "."`. CI's `ci-scan-skills.js` reads only BLOCK findings, so the FLAG checks here do not show in CI.
 
 A symlink to a file inside the tree is scanned under the link's name, since that is the name Claude Code loads it by (`SKILL.md` → `payload.png` is read as markdown). A symlink to a directory is never walked; the tree's own directories are walked in place. The path you name is followed if it is a symlink; if it is not a directory, it is scanned as a single file.
 

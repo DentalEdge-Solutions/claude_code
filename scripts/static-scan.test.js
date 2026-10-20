@@ -1213,6 +1213,67 @@ test('S10: an in-tree directory symlink is not walked twice, and is not a findin
   assert.deepStrictEqual([...new Set(r.json.findings.map(f => f.file))], [path.join('docs', 'a.md')]);
 });
 
+test('S10: the chunked scan keeps the most severe finding per check (review K4)', () => {
+  // rm-rf-root is FLAG in a code block and BLOCK in prose; the code-block one comes first.
+  const dir = makeDir({});
+  const f = path.join(dir, 'SKILL.md');
+  const fd = fs.openSync(f, 'w');
+  fs.ftruncateSync(fd, 600 * 1024 * 1024);
+  fs.writeSync(fd, '```\nrm -rf ~/\n```\n', 0);
+  fs.writeSync(fd, '\nrm -rf ~/\n', 100 * 1024 * 1024);
+  fs.closeSync(fd);
+  const r = spawnSync(process.execPath, [SCAN, dir], { encoding: 'utf8', timeout: 120000 });
+  const json = JSON.parse(r.stdout);
+  assert.deepStrictEqual(json.findings.filter(x => x.check === 'rm-rf-root').map(x => x.severity), ['BLOCK']);
+});
+
+test('S10: a file over 2 GiB is not read, and is a file-over-scan-limit BLOCK', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n' });
+  const fd = fs.openSync(path.join(dir, 'big.json'), 'w');
+  fs.ftruncateSync(fd, 2 * 1024 * 1024 * 1024 + 1);
+  fs.closeSync(fd);
+  const t0 = Date.now();
+  const r = run([dir]);
+  assert.ok(blocked(r, 'file-over-scan-limit'), r.json ? checks(r.json).join(', ') : r.stderr);
+  assert.ok(Date.now() - t0 < 10000, 'not read');
+});
+
+test('S10: an outside link keeps its own size or error detail; only matches are hidden (review K6)', () => {
+  const outside = makeDir({});
+  const big = path.join(outside, 'big.json');
+  const fd = fs.openSync(big, 'w');
+  fs.ftruncateSync(fd, 600 * 1024 * 1024);
+  fs.closeSync(fd);
+  const dir = makeDir({ 'SKILL.md': 'ok\n' });
+  fs.symlinkSync(big, path.join(dir, 'data.json'));
+  const r = run([dir]);
+  assert.match(flagged(r, 'file-too-large').detail, /bytes, too large to read whole/);
+});
+
+test('S10: matches after an outside link are quoted again (the reset, review K5)', () => {
+  const outside = makeDir({ 'x.md': INJECTION });
+  const files = { 'SKILL.md': 'ok\n' };
+  for (let i = 0; i < 9; i++) files[`z${i}.md`] = INJECTION;
+  const dir = makeDir(files);
+  fs.symlinkSync(path.join(outside, 'x.md'), path.join(dir, 'a-link.md'));
+  const r = run([dir]);
+  const inTree = r.json.findings.filter(f => /^z\d\.md$/.test(f.file));
+  assert.strictEqual(inTree.length, 9);
+  for (const f of inTree) assert.match(f.detail, /Ignore previous/, `${f.file} lost its quote`);
+});
+
+test('S10: the named path is followed if it is a symlink, directory or file (review K5)', () => {
+  const real = makeDir({ 'SKILL.md': INJECTION });
+  const link = path.join(WORK, `named-dir-${seq++}`);
+  fs.symlinkSync(real, link);
+  assert.strictEqual(run([link]).json.verdict, 'BLOCK');
+  const fileLink = path.join(WORK, `named-file-${seq++}.md`);
+  fs.symlinkSync(path.join(real, 'SKILL.md'), fileLink);
+  const r = run([fileLink]);
+  assert.strictEqual(r.json.verdict, 'BLOCK');
+  assert.ok(!checks(r.json).includes('symlink-outside-tree'), checks(r.json).join(', '));
+});
+
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 if (isRoot) console.log('SKIP S10 unreadable cases: root reads any file');
 else {
@@ -1225,6 +1286,15 @@ else {
       assert.ok(f, `got ${r.json ? checks(r.json).join(', ') : r.stderr}`);
       assert.strictEqual(f.file, 'tool.md');
     } finally { fs.chmodSync(path.join(dir, 'tool.md'), 0o644); }
+  });
+
+  test('S10: an unreadable root directory is reported as "." (review K8)', () => {
+    const dir = makeDir({ 'SKILL.md': 'ok\n' });
+    fs.chmodSync(dir, 0o000);
+    try {
+      const r = run([dir]);
+      assert.strictEqual(blocked(r, 'unreadable').file, '.');
+    } finally { fs.chmodSync(dir, 0o755); }
   });
 
   test('S10: a single-file scan of an unreadable file is a BLOCK, not an empty PASS', () => {

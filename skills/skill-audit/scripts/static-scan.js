@@ -9,6 +9,8 @@
 //   - Malicious JS/Python/Shell in scripts (JS/PY/SH_PATTERNS); a file with no known extension is
 //     read by its shebang (S5)
 //   - Hardcoded secrets in data and config files: JSON, YAML, TOML, INI, .env, .npmrc … (S6)
+//   - Content it cannot check (S10): unreadable, special-file, file-over-scan-limit (BLOCK);
+//     file-too-large, symlink-outside-tree (FLAG)
 // Outputs JSON: { verdict, findings, scanned }
 
 const fs = require('fs');
@@ -29,13 +31,17 @@ Arguments:
 Output:
   JSON to stdout: { verdict, findings, scanned }
   verdict:  PASS | FLAG | BLOCK
-  findings: array of { severity, pattern, file, line, match }
+  findings: array of { file, check, severity, detail }
   scanned:  list of files checked
 
 Severities:
   BLOCK   Must not be installed — malicious or dangerous content detected
   FLAG    Requires explicit user confirmation before proceeding
   PASS    No security issues found
+
+Content it cannot check is never a silent PASS: an unreadable file or directory, a FIFO or
+device, or a file over 2 GiB is BLOCK; a file too large to read whole (scanned in chunks) or a
+symlink leaving the tree is FLAG.
 
 Examples:
   node skills/skill-audit/scripts/static-scan.js skills/skill-scout
@@ -60,10 +66,12 @@ const isSingleFile = !targetStat.isDirectory();
 // A single-file scan names the file itself; relative to the file, every finding had file: "" (S9).
 const findingRoot = isSingleFile ? path.dirname(skillDir) : skillDir;
 
-function flag(file, check, severity, detail) {
+// own: the detail is the scanner's own text (a size, an error code), not quoted content.
+function flag(file, check, severity, detail, own = false) {
   // Matches in a symlink target outside the tree are not quoted: it can be any file on the machine (S10).
-  if (!quoteMatches) detail = '"(match in a file outside the scanned tree; not quoted)"';
-  findings.push({ file: path.relative(findingRoot, file), check, severity, detail });
+  if (!quoteMatches && !own) detail = '"(match in a file outside the scanned tree; not quoted)"';
+  // The scanned directory itself is "." (an unreadable root), never an empty name.
+  findings.push({ file: path.relative(findingRoot, file) || '.', check, severity, detail });
 }
 
 function stripCodeBlocks(text) {
@@ -504,7 +512,8 @@ function scanFile(full, content) {
 // symlink-outside-tree) is FLAG. These checks only add to what main reported: every file main
 // read is still read the same way, so a verdict is never lower than main's.
 // - A file too large to read whole (past about 536 MB, node's string limit) used to be dropped
-//   and pass. It is now scanned in overlapping chunks and reported.
+//   and pass. It is now scanned in overlapping chunks and reported. Past MAX_SCAN_BYTES it is not
+//   read at all (BLOCK): scan time grows with size, and main passed such files unread.
 // - A FIFO, socket or device is never opened: opening a FIFO waits for a writer forever.
 // - A symlink to a file is read through the link and scanned under the link's name, as main
 //   did: that is the name Claude Code loads it by. One whose target is outside the tree is also
@@ -513,6 +522,7 @@ function scanFile(full, content) {
 //   A dangling or looping symlink is reported.
 // - A file or directory that cannot be read is reported.
 const CHUNK_BYTES = 64 * 1024 * 1024;
+const MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024;   // larger files are not read: a 2.5 GB scan took 45 s
 const OVERLAP_BYTES = 1024 * 1024;
 let treeRoot = null;
 try { treeRoot = isSingleFile ? null : fs.realpathSync(skillDir); } catch { /* reported by walkDir */ }
@@ -541,7 +551,7 @@ function scanInChunks(full, size) {
   const before = findings.length;
   let fd;
   try { fd = fs.openSync(full, 'r'); }
-  catch (e) { flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; not scanned"`); return; }
+  catch (e) { flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; not scanned"`, true); return; }
   const buf = Buffer.alloc(CHUNK_BYTES);
   try {
     for (let pos = 0; ; pos += CHUNK_BYTES - OVERLAP_BYTES) {
@@ -550,11 +560,14 @@ function scanInChunks(full, size) {
       if (n < CHUNK_BYTES) break;
     }
   } catch (e) {
-    flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; partly scanned"`);
+    flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; partly scanned"`, true);
   } finally { fs.closeSync(fd); }
+  // One finding per check, the most severe: rm-rf-root is FLAG in a code block and BLOCK in prose.
   const seen = new Set();
-  findings.push(...findings.splice(before).filter(f => !seen.has(f.check) && seen.add(f.check)));
-  flag(full, 'file-too-large', 'FLAG', `"${size} bytes, too large to read whole; scanned in chunks of ${CHUNK_BYTES} bytes overlapping by ${OVERLAP_BYTES}, so a longer match can be missed"`);
+  const rank = f => (f.severity === 'BLOCK' ? 0 : 1);
+  findings.push(...findings.splice(before).sort((a, b) => rank(a) - rank(b))
+    .filter(f => !seen.has(f.check) && seen.add(f.check)));
+  flag(full, 'file-too-large', 'FLAG', `"${size} bytes, too large to read whole; scanned in chunks of ${CHUNK_BYTES} bytes overlapping by ${OVERLAP_BYTES}, so a longer match can be missed"`, true);
 }
 
 function readAndScan(full, size) {
@@ -562,7 +575,7 @@ function readAndScan(full, size) {
   try { content = fs.readFileSync(full, 'utf8'); }
   catch (e) {
     if (e.code === 'ERR_STRING_TOO_LONG' || e.code === 'ERR_FS_FILE_TOO_LARGE') scanInChunks(full, size);
-    else flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; not scanned"`);
+    else flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; not scanned"`, true);
     return;
   }
   scanFile(full, content);
@@ -575,19 +588,23 @@ function scanPath(full, st) {
     let target;
     try { target = fs.statSync(full); }
     catch (e) {
-      flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; ${errText(e)}, not followed"`);
+      flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; ${errText(e)}, not followed"`, true);
       return;
     }
     outside = !insideTree(full);
     if (target.isDirectory()) {
-      if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; a directory outside the scanned tree, not walked"`);
+      if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; a directory outside the scanned tree, not walked"`, true);
       return;
     }
-    if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; outside the scanned tree, scanned under this name"`);
+    if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; outside the scanned tree, scanned under this name"`, true);
     st = target;
   }
   if (st.isDirectory()) { walkDir(full); return; }
-  if (!st.isFile()) { flag(full, 'special-file', 'BLOCK', `"${specialKind(st)}; not read"`); return; }
+  if (!st.isFile()) { flag(full, 'special-file', 'BLOCK', `"${specialKind(st)}; not read"`, true); return; }
+  if (st.size > MAX_SCAN_BYTES) {
+    flag(full, 'file-over-scan-limit', 'BLOCK', `"${st.size} bytes, over the ${MAX_SCAN_BYTES}-byte scan limit; not read"`, true);
+    return;
+  }
   quoteMatches = !outside;
   try { readAndScan(full, st.size); } finally { quoteMatches = true; }
 }
@@ -595,12 +612,12 @@ function scanPath(full, st) {
 function walkDir(dir) {
   let names;
   try { names = fs.readdirSync(dir); }
-  catch (e) { flag(dir, 'unreadable', 'BLOCK', `"${e.code || e.message}; directory not scanned"`); return; }
+  catch (e) { flag(dir, 'unreadable', 'BLOCK', `"${e.code || e.message}; directory not scanned"`, true); return; }
   for (const name of names) {
     const full = path.join(dir, name);
     let st;
     try { st = fs.lstatSync(full); }
-    catch (e) { flag(full, 'unreadable', 'BLOCK', `"${e.code || e.message}; not scanned"`); continue; }
+    catch (e) { flag(full, 'unreadable', 'BLOCK', `"${e.code || e.message}; not scanned"`, true); continue; }
     scanPath(full, st);
   }
 }
