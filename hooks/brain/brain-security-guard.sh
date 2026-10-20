@@ -12,7 +12,8 @@
 #     .project-brain/reports/guard-failures.log, exit 1 (a non-blocking hook error
 #     the user sees). Denying there would block every Write/Edit/Bash, the fix included.
 # Denial is expressed via permissionDecision with exit 0. Every pattern is linear-time:
-# a hook that times out lets the tool call through.
+# a hook that times out lets the tool call through. brain-self-install.sh registers this
+# hook with a 30 s timeout (Claude Code's default is 600 s), so a stall costs 30 s, not 10 min.
 # Defense-in-depth only: brain-promote --approve + git history are the real
 # canon boundary; this guard raises the cost of accidental/careless mutation.
 set -u

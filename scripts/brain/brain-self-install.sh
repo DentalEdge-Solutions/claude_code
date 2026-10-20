@@ -43,28 +43,42 @@ const file = process.argv[1] + "/.claude/settings.local.json";
 let settings = {};
 if (fs.existsSync(file)) { try { settings = JSON.parse(fs.readFileSync(file, "utf8")); } catch { settings = {}; } }
 settings.hooks = settings.hooks || {};
-function ensureHookEntry(eventName, matcher, command) {
+function ensureHookEntry(eventName, matcher, command, timeout) {
   settings.hooks[eventName] = settings.hooks[eventName] || [];
   const list = settings.hooks[eventName];
   const already = list.some((entry) =>
     (entry.matcher || null) === (matcher || null) &&
     Array.isArray(entry.hooks) && entry.hooks.some((h) => h && h.command === command));
   if (already) return false;
-  list.push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command }] });
+  list.push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command, ...(timeout !== undefined ? { timeout } : {}) }] });
   return true;
+}
+// Give every hook that runs command on eventName the timeout (seconds) if it has none, whatever
+// its matcher: matching hooks run in parallel, so one untimed copy keeps the default. A timeout
+// the owner already set is kept. Returns how many hooks it updated.
+function ensureTimeout(eventName, command, timeout) {
+  let n = 0;
+  for (const entry of settings.hooks[eventName] || [])
+    for (const h of Array.isArray(entry && entry.hooks) ? entry.hooks : [])
+      if (h && h.command === command && h.timeout === undefined) { h.timeout = timeout; n++; }
+  return n;
 }
 const H = (name) => `bash "$CLAUDE_PROJECT_DIR/hooks/brain/${name}"`;
 let added = 0;
 if (ensureHookEntry("PreCompact", null, H("brain-pre-compact.sh"))) added++;
 if (ensureHookEntry("SessionEnd", null, H("brain-session-end.sh"))) added++;
 if (ensureHookEntry("Stop", null, H("brain-session-end.sh"))) added++;
-if (ensureHookEntry("PreToolUse", "Write|Edit|NotebookEdit|Bash", H("brain-security-guard.sh"))) added++;
+// 30 s, not the 600 s default: a PreToolUse hook that times out does not block the call, so a
+// stalled guard would freeze every Write/Edit/Bash for 10 minutes and then let it through.
+// A normal check takes well under 1 s, even on a 1 MB command under load (triage F1).
+if (ensureHookEntry("PreToolUse", "Write|Edit|NotebookEdit|Bash", H("brain-security-guard.sh"), 30)) added++;
+added += ensureTimeout("PreToolUse", H("brain-security-guard.sh"), 30);
 if (ensureHookEntry("PostToolUse", "Write|Edit", H("brain-post-lint.sh"))) added++;
 if (ensureHookEntry("SessionStart", null, H("brain-load.sh"))) added++;
 fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
 process.stdout.write(String(added));
 ' "${TARGET}")"
-echo "✓ hook entries merged (${ADDED} added)"
+echo "✓ hook entries merged (${ADDED} added or updated)"
 
 # 3. .gitignore — session logs are local-only by default
 touch "${TARGET}/.gitignore"

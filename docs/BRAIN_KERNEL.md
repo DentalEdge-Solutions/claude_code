@@ -40,7 +40,7 @@ Frontmatter schema (required set): `type, title, description, tags, timestamp, s
 | `brain-post-lint.sh` | PostToolUse (`Write\|Edit`) | lint capsule edits; warn on sensitive content | no |
 | `brain-load.sh` | SessionStart | inject protocol + top-authority titles (≤ 8000 chars / < 2k tokens) | no |
 
-Every hook exits 0, except one case below; the guard expresses denial via `hookSpecificOutput.permissionDecision: "deny"`. The guard denies bad input (fail closed). If node cannot run, it fails open visibly: a stderr warning, a line in `.project-brain/reports/guard-failures.log`, and exit 1, which Claude Code shows as a non-blocking hook error. Details: `docs/SECOND_BRAIN_SECURITY.md`, "Hook gate".
+Every hook exits 0, except one case below; the guard expresses denial via `hookSpecificOutput.permissionDecision: "deny"`. The guard denies bad input (fail closed). If node cannot run, it fails open visibly: a stderr warning, a line in `.project-brain/reports/guard-failures.log`, and exit 1, which Claude Code shows as a non-blocking hook error. The guard is registered with a 30 s timeout; a guard that times out still lets the call through. Details: `docs/SECOND_BRAIN_SECURITY.md`, "Hook gate".
 
 ## Skills
 
