@@ -1614,6 +1614,10 @@ for (const [label, file, text] of [
   ['a code api_key value with spaces', 'c.js', `const api_key = "${rep('k', 20)} and more";\n`],
   ['a 7-character .netrc password', '.netrc', `machine h login u ${PW} hunter2\n`],
   ['a .netrc password placeholder', '.netrc', `machine h login u ${PW} \${NETRC_PASSWORD}\n`],
+  ['a 7-character .properties password (review R1)', 'app.properties', `${PW} s3cr3t7\n`],
+  ['a .properties password placeholder (review R1)', 'app.properties', `${PW} \${DB_PASSWORD}\n`],
+  ['a space-separated password in YAML or .env (review R1)', 'c.yml', `${PW} something_long\n`],
+  ['a space-separated password in .env (review R1)', '.env', `${PW} something_long\n`],
 ]) {
   test(`Q2/Q3/Q6: ${label} is not a secret`, () => {
     const json = scanOne(file, text);
