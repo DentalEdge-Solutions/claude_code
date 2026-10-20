@@ -498,9 +498,11 @@ function scanFile(full, content) {
   else                                 scanScript(full, content, shebangExt(content));
 }
 
-// S10: content the scanner cannot check is a FLAG finding, never skipped silently. These checks
-// only add to what main reported: every file main read is still read the same way, so a verdict
-// is never lower than main's.
+// S10: content the scanner cannot check is a finding, never skipped silently. What it could not
+// read at all (unreadable, special-file) is BLOCK: main crashed or hung there, which fails closed,
+// and a FLAG would let unchecked content through. What it read with a caveat (file-too-large,
+// symlink-outside-tree) is FLAG. These checks only add to what main reported: every file main
+// read is still read the same way, so a verdict is never lower than main's.
 // - A file too large to read whole (past about 536 MB, node's string limit) used to be dropped
 //   and pass. It is now scanned in overlapping chunks and reported.
 // - A FIFO, socket or device is never opened: opening a FIFO waits for a writer forever.
@@ -539,7 +541,7 @@ function scanInChunks(full, size) {
   const before = findings.length;
   let fd;
   try { fd = fs.openSync(full, 'r'); }
-  catch (e) { flag(full, 'unreadable', 'FLAG', `"${errText(e)}; not scanned"`); return; }
+  catch (e) { flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; not scanned"`); return; }
   const buf = Buffer.alloc(CHUNK_BYTES);
   try {
     for (let pos = 0; ; pos += CHUNK_BYTES - OVERLAP_BYTES) {
@@ -548,7 +550,7 @@ function scanInChunks(full, size) {
       if (n < CHUNK_BYTES) break;
     }
   } catch (e) {
-    flag(full, 'unreadable', 'FLAG', `"${errText(e)}; partly scanned"`);
+    flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; partly scanned"`);
   } finally { fs.closeSync(fd); }
   const seen = new Set();
   findings.push(...findings.splice(before).filter(f => !seen.has(f.check) && seen.add(f.check)));
@@ -560,7 +562,7 @@ function readAndScan(full, size) {
   try { content = fs.readFileSync(full, 'utf8'); }
   catch (e) {
     if (e.code === 'ERR_STRING_TOO_LONG' || e.code === 'ERR_FS_FILE_TOO_LARGE') scanInChunks(full, size);
-    else flag(full, 'unreadable', 'FLAG', `"${errText(e)}; not scanned"`);
+    else flag(full, 'unreadable', 'BLOCK', `"${errText(e)}; not scanned"`);
     return;
   }
   scanFile(full, content);
@@ -585,7 +587,7 @@ function scanPath(full, st) {
     st = target;
   }
   if (st.isDirectory()) { walkDir(full); return; }
-  if (!st.isFile()) { flag(full, 'special-file', 'FLAG', `"${specialKind(st)}; not read"`); return; }
+  if (!st.isFile()) { flag(full, 'special-file', 'BLOCK', `"${specialKind(st)}; not read"`); return; }
   quoteMatches = !outside;
   try { readAndScan(full, st.size); } finally { quoteMatches = true; }
 }
@@ -593,12 +595,12 @@ function scanPath(full, st) {
 function walkDir(dir) {
   let names;
   try { names = fs.readdirSync(dir); }
-  catch (e) { flag(dir, 'unreadable', 'FLAG', `"${e.code || e.message}; directory not scanned"`); return; }
+  catch (e) { flag(dir, 'unreadable', 'BLOCK', `"${e.code || e.message}; directory not scanned"`); return; }
   for (const name of names) {
     const full = path.join(dir, name);
     let st;
     try { st = fs.lstatSync(full); }
-    catch (e) { flag(full, 'unreadable', 'FLAG', `"${e.code || e.message}; not scanned"`); continue; }
+    catch (e) { flag(full, 'unreadable', 'BLOCK', `"${e.code || e.message}; not scanned"`); continue; }
     scanPath(full, st);
   }
 }
