@@ -58,16 +58,16 @@ The first row that matches wins, top to bottom, so a script named `.env.sh` is a
 
 ### What the scanner cannot check
 
-Content the scanner cannot read is a FLAG finding, never a silent PASS. A `blocklist` entry in `skill-audit-policy.json` raises any of these to BLOCK.
+Content the scanner cannot fully check is a FLAG finding, never a silent PASS. These checks only add findings: every file is still read the way it always was, so a verdict is never lower than before. A `blocklist` entry in `skill-audit-policy.json` raises any of them to BLOCK.
 
 | Check | When | What happens |
 |-------|------|--------------|
-| `file-too-large` | a file over 10 MB (10,485,760 bytes) | not read; a file at the cap is scanned |
-| `special-file` | a FIFO, socket or device | never opened (a FIFO would hang the scan) |
-| `symlink-outside-tree` | a symlink whose target is outside the scanned directory, or missing | not followed; the installed copy would still point at unaudited content. A symlink inside the tree is skipped without a finding, since its target is scanned where it lives |
+| `file-too-large` | a file too large to read whole (past about 536 MB, node's string limit) | scanned in 64 MB chunks that overlap by 1 MB, one finding per check; a match longer than the overlap can be missed |
+| `special-file` | a FIFO, socket or device, or a symlink to one | never opened (a FIFO would hang the scan) |
+| `symlink-outside-tree` | a symlink whose target is outside the scanned directory, missing, or a loop | a file target is still scanned, under the link's name, and its matches are not quoted; a directory target is not walked |
 | `unreadable` | a file or directory that cannot be read (permissions, I/O error) | the rest of the tree is still scanned |
 
-The path you name is followed if it is a symlink. If it is not a directory, it is scanned as a single file.
+A symlink to a file inside the tree is scanned under the link's name, since that is the name Claude Code loads it by (`SKILL.md` → `payload.png` is read as markdown). A symlink to a directory is never walked; the tree's own directories are walked in place. The path you name is followed if it is a symlink; if it is not a directory, it is scanned as a single file.
 
 ### Settings permissions (settings.json)
 

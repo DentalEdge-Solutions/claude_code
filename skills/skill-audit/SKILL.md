@@ -23,7 +23,7 @@ Run `node skills/skill-audit/scripts/static-scan.js /tmp/candidate-skill` then r
    ```bash
    node skills/skill-audit/scripts/static-scan.js <skill-dir|agent.md|settings.json>
    ```
-   Covers 5 categories: prompt injection, dangerous Bash, hardcoded secrets (Anthropic/GitHub/AWS keys), overly permissive settings.json rules, and malicious scripts. Records PASS/FLAG/BLOCK per finding. Content it cannot check (a file over 10 MB, a FIFO or device, a symlink leaving the tree, an unreadable file) is a FLAG, never a silent PASS; see REFERENCE.md, "What the scanner cannot check".
+   Covers 5 categories: prompt injection, dangerous Bash, hardcoded secrets (Anthropic/GitHub/AWS keys), overly permissive settings.json rules, and malicious scripts. Records PASS/FLAG/BLOCK per finding. Content it cannot fully check (a file too large to read whole, a FIFO or device, a symlink leaving the tree, an unreadable file) is a FLAG, never a silent PASS; see REFERENCE.md, "What the scanner cannot check".
 
 2. **Permissions audit** — read every `.md` file; list all tools, Bash commands, and external URLs the skill's instructions request. Check each against the skill's stated purpose. Flag mismatches (e.g., a "summarize" skill requesting `rm` or WebFetch to unknown domains).
 

@@ -61,6 +61,8 @@ const isSingleFile = !targetStat.isDirectory();
 const findingRoot = isSingleFile ? path.dirname(skillDir) : skillDir;
 
 function flag(file, check, severity, detail) {
+  // Matches in a symlink target outside the tree are not quoted: it can be any file on the machine (S10).
+  if (!quoteMatches) detail = '"(match in a file outside the scanned tree; not quoted)"';
   findings.push({ file: path.relative(findingRoot, file), check, severity, detail });
 }
 
@@ -496,24 +498,30 @@ function scanFile(full, content) {
   else                                 scanScript(full, content, shebangExt(content));
 }
 
-// S10: content the scanner cannot check is a FLAG finding, never skipped silently.
-// - A file over MAX_FILE_BYTES is not read: scan time grows with size, and past about 536 MB
-//   the read itself fails (node's string limit), which used to drop the file and pass.
+// S10: content the scanner cannot check is a FLAG finding, never skipped silently. These checks
+// only add to what main reported: every file main read is still read the same way, so a verdict
+// is never lower than main's.
+// - A file too large to read whole (past about 536 MB, node's string limit) used to be dropped
+//   and pass. It is now scanned in overlapping chunks and reported.
 // - A FIFO, socket or device is never opened: opening a FIFO waits for a writer forever.
-// - A symlink inside the tree is skipped, since its target is scanned where it lives. One that
-//   leaves the tree, or dangles, is reported and not followed: it would read files outside
-//   the skill, and the installed copy would still point at content no one audited.
+// - A symlink to a file is read through the link and scanned under the link's name, as main
+//   did: that is the name Claude Code loads it by. One whose target is outside the tree is also
+//   reported, and its matches are not quoted (the target can be any file on the machine). A
+//   symlink to a directory is never walked: the tree's own directories are walked in place.
+//   A dangling or looping symlink is reported.
 // - A file or directory that cannot be read is reported.
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const CHUNK_BYTES = 64 * 1024 * 1024;
+const OVERLAP_BYTES = 1024 * 1024;
 let treeRoot = null;
 try { treeRoot = isSingleFile ? null : fs.realpathSync(skillDir); } catch { /* reported by walkDir */ }
+let quoteMatches = true;
 
 function insideTree(full) {
   if (!treeRoot) return false;
   try {
     const real = fs.realpathSync(full);
     return real === treeRoot || real.startsWith(treeRoot + path.sep);
-  } catch { return false; }                            // dangling or a loop
+  } catch { return false; }
 }
 function linkTarget(full) {
   try { return fs.readlinkSync(full); } catch { return '?'; }
@@ -524,24 +532,62 @@ function specialKind(st) {
   if (st.isCharacterDevice() || st.isBlockDevice()) return 'a device';
   return 'not a regular file';
 }
+const errText = e => e.code || e.message;
+
+// Past node's string limit: scan overlapping chunks, keep one finding per check, and report it.
+function scanInChunks(full, size) {
+  const before = findings.length;
+  let fd;
+  try { fd = fs.openSync(full, 'r'); }
+  catch (e) { flag(full, 'unreadable', 'FLAG', `"${errText(e)}; not scanned"`); return; }
+  const buf = Buffer.alloc(CHUNK_BYTES);
+  try {
+    for (let pos = 0; ; pos += CHUNK_BYTES - OVERLAP_BYTES) {
+      const n = fs.readSync(fd, buf, 0, CHUNK_BYTES, pos);
+      if (n > 0) scanFile(full, buf.toString('utf8', 0, n));
+      if (n < CHUNK_BYTES) break;
+    }
+  } catch (e) {
+    flag(full, 'unreadable', 'FLAG', `"${errText(e)}; partly scanned"`);
+  } finally { fs.closeSync(fd); }
+  const seen = new Set();
+  findings.push(...findings.splice(before).filter(f => !seen.has(f.check) && seen.add(f.check)));
+  flag(full, 'file-too-large', 'FLAG', `"${size} bytes, too large to read whole; scanned in chunks of ${CHUNK_BYTES} bytes overlapping by ${OVERLAP_BYTES}, so a longer match can be missed"`);
+}
+
+function readAndScan(full, size) {
+  let content;
+  try { content = fs.readFileSync(full, 'utf8'); }
+  catch (e) {
+    if (e.code === 'ERR_STRING_TOO_LONG' || e.code === 'ERR_FS_FILE_TOO_LARGE') scanInChunks(full, size);
+    else flag(full, 'unreadable', 'FLAG', `"${errText(e)}; not scanned"`);
+    return;
+  }
+  scanFile(full, content);
+}
 
 // st comes from lstat for an entry of the tree and from stat for the named target.
 function scanPath(full, st) {
+  let outside = false;
   if (st.isSymbolicLink()) {
-    if (!insideTree(full))
-      flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; outside the scanned tree, not followed"`);
-    return;
+    let target;
+    try { target = fs.statSync(full); }
+    catch (e) {
+      flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; ${errText(e)}, not followed"`);
+      return;
+    }
+    outside = !insideTree(full);
+    if (target.isDirectory()) {
+      if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; a directory outside the scanned tree, not walked"`);
+      return;
+    }
+    if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; outside the scanned tree, scanned under this name"`);
+    st = target;
   }
   if (st.isDirectory()) { walkDir(full); return; }
   if (!st.isFile()) { flag(full, 'special-file', 'FLAG', `"${specialKind(st)}; not read"`); return; }
-  if (st.size > MAX_FILE_BYTES) {
-    flag(full, 'file-too-large', 'FLAG', `"${st.size} bytes, over the ${MAX_FILE_BYTES}-byte cap; not scanned"`);
-    return;
-  }
-  let content;
-  try { content = fs.readFileSync(full, 'utf8'); }
-  catch (e) { flag(full, 'unreadable', 'FLAG', `"${e.code || e.message}; not scanned"`); return; }
-  scanFile(full, content);
+  quoteMatches = !outside;
+  try { readAndScan(full, st.size); } finally { quoteMatches = true; }
 }
 
 function walkDir(dir) {
