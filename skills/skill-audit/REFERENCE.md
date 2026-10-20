@@ -56,6 +56,22 @@
 
 The first row that matches wins, top to bottom, so a script named `.env.sh` is a shell script. A shebang file with a data extension (`run.conf`) is read for secrets only. Shebangs with an `env` option that takes an argument (`env -u FOO python3`) or other interpreters (`tsx`, `pythonw`, `uv run`) are not recognised. Script files (JS, Python, shell) are not read for the secrets table; Python has its own hardcoded-secret FLAG. In a single-file scan, each finding's `file` is the file's name.
 
+### What the scanner cannot check
+
+Content the scanner cannot fully check is a finding, never a silent PASS. Content it could not read at all, or cannot vouch for after install, is **BLOCK** (manual clearance): before, the scan crashed or hung there, or passed it unread. A file it read in chunks is **FLAG**. These checks only add findings: every file is still read the way it always was, so a verdict is never lower than before. A `blocklist` entry in `skill-audit-policy.json` raises a FLAG check to BLOCK, and an `allowlist` entry skips a check (for example a reviewed symlink).
+
+| Check | Severity | When | What happens |
+|-------|----------|------|--------------|
+| `unreadable` | BLOCK | a file or directory that cannot be read (permissions, I/O error) | the rest of the tree is still scanned |
+| `special-file` | BLOCK | a FIFO, socket or device, or a symlink to one | never opened (a FIFO would hang the scan) |
+| `file-over-scan-limit` | BLOCK | a file over 2 GiB | not read (a 2.5 GB scan took 45 s) |
+| `symlink-outside-tree` | BLOCK | a symlink that leaves the tree: absolute (even to a file inside), or one whose resolution goes above the tree's top (even to come back in by name), or a dangling or looping link. It is resolved as the OS does, one component at a time, following every link on the way: `..` after a directory link goes to the parent of that link's target | a file target is still scanned, under the link's name, and its matches are not quoted; a directory target is not walked. Install copies the link as is, so what Claude Code loads after install would not be what was audited (owner decision 2026-10-20) |
+| `file-too-large` | FLAG | a file too large to read whole (past about 536 MB, node's string limit), up to 2 GiB | scanned in 64 MB chunks that overlap by 1 MB, keeping the most severe finding per check; a match longer than the overlap, or a code fence that spans chunks, can be misread |
+
+For a symlink target outside the tree, only quoted content is hidden; a size or error detail is kept. A finding for the scanned directory itself (an unreadable root) has `file: "."`. CI's `ci-scan-skills.js` reads only BLOCK findings, so `file-too-large` does not show in CI.
+
+A relative symlink that stays inside the tree (`docs/b.md` → `../a.md`) is not a finding; a symlink to a file inside the tree is scanned under the link's name, since that is the name Claude Code loads it by (`SKILL.md` → `payload.png` is read as markdown). A symlink to a directory is never walked; the tree's own directories are walked in place. The path you name is followed if it is a symlink; if it is not a directory, it is scanned as a single file.
+
 ### Settings permissions (settings.json)
 
 When the file is valid JSON, each row is matched two ways. The bare-name forms are matched against every `permissions.allow` rule, trimmed; a key that appears twice in one object (`permissions` or `allow`, escaped spellings included) is read in every copy, since parsers differ on which copy wins. The quoted forms (`"Bash(*)"`, `"*"` in an `allow` array, …) are matched against the raw text with the `permissions.deny` and `permissions.ask` arrays emptied, so a rule anywhere else in the file (`allowedTools`, a nested `allow`) is still reported. Deny and ask rules grant nothing and are not reported. When the file is not valid JSON, the rows are matched against the raw text, deny and ask lists included. Per the [permissions docs](https://code.claude.com/docs/en/permissions) (read 2026-10-16), a bare tool name matches every use of the tool: "`Bash(*)` is equivalent to `Bash`", and `:*` is another way to write a trailing wildcard.
