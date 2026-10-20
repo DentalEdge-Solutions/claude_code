@@ -56,6 +56,19 @@
 
 The first row that matches wins, top to bottom, so a script named `.env.sh` is a shell script. A shebang file with a data extension (`run.conf`) is read for secrets only. Shebangs with an `env` option that takes an argument (`env -u FOO python3`) or other interpreters (`tsx`, `pythonw`, `uv run`) are not recognised. Script files (JS, Python, shell) are not read for the secrets table; Python has its own hardcoded-secret FLAG. In a single-file scan, each finding's `file` is the file's name.
 
+### What the scanner cannot check
+
+Content the scanner cannot read is a FLAG finding, never a silent PASS. A `blocklist` entry in `skill-audit-policy.json` raises any of these to BLOCK.
+
+| Check | When | What happens |
+|-------|------|--------------|
+| `file-too-large` | a file over 10 MB (10,485,760 bytes) | not read; a file at the cap is scanned |
+| `special-file` | a FIFO, socket or device | never opened (a FIFO would hang the scan) |
+| `symlink-outside-tree` | a symlink whose target is outside the scanned directory, or missing | not followed; the installed copy would still point at unaudited content. A symlink inside the tree is skipped without a finding, since its target is scanned where it lives |
+| `unreadable` | a file or directory that cannot be read (permissions, I/O error) | the rest of the tree is still scanned |
+
+The path you name is followed if it is a symlink. If it is not a directory, it is scanned as a single file.
+
 ### Settings permissions (settings.json)
 
 When the file is valid JSON, each row is matched two ways. The bare-name forms are matched against every `permissions.allow` rule, trimmed; a key that appears twice in one object (`permissions` or `allow`, escaped spellings included) is read in every copy, since parsers differ on which copy wins. The quoted forms (`"Bash(*)"`, `"*"` in an `allow` array, …) are matched against the raw text with the `permissions.deny` and `permissions.ask` arrays emptied, so a rule anywhere else in the file (`allowedTools`, a nested `allow`) is still reported. Deny and ask rules grant nothing and are not reported. When the file is not valid JSON, the rows are matched against the raw text, deny and ask lists included. Per the [permissions docs](https://code.claude.com/docs/en/permissions) (read 2026-10-16), a bare tool name matches every use of the tool: "`Bash(*)` is equivalent to `Bash`", and `:*` is another way to write a trailing wildcard.

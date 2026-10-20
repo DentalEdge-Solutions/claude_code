@@ -53,7 +53,10 @@ if (!fs.existsSync(skillDir)) {
 }
 
 const findings = [];
-const isSingleFile = fs.statSync(skillDir).isFile();
+// The target itself is followed if it is a symlink: the user named it. Anything that is not a
+// directory is scanned as a single file, so a FIFO or an unreadable file is reported (S10).
+const targetStat = fs.statSync(skillDir);
+const isSingleFile = !targetStat.isDirectory();
 // A single-file scan names the file itself; relative to the file, every finding had file: "" (S9).
 const findingRoot = isSingleFile ? path.dirname(skillDir) : skillDir;
 
@@ -493,25 +496,70 @@ function scanFile(full, content) {
   else                                 scanScript(full, content, shebangExt(content));
 }
 
+// S10: content the scanner cannot check is a FLAG finding, never skipped silently.
+// - A file over MAX_FILE_BYTES is not read: scan time grows with size, and past about 536 MB
+//   the read itself fails (node's string limit), which used to drop the file and pass.
+// - A FIFO, socket or device is never opened: opening a FIFO waits for a writer forever.
+// - A symlink inside the tree is skipped, since its target is scanned where it lives. One that
+//   leaves the tree, or dangles, is reported and not followed: it would read files outside
+//   the skill, and the installed copy would still point at content no one audited.
+// - A file or directory that cannot be read is reported.
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+let treeRoot = null;
+try { treeRoot = isSingleFile ? null : fs.realpathSync(skillDir); } catch { /* reported by walkDir */ }
+
+function insideTree(full) {
+  if (!treeRoot) return false;
+  try {
+    const real = fs.realpathSync(full);
+    return real === treeRoot || real.startsWith(treeRoot + path.sep);
+  } catch { return false; }                            // dangling or a loop
+}
+function linkTarget(full) {
+  try { return fs.readlinkSync(full); } catch { return '?'; }
+}
+function specialKind(st) {
+  if (st.isFIFO()) return 'a FIFO';
+  if (st.isSocket()) return 'a socket';
+  if (st.isCharacterDevice() || st.isBlockDevice()) return 'a device';
+  return 'not a regular file';
+}
+
+// st comes from lstat for an entry of the tree and from stat for the named target.
+function scanPath(full, st) {
+  if (st.isSymbolicLink()) {
+    if (!insideTree(full))
+      flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; outside the scanned tree, not followed"`);
+    return;
+  }
+  if (st.isDirectory()) { walkDir(full); return; }
+  if (!st.isFile()) { flag(full, 'special-file', 'FLAG', `"${specialKind(st)}; not read"`); return; }
+  if (st.size > MAX_FILE_BYTES) {
+    flag(full, 'file-too-large', 'FLAG', `"${st.size} bytes, over the ${MAX_FILE_BYTES}-byte cap; not scanned"`);
+    return;
+  }
+  let content;
+  try { content = fs.readFileSync(full, 'utf8'); }
+  catch (e) { flag(full, 'unreadable', 'FLAG', `"${e.code || e.message}; not scanned"`); return; }
+  scanFile(full, content);
+}
+
 function walkDir(dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) { walkDir(full); continue; }
-    let content;
-    try { content = fs.readFileSync(full, 'utf8'); } catch { continue; }
-    scanFile(full, content);
+  let names;
+  try { names = fs.readdirSync(dir); }
+  catch (e) { flag(dir, 'unreadable', 'FLAG', `"${e.code || e.message}; directory not scanned"`); return; }
+  for (const name of names) {
+    const full = path.join(dir, name);
+    let st;
+    try { st = fs.lstatSync(full); }
+    catch (e) { flag(full, 'unreadable', 'FLAG', `"${e.code || e.message}; not scanned"`); continue; }
+    scanPath(full, st);
   }
 }
 
 // Support single-file scanning (agent .md, settings.json) as well as directories
-if (isSingleFile) {
-  let content;
-  try { content = fs.readFileSync(skillDir, 'utf8'); } catch { content = ''; }
-  scanFile(skillDir, content);
-} else {
-  walkDir(skillDir);
-}
+if (isSingleFile) scanPath(skillDir, targetStat);
+else walkDir(skillDir);
 
 let verdict = 'PASS';
 if (findings.some(f => f.severity === 'BLOCK')) verdict = 'BLOCK';
