@@ -46,6 +46,11 @@ try {
   assert.ok(flat.includes('echo preexisting'), 'pre-existing hook survived');
   assert.ok(Array.isArray(settings.hooks.Stop) && Array.isArray(settings.hooks.SessionEnd),
     'session-end script registered on both SessionEnd and Stop');
+  // The guard has an explicit 30 s timeout. Claude Code's default is 600 s, and a PreToolUse hook
+  // that times out does not block the call, so a stalled guard froze each call for 10 minutes and
+  // then let it through unchecked (triage F1).
+  const guardHooks = list => list.flatMap(e => e.hooks || []).filter(h => /brain-security-guard\.sh/.test(h.command || ''));
+  assert.deepStrictEqual(guardHooks(settings.hooks.PreToolUse).map(h => h.timeout), [30], 'guard registered once, with timeout 30');
 
   // 3. .gitignore gained the sessions line exactly once
   const gi = fs.readFileSync(path.join(TMP, '.gitignore'), 'utf8');
@@ -59,6 +64,23 @@ try {
   assert.strictEqual(fs.readFileSync(path.join(TMP, '.claude', 'settings.local.json'), 'utf8'), settingsBefore);
   assert.strictEqual(fs.readFileSync(path.join(brain, 'BRAIN.md'), 'utf8'), brainMdBefore);
   assert.strictEqual((fs.readFileSync(path.join(TMP, '.gitignore'), 'utf8').match(/\.project-brain\/sessions\//g) || []).length, 1);
+
+  // 5. An install from before the timeout gains it on re-run, without a second guard entry;
+  //    a timeout the owner set is kept.
+  const settingsFile = path.join(TMP, '.claude', 'settings.local.json');
+  const guardCmd = 'bash "$CLAUDE_PROJECT_DIR/hooks/brain/brain-security-guard.sh"';
+  const withGuard = hook => JSON.stringify({ hooks: { PreToolUse: [
+    { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [hook] }] } }, null, 2);
+  fs.writeFileSync(settingsFile, withGuard({ type: 'command', command: guardCmd }));
+  r = run();
+  assert.strictEqual(r.status, 0, r.stderr);
+  let pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
+  assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [30], 'old guard entry gained timeout 30, no duplicate');
+  fs.writeFileSync(settingsFile, withGuard({ type: 'command', command: guardCmd, timeout: 45 }));
+  r = run();
+  assert.strictEqual(r.status, 0, r.stderr);
+  pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
+  assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [45], 'an owner-set timeout is kept');
 
   console.log('brain-self-install.test.js: all assertions passed');
 } finally {
