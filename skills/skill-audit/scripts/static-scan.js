@@ -141,9 +141,11 @@ const MD_BASH = [
 
 // ─── Markdown/Config: Hardcoded secrets ────────────────────────────────────
 const MD_SECRETS = [
-  // Generic patterns. The name may be quoted, as a JSON key is: "password": "…" (S13).
+  // Generic patterns. The name may be quoted, as a JSON key is: "password": "…" (S13), and may carry a
+  // key suffix: SECRET_KEY, AWS_SECRET_ACCESS_KEY, secretKey, private_key (review Q1).
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}/i,  name: 'hardcoded-api-key',     sev: 'FLAG'  },
-  { re: /(?:password|passwd|secret|token)['"]?\s*[:=]\s*['"][^'"]{8,}/i,  name: 'hardcoded-secret',       sev: 'FLAG'  },
+  { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"]{8,}/i,
+                                                                      name: 'hardcoded-secret',       sev: 'FLAG'  },
   { re: /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/,                          name: 'hardcoded-bearer-token', sev: 'BLOCK' },
   { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,          name: 'private-key-block',      sev: 'BLOCK' },
   // Anthropic keys and tokens: api03, admin01, oat01 (OAuth) … (S7: main knew api03 and admin only). The
@@ -180,13 +182,16 @@ const DATA_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?[ \t]*[:=][ \t]*[A-Za-z0-9_\-]{16,}/i,                name: 'hardcoded-api-key', sev: 'FLAG' },   // its value class already excludes $ < { %
   // SECRET_KEY, AWS_SECRET_ACCESS_KEY, secretKey, PRIVATE_KEY and an .npmrc _auth too (review P4). A
   // value starting with "-" is the default of a ${VAR:-default}, not the secret (review P5).
-  { re: /(?:password|passwd|secret|token|_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
+  // _auth only at the start of a name, as .npmrc writes it, not inside enable_auth (review Q2).
+  { re: /(?:password|passwd|secret|token|(?<![A-Za-z0-9_])_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
                                                                                             name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
 
-// .netrc ("machine h login u password X") and .properties ("password X") also separate a name from its
-// value by spaces alone (review P4).
-const SPACE_SEPARATED_SECRET = /(?:^|\s)(?:password|passwd)[ \t]+(?![$<{%'"=:-])[^\s'"#;,]{8,}/i;
+// .netrc ("machine h login u password X", anywhere on a line) and .properties ("password X" or
+// "ssl.password X", a key at the line start; # and ! start a comment) also separate a name from its value
+// by spaces alone (review P4, Q3).
+const NETRC_SECRET = /(?:^|\s)password[ \t]+(?![$<{%'"=:-])[^\s'"#;,]{8,}/i;
+const PROPERTIES_SECRET = /^[ \t]*(?:[\w-]+\.)*(?:password|passwd)[ \t]+(?![$<{%'"=:-])[^\s'"#;,]{8,}/im;
 
 // ─── Secrets in code: the generic forms, stricter (review P3) ──────────────
 // In scripts and other code the quoted value must be one closed string without spaces, so a prompt
@@ -194,7 +199,8 @@ const SPACE_SEPARATED_SECRET = /(?:^|\s)(?:password|passwd)[ \t]+(?![$<{%'"=:-])
 // ("access_token=" + tok) is not a secret. Main never read scripts for secrets, so nothing is lost.
 const SCRIPT_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]/i, name: 'hardcoded-api-key', sev: 'FLAG' },
-  { re: /(?:password|passwd|secret|token)['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i, name: 'hardcoded-secret',  sev: 'FLAG' },
+  { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,
+                                                                                 name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
 const GENERIC_SECRET_CHECKS = new Set(SCRIPT_SECRETS.map(p => p.name));
 
@@ -503,8 +509,9 @@ function scanSecrets(filePath, content, kind = 'config') {
     if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
   }
   const base = path.basename(filePath).toLowerCase();
-  if (kind === 'data' && (base === '.netrc' || path.extname(base) === '.properties') && !(checksByFile.get(rel) || new Set()).has('hardcoded-secret')) {
-    const m = content.match(SPACE_SEPARATED_SECRET);
+  const spaced = kind !== 'data' ? null : base === '.netrc' ? NETRC_SECRET : path.extname(base) === '.properties' ? PROPERTIES_SECRET : null;
+  if (spaced && !(checksByFile.get(rel) || new Set()).has('hardcoded-secret')) {
+    const m = content.match(spaced);
     if (m) flag(filePath, 'hardcoded-secret', 'FLAG', `"${m[0].trim().slice(0, 80)}"`);
   }
 }

@@ -1586,5 +1586,45 @@ test('P8: a large report is printed whole through a pipe', () => {
   assert.strictEqual(r.json.findings.length >= 700, true);
 });
 
+// ── Review round 2 (Q1–Q3, Q6) ─────────────────────────────────────────────
+
+for (const [label, file, text] of [
+  ['a quoted SECRET_KEY in .env', '.env', `SECRET_KEY${''}="django-insecure-abcdefgh"\n`],
+  ['a quoted AWS_SECRET_ACCESS_KEY in .env', '.env', `AWS_SECRET_ACCESS_KEY${''}='abcdefghijklmnop'\n`],
+  ['a JSON secretKey', 'c.json', `{"secretKey${''}": "abcdefghijklmnop"}\n`],
+  ['a JSON aws_secret_access_key', 'c.json', `{"aws_secret_access_key${''}": "abcdefghijklmnop"}\n`],
+  ['a quoted YAML private_key', 'c.yml', `private_key${''}: "abcdefghijklmnop"\n`],
+  ['a TOML secret_key', 'c.toml', `secret_key${''} = "abcdefghijklmnop"\n`],
+  ['a Django SECRET_KEY', 'settings.py', `SECRET_KEY${''} = "django-insecure-abcdefgh"\n`],
+  ['a JS secretKey', 'c.js', `const o = { secretKey${''}: "abcdefghijklmnop" };\n`],
+  ['an env SECRET_KEY in settings.json', 'settings.json', `{"env": {"SECRET_KEY${''}": "abcdefghijklmnop"}}\n`],
+  ['a dotted .properties key', 'app.properties', `ssl.pass${''}word changeit123\n`],
+]) {
+  test(`Q1/Q3: ${label} → hardcoded-secret FLAG`, () => {
+    const json = scanOne(file, text);
+    assert.deepStrictEqual(sevs(json, 'hardcoded-secret'), ['FLAG'], `got ${json.findings.map(f => f.check).join(', ') || 'none'}`);
+  });
+}
+
+for (const [label, file, text] of [
+  ['enable_auth in YAML', 'c.yml', 'enable_auth: whenever\n'],
+  ['SKIP_AUTH in .env', '.env', 'SKIP_AUTH=whenever_true\n'],
+  ['a .properties comment', 'app.properties', '# password reset_link expires\n! password reset_link expires\n'],
+  ['a code value with spaces (no closing quote right after)', 'c.js', `const ${PW} = "hunter2hunter2 more words";\n`],
+  ['a code api_key value with spaces', 'c.js', `const api_key = "${rep('k', 20)} and more";\n`],
+  ['a 7-character .netrc password', '.netrc', `machine h login u ${PW} hunter2\n`],
+  ['a .netrc password placeholder', '.netrc', `machine h login u ${PW} \${NETRC_PASSWORD}\n`],
+]) {
+  test(`Q2/Q3/Q6: ${label} is not a secret`, () => {
+    const json = scanOne(file, text);
+    assert.deepStrictEqual(json.findings.filter(f => /hardcoded/.test(f.check)).map(f => f.check), [],
+      `got ${json.findings.map(f => f.check).join(', ')}`);
+  });
+}
+
+test('Q2: an .npmrc _auth at the line start or after a host is still a FLAG', () => {
+  assert.deepStrictEqual(sevs(scanOne('.npmrc', '_auth=dXNlcjpwYXNzd29yZA==\n'), 'hardcoded-secret'), ['FLAG']);
+});
+
 if (!ok) process.exit(1);
 console.log('\nAll static-scan tests passed.');

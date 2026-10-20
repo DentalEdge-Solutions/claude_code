@@ -93,10 +93,10 @@ Anthropic keys and tokens (`sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-ant-oat
 A generic `api_key`/`password`/`secret`/`token` assignment is a FLAG when the name, which may be quoted as a JSON key is (`"password": "…"`), sits right before `:` or `=` and the value is quoted (`password = "…"`).
 
 - **Code** (scripts and files of no known type): the quoted value must be one closed string without spaces, so a prompt (`getpass("Password: ")`), a format string (`"Bearer %s"`) or a string that code continues (`"access_token=" + tok`) is not matched.
-- **Data and config files:** the value may also be unquoted (`PASSWORD=…` in `.env`, `password: …` in YAML, an npm `_authToken=…` or `_auth=…`), with only spaces or tabs around the separator. Names with a suffix count too (`SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`, `secretKey`, `PRIVATE_KEY`). An unquoted value that starts like a placeholder (`$VAR`, `${VAR}`, `<…>`, `{{ … }}`, `%(…)s`) or with `-` (the default in `${VAR:-default}`) is not a secret; a quoted placeholder still is, as on main. In `.netrc` and `.properties`, `password` followed by spaces and a value counts too.
+- **Data and config files:** the value may also be unquoted (`PASSWORD=…` in `.env`, `password: …` in YAML, an npm `_authToken=…` or `_auth=…`), with only spaces or tabs around the separator. Names with a suffix count in every form, quoted or not (`SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`, `secretKey`, `private_key`); `_auth` counts only at the start of a name, as `.npmrc` writes it. An unquoted value that starts like a placeholder (`$VAR`, `${VAR}`, `<…>`, `{{ … }}`, `%(…)s`) or with `-` (the default in `${VAR:-default}`) is not a secret; a quoted placeholder still is, as on main. In `.netrc`, `password` followed by spaces and a value counts anywhere on a line; in `.properties`, a `password` key at the line start does (also dotted, `ssl.password`), and `#` or `!` lines are comments.
 - **Markdown** keeps the quoted forms only, so prose like `password: required` is not matched (S13).
 
-Not matched: values containing `;`, `#` or `,`, and unquoted assignments in shell scripts (`export PASSWORD=x`).
+Not matched: values containing `;`, `#` or `,`; in code, quoted values with spaces (`password = 'p@ss word'`), values split by string concatenation or built in a template literal, and unquoted assignments (`export PASSWORD=x` in a shell script, `ENV DB_PASSWORD=x` in a Dockerfile, `password: x` in a `.yml.j2` template), since files of no known type are read as code.
 
 ### Prompt Injection (in .md files)
 
