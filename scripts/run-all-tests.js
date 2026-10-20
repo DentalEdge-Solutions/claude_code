@@ -29,30 +29,60 @@ function discoverTestFiles(dir, out) {
   return out;
 }
 
-const discovered = [
-  ...discoverTestFiles(path.join(REPO, 'skills'), []),
-  ...discoverTestFiles(path.join(REPO, 'scripts'), []),
-].map(p => path.relative(REPO, p));
+// The report printed for a failing suite. stderr is kept whole up to 200 lines, then head and tail: node
+// prints an uncaught assertion's message ABOVE its stack and error fields, so a short tail loses it (an
+// intermittent brain-hooks.test.js failure on 2026-10-19 left only "actual: false, expected: true").
+const STDERR_HEAD = 100;
+const STDERR_TAIL = 100;
+const STDOUT_TAIL = 40;
+const MAX_LINE = 2000;   // one huge line must not flood the log
 
-const suites = [...new Set([...discovered, ...NAMED_SUITES])].sort()
-  .filter(p => fs.existsSync(path.join(REPO, p)));
+const cut = l => (l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)} … [${l.length - MAX_LINE} character${l.length - MAX_LINE === 1 ? '' : 's'} cut]` : l);
+const lines = text => (text || '').replace(/\n$/, '').split('\n').map(cut);
 
-if (suites.length === 0) {
-  console.error('Error: no test suites found — expected *.test.js files under skills/ and scripts/.');
-  process.exit(1);
-}
-
-let failed = 0;
-for (const suite of suites) {
-  const r = spawnSync('node', [suite], { cwd: REPO, encoding: 'utf8' });
-  const ok = r.status === 0;
-  if (!ok) failed++;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${suite}`);
-  if (!ok) {
-    process.stdout.write((r.stdout || '').split('\n').slice(-15).join('\n') + '\n');
-    process.stderr.write((r.stderr || '').split('\n').slice(-15).join('\n') + '\n');
+function formatFailure(r) {
+  const parts = [];
+  if (r.error) parts.push(`(spawn error: ${r.error.message})`);
+  if (r.status === null && r.signal) parts.push(`(killed by ${r.signal})`);
+  const out = lines(r.stdout);
+  const err = lines(r.stderr);
+  if (r.status !== null && !out.join('') && !err.join('')) parts.push(`(exit ${r.status}, no output)`);
+  if (out.join('')) parts.push(out.slice(-STDOUT_TAIL).join('\n'));
+  if (err.join('')) {
+    const n = err.length - STDERR_HEAD - STDERR_TAIL;
+    parts.push(n <= 0 ? err.join('\n')
+      : [...err.slice(0, STDERR_HEAD), `... ${n} line${n === 1 ? '' : 's'} omitted ...`, ...err.slice(-STDERR_TAIL)].join('\n'));
   }
+  return parts.join('\n') + '\n';
 }
 
-console.log(`\n${suites.length - failed}/${suites.length} suites passed`);
-process.exit(failed === 0 ? 0 : 1);
+function main() {
+  const discovered = [
+    ...discoverTestFiles(path.join(REPO, 'skills'), []),
+    ...discoverTestFiles(path.join(REPO, 'scripts'), []),
+  ].map(p => path.relative(REPO, p));
+
+  const suites = [...new Set([...discovered, ...NAMED_SUITES])].sort()
+    .filter(p => fs.existsSync(path.join(REPO, p)));
+
+  if (suites.length === 0) {
+    console.error('Error: no test suites found — expected *.test.js files under skills/ and scripts/.');
+    process.exit(1);
+  }
+
+  let failed = 0;
+  for (const suite of suites) {
+    const r = spawnSync('node', [suite], { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const ok = r.status === 0;
+    if (!ok) failed++;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${suite}`);
+    if (!ok) process.stdout.write(formatFailure(r));
+  }
+
+  console.log(`\n${suites.length - failed}/${suites.length} suites passed`);
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+module.exports = { formatFailure };
+
+if (require.main === module) main();

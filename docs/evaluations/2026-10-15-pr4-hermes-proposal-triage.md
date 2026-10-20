@@ -535,6 +535,25 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **N6:** extends E14.
 - **E14 (open, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)"). Each skill's own `REFERENCE.md` threshold table ("**NEUTRAL → KEEP** | Within ±2–5%") also contradicts its step 8, which points to that table (review N6).
 - **E15 (open, found while fixing E13):** `agent-refine` `SKILL.md` step 8's "Sync to runtime: `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`" copies the agent into the root of `~/.claude/`, not `~/.claude/agents/`. CLAUDE.md says agents are project-scoped (installed to target projects only), so this leaves a stray file in `~/.claude/`.
+- **F1 (open, found 2026-10-19):** `scripts/brain/brain-hooks.test.js` fails intermittently, seen 4 times. The cause was named on its first run under the new runner (review R1):
+  - **The failing check:** `brain-hooks.test.js:24`, runHook's `assert.ok(!r.error)`: "brain-security-guard.sh failed to run or timed out: spawnSync bash ETIMEDOUT".
+  - **Where:** it is called from the 512 KB guard-timing loop (`:463`). The hook passed the test's 15 s timeout; this is not the `ms < 3000` check.
+  - **Which input** (an inference: the test message names no input):
+    - Timing all 12 inputs of that loop 15 times each (`brain-security-guard.sh` alone, fresh capsule) once found exactly one hang: `quotes`, `grep "` plus 512 K `"`, about 1 MB as JSON on stdin. It hung in 1 of 15 runs, to the probe's 30 s limit, against a 72 ms median. Every other input stayed between 51 and 143 ms. The output is saved as the session scratchpad's `guard-timing-run1.txt`.
+    - The independent reviewer re-ran the same 15 × 12 timing and saw no hang.
+    - 100 more targeted runs did not hang either: 60 async (output not kept) and 40 `spawnSync` with a process watcher (its log records only "0 hang(s)").
+    - The input is the same each time, so this looks like a stall in the hook's input or process handling (bash → `node -e` reading fd 0), not a slow pattern.
+  - **Root cause:** not found.
+  - **Possible security impact (unverified):** the test file states that "a timed-out PreToolUse hook lets the tool call through".
+    - `brain-self-install.sh` registers the guard with no `timeout`, so Claude Code's default applies.
+    - No probe waited past 30 s, so whether a stall outlasts that default is unknown.
+    - If it did, one unusually large command (about 1 MB) could skip the guard. Measuring this and fixing the stall is an owner decision.
+  - **Change:** `run-all-tests.js` now reports a failing suite in full (`scripts/run-all-tests.test.js` pins all of it). The new report named this failure on its first occurrence (review R1):
+    - stderr whole up to 200 lines, head and tail beyond that;
+    - the last 40 stdout lines;
+    - the exit code when there is no output;
+    - any spawn error or signal;
+    - lines over 2,000 characters cut.
 - **E9 (fixed 2026-10-19, from review K3):** `--commit` records HEAD. When a refine loop measures an edited, uncommitted definition, that commit doesn't contain the measured text; only `subject.sha256` pins it. An iteration resumed from a manifest made before `--subject` has `subject: null`.
   - **Fix:** the "Subject revision" bullet now reads "definition sha256 · commit". It is changed in all six copies: the two templates, the two `REFERENCE.md` files and the two eval agents. It says three things:
     - the sha256 identifies the measured text;
