@@ -31,7 +31,7 @@ project-setup → project-audit → skill-scout → skill-audit → skill-adapt 
 - `project-setup` — generates `CLAUDE.md` + `evals/project-context.json` for the target project
 - `project-audit` — wraps `npx ecc-agentshield` to scan `.claude/` config for security issues
 - `skill-scout` / `agent-scout` — searches GitHub registries; scores candidates on 7 dimensions
-- `skill-audit` / `agent-audit` — static scanner (47-pattern set across 5 categories: prompt injection, bash, secrets, permissions, scripts); accepts skill dirs, agent .md files, or settings.json
+- `skill-audit` / `agent-audit` — static scanner (pattern tables for prompt injection, bash, secrets, permissions and scripts, plus checks for content it cannot read); accepts skill dirs, agent .md files, or settings.json
 - `skill-adapt` / `agent-adapt` — rewrites sourced skill/agent to match target project context
 - `skill-eval` — 9-scenario test suite; 5 metrics (pass rate, trigger accuracy, footprint, fit, resilience)
 - `skill-refine` — Karpathy autoresearch loop; max 10 iterations; routes by failing metric to lever A–E

@@ -23,7 +23,7 @@ const lib = require('./brain-lib');
 // sensitive scanner catches planted secrets, passes clean text
 {
   assert.ok(lib.scanSensitive('key is sk-ant-abc123def456ghi789').length >= 1);
-  assert.ok(lib.scanSensitive('-----BEGIN RSA PRIVATE KEY-----').length >= 1);
+  assert.ok(lib.scanSensitive('-----BEGIN RSA ' + 'PRIVATE KEY-----').length >= 1);
   assert.ok(lib.scanSensitive('password = hunter22').length >= 1);
   assert.deepStrictEqual(lib.scanSensitive('we decided to use pipeline() here'), []);
 }

@@ -88,7 +88,7 @@ Searches GitHub and known registries for existing skills that match a capability
 **Triggers:** "find a skill for X", "is there a skill that can Y", "source a skill"
 
 #### `skill-audit`
-Security gate for sourced skill files and agent definitions. Scans SKILL.md content, agent `.md` files, and `settings.json` for prompt injection, hardcoded secrets (Anthropic/GitHub/AWS keys), overly permissive allow rules, and malicious scripts using a 47-pattern static scanner across 5 categories. Returns PASS / FLAG / BLOCK before anything is installed. Complements `project-audit` (which runs AgentShield's 102-rule scan; this is self-contained with no external dependencies).
+Security gate for sourced skill files and agent definitions. Scans SKILL.md content, agent `.md` files, and `settings.json` for prompt injection, hardcoded secrets (Anthropic/GitHub/AWS/npm keys), overly permissive allow rules, and malicious scripts using a static pattern scanner. Returns PASS / FLAG / BLOCK before anything is installed. Complements `project-audit` (which runs AgentShield's 102-rule scan; this is self-contained with no external dependencies).
 
 **Triggers:** "audit this skill", "check skill security", "scan this skill from GitHub"
 
