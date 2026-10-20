@@ -83,6 +83,10 @@ const CASES = [
   { ctx: 'md', check: 'private-key-block',      sev: 'BLOCK', text: '-----BEGIN ' + 'RSA PRIVATE KEY-----' },
   { ctx: 'md', check: 'anthropic-api-key',      sev: 'BLOCK', text: ANT_KEY },
   { ctx: 'md', check: 'hardcoded-llm-key',      sev: 'BLOCK', text: 'sk-' + rep('A', 40) },
+  { ctx: 'md', check: 'npm-token',              sev: 'BLOCK', text: 'np' + 'm_' + rep('N', 36) },
+  // data: unquoted values, read in data and config files only (S13)
+  { ctx: 'data', check: 'hardcoded-api-key',    sev: 'FLAG',  text: 'API' + '_KEY=' + rep('k', 20) },
+  { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'PASS' + 'WORD=' + rep('h', 10) },
   { ctx: 'md', check: 'github-pat-classic',     sev: 'BLOCK', text: 'gh' + 'p_' + rep('r', 36) },
   { ctx: 'md', check: 'github-pat-fine',        sev: 'BLOCK', text: 'github' + '_pat_' + rep('Z', 82) },
   { ctx: 'md', check: 'github-oauth-token',     sev: 'BLOCK', text: 'gh' + 'o_' + rep('r', 36) },
@@ -143,13 +147,14 @@ const CASE_FILE = {
   js: c => `js-${c.check}.js`,
   py: c => `py-${c.check}.py`,
   sh: c => `sh-${c.check}.sh`,
+  data: c => `data-${c.check}.env`,
 };
 
 // Reads the pattern tables out of the scanner source, so a pattern added without a case
 // here (or a severity changed without updating its case) fails the coverage test.
 const TABLE_CTX = {
   MD_INJECTION: 'md', MD_BASH: 'md', MD_SECRETS: 'md', CONFIG_PATTERNS: 'config',
-  JS_PATTERNS: 'js', PY_PATTERNS: 'py', SH_PATTERNS: 'sh',
+  JS_PATTERNS: 'js', PY_PATTERNS: 'py', SH_PATTERNS: 'sh', DATA_SECRETS: 'data',
 };
 function sourcePatterns() {
   const src = fs.readFileSync(SCAN, 'utf8');
@@ -1462,6 +1467,60 @@ else {
     } finally { fs.chmodSync(path.join(dir, 'locked'), 0o755); }
   });
 }
+
+// ── S13: generic secrets in data files; S12: secrets in script files ──────────
+
+const scanOne = (file, text) => run([makeDir({ [file]: text })]).json;
+const sevs = (json, check) => json.findings.filter(f => f.check === check).map(f => f.severity);
+const PW = 'pass' + 'word', NPM = 'np' + 'm_' + rep('Q', 36);
+
+for (const [label, file, text, check, sev] of [
+  ['a JSON key in quotes', 'config.json', `{"${PW}": "hunter2hunter2"}`, 'hardcoded-secret', 'FLAG'],
+  ['a JSON api_key in quotes', 'config.json', `{"api_key": "${rep('k', 20)}"}`, 'hardcoded-api-key', 'FLAG'],
+  ['a YAML value without quotes', 'config.yml', `${PW}: hunter2hunter2\n`, 'hardcoded-secret', 'FLAG'],
+  ['an .env value without quotes', '.env', `DB_${PW.toUpperCase()}=hunter2hunter2\n`, 'hardcoded-secret', 'FLAG'],
+  ['an old npm token in .npmrc', '.npmrc', '//registry.npmjs.org/:_auth' + 'Token=' + '0123abcd' + '-4567-89ef-0123-' + '456789abcdef\n', 'hardcoded-secret', 'FLAG'],
+  ['an npm token in .npmrc', '.npmrc', `//registry.npmjs.org/:_authToken=${NPM}\n`, 'npm-token', 'BLOCK'],
+  ['an npm token in markdown', 'SKILL.md', `token ${NPM}\n`, 'npm-token', 'BLOCK'],
+  ['S12: a GitHub token in a JS file', 'tool.js', `const t = "ghp_${rep('a', 36)}";\n`, 'github-pat-classic', 'BLOCK'],
+  ['S12: an AWS key in a shell script', 'run.sh', `export AWS_ID=AKIA${rep('B', 16)}\n`, 'aws-access-key-id', 'BLOCK'],
+  ['S12: an Anthropic key in a shebang script', 'tool', `#!/usr/bin/env node\nconst k = '${ANT_KEY}';\n`, 'anthropic-api-key', 'BLOCK'],
+  ['S12: a private key in a Python file', 'k.py', `KEY = '-----BEGIN ${'PRIVATE'} KEY-----'\n`, 'private-key-block', 'BLOCK'],
+]) {
+  test(`S13/S12: ${label} → ${check} ${sev}`, () => {
+    const json = scanOne(file, text);
+    assert.deepStrictEqual(sevs(json, check), [sev], `got ${json.findings.map(f => `${f.check}:${f.severity}`).join(', ') || 'none'}`);
+  });
+}
+
+for (const [label, file, text] of [
+  ['a placeholder ${VAR}', '.env', `${PW.toUpperCase()}=\${DB_${PW.toUpperCase()}}\n`],
+  ['a placeholder <…>', 'config.yml', `${PW}: <your-${PW}-here>\n`],
+  ['a template {{ … }}', 'config.yml', 'token: {{ vault_token_value }}\n'],
+  ['an empty value', '.env', `${PW.toUpperCase()}=\n`],
+  ['an api key placeholder', '.env', 'API_KEY=${OPENWEATHER_API_KEY_FROM_ENV}\nAPI_KEY=<your-api-key-goes-here>\n'],
+  ['an npm token placeholder', '.npmrc', '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n'],
+  ['an npm token glued to a word', 'SKILL.md', `x${NPM}\n`],
+  ['an npm-like run of 37 characters', 'SKILL.md', `${NPM}Q\n`],
+  ['markdown prose without quotes, as on main', 'SKILL.md', `${PW}: hunter2hunter2\n`],
+  ['max_tokens in YAML', 'config.yml', 'max_tokens: 4096\ntokenizer: whitespace\n'],
+  ['a YAML key with a nested block', 'config.yml', 'secret:\n  provider_name: vaultvaultvault\n'],
+]) {
+  test(`S13: ${label} is not a secret`, () => {
+    const json = scanOne(file, text);
+    assert.deepStrictEqual(json.findings.map(f => f.check), [], `got ${json.findings.map(f => f.check).join(', ')}`);
+  });
+}
+
+test('S12: a Python secret is reported once, not by both tables', () => {
+  const json = scanOne('cfg.py', `${PW} = "hunter2hunter2xx"\napi_key = "${rep('k', 20)}"\n`);
+  assert.deepStrictEqual(sevs(json, 'hardcoded-secret'), ['FLAG']);
+});
+
+test('S12: a JS secret inside a regex literal is still found (secrets read the raw text)', () => {
+  const json = scanOne('t.js', `const re = /ghp_${rep('a', 36)}/;\n`);
+  assert.deepStrictEqual(sevs(json, 'github-pat-classic'), ['BLOCK']);
+});
 
 if (!ok) process.exit(1);
 console.log('\nAll static-scan tests passed.');

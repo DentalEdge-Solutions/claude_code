@@ -19,11 +19,11 @@ Run `node skills/skill-audit/scripts/static-scan.js /tmp/candidate-skill` then r
 
 ## Workflow
 
-1. **Static scan** — run the 47-pattern scanner against the skill directory, agent file, or settings file:
+1. **Static scan** — run the pattern scanner against the skill directory, agent file, or settings file:
    ```bash
    node skills/skill-audit/scripts/static-scan.js <skill-dir|agent.md|settings.json>
    ```
-   Covers 5 categories: prompt injection, dangerous Bash, hardcoded secrets (Anthropic/GitHub/AWS keys), overly permissive settings.json rules, and malicious scripts. Records PASS/FLAG/BLOCK per finding. Content it cannot fully check is never a silent PASS: an unreadable file or directory, a FIFO or device, a file over 2 GiB, or a symlink leaving the tree (absolute, climbing out, dangling or looping) is BLOCK; a file too large to read whole, scanned in chunks, is FLAG. See REFERENCE.md, "What the scanner cannot check".
+   Covers 5 categories: prompt injection, dangerous Bash, hardcoded secrets (Anthropic/GitHub/AWS/npm keys, generic passwords and tokens; in every file read), overly permissive settings.json rules, and malicious scripts. Records PASS/FLAG/BLOCK per finding. Content it cannot fully check is never a silent PASS: an unreadable file or directory, a FIFO or device, a file over 2 GiB, or a symlink leaving the tree (absolute, climbing out, dangling or looping) is BLOCK; a file too large to read whole, scanned in chunks, is FLAG. See REFERENCE.md, "What the scanner cannot check".
 
 2. **Permissions audit** — read every `.md` file; list all tools, Bash commands, and external URLs the skill's instructions request. Check each against the skill's stated purpose. Flag mismatches (e.g., a "summarize" skill requesting `rm` or WebFetch to unknown domains).
 

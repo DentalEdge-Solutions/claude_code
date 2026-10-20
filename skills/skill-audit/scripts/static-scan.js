@@ -137,9 +137,9 @@ const MD_BASH = [
 
 // ─── Markdown/Config: Hardcoded secrets ────────────────────────────────────
 const MD_SECRETS = [
-  // Generic patterns
-  { re: /(?:api[_-]?key|apikey)\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}/i,  name: 'hardcoded-api-key',     sev: 'FLAG'  },
-  { re: /(?:password|passwd|secret|token)\s*[:=]\s*['"][^'"]{8,}/i,  name: 'hardcoded-secret',       sev: 'FLAG'  },
+  // Generic patterns. The name may be quoted, as a JSON key is: "password": "…" (S13).
+  { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}/i,  name: 'hardcoded-api-key',     sev: 'FLAG'  },
+  { re: /(?:password|passwd|secret|token)['"]?\s*[:=]\s*['"][^'"]{8,}/i,  name: 'hardcoded-secret',       sev: 'FLAG'  },
   { re: /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/,                          name: 'hardcoded-bearer-token', sev: 'BLOCK' },
   { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,          name: 'private-key-block',      sev: 'BLOCK' },
   // Anthropic keys and tokens: api03, admin01, oat01 (OAuth) … (S7: main knew api03 and admin only). The
@@ -161,6 +161,20 @@ const MD_SECRETS = [
   { re: /AKIA[0-9A-Z]{16}/,                                           name: 'aws-access-key-id',      sev: 'BLOCK' },
   // Slack
   { re: /xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24}/,           name: 'slack-bot-token',        sev: 'BLOCK' },
+  // npm access tokens: "npm" + "_" + GitHub's token alphabet (base62), the last six a CRC32 checksum
+  // (github.blog, "Announcing npm's new access token format", read 2026-10-20; 178 bits of entropy
+  // is 30 base62 characters + 6 = 36, as for ghp_). Not glued to a word or a longer run (S13).
+  { re: /(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])/,     name: 'npm-token',              sev: 'BLOCK' },
+];
+
+// ─── Secrets without quotes, in data and config files only (S13) ───────────
+// .env, .npmrc, YAML and INI values are often unquoted: PASSWORD=hunter2, _authToken=…, password: x.
+// Markdown keeps the quoted forms only (prose "password: required" is not a secret). A value that
+// starts like a placeholder ($VAR, ${VAR}, <…>, {{ … }}, %(…)s) is not a secret. Only spaces and tabs
+// may surround the separator, so a YAML key followed by a nested block is not read as its value.
+const DATA_SECRETS = [
+  { re: /(?:api[_-]?key|apikey)['"]?[ \t]*[:=][ \t]*[A-Za-z0-9_\-]{16,}/i,                name: 'hardcoded-api-key', sev: 'FLAG' },   // its value class already excludes $ < { %
+  { re: /(?:password|passwd|secret|token)['"]?[ \t]*[:=][ \t]*(?![$<{%'"])[^\s'"#;,]{8,}/i, name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
 
 // ─── Config: Overly permissive settings.json rules ─────────────────────────
@@ -453,13 +467,17 @@ function scanConfig(filePath, content) {
   scanSecrets(filePath, content);
 }
 
-// Data and config files other than settings*.json are read for secrets only (S6).
-function scanSecrets(filePath, content) {
-  for (const { re, name, sev } of MD_SECRETS) {
-    if (re.test(content)) {
-      const m = content.match(re);
-      flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
-    }
+// Data and config files other than settings*.json are read for secrets only (S6). Script files are
+// read for secrets too (S12). unquoted adds DATA_SECRETS (data and config files, S13). A check
+// already reported for this file (a script table's own hardcoded-secret, or the quoted form) is not
+// reported twice.
+function scanSecrets(filePath, content, { unquoted = false } = {}) {
+  const rel = path.relative(findingRoot, filePath) || '.';
+  const seen = new Set(findings.filter(f => f.file === rel).map(f => f.check));
+  for (const { re, name, sev } of unquoted ? [...MD_SECRETS, ...DATA_SECRETS] : MD_SECRETS) {
+    if (seen.has(name)) continue;
+    const m = content.match(re);
+    if (m) { flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`); seen.add(name); }
   }
 }
 
@@ -475,6 +493,8 @@ function scanScript(filePath, content, ext) {
     const m = find ? find(scanContent) : scanContent.match(re);
     if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
   }
+  // Secrets in scripts (S12), read in the raw text: a key inside a JS regex literal is still a key.
+  scanSecrets(filePath, content);
 }
 
 // Data and config files read for secrets (S6), by extension or, for dotfiles, by name.
@@ -502,7 +522,7 @@ function scanFile(full, content) {
   else if (CONFIG_FILENAMES.has(base)) scanConfig(full, content);
   // Script extensions first: a script named .env.sh or .env.local.js keeps its table (independent review T3)
   else if (JS_EXTS.has(ext) || PY_EXTS.has(ext) || SH_EXTS.has(ext)) scanScript(full, content, ext);
-  else if (isDataFile(base, ext))      scanSecrets(full, content);
+  else if (isDataFile(base, ext))      scanSecrets(full, content, { unquoted: true });
   else                                 scanScript(full, content, shebangExt(content));
 }
 

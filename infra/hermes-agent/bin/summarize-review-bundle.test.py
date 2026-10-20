@@ -11,7 +11,7 @@ OURS = "/etc/systemd/journald.conf.d/50-hermes-retention.conf"
 PLANT = "sk-or-v1-" + "0123456789abcdef" * 4
 # What a sensitive value can look like and still pass a test of SHAPE: none of these may ever print.
 PLANTS = (PLANT, "acmecorp", "host.example.com", "10.0.0.5", "ops@acme.com", "123-456-7890",
-          "client-acme.json", "etc/passwd", "AKIAIOSFODNN7EXAMPLE", "deadbee")
+          "client-acme.json", "etc/passwd", "AKIA" + "IOSFODNN7EXAMPLE", "deadbee")
 ACCOUNTS = ("jsmith", "acme-ops")
 
 

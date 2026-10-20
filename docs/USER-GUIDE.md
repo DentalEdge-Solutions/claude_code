@@ -168,13 +168,14 @@ Source reputation rewards 15 trusted organisations across 3 tiers (Anthropic, Ve
 /skill-audit skills/<candidate-dir>/
 ```
 
-The 47-pattern `static-scan.js` scanner checks:
+The `static-scan.js` scanner checks (the full tables are in `skills/skill-audit/REFERENCE.md`):
 
-- **Prompt injection** (10 patterns) — `ignore previous instructions`, persona overrides, hidden unicode
-- **Dangerous Bash** (7 patterns) — `rm -rf /`, curl-pipe-shell, SSH directory access
-- **Hardcoded secrets** (11 patterns) — Anthropic API keys (`sk-ant-api03-`), GitHub PATs (`ghp_`, `github_pat_`), AWS keys (`AKIA`), Slack tokens (`xoxb-`), private keys, Bearer tokens
-- **Permissions** (10 patterns, for `settings.json`) — `Bash(*)` wildcards, `bypassPermissions`, hook shell substitution
-- **Script malware** (9 patterns) — `eval()`, `child_process`, `pickle.loads`, `os.system`, unsafe YAML
+- **Prompt injection** — `ignore previous instructions`, persona overrides, hidden unicode
+- **Dangerous Bash** — `rm -rf /`, curl-pipe-shell, SSH directory access
+- **Hardcoded secrets**, in every file it reads (markdown, scripts, data and config files) — Anthropic API keys (`sk-ant-api03-`), GitHub PATs (`ghp_`, `github_pat_`), AWS keys (`AKIA`), Slack tokens (`xoxb-`), npm tokens (`npm_`), private keys, Bearer tokens, and generic `password`/`token`/`api_key` values
+- **Permissions** (for `settings.json`) — `Bash(*)` wildcards, `bypassPermissions`, hook shell substitution
+- **Script malware** — `eval()`, `child_process`, `pickle.loads`, `os.system`, unsafe YAML
+- **Content it cannot check** — an unreadable file, a FIFO, a symlink leaving the skill, a file too large to read
 
 Returns PASS / FLAG / BLOCK. BLOCK stops the pipeline immediately.
 
