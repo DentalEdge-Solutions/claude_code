@@ -1084,6 +1084,8 @@ for (const [file, text] of [
 }
 
 // ── S10: content the scanner cannot check is reported, never passed silently ──
+// A symlink that leaves the tree is BLOCK (owner decision 2026-10-20): install copies the link as is,
+// so what Claude Code loads after install is not what was audited.
 // Content the scanner could not read at all (unreadable, special-file) is BLOCK: main crashed or hung
 // there, which fails closed, so a FLAG would let it through (security review of 58a22a7). Content
 // read with a caveat (file-too-large, symlink-outside-tree) is FLAG: skill-audit shows it and asks.
@@ -1169,24 +1171,25 @@ test('S10: an in-tree symlink is scanned under its own name (SKILL.md -> payload
   assert.ok(r.json.findings.some(f => f.file === 'SKILL.md' && f.severity === 'BLOCK'));
 });
 
-test('S10: a symlink to a file outside the tree is a FLAG, and its content is still scanned but not quoted', () => {
+test('S10: a symlink to a file outside the tree is BLOCK, and its content is still scanned but not quoted', () => {
   const outside = makeDir({ 'secret.md': INJECTION });
   const dir = makeDir({ 'SKILL.md': 'ok\n' });
   fs.symlinkSync(path.join(outside, 'secret.md'), path.join(dir, 'notes.md'));
   const r = run([dir]);
-  assert.ok(flagged(r, 'symlink-outside-tree'), checks(r.json).join(', '));
+  assert.ok(blocked(r, 'symlink-outside-tree'), checks(r.json).join(', '));
   assert.strictEqual(r.json.verdict, 'BLOCK', 'the target\'s injection still blocks, as on main');
-  const hit = r.json.findings.find(f => f.severity === 'BLOCK');
+  const hit = r.json.findings.find(f => f.check === 'instruction-override');
   assert.strictEqual(hit.file, 'notes.md');
   assert.doesNotMatch(hit.detail, /Ignore previous/, 'content outside the tree is not quoted');
 });
 
-test('S10: a symlink to a directory outside the tree is a FLAG and is not walked', () => {
+test('S10: a symlink to a directory outside the tree is BLOCK and is not walked', () => {
   const outside = makeDir({ 'x.md': INJECTION });
   const dir = makeDir({ 'SKILL.md': 'ok\n' });
   fs.symlinkSync(outside, path.join(dir, 'lib'));
   const r = run([dir]);
   assert.deepStrictEqual(checks(r.json), ['symlink-outside-tree']);
+  assert.ok(blocked(r, 'symlink-outside-tree'));
 });
 
 test('S10: a sibling directory whose name starts with the tree\'s name is outside the tree', () => {
@@ -1196,13 +1199,60 @@ test('S10: a sibling directory whose name starts with the tree\'s name is outsid
   fs.symlinkSync(path.join(`${dir}-evil`, 'x.md'), path.join(dir, 'x.md'));
   const r = run([dir]);
   assert.deepStrictEqual(checks(r.json), ['symlink-outside-tree']);
+  assert.ok(blocked(r, 'symlink-outside-tree'));
 });
 
-test('S10: a dangling symlink is a FLAG', () => {
+test('S10: an absolute symlink is BLOCK even when it points inside the tree', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'docs/a.md': 'ok\n' });
+  fs.symlinkSync(path.join(dir, 'docs', 'a.md'), path.join(dir, 'b.md'));
+  const r = run([dir]);
+  assert.match(blocked(r, 'symlink-outside-tree').detail, /absolute/);
+});
+
+test('S10: a relative symlink that climbs out of the tree and back in is BLOCK', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'docs/a.md': 'ok\n' });
+  fs.symlinkSync(path.join('..', path.basename(dir), 'docs', 'a.md'), path.join(dir, 'b.md'));
+  const r = run([dir]);
+  assert.ok(blocked(r, 'symlink-outside-tree'), checks(r.json).join(', '));
+});
+
+test('S10: a relative symlink in a subdirectory that climbs one level stays inside', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'a.md': INJECTION, 'docs/sub/x.md': 'ok\n' });
+  fs.symlinkSync(path.join('..', 'a.md'), path.join(dir, 'docs', 'b.md'));
+  fs.symlinkSync('sub/../../a.md', path.join(dir, 'docs', 'c.md'));   // down, then up two (path.join would fold it)
+  const r = run([dir]);
+  assert.ok(!checks(r.json).includes('symlink-outside-tree'), checks(r.json).join(', '));
+  assert.ok(r.json.findings.some(f => f.file === path.join('docs', 'b.md') && /Ignore previous/.test(f.detail)), 'scanned and quoted under the link name');
+});
+
+test('S10: a relative link that resolves outside through a directory link is BLOCK itself', () => {
+  // lib -> ../<tree>-evil is flagged; b.md -> lib/x.md stays inside by its path but resolves into
+  // the sibling, whose name starts with the tree's name.
+  const dir = makeDir({ 'SKILL.md': 'ok\n' });
+  fs.mkdirSync(`${dir}-evil`);
+  fs.writeFileSync(path.join(`${dir}-evil`, 'x.md'), INJECTION);
+  fs.symlinkSync(path.join('..', `${path.basename(dir)}-evil`), path.join(dir, 'lib'));
+  fs.symlinkSync(path.join('lib', 'x.md'), path.join(dir, 'b.md'));
+  const r = run([dir]);
+  const b = r.json.findings.filter(f => f.file === 'b.md');
+  assert.ok(b.some(f => f.check === 'symlink-outside-tree' && f.severity === 'BLOCK'), b.map(f => f.check).join(', '));
+  assert.ok(b.every(f => !/Ignore previous/.test(f.detail)), 'outside content quoted');
+});
+
+test('S10: a symlink loop is BLOCK', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n' });
+  fs.symlinkSync('b', path.join(dir, 'a'));
+  fs.symlinkSync('a', path.join(dir, 'b'));
+  const r = run([dir]);
+  assert.deepStrictEqual(r.json.findings.map(f => `${f.file}:${f.check}:${f.severity}`).sort(),
+    ['a:symlink-outside-tree:BLOCK', 'b:symlink-outside-tree:BLOCK']);
+});
+
+test('S10: a dangling symlink is BLOCK', () => {
   const dir = makeDir({ 'SKILL.md': 'ok\n' });
   fs.symlinkSync(path.join(dir, 'missing.md'), path.join(dir, 'gone.md'));
   const r = run([dir]);
-  assert.ok(flagged(r, 'symlink-outside-tree'), checks(r.json).join(', '));
+  assert.ok(blocked(r, 'symlink-outside-tree'), checks(r.json).join(', '));
 });
 
 test('S10: an in-tree directory symlink is not walked twice, and is not a finding', () => {

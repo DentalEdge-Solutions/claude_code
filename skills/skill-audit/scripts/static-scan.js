@@ -9,8 +9,8 @@
 //   - Malicious JS/Python/Shell in scripts (JS/PY/SH_PATTERNS); a file with no known extension is
 //     read by its shebang (S5)
 //   - Hardcoded secrets in data and config files: JSON, YAML, TOML, INI, .env, .npmrc … (S6)
-//   - Content it cannot check (S10): unreadable, special-file, file-over-scan-limit (BLOCK);
-//     file-too-large, symlink-outside-tree (FLAG)
+//   - Content it cannot check (S10): unreadable, special-file, file-over-scan-limit and
+//     symlink-outside-tree (BLOCK); file-too-large (FLAG)
 // Outputs JSON: { verdict, findings, scanned }
 
 const fs = require('fs');
@@ -40,8 +40,8 @@ Severities:
   PASS    No security issues found
 
 Content it cannot check is never a silent PASS: an unreadable file or directory, a FIFO or
-device, or a file over 2 GiB is BLOCK; a file too large to read whole (scanned in chunks) or a
-symlink leaving the tree is FLAG.
+device, a file over 2 GiB, or a symlink leaving the tree (absolute, climbing out, dangling or
+looping) is BLOCK; a file too large to read whole, scanned in chunks, is FLAG.
 
 Examples:
   node skills/skill-audit/scripts/static-scan.js skills/skill-scout
@@ -516,10 +516,13 @@ function scanFile(full, content) {
 //   read at all (BLOCK): scan time grows with size, and main passed such files unread.
 // - A FIFO, socket or device is never opened: opening a FIFO waits for a writer forever.
 // - A symlink to a file is read through the link and scanned under the link's name, as main
-//   did: that is the name Claude Code loads it by. One whose target is outside the tree is also
-//   reported, and its matches are not quoted (the target can be any file on the machine). A
-//   symlink to a directory is never walked: the tree's own directories are walked in place.
-//   A dangling or looping symlink is reported.
+//   did: that is the name Claude Code loads it by. A symlink to a directory is never walked: the
+//   tree's own directories are walked in place.
+// - A symlink that leaves the tree is BLOCK (owner decision 2026-10-20): install copies the link
+//   as is, so what Claude Code loads after install is not what was audited. It leaves the tree if
+//   it is absolute (after install it points back at the audit location), if its relative path
+//   climbs out of the tree (even to come back in by name), if it resolves outside, or if it is
+//   dangling or loops. A file target is still scanned, and its matches are not quoted.
 // - A file or directory that cannot be read is reported.
 const CHUNK_BYTES = 64 * 1024 * 1024;
 const MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024;   // larger files are not read: a 2.5 GB scan took 45 s
@@ -528,12 +531,23 @@ let treeRoot = null;
 try { treeRoot = isSingleFile ? null : fs.realpathSync(skillDir); } catch { /* reported by walkDir */ }
 let quoteMatches = true;
 
-function insideTree(full) {
-  if (!treeRoot) return false;
-  try {
-    const real = fs.realpathSync(full);
-    return real === treeRoot || real.startsWith(treeRoot + path.sep);
-  } catch { return false; }
+const within = (root, p) => p === root || p.startsWith(root + path.sep);
+// Why a symlink leaves the tree, or '' when it stays inside: a relative link whose path stays in
+// the tree and resolves inside it. A link in the tree is checked when it is walked, so a chain
+// through another link is caught at that link too.
+function leavesTree(full) {
+  const target = linkTarget(full);
+  if (path.isAbsolute(target)) return 'an absolute link';
+  // Walk the link's path from its directory: a ".." above the tree's top climbs out, even when a
+  // later part comes back in by the tree's name (that name changes on install).
+  let depth = path.relative(path.resolve(skillDir), path.resolve(path.dirname(full))).split(path.sep).filter(Boolean).length;
+  for (const part of target.split(/[\\/]/)) {
+    if (part === '..' && --depth < 0) return 'its path climbs out of the scanned tree';
+    if (part && part !== '.' && part !== '..') depth++;
+  }
+  if (!treeRoot) return 'outside the scanned tree';
+  try { return within(treeRoot, fs.realpathSync(full)) ? '' : 'it resolves outside the scanned tree'; }
+  catch { return 'outside the scanned tree'; }
 }
 function linkTarget(full) {
   try { return fs.readlinkSync(full); } catch { return '?'; }
@@ -585,18 +599,14 @@ function readAndScan(full, size) {
 function scanPath(full, st) {
   let outside = false;
   if (st.isSymbolicLink()) {
+    const why = (target) => `"links to ${linkTarget(full).slice(0, 80)}; ${target}, so the installed copy would not load what was audited"`;
     let target;
     try { target = fs.statSync(full); }
-    catch (e) {
-      flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; ${errText(e)}, not followed"`, true);
-      return;
-    }
-    outside = !insideTree(full);
-    if (target.isDirectory()) {
-      if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; a directory outside the scanned tree, not walked"`, true);
-      return;
-    }
-    if (outside) flag(full, 'symlink-outside-tree', 'FLAG', `"links to ${linkTarget(full).slice(0, 80)}; outside the scanned tree, scanned under this name"`, true);
+    catch (e) { flag(full, 'symlink-outside-tree', 'BLOCK', why(`${errText(e)} (dangling or a loop)`), true); return; }
+    const reason = leavesTree(full);
+    outside = reason !== '';
+    if (outside) flag(full, 'symlink-outside-tree', 'BLOCK', why(target.isDirectory() ? `${reason}; a directory, not walked` : `${reason}; scanned under this name`), true);
+    if (target.isDirectory()) return;
     st = target;
   }
   if (st.isDirectory()) { walkDir(full); return; }
