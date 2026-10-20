@@ -1213,7 +1213,100 @@ test('S10: a relative symlink that climbs out of the tree and back in is BLOCK',
   const dir = makeDir({ 'SKILL.md': 'ok\n', 'docs/a.md': 'ok\n' });
   fs.symlinkSync(path.join('..', path.basename(dir), 'docs', 'a.md'), path.join(dir, 'b.md'));
   const r = run([dir]);
-  assert.ok(blocked(r, 'symlink-outside-tree'), checks(r.json).join(', '));
+  assert.match(blocked(r, 'symlink-outside-tree').detail, /climbs above/);
+});
+
+if (path.sep === '/') test('S10: a backslash is part of a name on POSIX, so a\\b/../../<tree>/x climbs out (security review of cc700f8)', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'x.md': 'ok\n' });
+  fs.mkdirSync(path.join(dir, 'a\\b'));
+  fs.symlinkSync(`a\\b/../../${path.basename(dir)}/x.md`, path.join(dir, 'b.md'));
+  const r = run([dir]);
+  const f = blocked(r, 'symlink-outside-tree');
+  assert.ok(f, `got ${r.json.verdict} ${checks(r.json).join(', ')}`);
+  assert.match(f.detail, /climbs above/);
+});
+
+test('S10: ".." after a directory link is taken physically, as the OS does (security review of cc700f8)', () => {
+  // docs/l -> .. is the tree's top (inside). docs/x.md -> l/../<tree>/y.md: lexically it never climbs
+  // out, but the OS follows l first, so ".." goes above the top and comes back in by the tree's name.
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'y.md': 'ok\n', 'docs/z.md': 'ok\n' });
+  fs.symlinkSync('..', path.join(dir, 'docs', 'l'));
+  fs.symlinkSync(`l/../${path.basename(dir)}/y.md`, path.join(dir, 'docs', 'x.md'));
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'docs', 'x.md'), 'utf8'), 'ok\n', 'the link resolves');
+  const r = run([dir]);
+  assert.deepStrictEqual(r.json.findings.map(f => `${f.file}:${f.check}:${f.severity}`),
+    [`${path.join('docs', 'x.md')}:symlink-outside-tree:BLOCK`]);
+});
+
+test('S10: a link whose ".." the OS takes to a file outside is BLOCK, even when the same name exists inside', () => {
+  // docs/x.md -> l/../<name>: folded as text it is docs/<name> (exists); the OS follows l (-> ..) to
+  // the top, so ".." is the tree's parent and it reads the file there.
+  const dir = makeDir({ 'SKILL.md': 'ok\n' });
+  const name = `outside-${path.basename(dir)}.md`;
+  fs.mkdirSync(path.join(dir, 'docs'));
+  fs.writeFileSync(path.join(dir, 'docs', name), 'ok\n');
+  fs.writeFileSync(path.join(path.dirname(dir), name), INJECTION);
+  fs.symlinkSync('..', path.join(dir, 'docs', 'l'));
+  fs.symlinkSync(`l/../${name}`, path.join(dir, 'docs', 'x.md'));
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'docs', 'x.md'), 'utf8'), INJECTION, 'the OS reads the outside file');
+  const r = run([dir]);
+  assert.ok(r.json.findings.some(f => f.file === path.join('docs', 'x.md') && f.check === 'symlink-outside-tree' && f.severity === 'BLOCK'),
+    r.json.findings.map(f => `${f.file}:${f.check}`).join(', '));
+});
+
+test('S10: self -> . then SKILL.md -> self/../<name> reads the parent, even with a decoy inside (review K16)', () => {
+  const dir = makeDir({});
+  const name = `k16-${path.basename(dir)}.md`;
+  fs.writeFileSync(path.join(dir, name), 'ok\n');                       // decoy inside the tree
+  fs.writeFileSync(path.join(path.dirname(dir), name), INJECTION);      // what the OS opens
+  fs.symlinkSync('.', path.join(dir, 'self'));
+  fs.symlinkSync(`self/../${name}`, path.join(dir, 'SKILL.md'));
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'), INJECTION, 'the OS reads the parent');
+  const r = run([dir]);
+  const f = r.json.findings.find(x => x.file === 'SKILL.md' && x.check === 'symlink-outside-tree');
+  assert.ok(f && f.severity === 'BLOCK', r.json.findings.map(x => `${x.file}:${x.check}`).join(', '));
+  assert.match(f.detail, /climbs above/);
+  assert.ok(r.json.findings.every(x => !/Ignore previous/.test(x.detail)), 'outside content quoted');
+});
+
+test('S10: ./../<tree>/a.md from the top climbs out ("." is not a level, review K18)', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'a.md': 'ok\n' });
+  fs.symlinkSync(`./../${path.basename(dir)}/a.md`, path.join(dir, 'b.md'));
+  const r = run([dir]);
+  assert.match(blocked(r, 'symlink-outside-tree').detail, /climbs above/);
+});
+
+test('S10: climbing out lands in a path that also exists inside (a folder named like the tree)', () => {
+  // x.md -> ../<tree>/y.md is the tree's own y.md through its parent. A walk that ignored the climb
+  // would find the decoy folder <tree>/<tree>/y.md inside and pass it.
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'y.md': 'ok\n' });
+  fs.mkdirSync(path.join(dir, path.basename(dir)));
+  fs.writeFileSync(path.join(dir, path.basename(dir), 'y.md'), 'ok\n');
+  fs.symlinkSync(`../${path.basename(dir)}/y.md`, path.join(dir, 'x.md'));
+  const r = run([dir]);
+  assert.match(blocked(r, 'symlink-outside-tree').detail, /climbs above/);
+});
+
+test('S10: a link through an absolute link is BLOCK for that reason', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'c.md': 'ok\n' });
+  fs.symlinkSync(path.join(dir, 'c.md'), path.join(dir, 'b.md'));
+  fs.symlinkSync('b.md', path.join(dir, 'a.md'));
+  const r = run([dir]);
+  const a = r.json.findings.find(f => f.file === 'a.md' && f.check === 'symlink-outside-tree');
+  assert.ok(a && a.severity === 'BLOCK', r.json.findings.map(f => `${f.file}:${f.check}`).join(', '));
+  assert.match(a.detail, /passes through an absolute link/);
+});
+
+test('S10: a chain of in-tree relative links that stays inside is not a finding', () => {
+  const dir = makeDir({ 'SKILL.md': 'ok\n', 'docs/sub/a.md': INJECTION });
+  fs.symlinkSync('docs/sub', path.join(dir, 's'));
+  fs.symlinkSync('s/a.md', path.join(dir, 'b.md'));
+  fs.symlinkSync('b.md', path.join(dir, 'c.md'));
+  fs.symlinkSync('../s/../sub/a.md', path.join(dir, 'docs', 'd.md'));   // s -> docs/sub, so ".." is docs
+  fs.symlinkSync('s/../../docs/sub/a.md', path.join(dir, 'e.md'));       // lexically above the top, physically inside
+  for (const l of ['c.md', 'docs/d.md', 'e.md']) assert.strictEqual(fs.readFileSync(path.join(dir, l), 'utf8'), INJECTION, `${l} resolves`);
+  const r = run([dir]);
+  assert.ok(!checks(r.json).includes('symlink-outside-tree'), r.json.findings.map(f => `${f.file}:${f.check}`).join(', '));
 });
 
 test('S10: a relative symlink in a subdirectory that climbs one level stays inside', () => {

@@ -68,8 +68,8 @@ const findingRoot = isSingleFile ? path.dirname(skillDir) : skillDir;
 
 // own: the detail is the scanner's own text (a size, an error code), not quoted content.
 function flag(file, check, severity, detail, own = false) {
-  // Matches in a symlink target outside the tree are not quoted: it can be any file on the machine (S10).
-  if (!quoteMatches && !own) detail = '"(match in a file outside the scanned tree; not quoted)"';
+  // Matches read through a link that leaves the tree are not quoted: the target can be any file (S10).
+  if (!quoteMatches && !own) detail = '"(match through a link that leaves the scanned tree; not quoted)"';
   // The scanned directory itself is "." (an unreadable root), never an empty name.
   findings.push({ file: path.relative(findingRoot, file) || '.', check, severity, detail });
 }
@@ -507,10 +507,11 @@ function scanFile(full, content) {
 }
 
 // S10: content the scanner cannot check is a finding, never skipped silently. What it could not
-// read at all (unreadable, special-file) is BLOCK: main crashed or hung there, which fails closed,
-// and a FLAG would let unchecked content through. What it read with a caveat (file-too-large,
-// symlink-outside-tree) is FLAG. These checks only add to what main reported: every file main
-// read is still read the same way, so a verdict is never lower than main's.
+// read at all (unreadable, special-file, file-over-scan-limit) is BLOCK: main crashed or hung
+// there, or passed it unread, and a FLAG would let unchecked content through. A symlink that
+// leaves the tree is BLOCK too. A file read in chunks (file-too-large) is FLAG. These checks only
+// add to what main reported: every file main read is still read the same way, so a verdict is
+// never lower than main's.
 // - A file too large to read whole (past about 536 MB, node's string limit) used to be dropped
 //   and pass. It is now scanned in overlapping chunks and reported. Past MAX_SCAN_BYTES it is not
 //   read at all (BLOCK): scan time grows with size, and main passed such files unread.
@@ -520,34 +521,49 @@ function scanFile(full, content) {
 //   tree's own directories are walked in place.
 // - A symlink that leaves the tree is BLOCK (owner decision 2026-10-20): install copies the link
 //   as is, so what Claude Code loads after install is not what was audited. It leaves the tree if
-//   it is absolute (after install it points back at the audit location), if its relative path
-//   climbs out of the tree (even to come back in by name), if it resolves outside, or if it is
-//   dangling or loops. A file target is still scanned, and its matches are not quoted.
+//   it is absolute (after install it points back at the audit location), or if resolving it goes
+//   above the tree's top (even to come back in by name), or if it is dangling or loops; see
+//   leavesTree. A file target is still scanned, and its matches are not quoted.
 // - A file or directory that cannot be read is reported.
 const CHUNK_BYTES = 64 * 1024 * 1024;
 const MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024;   // larger files are not read: a 2.5 GB scan took 45 s
 const OVERLAP_BYTES = 1024 * 1024;
-let treeRoot = null;
-try { treeRoot = isSingleFile ? null : fs.realpathSync(skillDir); } catch { /* reported by walkDir */ }
 let quoteMatches = true;
 
-const within = (root, p) => p === root || p.startsWith(root + path.sep);
-// Why a symlink leaves the tree, or '' when it stays inside: a relative link whose path stays in
-// the tree and resolves inside it. A link in the tree is checked when it is walked, so a chain
-// through another link is caught at that link too.
+// Why a symlink leaves the tree, or '' when it stays inside. The link is resolved the way the OS
+// resolves it, one component at a time from the tree's top, following every symlink on the way:
+// ".." after a directory link goes to the parent of that link's target, not to the parent in the
+// text. node's fs.realpathSync and a text walk both fold ".." first and so disagree with the OS
+// (security review of cc700f8). A ".." above the top, an absolute link, a missing component or
+// more than 40 links leaves the tree. A path that never goes above the top resolves the same after
+// install, whatever the tree is called or wherever it is copied.
+const SPLIT = path.sep === '\\' ? /[\\/]/ : /\//;      // on POSIX a backslash is part of a name
 function leavesTree(full) {
-  const target = linkTarget(full);
+  const top = path.resolve(skillDir);
+  const at = path.relative(top, path.dirname(path.resolve(full))).split(path.sep).filter(Boolean);
+  let target = linkTarget(full);
   if (path.isAbsolute(target)) return 'an absolute link';
-  // Walk the link's path from its directory: a ".." above the tree's top climbs out, even when a
-  // later part comes back in by the tree's name (that name changes on install).
-  let depth = path.relative(path.resolve(skillDir), path.resolve(path.dirname(full))).split(path.sep).filter(Boolean).length;
-  for (const part of target.split(/[\\/]/)) {
-    if (part === '..' && --depth < 0) return 'its path climbs out of the scanned tree';
-    if (part && part !== '.' && part !== '..') depth++;
+  const parts = target.split(SPLIT);
+  for (let hops = 0; parts.length;) {
+    const part = parts.shift();
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (!at.length) return 'its path climbs above the scanned tree';
+      at.pop();
+      continue;
+    }
+    const next = path.join(top, ...at, part);
+    let st;
+    // Defensive: the OS already resolved this link (the caller's statSync), so a component cannot
+    // be missing unless the tree changes during the scan.
+    try { st = fs.lstatSync(next); } catch { return 'a missing path'; }
+    if (!st.isSymbolicLink()) { at.push(part); continue; }
+    if (++hops > 40) return 'a symlink loop';
+    target = linkTarget(next);
+    if (path.isAbsolute(target)) return 'it passes through an absolute link';
+    parts.unshift(...target.split(SPLIT));
   }
-  if (!treeRoot) return 'outside the scanned tree';
-  try { return within(treeRoot, fs.realpathSync(full)) ? '' : 'it resolves outside the scanned tree'; }
-  catch { return 'outside the scanned tree'; }
+  return '';
 }
 function linkTarget(full) {
   try { return fs.readlinkSync(full); } catch { return '?'; }
