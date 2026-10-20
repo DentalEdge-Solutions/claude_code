@@ -146,9 +146,12 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
    - `brain-self-install.sh` registers the guard with `"timeout": 30` (triage F1, owner
      decision 2026-10-20). A stalled guard then costs each call 30 s instead of 10 minutes.
      It still fails open after those 30 s: the timeout bounds the delay, it does not close
-     the gap. A normal check takes about 0.07 s on a 1 MB command and stayed under 1 s
-     under heavy CPU load. Re-running the installer adds the timeout to an older install,
-     and keeps a timeout the owner already set. `"onFailure": "block"` would make a
+     the gap. A normal check takes about 0.1 s on a 1 MB command (medians of 72 ms, n=15,
+     and 120 ms, n=200) and stayed under 1 s under heavy CPU load. A check that would have
+     needed 30 s to 600 s now fails open sooner, but at that rate it would take a command
+     of hundreds of MB. Re-running the installer gives the timeout to every untimed copy of
+     the guard (any matcher; matching hooks run in parallel) and keeps a timeout the owner
+     already set. An existing install changes only when the installer is re-run there. `"onFailure": "block"` would make a
      timeout deny the call, but it also blocks on a node failure, against P11; it was
      considered and not adopted ([hooks reference](https://code.claude.com/docs/en/hooks),
      checked 2026-10-19 on Claude Code 2.1.302).

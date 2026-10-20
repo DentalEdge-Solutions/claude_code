@@ -28,6 +28,8 @@ try {
   // 1. Install succeeds; capsule verifies; placeholders filled
   let r = run();
   assert.strictEqual(r.status, 0, `install failed:\n${r.stdout}\n${r.stderr}`);
+  // six registrations, each counted once (the guard's own timeout is not a second update)
+  assert.match(r.stdout, /hook entries merged \(6 added or updated\)/);
   const brain = path.join(TMP, '.project-brain');
   const verify = spawnSync('node', [path.join(__dirname, 'brain-verify.js'), '--target', brain], { encoding: 'utf8' });
   assert.strictEqual(verify.status, 0, verify.stderr);
@@ -51,6 +53,11 @@ try {
   // then let it through unchecked (triage F1).
   const guardHooks = list => list.flatMap(e => e.hooks || []).filter(h => /brain-security-guard\.sh/.test(h.command || ''));
   assert.deepStrictEqual(guardHooks(settings.hooks.PreToolUse).map(h => h.timeout), [30], 'guard registered once, with timeout 30');
+  // Only the guard: a timeout on SessionEnd, for one, would replace its short default budget (review G5).
+  const brainHooks = Object.values(settings.hooks).flat().flatMap(e => e.hooks || [])
+    .filter(h => /hooks\/brain\//.test(h.command || '') && !/brain-security-guard\.sh/.test(h.command));
+  assert.strictEqual(brainHooks.length, 5, 'five other brain hook registrations');
+  assert.ok(brainHooks.every(h => !('timeout' in h)), 'no other brain hook gets a timeout');
 
   // 3. .gitignore gained the sessions line exactly once
   const gi = fs.readFileSync(path.join(TMP, '.gitignore'), 'utf8');
@@ -74,6 +81,8 @@ try {
   fs.writeFileSync(settingsFile, withGuard({ type: 'command', command: guardCmd }));
   r = run();
   assert.strictEqual(r.status, 0, r.stderr);
+  // 5 other hooks added + the guard's timeout added = 6 (review G7)
+  assert.match(r.stdout, /hook entries merged \(6 added or updated\)/);
   let pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
   assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [30], 'old guard entry gained timeout 30, no duplicate');
   fs.writeFileSync(settingsFile, withGuard({ type: 'command', command: guardCmd, timeout: 45 }));
@@ -81,6 +90,20 @@ try {
   assert.strictEqual(r.status, 0, r.stderr);
   pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
   assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [45], 'an owner-set timeout is kept');
+
+  // 6. Every untimed copy of the guard gets the timeout, whatever its matcher: matching hooks run
+  //    in parallel, so one untimed copy would still hold a call for 600 s (review G4).
+  //    An owner-set timeout of 0 is kept too.
+  fs.writeFileSync(settingsFile, JSON.stringify({ hooks: { PreToolUse: [
+    { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [{ type: 'command', command: guardCmd }] },
+    { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [{ type: 'command', command: guardCmd }] },
+    { matcher: 'Bash', hooks: [{ type: 'command', command: guardCmd }] },
+    { hooks: [{ type: 'command', command: guardCmd, timeout: 0 }] },
+  ] } }, null, 2));
+  r = run();
+  assert.strictEqual(r.status, 0, r.stderr);
+  pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
+  assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [30, 30, 30, 0], 'every untimed guard copy gained 30; owner 0 kept');
 
   console.log('brain-self-install.test.js: all assertions passed');
 } finally {

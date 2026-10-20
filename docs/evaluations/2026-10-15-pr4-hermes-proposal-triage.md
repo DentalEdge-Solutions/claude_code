@@ -535,7 +535,7 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **N6:** extends E14.
 - **E14 (open, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)"). Each skill's own `REFERENCE.md` threshold table ("**NEUTRAL → KEEP** | Within ±2–5%") also contradicts its step 8, which points to that table (review N6).
 - **E15 (open, found while fixing E13):** `agent-refine` `SKILL.md` step 8's "Sync to runtime: `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`" copies the agent into the root of `~/.claude/`, not `~/.claude/agents/`. CLAUDE.md says agents are project-scoped (installed to target projects only), so this leaves a stray file in `~/.claude/`.
-- **F1 (mitigated 2026-10-20, root cause parked; found 2026-10-19):** `scripts/brain/brain-hooks.test.js` fails intermittently, seen 4 times. The cause was named on its first run under the new runner (review R1):
+- **F1 (mitigated 2026-10-20, root cause parked; found 2026-10-19):** `scripts/brain/brain-hooks.test.js` fails intermittently, seen 4 times (plus 1 hang in a timing probe, below). The cause was named on its first run under the new runner (review R1):
   - **The failing check:** `brain-hooks.test.js:24`, runHook's `assert.ok(!r.error)`: "brain-security-guard.sh failed to run or timed out: spawnSync bash ETIMEDOUT".
   - **Where:** it is called from the 512 KB guard-timing loop (`:463`). The hook passed the test's 15 s timeout; this is not the `ms < 3000` check.
   - **Which input** (an inference: the test message names no input):
@@ -545,7 +545,7 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - The input is the same each time, so this looks like a stall in the hook's input or process handling (bash → `node -e` reading fd 0), not a slow pattern.
   - **Root cause:** not found.
   - **Possible security impact (unverified):** the test file states that "a timed-out PreToolUse hook lets the tool call through".
-    - `brain-self-install.sh` registers the guard with no `timeout`, so Claude Code's default applies.
+    - `brain-self-install.sh` registered the guard with no `timeout` (before 2026-10-20), so Claude Code's default applied.
     - No probe waited past 30 s, so whether a stall outlasts that default is unknown.
     - If it did, one unusually large command (about 1 MB) could skip the guard. Measuring this and fixing the stall is an owner decision.
   - **Follow-up (2026-10-20):**
@@ -557,13 +557,17 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **More repro runs, none hung.** All used the `quotes` input (1,048,677 bytes as JSON), `brain-security-guard.sh` alone and a throwaway capsule:
       - 1,500 runs on an idle machine: none passed 1 s;
       - 300 runs under 24 busy loops on 12 CPUs: none passed 1 s.
-      - With the earlier 140, that is about 1,940 targeted runs with no hang. CI's last 100 runs had no failure.
-      - All five sightings were local runs made while other work was running.
+      - With the earlier 100 targeted runs, that is 1,900 runs with no hang. Counting the two 15-run `quotes` samples of the timing sweeps, about 1,930 `quotes` runs gave one hang.
+      - CI's last 100 runs (2026-10-09 to 2026-10-20) had no failure.
+      - All five sightings (4 test failures, 1 probe hang) were local runs made while other work was running.
+      - The probe outputs are in the session scratchpad (`guard-hang-1500.txt`; the 300-run load output, whose busy-loop load is not itself recorded in it).
     - **Owner decision (2026-10-20):**
       - Stop looking for the root cause; the new runner report will name the failing check if it comes back.
-      - Bound the delay: `brain-self-install.sh` registers the guard with `"timeout": 30`, and a re-run adds it to an older install while keeping a timeout the owner set (`brain-self-install.test.js` §2 and §5).
+      - Bound the delay: `brain-self-install.sh` registers the guard with `"timeout": 30` (`brain-self-install.test.js` §2).
+      - A re-run gives the timeout to every untimed copy of the guard in PreToolUse, whatever its matcher, and keeps a timeout the owner set (§5, §6). Matching hooks run in parallel, so one untimed copy would still hold a call for 600 s (review G4).
       - A timeout still fails open after 30 s; this bounds the delay and does not close the gap.
       - `"onFailure": "block"` was considered and not adopted, because it conflicts with P11.
+      - **Follow-up for the owner:** the change reaches an existing install only when `brain-self-install.sh` is re-run there, this repo's own `.claude/settings.local.json` included (review G10).
   - **Change:** `run-all-tests.js` now reports a failing suite in full (`scripts/run-all-tests.test.js` pins all of it). The new report named this failure on its first occurrence (review R1):
     - stderr whole up to 200 lines, head and tail beyond that;
     - the last 40 stdout lines;
