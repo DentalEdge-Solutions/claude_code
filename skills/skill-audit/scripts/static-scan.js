@@ -59,6 +59,7 @@ if (!fs.existsSync(skillDir)) {
 }
 
 const findings = [];
+const checksByFile = new Map();   // file -> checks reported, so scanSecrets need not search findings (review P2)
 // The target itself is followed if it is a symlink: the user named it. Anything that is not a
 // directory is scanned as a single file, so a FIFO or an unreadable file is reported (S10).
 const targetStat = fs.statSync(skillDir);
@@ -71,7 +72,10 @@ function flag(file, check, severity, detail, own = false) {
   // Matches read through a link that leaves the tree are not quoted: the target can be any file (S10).
   if (!quoteMatches && !own) detail = '"(match through a link that leaves the scanned tree; not quoted)"';
   // The scanned directory itself is "." (an unreadable root), never an empty name.
-  findings.push({ file: path.relative(findingRoot, file) || '.', check, severity, detail });
+  const rel = path.relative(findingRoot, file) || '.';
+  findings.push({ file: rel, check, severity, detail });
+  if (!checksByFile.has(rel)) checksByFile.set(rel, new Set());
+  checksByFile.get(rel).add(check);
 }
 
 function stripCodeBlocks(text) {
@@ -174,8 +178,25 @@ const MD_SECRETS = [
 // may surround the separator, so a YAML key followed by a nested block is not read as its value.
 const DATA_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?[ \t]*[:=][ \t]*[A-Za-z0-9_\-]{16,}/i,                name: 'hardcoded-api-key', sev: 'FLAG' },   // its value class already excludes $ < { %
-  { re: /(?:password|passwd|secret|token)['"]?[ \t]*[:=][ \t]*(?![$<{%'"])[^\s'"#;,]{8,}/i, name: 'hardcoded-secret',  sev: 'FLAG' },
+  // SECRET_KEY, AWS_SECRET_ACCESS_KEY, secretKey, PRIVATE_KEY and an .npmrc _auth too (review P4). A
+  // value starting with "-" is the default of a ${VAR:-default}, not the secret (review P5).
+  { re: /(?:password|passwd|secret|token|_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
+                                                                                            name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
+
+// .netrc ("machine h login u password X") and .properties ("password X") also separate a name from its
+// value by spaces alone (review P4).
+const SPACE_SEPARATED_SECRET = /(?:^|\s)(?:password|passwd)[ \t]+(?![$<{%'"=:-])[^\s'"#;,]{8,}/i;
+
+// ─── Secrets in code: the generic forms, stricter (review P3) ──────────────
+// In scripts and other code the quoted value must be one closed string without spaces, so a prompt
+// ("Password: "), a format string ("Bearer %s") or a string that ends where code goes on
+// ("access_token=" + tok) is not a secret. Main never read scripts for secrets, so nothing is lost.
+const SCRIPT_SECRETS = [
+  { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]/i, name: 'hardcoded-api-key', sev: 'FLAG' },
+  { re: /(?:password|passwd|secret|token)['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i, name: 'hardcoded-secret',  sev: 'FLAG' },
+];
+const GENERIC_SECRET_CHECKS = new Set(SCRIPT_SECRETS.map(p => p.name));
 
 // ─── Config: Overly permissive settings.json rules ─────────────────────────
 // Applied only to files named settings.json / settings.local.json.
@@ -467,17 +488,24 @@ function scanConfig(filePath, content) {
   scanSecrets(filePath, content);
 }
 
-// Data and config files other than settings*.json are read for secrets only (S6). Script files are
-// read for secrets too (S12). unquoted adds DATA_SECRETS (data and config files, S13). A check
-// already reported for this file (a script table's own hardcoded-secret, or the quoted form) is not
-// reported twice.
-function scanSecrets(filePath, content, { unquoted = false } = {}) {
+// Every file is read for secrets (S6, S12, review P1). kind picks the generic forms: 'data' adds the
+// unquoted DATA_SECRETS (data and config files, S13), 'code' swaps in the stricter SCRIPT_SECRETS
+// (scripts and files of no known type), 'config' (settings*.json) keeps main's. A check already
+// reported for the file (a script table's own hardcoded-secret, or the quoted form) is not repeated.
+const CODE_SECRETS = [...SCRIPT_SECRETS, ...MD_SECRETS.filter(p => !GENERIC_SECRET_CHECKS.has(p.name))];
+function scanSecrets(filePath, content, kind = 'config') {
   const rel = path.relative(findingRoot, filePath) || '.';
-  const seen = new Set(findings.filter(f => f.file === rel).map(f => f.check));
-  for (const { re, name, sev } of unquoted ? [...MD_SECRETS, ...DATA_SECRETS] : MD_SECRETS) {
+  const seen = checksByFile.get(rel) || new Set();
+  const table = kind === 'data' ? [...MD_SECRETS, ...DATA_SECRETS] : kind === 'code' ? CODE_SECRETS : MD_SECRETS;
+  for (const { re, name, sev } of table) {
     if (seen.has(name)) continue;
     const m = content.match(re);
-    if (m) { flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`); seen.add(name); }
+    if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
+  }
+  const base = path.basename(filePath).toLowerCase();
+  if (kind === 'data' && (base === '.netrc' || path.extname(base) === '.properties') && !(checksByFile.get(rel) || new Set()).has('hardcoded-secret')) {
+    const m = content.match(SPACE_SEPARATED_SECRET);
+    if (m) flag(filePath, 'hardcoded-secret', 'FLAG', `"${m[0].trim().slice(0, 80)}"`);
   }
 }
 
@@ -487,14 +515,13 @@ function scanScript(filePath, content, ext) {
   if (JS_EXTS.has(ext)) { patterns = JS_PATTERNS; scanContent = stripRegexLiterals(content); }
   if (PY_EXTS.has(ext)) patterns = PY_PATTERNS;
   if (SH_EXTS.has(ext)) patterns = SH_PATTERNS;
-  if (patterns.length === 0) return;
-
   for (const { re, find, name, sev } of patterns) {
     const m = find ? find(scanContent) : scanContent.match(re);
     if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
   }
-  // Secrets in scripts (S12), read in the raw text: a key inside a JS regex literal is still a key.
-  scanSecrets(filePath, content);
+  // Secrets in scripts and in files of no known type (S12, review P1), read in the raw text: a key
+  // inside a JS regex literal is still a key.
+  scanSecrets(filePath, content, 'code');
 }
 
 // Data and config files read for secrets (S6), by extension or, for dotfiles, by name.
@@ -522,7 +549,7 @@ function scanFile(full, content) {
   else if (CONFIG_FILENAMES.has(base)) scanConfig(full, content);
   // Script extensions first: a script named .env.sh or .env.local.js keeps its table (independent review T3)
   else if (JS_EXTS.has(ext) || PY_EXTS.has(ext) || SH_EXTS.has(ext)) scanScript(full, content, ext);
-  else if (isDataFile(base, ext))      scanSecrets(full, content, { unquoted: true });
+  else if (isDataFile(base, ext))      scanSecrets(full, content, 'data');
   else                                 scanScript(full, content, shebangExt(content));
 }
 
@@ -688,4 +715,6 @@ console.log(JSON.stringify({
   findings,
 }, null, 2));
 
-process.exit(verdict === 'BLOCK' ? 2 : verdict === 'FLAG' ? 1 : 0);
+// exitCode, not process.exit(): on macOS a pipe is written asynchronously, and exit() cut the report at
+// 64 KiB (review P8).
+process.exitCode = verdict === 'BLOCK' ? 2 : verdict === 'FLAG' ? 1 : 0;

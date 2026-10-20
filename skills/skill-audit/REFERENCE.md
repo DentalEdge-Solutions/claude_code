@@ -54,7 +54,7 @@
 | Any other file starting with a shebang (`#!/bin/sh`, `#!/usr/bin/env node`, `#!/usr/bin/env -S node …`, `#!/usr/bin/python3.12`) | the table for its interpreter (node, deno, bun → JS; python, pypy → Python; sh, bash, zsh, dash, ksh, ash → shell), and secrets |
 | `.json` `.jsonc` `.json5` `.yaml` `.yml` `.toml` `.ini` `.cfg` `.conf` `.env` `.properties`, and `.env`, `.env.*`, `.npmrc`, `.pypirc`, `.netrc` | secrets, including unquoted values |
 
-The first row that matches wins, top to bottom, so a script named `.env.sh` is a shell script. A shebang file with a data extension (`run.conf`) is read for secrets only. Shebangs with an `env` option that takes an argument (`env -u FOO python3`) or other interpreters (`tsx`, `pythonw`, `uv run`) are not recognised. Script files (JS, Python, shell, and shebang files) are read for secrets in their raw text, so a key inside a JS regex literal is found (S12); a check the script table already reported for the file, such as Python's own hardcoded-secret FLAG, is not reported twice. In a single-file scan, each finding's `file` is the file's name.
+The first row that matches wins, top to bottom, so a script named `.env.sh` is a shell script. A shebang file with a data extension (`run.conf`) is read for secrets only. Shebangs with an `env` option that takes an argument (`env -u FOO python3`) or other interpreters (`tsx`, `pythonw`, `uv run`) are not recognised. Every file is read for secrets, including scripts and files of no known type (`id_rsa`, `.pem`, `Dockerfile`, `.go`, `.jsx`, ruby or perl scripts), in its raw text, so a key inside a JS regex literal is found (S12). A check the script table already reported for the file, such as Python's own hardcoded-secret FLAG, is not reported twice. In a single-file scan, each finding's `file` is the file's name.
 
 ### What the scanner cannot check
 
@@ -90,7 +90,13 @@ When the file is valid JSON, each row is matched two ways. The bare-name forms a
 
 Anthropic keys and tokens (`sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-ant-oat01-…`), OpenAI keys (`sk-…`, `sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), npm tokens (`npm_` + 36 base62 characters, not glued to a word), AWS access key IDs, Slack bot tokens, private-key headers and Bearer tokens are BLOCK.
 
-A generic `api_key`/`password`/`secret`/`token` assignment is a FLAG when the name, which may be quoted as a JSON key is (`"password": "…"`), sits right before `:` or `=` and the value is quoted (`password = "…"`). In data and config files the value may also be unquoted (`PASSWORD=…` in `.env`, `password: …` in YAML, an npm `_authToken=…`), with only spaces or tabs around the separator; a value that starts like a placeholder (`$VAR`, `${VAR}`, `<…>`, `{{ … }}`, `%(…)s`) is not a secret. Markdown keeps the quoted forms only, so prose like `password: required` is not matched (S13).
+A generic `api_key`/`password`/`secret`/`token` assignment is a FLAG when the name, which may be quoted as a JSON key is (`"password": "…"`), sits right before `:` or `=` and the value is quoted (`password = "…"`).
+
+- **Code** (scripts and files of no known type): the quoted value must be one closed string without spaces, so a prompt (`getpass("Password: ")`), a format string (`"Bearer %s"`) or a string that code continues (`"access_token=" + tok`) is not matched.
+- **Data and config files:** the value may also be unquoted (`PASSWORD=…` in `.env`, `password: …` in YAML, an npm `_authToken=…` or `_auth=…`), with only spaces or tabs around the separator. Names with a suffix count too (`SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`, `secretKey`, `PRIVATE_KEY`). An unquoted value that starts like a placeholder (`$VAR`, `${VAR}`, `<…>`, `{{ … }}`, `%(…)s`) or with `-` (the default in `${VAR:-default}`) is not a secret; a quoted placeholder still is, as on main. In `.netrc` and `.properties`, `password` followed by spaces and a value counts too.
+- **Markdown** keeps the quoted forms only, so prose like `password: required` is not matched (S13).
+
+Not matched: values containing `;`, `#` or `,`, and unquoted assignments in shell scripts (`export PASSWORD=x`).
 
 ### Prompt Injection (in .md files)
 
