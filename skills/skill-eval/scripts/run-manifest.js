@@ -32,8 +32,14 @@ init:   Writes run-manifest.json at the iteration root. Refuses to re-init if on
         --subject pins the evaluated definition (SKILL.md / agent .md) by sha256,
         so a report states exactly which revision it measured; --commit adds the
         repo commit (git rev-parse --short HEAD). Both optional.
+        --baseline-method snapshot is kept for an earlier-version baseline; no eval
+        flow uses it (E12): skill-eval and agent-eval record none. status treats a
+        snapshot manifest as stale (see below); a future snapshot flow must revisit that.
 mark:   Updates (or creates) a scenario's status entry.
-status: Prints a table and exits non-zero if any complete/graded scenario is
+status: Prints a table, re-hashes the --subject and warns if it changed since init
+        or is gone, and warns on a snapshot manifest. After either warning a failing
+        status closes with "Do not resume this iteration: start a new iteration";
+        the exit code ignores the warnings. Exits non-zero if any complete/graded scenario is
         missing output.md, timing.json, or evidence.json in either side, or if
         any scenario has not reached "graded". This is the resume/integrity gate.`);
   process.exit(code);
@@ -175,8 +181,28 @@ if (cmd === 'status') {
   const entries = Object.entries(manifest.scenario_status || {});
   console.log(`Run manifest: ${manifestPath(iterationDir)}`);
   console.log(`baseline_method=${manifest.baseline_method}  methodology_version=${manifest.methodology_version}  started_at=${manifest.started_at}`);
+  // stale: this iteration must not be resumed, only replaced by a new one (E10, E12 review R1).
+  let stale = false;
+  if (manifest.baseline_method === 'snapshot') {
+    stale = true;
+    console.log('WARNING: this manifest records baseline_method=snapshot, which no eval flow uses since E12 (its snapshot was identical to the subject) — start a new iteration rather than resuming.');
+  }
   if (manifest.subject) {
     console.log(`subject=${manifest.subject.path}  sha256=${manifest.subject.sha256.slice(0, 12)}  commit=${manifest.subject.commit || '-'}`);
+    // Re-hash the subject (E10): a resume after an edit would measure a different text than init recorded.
+    // A relative path resolves against the working directory, as it did at init. Warn only: the exit code
+    // stays the artifacts-and-grading gate.
+    let now = null;
+    try { now = crypto.createHash('sha256').update(fs.readFileSync(manifest.subject.path)).digest('hex'); } catch {}
+    if (now === null) {
+      stale = true;
+      console.log(`WARNING: the subject ${manifest.subject.path} is not found — this iteration's measured text cannot be checked; start a new iteration rather than resuming.`);
+    } else if (now !== manifest.subject.sha256) {
+      stale = true;
+      console.log(`WARNING: the subject changed since init (sha256 now ${now.slice(0, 12)}, recorded ${manifest.subject.sha256.slice(0, 12)}) — resumed scenarios would measure a different text; start a new iteration rather than resuming.`);
+    } else {
+      console.log('subject unchanged since init');
+    }
   } else {
     console.log('subject=not recorded');   // init ran without --subject: the report must say so (E9)
   }
@@ -225,7 +251,9 @@ if (cmd === 'status') {
   console.log('');
   console.log(ok
     ? 'STATUS: OK — all scenarios graded, no missing artifacts.'
-    : 'STATUS: FAILED — see missing files / ungraded scenarios above. Resume by dispatching only the incomplete scenarios, using the recorded baseline_method.');
+    : stale
+      ? 'STATUS: FAILED — see missing files / ungraded scenarios above. Do not resume this iteration: start a new iteration (see the WARNING above).'
+      : 'STATUS: FAILED — see missing files / ungraded scenarios above. Resume by dispatching only the incomplete scenarios, using the recorded baseline_method.');
   process.exit(ok ? 0 : 1);
 }
 

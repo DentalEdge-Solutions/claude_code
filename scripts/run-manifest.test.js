@@ -24,6 +24,10 @@ function run(...args) {
   const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', cwd: os.tmpdir() });
   return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
+function runIn(cwd, ...args) {
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', cwd });
+  return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+}
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'run-manifest-')); }
 function manifest(dir) { return JSON.parse(fs.readFileSync(path.join(dir, 'run-manifest.json'), 'utf8')); }
 
@@ -117,6 +121,126 @@ test('R6: --subject pointing at a directory fails cleanly, without a stack trace
   assert.notStrictEqual(r.status, 0);
   assert.match(r.out, /not a file/);
   assert.doesNotMatch(r.out, /EISDIR|at Object\./);
+});
+
+// E10 (PR #4 triage): the subject's sha256 is taken once, at init. A resumed run must see when the definition
+// changed since then, because the resumed scenarios would measure a different text. status re-hashes the
+// subject and warns; its exit code is unchanged (it stays the artifacts-and-grading gate).
+function gradedIteration() {
+  const root = tmp();
+  const subject = path.join(root, 'SKILL.md');
+  fs.writeFileSync(subject, 'v1');
+  const dir = path.join(root, 'iteration-1');
+  run('init', dir, '--baseline-method', 'none', '--subject', subject, '--commit', 'abcdef1');
+  for (const side of ['with_skill', 'without_skill']) {
+    const d = path.join(dir, 's1-x-r1', side);
+    fs.mkdirSync(d, { recursive: true });
+    for (const f of ['output.md', 'timing.json', 'evidence.json']) fs.writeFileSync(path.join(d, f), '{}');
+  }
+  run('mark', dir, 's1-x-r1', 'graded');
+  return { subject, dir };
+}
+
+test('E10: status says the subject is unchanged when it is', () => {
+  const { dir } = gradedIteration();
+  const r = run('status', dir);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.match(r.out, /subject unchanged since init/);
+  assert.doesNotMatch(r.out, /WARNING/);
+});
+
+test('E10: status warns when the subject changed since init, with the same exit code', () => {
+  const { subject, dir } = gradedIteration();
+  fs.writeFileSync(subject, 'v2');
+  const r = run('status', dir);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.match(r.out, /WARNING: the subject changed since init/);
+  const now = crypto.createHash('sha256').update('v2').digest('hex').slice(0, 12);
+  assert.ok(r.out.includes(now), `the current sha256 ${now} is not printed`);
+  assert.match(r.out, /start a new iteration/);
+  assert.doesNotMatch(r.out, /subject unchanged/);
+});
+
+test('E10: status warns when the subject is gone, with the same exit code', () => {
+  const { subject, dir } = gradedIteration();
+  fs.rmSync(subject);
+  const r = run('status', dir);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.match(r.out, /WARNING: the subject .*SKILL\.md is not found/);
+});
+
+test('E10: a changed subject does not turn a failing status into a passing one', () => {
+  const { subject, dir } = gradedIteration();
+  run('mark', dir, 's2-x-r1', 'pending');
+  fs.writeFileSync(subject, 'v2');
+  const r = run('status', dir);
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.out, /WARNING: the subject changed since init/);
+});
+
+test('E10 review R3: the not-found warning says to start a new iteration', () => {
+  const { subject, dir } = gradedIteration();
+  fs.rmSync(subject);
+  assert.match(run('status', dir).out, /WARNING: the subject [^\n]*not found[^\n]*start a new iteration/);
+});
+
+test('E10 review R3: a relative subject resolves against the working directory, as at init', () => {
+  const root = tmp();
+  fs.writeFileSync(path.join(root, 'SKILL.md'), 'v1');
+  fs.mkdirSync(path.join(root, 'sub'));
+  runIn(root, 'init', 'iteration-1', '--baseline-method', 'none', '--subject', 'SKILL.md', '--commit', 'abcdef1');
+  assert.match(runIn(root, 'status', 'iteration-1').out, /subject unchanged since init/);
+  fs.writeFileSync(path.join(root, 'SKILL.md'), 'v2');
+  assert.match(runIn(root, 'status', 'iteration-1').out, /WARNING: the subject changed since init/);
+  assert.match(runIn(path.join(root, 'sub'), 'status', path.join('..', 'iteration-1')).out, /WARNING: the subject SKILL\.md is not found/);
+});
+
+// Review R1: after a warning, the closing line must not tell the reader to resume.
+const RESUME_LINE = /Resume by dispatching only the incomplete scenarios/;
+test('E10 review R1: a failing status after a subject change closes with "start a new iteration", not "Resume"', () => {
+  const { subject, dir } = gradedIteration();
+  run('mark', dir, 's2-x-r1', 'pending');
+  fs.writeFileSync(subject, 'v2');
+  const last = run('status', dir).out.trim().split('\n').pop();
+  assert.match(last, /^STATUS: FAILED/);
+  assert.match(last, /start a new iteration/);
+  assert.doesNotMatch(last, RESUME_LINE);
+});
+
+test('E10 review R8: a failing status with the subject gone closes with "start a new iteration", not "Resume"', () => {
+  const { subject, dir } = gradedIteration();
+  run('mark', dir, 's2-x-r1', 'pending');
+  fs.rmSync(subject);
+  const last = run('status', dir).out.trim().split('\n').pop();
+  assert.match(last, /^STATUS: FAILED/);
+  assert.match(last, /start a new iteration/);
+  assert.doesNotMatch(last, RESUME_LINE);
+});
+
+test('E12 review R1: a snapshot manifest (made before E12) is warned about and not resumed', () => {
+  const root = tmp();
+  const dir = path.join(root, 'iteration-1');
+  run('init', dir, '--baseline-method', 'snapshot', '--snapshot-path', path.join(root, 'snap.md'));
+  run('mark', dir, 's1-x-r1', 'pending');
+  const out = run('status', dir).out;
+  assert.match(out, /WARNING: this manifest records baseline_method=snapshot/);
+  const last = out.trim().split('\n').pop();
+  assert.match(last, /start a new iteration/);
+  assert.doesNotMatch(last, RESUME_LINE);
+});
+
+test('E10 review R1: a plain failing status still says to resume', () => {
+  const { dir } = gradedIteration();
+  run('mark', dir, 's2-x-r1', 'pending');
+  assert.match(run('status', dir).out.trim().split('\n').pop(), RESUME_LINE);
+});
+
+test('E10: no subject, no check line', () => {
+  const root = tmp();
+  const dir = path.join(root, 'iteration-1');
+  run('init', dir, '--baseline-method', 'none');
+  const r = run('status', dir);
+  assert.doesNotMatch(r.out, /subject unchanged|WARNING: the subject/);
 });
 
 if (!ok) process.exit(1);

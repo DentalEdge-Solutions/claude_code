@@ -53,6 +53,7 @@ If it reports incomplete or ungraded scenarios, resume that iteration instead of
 starting a new one: dispatch only the scenarios not yet `graded`, using the
 **recorded** `baseline_method` from that manifest — never re-decide the baseline
 method mid-iteration.
+If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming.
 
 1. Read `skills/<skill-name>/SKILL.md` and all bundled files. Compute context
    footprint: total lines across all files × 4 estimated tokens/line.
@@ -66,21 +67,18 @@ method mid-iteration.
    Without --context: 6 scenarios. Never skip --context when project-context.json exists.
 
 4. Establish baseline:
-   - New skill (no prior SKILL-EVAL.md): baseline_method = `none` (no skill loaded)
-   - Existing skill being improved: baseline_method = `snapshot`; step 5 copies the skill
-     folder into the iteration folder (never into `skills/`, which install.sh syncs).
-   - Unchanged skill with current SKILL-EVAL.md: reuse prior baseline scores (no new
-     manifest needed).
+   - The baseline is the same prompt with no skill loaded: baseline_method = `none`,
+     for a new skill and an existing one alike; a baseline of an earlier version is not run:
+     a copy taken now would be identical to the skill being measured.
 
 5. Create the iteration directory and initialize the run manifest — record the
    baseline method here **once**:
    Count existing `evals/<skill-name>/iteration-*` dirs. N = count + 1 (or the
    resumed N from the check above).
    `mkdir -p evals/<skill-name>/iteration-<N>`
-   Snapshot only: `cp -R skills/<skill-name> evals/<skill-name>/iteration-<N>/eval-snapshot`
-   `node skills/skill-eval/scripts/run-manifest.js init evals/<skill-name>/iteration-<N> --baseline-method <none|snapshot> [--snapshot-path evals/<skill-name>/iteration-<N>/eval-snapshot/SKILL.md] --subject skills/<skill-name>/SKILL.md --commit <short SHA from git rev-parse --short HEAD>`
+   `node skills/skill-eval/scripts/run-manifest.js init evals/<skill-name>/iteration-<N> --baseline-method none --subject skills/<skill-name>/SKILL.md --commit <short SHA from git rev-parse --short HEAD>`
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
-   On resume, skip the snapshot copy and this call entirely — the manifest already exists and re-init is
+   On resume, skip this call entirely — the manifest already exists and re-init is
    refused by design. Every scenario in this iteration uses the recorded method.
 
 6. Dispatch ALL pairs simultaneously — spawn up to 42 subagents in ONE Agent call.
@@ -214,6 +212,7 @@ method mid-iteration.
 
     ## Evidence and Limits
     - **Subject revision:** definition sha256 <first 12> · commit <short SHA> — copied from `run-manifest.json` `subject`. The sha256 identifies the measured text; the commit is HEAD when the run started, so it does not contain an uncommitted definition (a refine loop measures edits before they are committed). Write "not recorded" for whichever of `subject` and its `commit` is null, keeping the other
+    - **Baseline:** the same prompt with no skill loaded (`baseline_method: none`). The delta measures the skill against no skill, not against an earlier version of it: no earlier-version baseline is run
     - **Evidence source:** `evidence.json` per scenario (harvest-evidence.js); subagent self-reports are not grading input. `skill_loaded` is the `Skill(<skill-name>)` token the with-skill subagent is instructed to write when it applies the skill — a marker in its own output, not an independent tool-call log, so trigger accuracy assumes the subagent follows that rule
     - **Untested:** (every scenario type, rep or check not run, each with its reason — never omitted silently; "none" if complete)
     - **Limitations:** (anything that bounds these numbers — e.g. whether the subject's description was in the skill listing during the run, reduced reps, judge model)

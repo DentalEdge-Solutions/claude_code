@@ -34,19 +34,24 @@ function evidenceBullets(file) {
 }
 
 const TRACKS = [
-  { track: 'skill', marker: '`Skill(<skill-name>)`' },
-  { track: 'agent', marker: '`Agent(<agent-name>)`' },
+  { track: 'skill', marker: '`Skill(<skill-name>)`', none: 'no skill loaded', what: 'the skill against no skill' },
+  { track: 'agent', marker: '`Agent(<agent-name>)`', none: 'no agent dispatched', what: 'the agent against no agent' },
 ];
 
-for (const { track, marker } of TRACKS) {
+for (const { track, marker, none, what } of TRACKS) {
   const template = `skills/${track}-eval/assets/${track.toUpperCase()}-EVAL.template.md`;
   const copies = [`skills/${track}-eval/REFERENCE.md`, `.claude/agents/${track}-eval-agent.md`];
   const expected = evidenceBullets(template);
 
-  test(`${track}: the template's section has the four bullets, and names the ${marker} marker`, () => {
+  test(`${track}: the template's section has the five bullets, and names the ${marker} marker`, () => {
     assert.deepStrictEqual(expected.map(b => b.match(/^- \*\*([^:*]+):\*\*/)?.[1]),
-      ['Subject revision', 'Evidence source', 'Untested', 'Limitations']);
-    assert.ok(expected[1].includes(marker), expected[1]);
+      ['Subject revision', 'Baseline', 'Evidence source', 'Untested', 'Limitations']);
+    assert.ok(expected[2].includes(marker), expected[2]);
+    // E12: the baseline that ran is no skill (no agent), so the delta is not a change from an earlier version.
+    for (const clause of [`the same prompt with ${none} (\`baseline_method: none\`)`,
+      `The delta measures ${what}, not against an earlier version of it`]) {
+      assert.ok(expected[1].includes(clause), `Baseline must say: ${clause}\n  got: ${expected[1]}`);
+    }
     // E9: the commit is HEAD when the run started, so a refine loop's uncommitted definition is not
     // in it; the sha256 is what identifies the measured text, and a manifest without one says so.
     // Whole clauses, so a reworded line that reverses the meaning fails (E9 review L2).
@@ -97,6 +102,29 @@ for (const { file, subject } of INIT_SUBJECT) {
     }
   });
 }
+
+// E11: team-eval writes no run manifest, so its report pins every definition by sha256 itself, and the review
+// protocol says which report pins its revision how.
+// Hashed before any run, like run-manifest.js init, and re-checked when the report is written (review R5).
+test('team-eval pins the orchestrator and every member by sha256 before the runs, and re-checks them (E11)', () => {
+  const text = fs.readFileSync(path.join(REPO, 'skills/team-eval/SKILL.md'), 'utf8').replace(/\s+/g, ' ');
+  const pin = text.indexOf('record the sha256 of the orchestrator and of every member definition');
+  const step3 = text.indexOf('3. **Execute scenarios**');
+  const step7 = text.indexOf('7. **Write the report**');
+  assert.ok(pin !== -1, 'no per-definition sha256');
+  assert.ok(step3 !== -1 && pin < step3, 'the sha256 must be recorded before step 3 runs the scenarios');
+  assert.ok(text.includes('`shasum -a 256 <file>`') && text.includes('`git rev-parse --short HEAD`'), 'no commands');
+  const report = text.slice(step7);
+  assert.ok(report.includes('re-hash every definition; if any differs from step 1, the report says which'), 'no re-check at step 7');
+  assert.ok(report.includes('the commit is HEAD when the run started, so it does not contain uncommitted edits'), 'no commit caveat');
+});
+
+test('REVIEW_PROTOCOL.md says how each eval report pins its revision (E11)', () => {
+  const text = fs.readFileSync(path.join(REPO, 'docs/REVIEW_PROTOCOL.md'), 'utf8');
+  assert.ok(!/TEAM-EVAL, with the revision pinned by `run-manifest\.js init --subject`/.test(text), 'still says team-eval uses run-manifest');
+  assert.ok(text.includes('SKILL-EVAL and AGENT-EVAL pin the measured definition with `run-manifest.js init --subject`'), 'skill/agent rule');
+  assert.ok(text.includes('TEAM-EVAL lists the sha256 of the orchestrator and of every member, taken before the runs (team-eval steps 1 and 7)'), 'team rule');
+});
 
 if (!ok) process.exit(1);
 console.log('\nAll eval-report-sections tests passed.');
