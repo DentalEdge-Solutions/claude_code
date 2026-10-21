@@ -118,7 +118,7 @@ own eval logic.
    7d. Keep or revert:
    - score > baseline + 2% → KEEP. Sync: `cp -r skills/<skill-name> ~/.claude/skills/`
    - score < baseline − 5% → REVERT. Restore: `cp evals/<skill-name>/refine/SKILL.md.pre-iter-N skills/<skill-name>/SKILL.md`
-   - within ±2–5% → NEUTRAL → KEEP (simpler is better).
+   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made the edited file shorter, with fewer bytes (`wc -c`) than before the edit. If it did, KEEP and sync as above; if not, restore as above.
    Mark lever as exhausted if reverted ≥ 2× with no improvement.
 
    7e. Append to SKILL-REFINE-LOG.md:

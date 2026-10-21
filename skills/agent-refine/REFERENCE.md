@@ -17,11 +17,11 @@
 
 | Outcome | Condition | Decision |
 |---------|-----------|----------|
-| **KEEP** | pass_rate > baseline + 2% | This is the new baseline |
-| **REVERT** | pass_rate < baseline − 5% | Restore exact prior content |
-| **NEUTRAL → KEEP** | Within ±2–5% | Keep — slight preference for new; simpler isn't worse |
+| **KEEP** | score > baseline + 2% | This is the new baseline |
+| **REVERT** | score < baseline − 5% | Restore exact prior content |
+| **NEUTRAL** | baseline − 5% ≤ score ≤ baseline + 2% | REVERT unless the edit made the edited file shorter, with fewer bytes (`wc -c`) than before the edit; if it did, KEEP |
 
-A neutral result that makes the agent file *shorter* is a win. Simplification that maintains the score reduces context footprint.
+`score` is the training-set pass rate from the re-eval. A neutral edit is kept only when it shortens the agent file: at the same score, a shorter definition has a smaller context footprint, while a longer one adds text the score did not pay for. The size is counted in bytes, not lines, so rewrapping text never counts as shorter.
 
 ---
 

@@ -124,7 +124,7 @@ your own eval logic.
    7d. Keep or revert:
    - score > baseline + 2% → KEEP.
    - score < baseline − 5% → REVERT. Restore: `cp evals/agents/<agent-name>/refine/<agent-name>.md.pre-iter-N .claude/agents/<agent-name>.md`
-   - within ±2–5% → NEUTRAL → KEEP (simpler is better).
+   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made the edited file shorter, with fewer bytes (`wc -c`) than before the edit. If it did, KEEP; if not, restore as above.
    Mark lever as exhausted if reverted ≥ 2× with no improvement.
 
    7e. Append to `.claude/agents/<agent-name>-REFINE-LOG.md`:
