@@ -1666,6 +1666,9 @@ for (const [label, file, text] of [
   ['@NC@ in settings.json env', 'settings.json', `{"env": {"@NC@": "${NPMAUTH}"}}\n`],
   ['@NC@ in a YAML CI file', 'ci.yml', `env:\n  @NC@: ${NPMAUTH}\n`],
   ['@nc@ in a script', 'publish.py', `@nc@ = "${NPMAUTH}"\n`],
+  ['an 8-character @NC@ value (review V12)', '.env', '@NC@=abcdefgh\n'],
+  ['an 8-character quoted @NC@ value (review V12)', 'c.json', '{"@NC@": "abcdefgh"}\n'],
+  ['an 8-character @nc@ value in code (review V12)', 'c.js', 'const @nc@ = "abcdefgh";\n'],
 ]) {
   test(`S13 follow-up: ${ex(label)} → hardcoded-secret FLAG`, () => {
     const json = scanOne(file, ex(text));
@@ -1692,6 +1695,13 @@ for (const [label, file, text] of [
   ['a constant whose value is the scheme name (review V4)', 'c.py', "AUTH_TYPE_@BA@ = '@ba@'\n"],
   ['a JSON @bA@ set to the scheme name (review V4)', 'c.json', '{"@bA@": "@ba@"}\n'],
   ['an unquoted @bA@ set to the scheme name (review V10)', 'c.yml', '@bA@: @ba@\n'],
+  ['an @nc@ value with spaces in code (review V12)', 'c.js', 'const @nc@ = "abc def ghi jkl";\n'],
+  ['an @nc@ string that code continues (review V12)', 'c.js', 'const @nc@ = "ZmFrZTpmYWtlZmFrZQ==\n'],
+  ['a 7-character @nc@ value in code (review V12)', 'c.js', 'const @nc@ = "abcdefg";\n'],
+  ['an @NC@ key with a nested YAML block (review V12)', 'c.yml', '@NC@:\n  from_vault_secret_name: x\n'],
+  ['an @NC@ value cut by a comment (review V12)', '.env', '@NC@=ab#cdefghij\n'],
+  ['a 7-character @NC@ value (review V12)', '.env', '@NC@=abcdefg\n'],
+  ['a 7-character quoted @NC@ value (review V12)', 'c.json', '{"@NC@": "abcdefg"}\n'],
   ['@BA@_USER, a user name', '.env', '@BA@_USER=administrator\n'],
   ['a @BA@ placeholder', '.env', '@BA@=${BASIC_AUTH}\n'],
   ['@ba@_check, another name', 'c.yml', '@ba@_check: whenever_ok\n'],
@@ -1712,8 +1722,12 @@ for (const [label, file, text] of [
   ['quoted, in Markdown', 'README.md', `Set @NC@: "\${{ secrets.NPM_AUTH }}" and ${PW}: "Fak3Passw0rd99".\n`],
   ['unquoted, in .env', '.env', `@NC@=ZmFrZTpmYWtlZmFrZQ==\n${PW.toUpperCase()}=Fak3Passw0rd99\n`],
   ['in code', 'c.js', `const @nc@ = "ZmFrZTpmYWtlZmFrZQ==";\nconst ${PW} = "Fak3Passw0rd99";\n`],
+  // .properties and .netrc read a space-separated password only when no hardcoded-secret was reported for the file;
+  // a new pattern's finding, a placeholder included, must not stop it (review V11)
+  ['in .properties, after a quoted basic-auth placeholder', 'application.properties', `server.@b-a@="\${BASIC_AUTH}"\nspring.datasource.${PW} Fak3Passw0rd99\n`],
+  ['in .netrc, after an npm line', '.netrc', `# @nc@="ZmFrZTpmYWtlZmFrZQ=="\nmachine h.test login u ${PW} Fak3Passw0rd99\n`],
 ]) {
-  test(`S13 follow-up: an npm _auth line does not hide a ${PW} line, ${label} (review V9)`, () => {
+  test(`S13 follow-up: a new pattern's line does not hide a ${PW} line, ${label} (review V9, V11)`, () => {
     const details = scanOne(file, ex(text)).findings.filter(f => f.check === 'hardcoded-secret').map(f => f.detail);
     assert.ok(details.some(d => d.includes('Fak3Passw0rd99')), `the ${PW} line is not shown: ${details.join(' | ')}`);
   });
