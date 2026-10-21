@@ -48,7 +48,9 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 5. **Hypothesis** — pick ONE change from the lever space. Consult the failure mode → lever table in REFERENCE.md. Track which levers have been tried this session — vary lever types in early iterations; exploit the best-performing lever in later ones.
 
-6. **Mutate** — make exactly the targeted edit. No other changes.
+6. **Mutate** — first copy the agent file, before the edit (N is the iteration number):
+   `cp .claude/agents/<name>.md evals/agents/<name>/refine/<name>.md.pre-iter-N`
+   Then make exactly the targeted edit. No other changes. `wc -c < evals/agents/<name>/refine/<name>.md.pre-iter-N` is the size before the edit.
    - **Lever E only**: after mutating `model:` or `tools:` in the frontmatter, immediately re-run agent-audit:
      ```bash
      node skills/skill-audit/scripts/static-scan.js .claude/agents/<name>.md
@@ -59,7 +61,8 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. No copy is needed: the agent is project-scoped, and Claude Code watches `.claude/agents/` and uses the edited file on the next delegation.
-   - score < baseline − 5% → **REVERT** to prior content exactly.
+   - score < baseline − 5% → **REVERT**: restore the agent file from step 6's copy:
+     `cp evals/agents/<name>/refine/<name>.md.pre-iter-N .claude/agents/<name>.md`
    - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → **REVERT unless the edit made the agent file shorter, with fewer bytes (`wc -c`) than before the edit**; if it did, **KEEP**, and the baseline stays as it was.
    - Log the iteration either way — failed hypotheses are data.
 
@@ -73,7 +76,8 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 - **One lever per iteration** — never change description AND a workflow step in the same iteration.
 - **Re-run agent-audit after Lever E** — any tools/model change must pass the security scanner before scoring.
-- **Revert faithfully** — restore the exact prior content, not a rewrite of it.
+- **Revert faithfully** — restore the exact prior content from the iteration's copy, not a rewrite of it.
+- **Never skip the per-iteration copy** — step 6 copies the agent file before every edit.
 - **Log every iteration** — including failed hypotheses. They're data.
 - **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend writing a new agent definition from scratch.
 - **Never skip the baseline backup** — `.md.baseline` must exist before the first mutation.

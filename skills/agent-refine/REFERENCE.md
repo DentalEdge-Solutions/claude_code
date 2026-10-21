@@ -18,7 +18,7 @@
 | Outcome | Condition | Decision |
 |---------|-----------|----------|
 | **KEEP** | score > baseline + 2% | This is the new baseline |
-| **REVERT** | score < baseline − 5% | Restore exact prior content |
+| **REVERT** | score < baseline − 5% | Restore the exact prior content from the iteration's copy (`evals/agents/<name>/refine/<name>.md.pre-iter-N`) |
 | **NEUTRAL** | baseline − 5% ≤ score ≤ baseline + 2% | REVERT unless the edit made the agent file shorter, with fewer bytes (`wc -c`) than before the edit; if it did, KEEP, and the baseline stays as it was |
 
 `score` is the training-set pass rate from the re-eval, and the bands are in percentage points of it. A neutral edit is kept only when it shortens the agent file: at the same score, a shorter definition has a smaller context footprint, while a longer one adds text the score did not pay for. The size is counted in bytes, not lines, so rewrapping text never counts as shorter. A neutral KEEP leaves the baseline where it was, so a run of neutral edits cannot lower the score step by step. For the lever-exhaustion and convergence rules, a neutral KEEP is not an improvement and a neutral revert counts as a revert.

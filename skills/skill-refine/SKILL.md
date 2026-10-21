@@ -50,13 +50,20 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 5. **Hypothesis** — pick ONE change from the lever space. Consult the failure mode → lever table in REFERENCE.md. Track which levers have been tried this session (coverage) — in early iterations, vary lever types; in later iterations, exploit the best-performing lever.
 
-6. **Mutate** — make exactly the targeted edit. No other changes.
+6. **Mutate** — first copy the whole skill folder, before the edit, into a fresh folder outside it (step 8 syncs the skill folder; fresh, because N, the iteration number, repeats across sessions):
+   `rm -rf "evals/<skill-name>/refine/pre-iter-N" && mkdir -p "evals/<skill-name>/refine/pre-iter-N" && cp -R "skills/<skill-name>/." "evals/<skill-name>/refine/pre-iter-N/"`
+   Then make exactly the targeted edit, to one file, `<file>`, relative to the skill folder: `SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E. No other changes. A symlinked `<file>` is out of scope: a revert can't restore it, so pick another file. `wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit.
 
 7. **Re-eval (training set only)** — re-run the failing scenarios using skill-eval's exact methodology: parallel subagents (with-skill vs no-skill baseline), 3 reps each, programmatic trigger detection first, then LLM judge scoring using the rubric in skill-eval's REFERENCE.md. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Trigger × 0.4) + (Checklist × 0.3) + (Output × 0.3)`.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. Sync to runtime: `cp -r skills/<skill-name> ~/.claude/skills/`
-   - score < baseline − 5% → **REVERT** to prior content exactly.
+   - score < baseline − 5% → **REVERT**: restore the edited file from step 6's copy, or delete it if the edit created it:
+     `if [ -e "evals/<skill-name>/refine/pre-iter-N/<file>" ]; then cp "evals/<skill-name>/refine/pre-iter-N/<file>" "skills/<skill-name>/<file>"; else rm "skills/<skill-name>/<file>"; fi`
+     Then check that nothing else differs from the copy; this must print nothing:
+     `diff -rq -x SKILL-EVAL.md -x SKILL-REFINE-LOG.md "evals/<skill-name>/refine/pre-iter-N" "skills/<skill-name>"`
+     If it lists a file, restore it the same way; if it lists a folder the edit created, remove it.
+     `SKILL-EVAL.md` and `SKILL-REFINE-LOG.md` are not restored.
    - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → **REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit**; if it did, **KEEP** and sync as above, and the baseline stays as it was. A neutral Lever D or E edit is always reverted.
    - Log the iteration either way — failed hypotheses are data.
 
@@ -69,7 +76,8 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 ## Rules
 
 - **One lever per iteration** — never change description AND checklist in the same iteration.
-- **Revert faithfully** — restore the exact prior content, not a rewrite of it.
+- **Revert faithfully** — restore the exact prior content from the iteration's copy, not a rewrite of it.
+- **Never skip the per-iteration copy** — step 6 copies the skill folder before every edit.
 - **Log every iteration** — including failed hypotheses. They're data.
 - **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend a rebuild instead: `superpowers:writing-skills` if installed, otherwise by hand per skill-scout's no-results step; then `skill-audit` → `skill-eval`.
 - **Never skip the baseline backup** — `SKILL.md.baseline` must exist before the first mutation.

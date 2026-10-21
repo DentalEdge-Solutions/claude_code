@@ -252,13 +252,23 @@ Read `./skills/<skill-name>/SKILL-EVAL.md` for baseline scores and worst-perform
 
 **Per iteration:**
 1. State hypothesis: "Changing [section] will improve [scenario] because [reason]"
-2. Make ONE surgical edit to `./skills/<skill-name>/SKILL.md` (or REFERENCE.md for Lever D)
-3. Re-score the failing scenarios
-4. Keep or revert (`score` is the pass rate of the re-scored scenarios; the bands are in percentage points of it):
+2. Copy the whole skill folder, before the edit, into a fresh folder outside it (N is the iteration number;
+   fresh, because N repeats across runs):
+   `rm -rf "evals/<skill-name>/refine/pre-iter-N" && mkdir -p "evals/<skill-name>/refine/pre-iter-N" && cp -R "skills/<skill-name>/." "evals/<skill-name>/refine/pre-iter-N/"`
+   `wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit.
+3. Make ONE surgical edit to one file, `<file>`, relative to `./skills/<skill-name>/`:
+   `SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E. A symlinked `<file>` is out of scope: a revert can't restore it, so pick another file.
+4. Re-score the failing scenarios
+5. Keep or revert (`score` is the pass rate of the re-scored scenarios; the bands are in percentage points of it):
    - score > baseline + 2% → KEEP
-   - score < baseline − 5% → REVERT the edit
+   - score < baseline − 5% → REVERT: restore the edited file from step 2's copy, or delete it if the edit created it:
+     `if [ -e "evals/<skill-name>/refine/pre-iter-N/<file>" ]; then cp "evals/<skill-name>/refine/pre-iter-N/<file>" "skills/<skill-name>/<file>"; else rm "skills/<skill-name>/<file>"; fi`
+     Then check that nothing else differs from the copy; this must print nothing:
+     `diff -rq -x SKILL-EVAL.md -x SKILL-REFINE-LOG.md "evals/<skill-name>/refine/pre-iter-N" "skills/<skill-name>"`
+     If it lists a file, restore it the same way; if it lists a folder the edit created, remove it.
+     `SKILL-EVAL.md` and `SKILL-REFINE-LOG.md` are not restored.
    - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit; if it did, KEEP, and the baseline stays as it was. A neutral Lever D or E edit is always reverted.
-5. Log to `./skills/<skill-name>/SKILL-REFINE-LOG.md`
+6. Log to `./skills/<skill-name>/SKILL-REFINE-LOG.md`
 
 Stop when: all thresholds met, 3-iteration budget exhausted, or no hypotheses remain.
 
