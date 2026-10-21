@@ -1726,6 +1726,9 @@ for (const [label, file, text] of [
   // a new pattern's finding, a placeholder included, must not stop it (review V11)
   ['in .properties, after a quoted basic-auth placeholder', 'application.properties', `server.@b-a@="\${BASIC_AUTH}"\nspring.datasource.${PW} Fak3Passw0rd99\n`],
   ['in .netrc, after an npm line', '.netrc', `# @nc@="ZmFrZTpmYWtlZmFrZQ=="\nmachine h.test login u ${PW} Fak3Passw0rd99\n`],
+  // the unquoted (data-file) forms too (review V14)
+  ['in .properties, after an unquoted basic-auth value', 'application.properties', `server.@b-a@=admin:hunter2pass\nspring.datasource.${PW} Fak3Passw0rd99\n`],
+  ['in .netrc, after an unquoted npm line', '.netrc', `@NC@=ZmFrZTpmYWtlZmFrZQ==\nmachine h.test login u ${PW} Fak3Passw0rd99\n`],
 ]) {
   test(`S13 follow-up: a new pattern's line does not hide a ${PW} line, ${label} (review V9, V11)`, () => {
     const details = scanOne(file, ex(text)).findings.filter(f => f.check === 'hardcoded-secret').map(f => f.detail);
