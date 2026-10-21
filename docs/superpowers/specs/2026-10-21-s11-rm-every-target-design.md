@@ -1,157 +1,212 @@
 # Design 2026-10-21: S11, the `rm` check reads every target
 
-Status: draft for the owner, 2026-10-21. Nothing is built. It changes how `rm-rf-root` in
-`skills/skill-audit/scripts/static-scan.js` reads Markdown; it does not touch the brain security guard.
+Status: draft for the owner, revision 2 (after design review round 1, D-R1 to D-R13). Nothing is built. It
+changes how `rm-rf-root` in `skills/skill-audit/scripts/static-scan.js` reads Markdown; it does not touch the
+brain security guard.
 
 ## Goal
 
 `rm-rf-root` finds a recursive or forced `rm` of a root or home path wherever the path sits in the command,
-not only when it is the first target, without the faults that sank the last attempt:
+and resists the cheap ways to hide one, without the faults that sank the last attempt:
 
 1. The forms S11 records are found: `rm -rf ./build ~/`, `rm -rf x /`, `rm --interactive=never -rf /`,
    `rm / -rf`, and after `--` a first target that starts with `-` or a quote (`rm -rf -- --foo-rm ~`).
-2. Every finding main makes today is still made, with the same severity and the same quoted line.
-3. Scan time stays linear in the input: no input makes it slower than main by more than a small constant.
-4. No new false BLOCK across lines, or because of separators inside quotes or redirections.
+2. So are the evasions design review round 1 showed against revision 1 (listed under "How it is checked").
+3. Every finding main makes today is still made, with the same severity and the same quoted line.
+4. Scan time stays linear in the input, and within a stated budget (below).
+5. No new false BLOCK across lines, or because of separators inside quotes or redirections.
 
-Done means: the S11 forms are tests that fail on main; the decision of 2026-10-15 is met (a main-versus-
-branch differential with every evidence line compared, 1 MB and 4 MB timing including the F1 inputs, and
-real inputs); CI's skill scan stays clean.
+No static check closes every way to build a command at run time; the limits are listed, and each is a test
+pinned as a known limit.
 
 ## In plain language
 
 skill-audit reads a skill's instructions before it is installed and refuses a skill that tells Claude to
-delete the root or the home folder. Today it looks only at the first thing after `rm` and its options. A
-skill can slip past by putting a harmless folder first: `rm -rf ./build ~/` deletes the home folder and
-passes. The fix reads the command the way the shell would, word by word, and checks every target. It is a
+delete the root or the home folder. Today it looks only at the first thing after `rm` and its options, so
+`rm -rf ./build ~/` passes. The fix reads the command the way the shell would and checks every target. It is a
 second detector beside today's, so nothing today's catches is lost.
 
 ## Where it stands
 
-- **The check today** (static-scan.js:129, REFERENCE.md "Dangerous Bash"): one regular expression. `rm`
-  after any non-word character, an option run that holds a recursive or force option, then the first target
-  must start with `/`, `~` or `$HOME` (quoted or not; `/tmp` counts). An option run holding `--cached` before
-  any `--` is `git rm --cached` and is skipped. In Markdown prose a hit is BLOCK; a hit only inside code
-  (fenced or inline) is FLAG (owner decision R2, 2026-10-15). `scripts/static-scan.test.js` names it 19 times.
+- **The check today** (static-scan.js:129, REFERENCE.md "Dangerous Bash"): one regular expression. `rm` after
+  any non-word character, an option run holding a recursive or force option, then the first target must start
+  with `/`, `~` or `$HOME` (quoted or not; `/tmp` counts). An option run holding `--cached` before any `--` is
+  `git rm --cached` and is skipped. In prose a hit is BLOCK; a hit only inside code (fenced or inline) is FLAG
+  (owner decision R2, 2026-10-15). `scripts/static-scan.test.js` names it 19 times.
 - **The attempt that was dropped** (triage, "Final independent review", 2026-10-15): an every-target regex
-  with a `/tmp` exemption. F1, a blocker: `rm -rf "` repeated took 5 s at 100 KB and over 20 s at 1 MB.
-  F2: a target was read across lines (`rm -rf dist`, then `cd /usr/src/app`). F3: separators inside
-  arguments (`2>&1`, `\;`, a quoted `;`) ended the target list early. F4: the `/tmp` exemption trusted text
-  (`/tmp/.\./etc`). The owner then chose the first-target rule with no `/tmp` exemption (active decision
-  2026-10-15), and S11 recorded that "a safe version needs a shell-aware tokenizer, not a regex".
-- **How often it matters on benign skills** (measured 2026-10-21, a rough whitespace split, not this
-  design): 3,016 Markdown files (this repo's skills and agents, the installed `~/.claude/skills` and
-  `~/.claude/plugins`) hold 5,076 `rm` commands with `-r` or `-f`. In 2,266 the first target is root or home
-  (main finds these: 2,265 in code, 1 in prose). In 1 a later target is and the first is not (in code). In
-  prose, no line would gain a finding. So the change adds almost no noise; its value is against a skill
-  written to evade the check, which a security gate for external skills has to assume.
+  with a `/tmp` exemption. F1, a blocker: `rm -rf "` repeated took 5 s at 100 KB and over 20 s at 1 MB. F2: a
+  target read across lines. F3: separators inside arguments (`2>&1`, `\;`, a quoted `;`) ended the list early.
+  F4: the `/tmp` exemption trusted text. The owner chose the first-target rule with no `/tmp` exemption
+  (active decision 2026-10-15); S11 recorded that a safe version needs a shell-aware tokenizer.
+- **How often it matters on benign skills:** 3,016 Markdown files (this repo's skills and agents, the installed
+  `~/.claude/skills` and `~/.claude/plugins`) hold 5,076 `rm` commands with `-r` or `-f` (author's rough count,
+  2026-10-21). In 1 a later target is root or home and the first is not. The reviewer's prototype of revision 1
+  on 3,029 files (with `reference-repositories/`) gave 0 new BLOCK and 1 new FLAG. The value is against a skill
+  written to evade the check, which a gate for external skills has to assume.
+- **Facts checked** (design review round 1, 2026-10-21): GNU coreutils "Common options"
+  (gnu.org/software/coreutils/manual/html_node/Common-options.html): options and operands "can appear in any
+  order", `POSIXLY_CORRECT` makes options come first, `--` ends the options, and long options take
+  "unambiguous abbreviations"; glibc "Getopt Long Options"
+  (sourceware.org/glibc/manual/latest/html_node/Getopt-Long-Options.html) agrees. GNU rm 9.11 in a scratch
+  folder: `--r` is `--recursive`, `--f` is `--force`, `rm d --r` removes `d`, `--recursive=x` is refused.
+  Bash 3.2: `"~"` does not expand; `$'\x2f'` is `/` and `$'\x72m'` is `rm`; a backslash-newline inside double
+  quotes joins the lines; `{` and `}` are plain words out of command position; `>|` is a redirection; `RM` runs
+  `/bin/rm` on macOS's case-insensitive file system.
 
 ## Design
 
 ### 1. A second detector, beside today's
 
-Today's regular expression stays byte for byte, and keeps reporting as it does. A new detector, also named
-`rm-rf-root`, is a function in the Markdown Bash table: the script loop already takes a `find` function in place of a regular expression, and the Markdown loop gains the same. It reports
-a command only when today's expression does not match that command's text, so the two never report the same
-command twice and today's quoted line is never replaced (the lesson of PR #167, reviews V1, V9, V11).
+Today's regular expression stays byte for byte and keeps reporting as it does. A new detector, also named
+`rm-rf-root`, is a function in the Markdown Bash table: the script loop already takes a `find` function in
+place of a regular expression, and the Markdown loop gains the same.
+
+It reports every command it finds that today's expression does not: a hit is dropped only when today's
+expression matches **that command's raw text** (its span in the string today scans, from the `rm` word to the
+end of the command at that nesting level), so today's finding and quoted line stay exactly as they are, and a
+second command in the same file is never hidden behind today's (the lesson of PR #167: V1, V9, V11). Each raw
+span is tested once per nesting level, so this stays linear.
 
 ### 2. What it reads
 
-The same split as today, so R2 holds:
+The same prose/code split as today, so R2 holds, with three corrections:
 
-- **Prose:** the text with code removed (`stripCodeBlocks`), one line at a time. A hit is BLOCK.
-- **Code:** each fenced block and each inline span, found with the same two expressions `stripCodeBlocks`
-  uses. A hit found only here is FLAG.
+- **Prose:** the text with fenced code removed, one line at a time, with inline code put back in place
+  (markup stripped). A hit whose `rm` word and matched target are both in prose is BLOCK; a hit that uses inline
+  code for either is FLAG, as a hit inside code is today (decision D6).
+- **Code:** each fenced block, its info line included (```` ```rm -rf ./x ~``` ```` on one line is code), and
+  each inline span. A hit found only here is FLAG.
+- **Unit boundaries:** fenced blocks are found first; inline spans on the text with fences removed. `~~~` and
+  indented blocks are read as prose, as today (F7). A unit is tokenized on its own, so an unclosed quote never
+  runs past its line (prose) or block (code).
 
-A unit is tokenized on its own, so an unclosed quote can never run past its line (prose) or its block (code).
+### 3. Normalizing before reading
 
-### 3. The tokenizer
+Applied to the detector's copy of the text only, never to what today's expression reads:
 
-One left-to-right pass over a unit, no backtracking. It yields shell words and operators:
+- Unicode NFKC (a fullwidth slash or tilde becomes `/` or `~`), then invisible characters removed
+  (`\p{Default_Ignorable_Code_Point}`: word joiner, soft hyphen, zero-width spaces), so `r` + word joiner + `m`
+  is `rm`.
+- Separators are JavaScript `\s`, which includes the no-break space; a lone `\r` is a separator; a backslash
+  before `\n` or `\r\n` joins the lines.
+- The `rm` word is matched without regard to case (`RM` runs `/bin/rm` on macOS).
 
-- **Quotes:** `'…'` is literal; `"…"` keeps `\"`, `\\`, `\$` and `` \` `` escapes; a word joins its quoted and
-  unquoted pieces (`"r"m` is `rm`, `/"etc"` is `/etc`). The word also records whether its first character came
-  from a quote, so `"~"` (no tilde expansion) can be told from `~`; both are treated as home, as today.
-- **Backslash:** outside quotes it escapes the next character (`\/` is `/`, `\;` is the word `;`, not an
-  operator); a backslash before a newline joins the lines (a continued command).
-- **Operators**, only when unquoted and unescaped: newline, `;`, `&&`, `||`, `|`, `&`, `(`, `)`, `{`, `}`
-  as words, `` ` `` and `$(` . Each ends the current command (a stage). `#` at the start of a word starts a
-  comment to the end of the line.
-- **Redirections:** a word that is or starts with `<`, `>`, `>>`, `2>`, `&>`, `>&`, `<<`, `<<<` (with an
-  optional digit) is a redirection; its target is the rest of the word or, if the operator stands alone, the
-  next word. Neither is an `rm` target, so `rm -rf build 2>/dev/null` is not read as removing `/dev/null`.
-- **Quoted commands:** the text of every quoted piece is tokenized again as a unit of its own, up to two
-  levels deep, because `sh -c '…'`, `bash -c "…"`, `eval "…"`, `ssh host '…'` and `find … -exec sh -c '…'` run
-  it as a command. Without this, `sh -c 'rm -rf ./x ~'` is one argument and passes; today's expression finds
-  only the first-target form of it (`sh -c 'rm -rf ~'`), because it ignores quotes.
-- **Limits that keep it linear:** each level reads each character once, so a unit is read at most three
-  times; each stage is read once (below). There is no regular expression with nested repetition. The input is
-  at most a Markdown file the scanner already holds as a string.
+### 4. The tokenizer
 
-### 4. Finding an `rm` and its arguments
+One left-to-right pass per unit and nesting level, no backtracking:
 
-In each stage, the first word that names `rm` starts the command: the word, after leading `(`, `{`, `!`, and
-make's recipe prefixes `-`, `@`, `+` are dropped, is `rm` or ends in `/rm` (`\rm`, `/bin/rm`, `sudo rm`,
-`xargs rm`, `git rm`, `find … -exec rm` all reach it). As today, `rm` anywhere in the stage counts, also as an
-argument (`echo rm -rf /`); a gate errs toward refusal. Only the first `rm` word in a stage is read, so a stage
-is read once: words after it are its arguments up to the end of the stage, which is also what the shell does
-(`rm a rm -rf /` is one `rm` with five arguments).
+- **Quotes:** `'…'` is literal. `"…"` keeps `\"`, `\\`, `\$`, `` \` `` and backslash-newline (a continuation).
+  `$'…'` decodes its escapes (`\xHH`, `\nnn`, `\uHHHH`, `\UHHHHHHHH`, `\'`, and the letter escapes); `$"…"` is
+  read as `"…"`. A word joins its quoted and unquoted pieces (`"r"m` is `rm`).
+- **Backslash** outside quotes escapes the next character (`\/` is `/`, `\;` is the word `;`).
+- **Stage separators** (unquoted, unescaped): newline, `;`, `&&`, `||`, `|`, and in code also `&`, `(`, `)`,
+  `` ` ``, `$(`, and `{` or `}` standing as a word in command position only. In prose only newline, `;`, `&&`,
+  `||` and `|` separate (decision D1): prose punctuation such as `(and ~/)` or `&` must not end a command, and
+  `#` starts a comment only in code.
+- **Redirections** (code and prose): a word that is or starts with an optional digit and one of `<<<`, `<<`,
+  `<>`, `<&`, `<`, `>>`, `>|`, `>&`, `>`, `&>>`, `&>`, read longest first and before `&` is read as a separator.
+  Its target is the rest of the word or, if the operator stands alone, the next word in the same stage, never
+  a word across a separator. Neither is an `rm` target.
+- **Quoted commands:** the decoded text of every quoted piece is tokenized again as a unit of its own, because
+  `sh -c '…'`, `bash -c "…"`, `eval "…"`, `ssh host '…'` and `find … -exec sh -c '…'` run it. Down to eight
+  levels (decision D7); a piece at level eight that still holds `rm` is FLAG. Each deeper level is a disjoint
+  substring of the level above, so the cost is at most nine readings of the unit.
 
-The arguments, as GNU `rm` reads them (options may follow targets unless after `--`):
+### 5. Finding each `rm` and its arguments
 
-- Before `--`: a word starting with `-` (and not `-` alone) is an option. Recursive or forced: a short cluster
-  holding `r`, `R` or `f` (`-rf`, `-Rv`, `-fr`), or `--recursive`, `--force`, or an unambiguous prefix of
-  either that GNU accepts (`--rec`, `--for`), with or without `=…`. `--interactive=never`,
-  `--no-preserve-root` and the like are options that are neither.
-- `--` ends the options; every later word is a target, even one starting with `-` or a quote.
-- `--cached` among the options before `--` makes it `git rm --cached` (it only untracks), as today: the
-  command is skipped.
-- Every other word is a target.
+**The `rm` word:** as today, `rm` is found inside a word when no letter, digit or `_` comes right before it and
+none right after (`(rm`, `**rm`, `<code>rm`, `[rm`, `\rm`, `/bin/rm`, make's `-rm` and `@rm` all count), without
+regard to case. Make's `$(RM)` and `${RM}` count too. As today, `rm` anywhere in a stage counts, as an argument
+too (`echo rm -rf /`); a gate errs toward refusal.
 
-A command is reported when it has a recursive or forced option and any target is root or home: after the
-tokenizer has removed quotes and escapes, it starts with `/`, `~` (any user: `~root`), `$HOME` or
-`${HOME`. `/tmp` counts, as decided on 2026-10-15.
+**Every `rm` word starts its own reading** (review D-R1: a dummy `rm` or `--cached` earlier in the stage must
+not switch off a later one). One right-to-left pass over a stage's words records, for each position, whether a
+later word is root or home, whether a recursive or force option comes before the next `--`, and whether
+`--cached` does. An option word can never be root or home, so options and targets need no telling apart for
+the first question. Each `rm` word then reads its answer in constant time.
 
-### 5. What it reports
+**The arguments**, as GNU `rm` reads them (decision D2: options may follow targets unless after `--`; BSD reads
+`rm / -rf` as three targets, so this errs toward a finding):
 
-`rm-rf-root`, BLOCK from prose and FLAG from code only, as today. The quoted line is the unit's text from the
-`rm` word through the target that matched, cut at 80 characters, so the reviewer sees the target that made it.
+- Before `--`, recursive or forced is: a short-option word made only of rm's letters (GNU `dfirvIR`, BSD adds
+  `PWx`) holding `r`, `R` or `f` (`-rf`, `-Rv`, `-fr`; find's `-prune` is not one), or `--recursive`, `--force`,
+  or any prefix of either down to `--r` and `--f`. GNU refuses `--recursive=x`; it is still counted, which only
+  over-reports.
+- `--cached` before `--` makes the reading `git rm --cached` (it only untracks), as today: no finding.
+- Root or home: after quotes, escapes and normalization, the word starts with `/`, `~` (any form: `~root`,
+  `~+`, `~-`, which over-reports), or `$HOME`/`${HOME` followed by a character that cannot continue a name
+  (review D-R7: `$HOMEBREW_PREFIX` is not home). Leading Markdown markup (`*`, `_`, `[`, `(`, `<`, a tag such as
+  `<code>`) is skipped first. `/tmp` counts, as decided on 2026-10-15.
 
-## What stays out (limits, recorded in REFERENCE.md)
+### 6. What it reports
 
-- A target the shell builds: a variable other than `HOME` (`rm -rf "$DIR"`, `${X:-/}`), a command
-  substitution (`rm -rf $(echo /)`), brace expansion (`{/,x}`), a glob that does not start with `/` or `~`.
-- `rm` reached through an alias, a function, a heredoc fed to a shell, `xargs` input, or a quoted command
-  nested more than two levels deep.
-- Shell scripts (`.sh` and the like): the script tables have no `rm` check today; adding one is decision D3.
-- Systems where options must come first (BSD `rm` reads `rm / -rf` as three targets): GNU's reading is used,
-  which errs toward a finding.
+`rm-rf-root`, BLOCK or FLAG as section 2 says. The quoted line is the `rm` word, `…`, and the target that
+matched (each cut to 40 characters), so the reviewer always sees the target; a hit from a nested level says
+which level, since its text is decoded and may not appear as such in the file.
+
+## What stays out (limits, each a test, recorded in REFERENCE.md)
+
+- A target the shell builds: a variable other than `HOME` (`rm -rf "$DIR"`, `${X:-/}`), a command substitution
+  (`rm -rf $(echo /)`), brace expansion (`{/,x}`), a glob that does not start with `/` or `~`, an HTML entity
+  (`&#126;`).
+- A command word the shell builds: `{rm,-rf,./x,~}`, `rm${IFS}-rf` (decision D4).
+- A root reached otherwise: `cd ~ && rm -rf ./x *` or a bare `cd`, relative climbing (`../../../../*`),
+  `find ~ -delete`, `find ~ -exec rm -rf {} +` (the root is find's argument, not rm's).
+- `rm` reached through an alias, a function or `xargs` input. Heredoc bodies are read as code (a hit is FLAG).
+- Shell scripts (`.sh` and the like): the script tables have no `rm` check today (decision D3).
+- A file over about 536 MB, scanned in chunks: a detector finding from an earlier chunk can take the place of
+  today's line from a later chunk in the one-finding-per-check reduction (the V13 limit, accepted 2026-10-21).
+- CI's baseline keys on skill, file and check: a baselined `rm-rf-root` BLOCK would also cover a new one in the
+  same file. The baseline holds none today.
 
 ## Decisions for the owner
 
-- **D1, prose:** read prose lines with the full tokenizer, or only up to the first plain word ("rm -rf to
-  remove /tmp files" would otherwise read `/tmp` as a target). Recommendation: full tokenizer; the measurement
-  found no prose line that would gain a finding. Revisit if the real-input check finds one.
-- **D2, options after targets:** count them (GNU), as above. Recommendation: yes; a skill runs on the host's
-  `rm`, which is GNU on Linux.
-- **D3, scope:** Markdown only, as today's check, or also shell scripts. Recommendation: Markdown now; a script
-  check is a separate change with its own real-input measurement, since scripts use `rm -rf "$TMP"` and
-  absolute build paths far more than instructions do.
-- **D4, targets the shell builds:** keep them out (above), or FLAG a recursive `rm` whose target holds `$`,
-  `` ` `` or `$(` other than `$HOME`. Recommendation: out for now; a FLAG on every `rm -rf "$DIR"` would be
-  noise in most skills.
+Recommendations first; review round 1 agreed with D2 to D4 and proposed D5 to D9.
+
+- **D1, prose separators:** only newline, `;`, `&&`, `||`, `|`; no comments, parentheses, braces, backticks or
+  `&` in prose. (Revision 1 used the full shell reading, which let prose punctuation hide a target.)
+- **D2, options after targets:** count them, GNU's way.
+- **D3, scope:** Markdown only; a script check is a separate change with its own measurement.
+- **D4, words the shell builds:** targets stay out. A narrow FLAG for a command word built by brace expansion
+  or `${IFS}`: recommended no for now (listed as a limit), since it adds a second parser for little benefit.
+- **D5, a soft wrap in prose:** the detector does not join prose lines (a target on the next line of a
+  paragraph is too often prose, the F2 fault); today's expression still finds a first target after a wrap (G1).
+- **D6, a hit that mixes prose and inline code:** FLAG. The reviewer measured 34 such prose lines in 3,029
+  files, mostly one skill's list of `rm -rf node_modules` / `.next` / … items, where `/` is a separator word;
+  they must not become BLOCKs.
+- **D7, nesting:** eight levels, and FLAG when a piece at the eighth still holds `rm`.
+- **D8, case and Unicode:** match the `rm` word without regard to case; NFKC and invisible characters removed
+  before reading.
+- **D9, suppression:** per command, on that command's raw span (section 1), not once per file.
 
 ## How it is checked
 
-- **Tests first**, in `scripts/static-scan.test.js`: the S11 forms (each failing on main); every case of F2
-  and F3 as must-not-match (a target on the next line, `2>&1`, `\;`, a quoted `;`, a redirection to `/dev/null`);
-  prose and code severities; `git rm --cached`; every existing `rm-rf-root` test unchanged; a test that a command today's
-  expression matches is reported once, with today's quoted line.
-- **Timing:** the F1 inputs (`rm -rf "` repeated, `\rm -rf x`, `(rm -rf x)`), `rm` repeated, long unclosed
-  quotes, long runs of `\`, `;`, `--` and `-r`, at 1 MB and 4 MB, against main.
-- **Differential** (decision 2026-10-15): random Markdown with `rm` commands in prose, inline and fenced
-  code; every main finding kept, compared on file, check, severity and quoted line; every new finding read.
+- **Tests first**, in `scripts/static-scan.test.js`, each failing on main where it is a new finding:
+  - the S11 forms, and `--r`/`--f`;
+  - every evasion of review round 1: a dummy `rm` or `--cached` first in the stage
+    (`find … -name rm -o -name -- -o -exec rm -rf ./x ~ \;`), three nested `sh -c` levels, `**rm**`,
+    `<code>rm …</code>`, `[rm …](…)`, a target in inline code, `(and ~/)` and `& ~/` in prose, a `#` heading,
+    continuations in `~~~` and indented blocks, `$'/'`, `$'\x2f'`, `$'\x72m'`, `rm -rf ./x } ~`,
+    `>|/tmp/log ~`, no-break spaces, `RM`, a word joiner or soft hyphen inside `rm`, a fullwidth slash or tilde,
+    `$(RM)`;
+  - must-not-match: F2 and F3 (a target on the next line, `2>&1`, `\;`, a quoted `;`, a redirection to
+    `/dev/null`), `$HOMEBREW_PREFIX/y`, `"${HOMEBREW_CACHE}"`, find's `-prune`, `git rm --cached`;
+  - severities (prose BLOCK, code and mixed FLAG, nesting cap FLAG); every limit above pinned as a known limit;
+  - a command today's expression matches is reported once, with today's quoted line; two commands in one file,
+    one today's, one new, are both reported;
+  - the coverage test: the detector's case carries a `tag` (it shares `md:rm-rf-root:BLOCK` with today's entry)
+    and uses a form today's expression misses; removing the detector must fail the suite;
+  - REFERENCE.md's `rm` row no longer says "first target".
+- **Timing budget** (goal 4): linear on every input, and at 1 MB the detector at most 10 times main's
+  expression and under 100 ms; at 4 MB under 400 ms. Inputs: the F1 set (`rm -rf "` repeated, `\rm -rf x`,
+  `(rm -rf x)`), `rm` repeated, long unclosed quotes, long runs of `\`, `;`, `--`, `-r`, `$'`, nested quotes to
+  the cap, and inline spans. The prototype of revision 1 took 30–60 ms at 1 MB and 110–220 ms at 4 MB, against
+  about 7 ms for main's expression at 1 MB.
+- **Differential** (decision 2026-10-15): random Markdown that includes every construct above, with the
+  generator written by the reviewer, not the author (the V11 lesson: the author's generator was blind to a
+  shape); every main finding kept, compared on file, check, severity and quoted line; every new finding read.
 - **Real inputs:** this repo's skills and agents, `reference-repositories/`, the installed skills and plugins
   (copied without secret files, names and checks printed only); CI's `ci-scan-skills.js` must stay clean.
-- **Mutants:** of the tokenizer's quote, escape, operator, redirection and option rules.
+- **Mutants** of the quote, escape, `$'…'`, operator, redirection, normalization, option and suppression rules,
+  and of the right-to-left pass.
 - **Independent review** under `docs/REVIEW_PROTOCOL.md`, then a `skill-audit` deploy.
