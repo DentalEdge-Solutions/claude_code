@@ -80,9 +80,13 @@ One left-to-right pass over a unit, no backtracking. It yields shell words and o
 - **Redirections:** a word that is or starts with `<`, `>`, `>>`, `2>`, `&>`, `>&`, `<<`, `<<<` (with an
   optional digit) is a redirection; its target is the rest of the word or, if the operator stands alone, the
   next word. Neither is an `rm` target, so `rm -rf build 2>/dev/null` is not read as removing `/dev/null`.
-- **Limits that keep it linear:** each character is read once; each stage is read once (below). There is no
-  regular expression with nested repetition. The input is at most a Markdown file the scanner already holds
-  as a string.
+- **Quoted commands:** the text of every quoted piece is tokenized again as a unit of its own, up to two
+  levels deep, because `sh -c '…'`, `bash -c "…"`, `eval "…"`, `ssh host '…'` and `find … -exec sh -c '…'` run
+  it as a command. Without this, `sh -c 'rm -rf ./x ~'` is one argument and passes; today's expression finds
+  only the first-target form of it (`sh -c 'rm -rf ~'`), because it ignores quotes.
+- **Limits that keep it linear:** each level reads each character once, so a unit is read at most three
+  times; each stage is read once (below). There is no regular expression with nested repetition. The input is
+  at most a Markdown file the scanner already holds as a string.
 
 ### 4. Finding an `rm` and its arguments
 
@@ -117,7 +121,8 @@ tokenizer has removed quotes and escapes, it starts with `/`, `~` (any user: `~r
 
 - A target the shell builds: a variable other than `HOME` (`rm -rf "$DIR"`, `${X:-/}`), a command
   substitution (`rm -rf $(echo /)`), brace expansion (`{/,x}`), a glob that does not start with `/` or `~`.
-- `rm` reached through an alias, a function, `eval`, a heredoc fed to a shell, or `xargs` input.
+- `rm` reached through an alias, a function, a heredoc fed to a shell, `xargs` input, or a quoted command
+  nested more than two levels deep.
 - Shell scripts (`.sh` and the like): the script tables have no `rm` check today; adding one is decision D3.
 - Systems where options must come first (BSD `rm` reads `rm / -rf` as three targets): GNU's reading is used,
   which errs toward a finding.
