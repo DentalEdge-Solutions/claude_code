@@ -148,8 +148,10 @@ const MD_SECRETS = [
   { re: /(?:password|passwd|secret|token|npm_config__auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"]{8,}/i,
                                                                       name: 'hardcoded-secret',       sev: 'FLAG'  },
   // A basic-auth credential (user:pass, or its base64): basic_auth, basic-auth, basicAuth. The words a
-  // config uses for a switch (disabled, required, optional) are not one.
-  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional)(?:['"\s]|$))[^'"]{8,}/i,
+  // config uses for a switch (disabled, required, optional) are not one, nor is the scheme's own name
+  // (an enum member BasicAuth = 'BasicAuth', review V4). Each pattern that matches reports, as for the
+  // other generic forms, so one line never hides another (review V1).
+  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional|basic[_-]?auth)(?:['"\s]|$))[^'"]{8,}/i,
                                                                       name: 'hardcoded-secret',       sev: 'FLAG'  },
   { re: /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/,                          name: 'hardcoded-bearer-token', sev: 'BLOCK' },
   { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,          name: 'private-key-block',      sev: 'BLOCK' },
@@ -191,7 +193,7 @@ const DATA_SECRETS = [
   // npm_config_, its environment form (NPM_CONFIG__AUTH).
   { re: /(?:password|passwd|secret|token|(?:npm_config_|(?<![A-Za-z0-9_]))_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
                                                                                             name: 'hardcoded-secret',  sev: 'FLAG' },
-  { re: /basic[_-]?auth['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])(?!(?:disabled|required|optional)(?![^\s'"#;,]))[^\s'"#;,]{8,}/i,
+  { re: /basic[_-]?auth['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])(?!(?:disabled|required|optional|basic[_-]?auth)(?![^\s'"#;,]))[^\s'"#;,]{8,}/i,
                                                                                             name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
 
@@ -209,7 +211,7 @@ const SCRIPT_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]/i, name: 'hardcoded-api-key', sev: 'FLAG' },
   { re: /(?:password|passwd|secret|token|npm_config__auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,
                                                                                  name: 'hardcoded-secret',  sev: 'FLAG' },
-  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional)['"])[^'"\s]{8,}['"]/i,
+  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional|basic[_-]?auth)['"])[^'"\s]{8,}['"]/i,
                                                                                  name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
 const GENERIC_SECRET_CHECKS = new Set(SCRIPT_SECRETS.map(p => p.name));
@@ -386,10 +388,7 @@ function scanMarkdown(filePath, content) {
     const c = content.match(re);
     if (c) flag(filePath, name, 'FLAG', quote(c, '(in code) '));
   }
-  // Two patterns of one check (hardcoded-secret's basic-auth form) report it once, as in scanSecrets.
-  const rel = path.relative(findingRoot, filePath) || '.';
   for (const { re, name, sev } of MD_SECRETS) {
-    if ((checksByFile.get(rel) || new Set()).has(name)) continue;
     const m = content.match(re);
     if (m) flag(filePath, name, sev, quote(m));
   }
@@ -514,11 +513,10 @@ function scanConfig(filePath, content) {
 const CODE_SECRETS = [...SCRIPT_SECRETS, ...MD_SECRETS.filter(p => !GENERIC_SECRET_CHECKS.has(p.name))];
 function scanSecrets(filePath, content, kind = 'config') {
   const rel = path.relative(findingRoot, filePath) || '.';
-  // Read at each pattern: two patterns of one check (hardcoded-secret's basic-auth form) report it once.
-  const seen = name => (checksByFile.get(rel) || new Set()).has(name);
+  const seen = checksByFile.get(rel) || new Set();
   const table = kind === 'data' ? [...MD_SECRETS, ...DATA_SECRETS] : kind === 'code' ? CODE_SECRETS : MD_SECRETS;
   for (const { re, name, sev } of table) {
-    if (seen(name)) continue;
+    if (seen.has(name)) continue;
     const m = content.match(re);
     if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
   }
