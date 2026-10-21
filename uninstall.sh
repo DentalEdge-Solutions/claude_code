@@ -170,39 +170,54 @@ done
 # target project already had are left untouched. Never deletes the file itself.
 SETTINGS_FILE="${TARGET}/.claude/settings.json"
 if [ -f "${SETTINGS_FILE}" ] && command -v node &>/dev/null; then
-    TELEMETRY_HOOKS_REMOVED="$(node -e '
+    if TELEMETRY_HOOKS_REMOVED="$(node -e '
 const fs = require("fs");
 const file = process.argv[1];
+// A file this cannot read is left as it is: exit non-zero and the shell warns (review N2, N3).
+function refuse(why) { process.stderr.write(`Error: ${file}: ${why}.\n`); process.exit(3); }
+const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const raw = fs.readFileSync(file, "utf8");
+if (raw.charCodeAt(0) === 0xFEFF) refuse("it starts with a byte-order mark; save it as UTF-8 without one");   // review P6
+if (!raw.trim()) { process.stdout.write("0"); process.exit(0); }
 let settings;
-try { settings = JSON.parse(fs.readFileSync(file, "utf8")); } catch { process.stdout.write("0"); process.exit(0); }
-if (!settings.hooks) { process.stdout.write("0"); process.exit(0); }
+try { settings = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.message})`); }
+if (!plain(settings)) refuse("it is not a JSON object");
+if (settings.hooks == null) { process.stdout.write("0"); process.exit(0); }
+if (!plain(settings.hooks)) refuse("its \"hooks\" is not an object");
 
 const invCmd = "node \"$CLAUDE_PROJECT_DIR/scripts/telemetry/log-invocation.js\"";
 const corrCmd = "node \"$CLAUDE_PROJECT_DIR/scripts/telemetry/log-outcome.js\" --mode correction";
 const endCmd = "node \"$CLAUDE_PROJECT_DIR/scripts/telemetry/log-outcome.js\" --mode session-end";
 const ours = new Set([invCmd, corrCmd, endCmd]);
 
+// Remove our hooks one by one, keeping the owner hooks that share an entry with them; drop an
+// entry only when every hook in it was ours (review N8). Anything malformed is kept as found.
 let removed = 0;
 for (const eventName of Object.keys(settings.hooks)) {
     const list = settings.hooks[eventName];
     if (!Array.isArray(list)) continue;
-    const kept = list.filter((entry) => {
-        if (!entry || !Array.isArray(entry.hooks)) return true;   // a null entry is kept as found (review N1)
-        const isOurs = entry.hooks.length > 0 && entry.hooks.every((h) => h && ours.has(h.command));
-        if (isOurs) removed++;
-        return !isOurs;
-    });
+    const kept = [];
+    for (const entry of list) {
+        if (!entry || !Array.isArray(entry.hooks)) { kept.push(entry); continue; }
+        const rest = entry.hooks.filter((h) => !(h && ours.has(h.command)));
+        removed += entry.hooks.length - rest.length;
+        if (rest.length === entry.hooks.length) kept.push(entry);
+        else if (rest.length) kept.push({ ...entry, hooks: rest });
+    }
     if (kept.length) settings.hooks[eventName] = kept;
     else delete settings.hooks[eventName];
 }
 
-fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+if (removed) fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
 process.stdout.write(String(removed));
-' "${SETTINGS_FILE}")"
-    if [ "${TELEMETRY_HOOKS_REMOVED}" != "0" ]; then
-        ok "removed ${TELEMETRY_HOOKS_REMOVED} telemetry hook entr$([ "${TELEMETRY_HOOKS_REMOVED}" = "1" ] && echo y || echo ies) from ${SETTINGS_FILE}"
+' "${SETTINGS_FILE}")"; then
+        if [ "${TELEMETRY_HOOKS_REMOVED}" != "0" ]; then
+            ok "removed ${TELEMETRY_HOOKS_REMOVED} telemetry hook$([ "${TELEMETRY_HOOKS_REMOVED}" = "1" ] || echo s) from ${SETTINGS_FILE}"
+        else
+            skip "no telemetry hook entries found in ${SETTINGS_FILE}"
+        fi
     else
-        skip "no telemetry hook entries found in ${SETTINGS_FILE}"
+        warn "telemetry hooks not removed: ${SETTINGS_FILE} was left unchanged (see the error above); remove them by hand"
     fi
 else
     skip "${SETTINGS_FILE} not found"
@@ -216,22 +231,47 @@ if [ -d "${TARGET}/hooks/brain" ] || [ -d "${TARGET}/scripts/brain" ]; then
     # Remove our hook entries (match by command string; leave everything else)
     SETTINGS="${TARGET}/.claude/settings.local.json"
     if [ -f "${SETTINGS}" ] && command -v node &>/dev/null; then
-        node -e '
+        if BRAIN_HOOKS_REMOVED="$(node -e '
 const fs = require("fs");
 const file = process.argv[1];
-const s = JSON.parse(fs.readFileSync(file, "utf8"));
+// A file this cannot read is left as it is: exit non-zero and the shell warns (review N2, N3).
+function refuse(why) { process.stderr.write(`Error: ${file}: ${why}.\n`); process.exit(3); }
+const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const raw = fs.readFileSync(file, "utf8");
+if (raw.charCodeAt(0) === 0xFEFF) refuse("it starts with a byte-order mark; save it as UTF-8 without one");   // review P6
+if (!raw.trim()) { process.stdout.write("0"); process.exit(0); }
+let s;
+try { s = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.message})`); }
+if (!plain(s)) refuse("it is not a JSON object");
+if (s.hooks == null) { process.stdout.write("0"); process.exit(0); }
+if (!plain(s.hooks)) refuse("its \"hooks\" is not an object");
+// Remove our hooks one by one, keeping the owner hooks that share an entry with them; drop an
+// entry only when every hook in it was ours (review N10). Anything malformed is kept as found.
 let removed = 0;
-for (const ev of Object.keys(s.hooks || {})) {
-  const before = s.hooks[ev].length;
-  // a null entry, or a null hook inside an entry, is kept as found (review N1)
-  s.hooks[ev] = s.hooks[ev].filter(e =>
-    !(e && Array.isArray(e.hooks) && e.hooks.some(h => h && /hooks\/brain\//.test(h.command || ""))));
-  removed += before - s.hooks[ev].length;
-  if (!s.hooks[ev].length) delete s.hooks[ev];
+for (const ev of Object.keys(s.hooks)) {
+  if (!Array.isArray(s.hooks[ev])) continue;
+  const kept = [];
+  for (const e of s.hooks[ev]) {
+    if (!e || !Array.isArray(e.hooks)) { kept.push(e); continue; }
+    const rest = e.hooks.filter(h => !(h && /hooks\/brain\//.test(h.command || "")));
+    removed += e.hooks.length - rest.length;
+    if (rest.length === e.hooks.length) kept.push(e);
+    else if (rest.length) kept.push({ ...e, hooks: rest });
+  }
+  if (kept.length) s.hooks[ev] = kept;
+  else delete s.hooks[ev];
 }
-fs.writeFileSync(file, JSON.stringify(s, null, 2) + "\n");
-console.log(removed);
-' "${SETTINGS}" >/dev/null && ok "brain hook entries removed from settings.local.json"
+if (removed) fs.writeFileSync(file, JSON.stringify(s, null, 2) + "\n");
+process.stdout.write(String(removed));
+' "${SETTINGS}")"; then
+            if [ "${BRAIN_HOOKS_REMOVED}" != "0" ]; then
+                ok "removed ${BRAIN_HOOKS_REMOVED} brain hook$([ "${BRAIN_HOOKS_REMOVED}" = "1" ] || echo s) from ${SETTINGS}"
+            else
+                skip "no brain hook entries found in ${SETTINGS}"
+            fi
+        else
+            warn "brain hooks not removed: ${SETTINGS} was left unchanged (see the error above); remove them by hand"
+        fi
     fi
     # Remove CLAUDE.md marker section (keep everything outside the markers)
     CLAUDE_MD="${TARGET}/CLAUDE.md"

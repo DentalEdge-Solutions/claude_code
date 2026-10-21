@@ -312,3 +312,9 @@ Hermes: [`infra/hermes-agent/README.md`](infra/hermes-agent/README.md).
 ```bash
 ./uninstall.sh /path/to/target-project
 ```
+
+`install.sh` and `uninstall.sh` merge or remove only their own hooks in the target's
+`.claude/settings.json` and `.claude/settings.local.json`; uninstall keeps the other hooks in an
+entry it shares with ours. A settings file they cannot read (invalid JSON, a byte-order mark, or
+the wrong shape) is left unchanged, with a warning; the Second Brain install stops instead, so its
+security guard is never silently missing.

@@ -230,16 +230,29 @@ done
 # every other hook the target project already has is left untouched.
 if ! ${DRY_RUN}; then
     if command -v node &>/dev/null; then
-        TELEMETRY_HOOKS_ADDED="$(node -e '
+        if TELEMETRY_HOOKS_ADDED="$(node -e '
 const fs = require("fs");
 const path = require("path");
 const target = process.argv[1];
 const file = path.join(target, ".claude", "settings.json");
 fs.mkdirSync(path.dirname(file), { recursive: true });
-let settings = {};
-if (fs.existsSync(file)) {
-    try { settings = JSON.parse(fs.readFileSync(file, "utf8")); } catch { settings = {}; }
+// Never write a file this cannot read: it would replace the owner settings with ours (review N2,
+// N3). Exit non-zero instead; the shell warns and the install goes on. An empty file counts as {}.
+function refuse(why) {
+    process.stderr.write(`Error: ${file}: ${why}.\n`);
+    process.exit(3);
 }
+const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const raw = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+if (raw.charCodeAt(0) === 0xFEFF) refuse("it starts with a byte-order mark; save it as UTF-8 without one");   // review P6
+let settings = {};
+if (raw.trim()) {
+    try { settings = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.message})`); }
+}
+if (!plain(settings)) refuse("it is not a JSON object");
+if (settings.hooks != null && !plain(settings.hooks)) refuse("its \"hooks\" is not an object");
+for (const ev of ["PostToolUse", "UserPromptSubmit", "Stop", "SessionEnd"])
+    if (settings.hooks && settings.hooks[ev] != null && !Array.isArray(settings.hooks[ev])) refuse(`its "hooks.${ev}" is not a list`);
 settings.hooks = settings.hooks || {};
 
 function ensureHookEntry(eventName, matcher, command) {
@@ -267,11 +280,14 @@ if (ensureHookEntry("SessionEnd", null, endCmd)) added++;
 
 fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
 process.stdout.write(String(added));
-' "${TARGET}")"
-        if [ "${TELEMETRY_HOOKS_ADDED}" != "0" ]; then
-            ok "merged ${TELEMETRY_HOOKS_ADDED} telemetry hook entr$([ "${TELEMETRY_HOOKS_ADDED}" = "1" ] && echo y || echo ies) into ${TARGET}/.claude/settings.json"
+' "${TARGET}")"; then
+            if [ "${TELEMETRY_HOOKS_ADDED}" != "0" ]; then
+                ok "merged ${TELEMETRY_HOOKS_ADDED} telemetry hook entr$([ "${TELEMETRY_HOOKS_ADDED}" = "1" ] && echo y || echo ies) into ${TARGET}/.claude/settings.json"
+            else
+                ok "telemetry hook entries already present in ${TARGET}/.claude/settings.json"
+            fi
         else
-            ok "telemetry hook entries already present in ${TARGET}/.claude/settings.json"
+            warn "telemetry hooks not merged: ${TARGET}/.claude/settings.json was left unchanged (see the error above); fix it and re-run install.sh"
         fi
     else
         warn "Node.js not found — skipping .claude/settings.json hook merge for telemetry"

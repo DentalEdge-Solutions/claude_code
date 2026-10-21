@@ -73,11 +73,12 @@ try {
   r = install('uninstall.sh', [], 'y\nn\n');
   assert.strictEqual(r.status, 0, `uninstall.sh failed on null entries:\n${r.stdout.slice(-2000)}\n${r.stderr}`);
   const after = JSON.parse(fs.readFileSync(SETTINGS, 'utf8')).hooks;
-  // The entries install added go; the PostToolUse entry that also holds a null hook is not ours
-  // alone, so uninstall keeps it whole, as it keeps any mixed entry.
-  assert.ok(!/scripts\/telemetry\//.test(JSON.stringify({ ...after, PostToolUse: [] })), 'added telemetry hooks removed');
-  assert.deepStrictEqual(after.PostToolUse, [null, { matcher: 'Skill|Task', hooks: [null, { type: 'command', command: invCmd }] }],
-    'the mixed PostToolUse entry is kept as found');
+  // Every telemetry hook goes, our hook in the mixed PostToolUse entry too; the null hook beside
+  // it is not ours, so the entry stays with it (review N8: it used to stay whole, still running a
+  // script uninstall had deleted).
+  assert.ok(!/scripts\/telemetry\//.test(JSON.stringify(after)), 'telemetry hooks removed');
+  assert.deepStrictEqual(after.PostToolUse, [null, { matcher: 'Skill|Task', hooks: [null] }],
+    'our hook leaves the mixed entry; the nulls stay');
   for (const ev of EVENTS) assert.strictEqual(after[ev][0], null, `settings.json ${ev}: the null entry is kept`);
   const local = JSON.parse(fs.readFileSync(LOCAL, 'utf8')).hooks;
   assert.ok(!/hooks\/brain\//.test(JSON.stringify(local)), 'brain hooks removed');
