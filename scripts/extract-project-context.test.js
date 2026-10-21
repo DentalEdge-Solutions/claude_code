@@ -119,7 +119,24 @@ try {
   out = extract(many).file;
   assert.deepStrictEqual(out.artifact_paths, Array.from({ length: 10 }, (_, i) => `./p${i}`), 'first 10 paths');
 
-  // 7. --help exits 0 and writes nothing (review P12-3: without the early exit the script
+  // 7. A null entry, a null hook inside an entry, an event value that is not a list and an entry
+  //    whose hooks are not a list are skipped; the other hooks in the same file are still read
+  //    (review G11 and N4: the TypeError was caught and the whole file's hooks dropped).
+  const nul = path.join(TMP, 'null-hooks');
+  write(path.join(nul, '.claude', 'settings.json'), JSON.stringify({ hooks: {
+    Notification: { matcher: 'x', hooks: [{ type: 'command', command: 'node /x/not-a-list.js' }] },
+    PreToolUse: [null, { matcher: 'Bash', hooks: [null, { type: 'command', command: 'bash "$CLAUDE_PROJECT_DIR/hooks/guard.sh"' }] }],
+    PostToolUse: [{ hooks: { type: 'command', command: 'node /x/hooks-not-a-list.js' } }],
+    Stop: [{ hooks: [{ type: 'command', command: 'node /x/after-null.js' }] }],
+  } }));
+  out = extract(nul).file;
+  assert.deepStrictEqual(out.hooks, [
+    { event: 'PreToolUse', matcher: 'Bash', command: 'guard.sh' },
+    { event: 'Stop', matcher: null, command: 'after-null.js' },
+    { event: 'Stop', matcher: null, command: 'log-outcome.js' },
+  ], 'hooks read past null entries, project then global');
+
+  // 8. --help exits 0 and writes nothing (review P12-3: without the early exit the script
   //    would treat "--help" as the project root and write --help/evals/).
   const helpCwd = path.join(TMP, 'help-cwd');
   fs.mkdirSync(helpCwd);

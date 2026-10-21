@@ -62,13 +62,14 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        (`git $'cl\x65an'`); `fs.rmSync`, `unlinkSync`, `rmdirSync`, `shutil.rmtree`, `rimraf`.
      - **A `git clean` dry run** is allowed only in a plain form, not by parsing git's options
        (that was bypassed with quoting, `-e` values, `--` and `--end-of-options`): `git` as
-       the command (a leading `time` is fine), optionally `-C <dir>`, then `clean`, then only `-[dfnqxX]…`, `--dry-run`,
-       `--quiet`, `--force` and plain paths, with an `n` before any `--`, and no quote,
-       escape, variable, glob, redirect, comment or `=` in the stage. So `git clean -nd -- <path>`
-       passes, while `git clean -n -e foo …`, `env git clean -n …` or
-       `git clean -n … 2>/dev/null` are conservatively denied. So is any `git -c …` stage
-       containing the word `clean` (`git -c color.ui=never log --grep clean …`): a `-c`
-       value can run a program, so the guard does not try to tell them apart.
+       the command (a leading `time` is fine), optionally `-C <dir>`, then `clean`, then
+       only `-[dfnqxX]…`, `--dry-run`, `--quiet`, `--force` and plain paths, with an `n`
+       before any `--`, and no quote, escape, variable, glob, redirect, comment or `=` in
+       the stage. So `git clean -nd -- <path>` passes, while `git clean -n -e foo …`,
+       `env git clean -n …` or `git clean -n … 2>/dev/null` are conservatively denied. So
+       is any `git -c …` stage containing the word `clean`
+       (`git -c color.ui=never log --grep clean …`): a `-c` value can run a program, so
+       the guard does not try to tell them apart.
      - **The git subcommand** is found from shell-split words after skipping git's global
        options together with the value of those that take one (`-C`, `-c`, `--git-dir`,
        `--work-tree`, `--namespace`, `--config-env`, `--attr-source`, `--shallow-file`; git
@@ -124,7 +125,8 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        no background, and no file-writing redirect — there an `rm` can only be a literal
        argument (`grep rm .project-brain/log.md`), so it stays allowed, while store-then-run
        forms (`echo rm -rf .project-brain > x.sh && sh x.sh`) stay denied.
-   - direct installs (`cp`/`mv`/`ln`/`rsync`) from `reference-repositories/sources/` into the skills dir
+   - direct installs (`cp`/`mv`/`ln`/`rsync`) from `reference-repositories/sources/` into the
+     skills dir
 
    **When the guard itself fails** (owner decision P11, 2026-10-15):
    - **Bad input fails closed.** Empty input, input that is not JSON, or JSON without a
@@ -151,10 +153,11 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
      needed 30 s to 600 s now fails open sooner, but at that rate it would take a command
      of hundreds of MB. Re-running the installer gives the timeout to every untimed copy of
      the guard (any matcher; matching hooks run in parallel) and keeps a timeout the owner
-     already set. An existing install changes only when the installer is re-run there. `"onFailure": "block"` would make a
-     timeout deny the call, but it also blocks on a node failure, against P11; it was
-     considered and not adopted ([hooks reference](https://code.claude.com/docs/en/hooks),
-     checked 2026-10-19 on Claude Code 2.1.302).
+     already set. An existing install changes only when the installer is re-run there.
+     `"onFailure": "block"` would make a timeout deny the call, but it also blocks on a node
+     failure, against P11; it was considered and not adopted
+     ([hooks reference](https://code.claude.com/docs/en/hooks), checked 2026-10-19 on
+     Claude Code 2.1.302).
 
    The guard is **defense-in-depth**: `brain-promote --approve` + git history are the
    real boundary. It errs toward denial — a read command mentioning `canon/` alongside a
