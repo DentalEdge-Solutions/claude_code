@@ -563,10 +563,12 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - The test reads the documents, not a refine run.
     - A neutral line that adds an unconditional "KEEP" after the stated rule still passes, as does a contradicting sentence elsewhere in a document, such as "a neutral KEEP counts as an improvement" in a convergence line. These are the 4 surviving round-2 mutants; a text test can't catch every contradiction.
     - So does a copy made with a tool other than `cp`, `rsync`, `install` or `ln`.
+    - So does GNU `cp -t DIR SRC`, which names the destination first (review R13; macOS `cp` has no `-t`).
     - Not addressed, and older than this change: whether the one regression rep on scenarios that already passed counts toward `score` (review R6).
   - **Independent review, round 1 (b993f12):** approve with changes, R1–R8, all minor.
   - **Round 2 (818d6e3):** approve; R1–R8 fixed (R3 as a record, the gap staying in E16). R9 (test gaps) and R10 (E16 omitted `skill-guardian`) are new and minor, and are answered in the next commit.
   - **Round 3 (97b6d33):** request changes. R9 and R10 fixed. R11 (blocking): the E15 copy check no longer caught the original line (above). R12 (minor): the user-level folder check matched `$CLAUDE_PROJECT_DIR/.claude/agents`. Both are answered in the fourth commit.
+  - **Round 4 (9af4383):** approve; R1–R12 fixed. R13 (minor): `cp -t` isn't read, now listed under Limits as the reviewer accepted.
 - **E16 (open, found while fixing E14; widened by review R3):** a refine can't always restore "prior content exactly", or measure the size "before the edit".
   - **`skill-refine-agent`:** step 7b snapshots only `SKILL.md` (`…/SKILL.md.pre-iter-N`), and its revert restores only `SKILL.md`. Lever D edits `REFERENCE.md` and Lever E edits `scripts/`, so a reverted D or E edit stays in the skill.
   - **Both refine skills** (`skill-refine`, `agent-refine`): step 6 makes no per-iteration copy at all; only step 2's once-per-session `.baseline` exists. After the first KEEP, step 8's revert has no stated source, for `SKILL.md` and the agent file as well.
