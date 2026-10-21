@@ -629,6 +629,7 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
         - **P6:** a UTF-8 byte-order mark was reported as an invisible unexpected token; all four steps now say "it starts with a byte-order mark; save it as UTF-8 without one". Whether Claude Code accepts a file with a byte-order mark is not documented and was not tested; refusing is the safe side.
         - **P7, P8:** the test count and the README wording corrected.
         - **P9 (open, pre-existing):** the installers rewrite and reformat the settings file on every run, even when they added nothing; uninstall now writes only when it removed something.
+      - **Round 2 (c09630b):** approve; P1–P8 closed, P9 open. Two new nits, closed in the next commit with tests only: P10 (each uninstall step's reason is now matched per file, and a file that is only a byte-order mark is refused, which pins the check before the empty-file rule: `trim()` drops U+FEFF) and P11 (the brain step's `"hooks": null` and singular "1 brain hook" messages). The reviewer's four surviving mutants, and a fifth, now fail the test. Observation O1, not this PR: `scripts/brain/brain-hooks.test.js` timed out once (its 15 s per-hook limit) while the reviewer ran mutants in parallel, and passed on a quiet rerun.
   - **Change:** `run-all-tests.js` now reports a failing suite in full (`scripts/run-all-tests.test.js` pins all of it). The new report named this failure on its first occurrence (review R1):
     - stderr whole up to 200 lines, head and tail beyond that;
     - the last 40 stdout lines;

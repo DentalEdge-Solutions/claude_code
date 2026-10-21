@@ -50,6 +50,8 @@ const SHARED = '.claude/settings.json';
 const BAD = [
   ['does not parse (trailing comma)', '{"hooks": {},}\n', /it is not valid JSON/, true],
   ['starts with a byte-order mark', '\uFEFF{"hooks": {}}\n', /it starts with a byte-order mark/, true],   // review P6
+  // trim() drops U+FEFF, so the mark must be checked before the empty-file rule (review P10)
+  ['is only a byte-order mark', '\uFEFF', /it starts with a byte-order mark/, true],
   ['is a JSON array', '[]\n', /it is not a JSON object/, true],
   ['is JSON null', 'null\n', /it is not a JSON object/, true],
   ['has a "hooks" list', '{"hooks": []}\n', /its "hooks" is not an object/, true],
@@ -145,7 +147,9 @@ try {
     assert.strictEqual(r.status, 0, `uninstall, settings ${why}: the uninstall goes on\n${tail(r.out)}`);
     assert.strictEqual(/settings\.json was left unchanged/.test(r.out), unreadable, `uninstall, settings.json ${why}: warns iff unreadable`);
     assert.strictEqual(/settings\.local\.json was left unchanged/.test(r.out), unreadable, `uninstall, settings.local.json ${why}: warns iff unreadable`);
-    if (unreadable) assert.match(r.out, reason, `uninstall, settings ${why}: gives the reason`);
+    // each step gives its own reason: both files hold the same text (review P10)
+    if (unreadable) for (const name of ['settings\\.json', 'settings\\.local\\.json'])
+      assert.match(r.out, new RegExp(`${name}: ${reason.source}`), `uninstall, ${name} ${why}: gives the reason`);
     assert.strictEqual(read(t, SHARED), text, `uninstall, settings.json ${why}: unchanged`);
     assert.strictEqual(read(t, LOCAL), text, `uninstall, settings.local.json ${why}: unchanged`);
     assert.ok(!fs.existsSync(path.join(t, 'hooks', 'brain')), `uninstall, settings ${why}: the brain files still go`);
@@ -171,6 +175,16 @@ try {
     assert.match(r.out, /no brain hook entries found in/);
     assert.ok(!/brain hook entries removed|removed \d+ brain hook/.test(r.out), 'no false "removed" line');
     assert.strictEqual(read(t, LOCAL), ownOnly, 'not rewritten');
+  }
+  // "hooks": null has nothing to remove; one brain hook is "1 brain hook", singular (review P11).
+  for (const [name, text, expect] of [
+    ['hooks-null', '{"hooks": null}\n', /no brain hook entries found in /],
+    ['one-brain-hook', JSON.stringify({ hooks: { Stop: [{ hooks: [brainEnd] }] } }), /removed 1 brain hook from /],
+  ]) {
+    const t = target(`uninstall-${name}`, { [LOCAL]: text, 'hooks/brain/brain-load.sh': 'x\n' });
+    const r = run('uninstall.sh', [t], 'y\n');
+    assert.strictEqual(r.status, 0, tail(r.out));
+    assert.match(r.out, expect, `uninstall, ${name}`);
   }
 
   console.log('settings-safety.test.js: all assertions passed');
