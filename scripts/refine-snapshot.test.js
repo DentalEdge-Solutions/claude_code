@@ -9,6 +9,9 @@
 // "delete the file the edit created" into "restore old content"), and a revert restores only the edited file, so
 // SKILL-EVAL.md and the append-only SKILL-REFINE-LOG.md keep what the iteration wrote. The agent flows copy their
 // one file. Each check RUNS the commands written in the documents, placeholders filled, in a temp folder.
+// Paths are quoted (review Q3: a <file> with a space made `[` fail and the else branch delete another file), and
+// after a revert a diff against the copy must print nothing: it catches a wrongly named <file>, a second stray
+// edit, and an empty folder a reverted new file leaves (review Q6).
 'use strict';
 const assert = require('assert');
 const fs = require('fs');
@@ -31,6 +34,7 @@ function sh(cwd, cmd) {
   const r = spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
   assert.strictEqual(r.status, 0, `command failed: ${cmd}\n${r.stderr}`);
 }
+const shOut = (cwd, cmd) => spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
 function tree(dir, base = dir, out = {}) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
@@ -40,8 +44,12 @@ function tree(dir, base = dir, out = {}) {
 }
 
 const SKILL_FLOWS = ['skills/skill-refine/SKILL.md', '.claude/agents/skill-refine-agent.md', '.claude/agents/skill-guardian.md'];
-const SNAPSHOT = 'rm -rf evals/<skill-name>/refine/pre-iter-N && mkdir -p evals/<skill-name>/refine/pre-iter-N && cp -R skills/<skill-name>/. evals/<skill-name>/refine/pre-iter-N/';
-const RESTORE = 'if [ -e evals/<skill-name>/refine/pre-iter-N/<file> ]; then cp evals/<skill-name>/refine/pre-iter-N/<file> skills/<skill-name>/<file>; else rm skills/<skill-name>/<file>; fi';
+const SNAPSHOT = 'rm -rf "evals/<skill-name>/refine/pre-iter-N" && mkdir -p "evals/<skill-name>/refine/pre-iter-N" && cp -R "skills/<skill-name>/." "evals/<skill-name>/refine/pre-iter-N/"';
+const RESTORE = 'if [ -e "evals/<skill-name>/refine/pre-iter-N/<file>" ]; then cp "evals/<skill-name>/refine/pre-iter-N/<file>" "skills/<skill-name>/<file>"; else rm "skills/<skill-name>/<file>"; fi';
+const CHECK = 'diff -rq -x SKILL-EVAL.md -x SKILL-REFINE-LOG.md "evals/<skill-name>/refine/pre-iter-N" "skills/<skill-name>"';
+// The instructions that start an iteration's edit; the copy must come before every one (review Q1). A summary
+// such as skill-refine-agent's "Make exactly one surgical edit per iteration" is not one.
+const EDIT_STEP = /Then make exactly\b[^\n]*edit|Make ONE surgical edit/g;
 
 for (const file of SKILL_FLOWS) {
   const text = read(file);
@@ -49,11 +57,19 @@ for (const file of SKILL_FLOWS) {
   const all = spans(text);
   const snap = all.filter(s => s.cmd === SNAPSHOT);
   const restore = all.filter(s => s.cmd === RESTORE);
+  const check = all.filter(s => s.cmd === CHECK);
 
   test(`${file}: one snapshot of the whole skill folder and one restore of the edited file`, () => {
     assert.strictEqual(snap.length, 1, `expected the snapshot command once, got ${snap.length}`);
     assert.ok(restore.length >= 1, 'no restore command');
     assert.ok(snap[0].at < restore[0].at, 'the restore comes before the snapshot');
+    assert.ok(check.length >= 1 && check[0].at > restore[0].at, 'no check after the restore');
+    const edits = [...text.matchAll(EDIT_STEP)];
+    assert.ok(edits.length >= 1, 'no edit step found');
+    for (const e of edits) assert.ok(snap[0].at < e.index, `the copy comes after the edit step: ${e[0]}`);
+    // no other copy back from the snapshot, such as a whole-folder restore that rolls back the logs (review Q2)
+    const rest = [SNAPSHOT, RESTORE].reduce((t, c) => t.split(c).join(''), text);
+    assert.ok(!/\b(?:cp|rsync|ditto)\b[^\n]*pre-iter-N/.test(rest), 'another copy from or to the snapshot');
     // no older, partial form is left
     assert.ok(!/SKILL\.md\.pre-iter-N/.test(text), 'still names SKILL.md.pre-iter-N');
     assert.ok(!/REVERT to prior content exactly\./.test(text), 'a revert with no stated source');
@@ -63,17 +79,21 @@ for (const file of SKILL_FLOWS) {
     assert.ok(flat.includes('`SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E'), 'the lever → file mapping');
     assert.ok(flat.includes('`wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit'), 'the size before the edit');
     assert.ok(flat.includes('`SKILL-EVAL.md` and `SKILL-REFINE-LOG.md` are not restored'), 'the logs are kept');
+    assert.ok(flat.includes('If it lists a file, restore it the same way; if it lists a folder the edit created, remove it.'), 'what to do when the check prints');
+    assert.ok(flat.includes('A symlinked `<file>` is out of scope: a revert can\'t restore it, so pick another file.'), 'symlinks (review Q4)');
   });
 
   // Run the documented commands: an iteration edits one file, the loop rewrites SKILL-EVAL.md and appends to the
   // log, then the revert runs. The edited file returns exactly (or goes, if new); everything else keeps its state.
-  for (const [edited, isNew] of [['SKILL.md', false], ['REFERENCE.md', false], ['scripts/fmt.js', false], ['REFERENCE.md', true], ['scripts/new.sh', true]]) {
+  for (const [edited, isNew] of [['SKILL.md', false], ['REFERENCE.md', false], ['scripts/fmt.js', false], ['REFERENCE.md', true],
+    ['scripts/new.sh', true], ['scripts/my tool.sh', false], ['scripts/my tool.sh', true]]) {
     test(`${file}: revert of an edit to ${isNew ? 'a new ' : ''}${edited} restores it exactly`, () => {
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'refine-snapshot-'));
       try {
         const skill = path.join(tmp, 'skills', 'demo');
-        const files = { 'SKILL.md': 'skill v1\n', 'scripts/fmt.js': 'fmt v1\n', 'SKILL-EVAL.md': 'eval 0\n', 'SKILL-REFINE-LOG.md': 'log 0\n' };
-        if (!isNew) files['REFERENCE.md'] = 'ref v1\n';
+        // `scripts/my` is the file an unquoted `[ -e …/scripts/my tool.sh ]` reached for (review Q3)
+        const files = { 'SKILL.md': 'skill v1\n', 'scripts/fmt.js': 'fmt v1\n', 'scripts/my': 'other\n', 'SKILL-EVAL.md': 'eval 0\n', 'SKILL-REFINE-LOG.md': 'log 0\n' };
+        if (!isNew) { files['REFERENCE.md'] = 'ref v1\n'; files['scripts/my tool.sh'] = 'tool v1\n'; }
         for (const [rel, body] of Object.entries(files)) {
           fs.mkdirSync(path.dirname(path.join(skill, rel)), { recursive: true });
           fs.writeFileSync(path.join(skill, rel), body);
@@ -93,13 +113,53 @@ for (const file of SKILL_FLOWS) {
         sh(tmp, fill(restore[0].cmd, edited));
 
         assert.deepStrictEqual(tree(skill), { ...before, 'SKILL-EVAL.md': 'eval 1\n', 'SKILL-REFINE-LOG.md': 'log 0\niter 3\n' });
+        const c = shOut(tmp, fill(check[0].cmd, edited));
+        assert.ok(c.status === 0 && c.stdout === '', `the check after the revert printed: ${c.stdout}${c.stderr}`);
       } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
       }
     });
   }
+
+  // The check catches what the restore of one file cannot: a second stray edit, and the folder a new file needed.
+  test(`${file}: the check after the revert lists a stray edit and a folder the edit created`, () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'refine-snapshot-'));
+    try {
+      const skill = path.join(tmp, 'skills', 'demo');
+      fs.mkdirSync(skill, { recursive: true });
+      fs.mkdirSync(path.join(skill, 'scripts'));
+      for (const [rel, body] of [['SKILL.md', 'skill v1\n'], ['REFERENCE.md', 'ref v1\n'], ['scripts/fmt.js', 'fmt v1\n']]) fs.writeFileSync(path.join(skill, rel), body);
+      sh(tmp, fill(snap[0].cmd, ''));
+      fs.mkdirSync(path.join(skill, 'scripts', 'new'), { recursive: true });
+      fs.writeFileSync(path.join(skill, 'scripts', 'new', 'x.sh'), 'new\n');   // the edit, in a new folder
+      fs.writeFileSync(path.join(skill, 'REFERENCE.md'), 'stray\n');            // a second, stray edit
+      sh(tmp, fill(restore[0].cmd, 'scripts/new/x.sh'));
+      const c = shOut(tmp, fill(check[0].cmd, ''));
+      assert.notStrictEqual(c.status, 0, 'the check found nothing');
+      assert.match(c.stdout, /REFERENCE\.md/, 'the stray edit is not listed');
+      assert.match(c.stdout, /Only in skills\/demo\/scripts: new/, 'the empty new folder is not listed');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 }
 
+// The refine skills' REFERENCE.md tables and rules name the copy (review Q5).
+for (const [file, row] of [
+  ['skills/skill-refine/REFERENCE.md', "| **REVERT** | score < baseline − 5% | Restore the edited file's exact prior content from the iteration's copy (`evals/<skill-name>/refine/pre-iter-N/`); delete a file the edit created |"],
+  ['skills/agent-refine/REFERENCE.md', "| **REVERT** | score < baseline − 5% | Restore the exact prior content from the iteration's copy (`evals/agents/<name>/refine/<name>.md.pre-iter-N`) |"],
+]) test(`${file}: the REVERT row names the copy`, () => assert.ok(read(file).split('\n').includes(row)));
+for (const [file, what] of [['skills/skill-refine/SKILL.md', 'the skill folder'], ['skills/agent-refine/SKILL.md', 'the agent file']]) {
+  test(`${file}: the rules keep the per-iteration copy`, () => {
+    const text = read(file);
+    assert.ok(text.includes(`- **Never skip the per-iteration copy** — step 6 copies ${what} before every edit.`));
+    assert.ok(text.includes("- **Revert faithfully** — restore the exact prior content from the iteration's copy, not a rewrite of it."));
+  });
+}
+test('.claude/agents/skill-refine-agent.md: the edit may create a file (review Q7)', () => {
+  assert.ok(read('.claude/agents/skill-refine-agent.md').includes('(use Edit, or Write for a new file)'));
+});
+{
 // agent-refine (the skill) copies its one file before each edit, as agent-refine-agent already did.
 const AGENT_SNAPSHOT = 'cp .claude/agents/<name>.md evals/agents/<name>/refine/<name>.md.pre-iter-N';
 const AGENT_RESTORE = 'cp evals/agents/<name>/refine/<name>.md.pre-iter-N .claude/agents/<name>.md';
@@ -111,6 +171,9 @@ test('skills/agent-refine/SKILL.md: a per-iteration copy before the edit, and th
   assert.ok(snap, 'no per-iteration copy');
   assert.ok(restore, 'no restore from it');
   assert.ok(snap.at < restore.at, 'restore before copy');
+  for (const e of text.matchAll(EDIT_STEP)) assert.ok(snap.at < e.index, `the copy comes after the edit step: ${e[0]}`);
+  const rest = [AGENT_SNAPSHOT, AGENT_RESTORE].reduce((t, c) => t.split(c).join(''), text);
+  assert.ok(!/\b(?:cp|rsync|ditto)\b[^\n]*pre-iter-N/.test(rest), 'another copy from or to the snapshot');
   assert.ok(!/REVERT to prior content exactly\./.test(text), 'a revert with no stated source');
   assert.ok(text.replace(/\s+/g, ' ').includes('`wc -c < evals/agents/<name>/refine/<name>.md.pre-iter-N` is the size before the edit'), 'the size before the edit');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'refine-snapshot-'));
@@ -127,6 +190,7 @@ test('skills/agent-refine/SKILL.md: a per-iteration copy before the edit, and th
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+}
 
 // skill-guardian's edit step names every lever's file, Lever E included (it named SKILL.md or REFERENCE.md only).
 test('.claude/agents/skill-guardian.md: the edit step covers Lever E', () => {

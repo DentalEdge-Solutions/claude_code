@@ -38,8 +38,9 @@ const copyTokens = text => (text.match(/[^\s`'"()\[\]]*(?:\.baseline|[./]pre-ite
   .filter(t => t.includes('/'));
 
 // `cp [-r|-R] <src> <dst>` commands in the text.
-// A `;` ends a command: the skill flows' restore runs inside `if …; then cp …; else …; fi`.
-const cps = text => [...text.matchAll(/\bcp(?: -[rR])? ([^\s`";]+) ([^\s`";]+)/g)].map(m => ({ src: m[1], dst: m[2], at: m.index }));
+// A `;` ends a command: the skill flows' restore runs inside `if …; then cp …; else …; fi`. Paths may be quoted
+// (the skill flows quote theirs, E16 review Q3).
+const cps = text => [...text.matchAll(/\bcp(?: -[rR])? "?([^\s`";]+)"? "?([^\s`";]+)"?/g)].map(m => ({ src: m[1], dst: m[2], at: m.index }));
 
 // Placeholders filled in, so git can be asked about a concrete path.
 const fill = p => p.replace(/<skill-name>|<agent-name>|<name>/g, 'demo').replace(/-N\b/g, '-3').replace(/\$TS\b/g, '20261019-120000');
@@ -66,7 +67,7 @@ for (const { file, restoreTo } of DOCS) {
   test(`${file}: each copy into evals/ is preceded by a mkdir -p of exactly its folder`, () => {
     for (const c of made) {
       const dir = c.dst.endsWith('/') ? c.dst.slice(0, -1) : path.posix.dirname(c.dst);
-      const re = new RegExp(`mkdir -p ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[\\s\`]|$)`, 'm');
+      const re = new RegExp(`mkdir -p "?${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"?(?=[\\s\`]|$)`, 'm');
       const mk = text.search(re);
       assert.ok(mk !== -1 && mk < c.at, `no "mkdir -p ${dir}" before: cp ${c.src} ${c.dst}`);
     }

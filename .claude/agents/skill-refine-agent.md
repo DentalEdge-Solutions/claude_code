@@ -107,9 +107,10 @@ own eval logic.
 
    7b. Safety snapshot, before the edit: copy the whole skill folder into a fresh folder outside it (7d syncs
    the skill folder; fresh, because N repeats across sessions):
-   `rm -rf evals/<skill-name>/refine/pre-iter-N && mkdir -p evals/<skill-name>/refine/pre-iter-N && cp -R skills/<skill-name>/. evals/<skill-name>/refine/pre-iter-N/`
-   Then make exactly ONE targeted edit (use Edit tool), to one file, `<file>`, relative to the skill folder:
-   `SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E. Nothing else.
+   `rm -rf "evals/<skill-name>/refine/pre-iter-N" && mkdir -p "evals/<skill-name>/refine/pre-iter-N" && cp -R "skills/<skill-name>/." "evals/<skill-name>/refine/pre-iter-N/"`
+   Then make exactly ONE targeted edit (use Edit, or Write for a new file), to one file, `<file>`, relative to
+   the skill folder: `SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E. Nothing else.
+   A symlinked `<file>` is out of scope: a revert can't restore it, so pick another file.
    `wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit.
 
    7c. Invoke skill-eval-agent as a subagent on training set only:
@@ -122,7 +123,10 @@ own eval logic.
    7d. Keep or revert (`score` is the training-set pass rate from 7c; the bands are in percentage points of it):
    - score > baseline + 2% → KEEP. Sync: `cp -r skills/<skill-name> ~/.claude/skills/`
    - score < baseline − 5% → REVERT. Restore the edited file from the snapshot, or delete it if the edit created it:
-     `if [ -e evals/<skill-name>/refine/pre-iter-N/<file> ]; then cp evals/<skill-name>/refine/pre-iter-N/<file> skills/<skill-name>/<file>; else rm skills/<skill-name>/<file>; fi`
+     `if [ -e "evals/<skill-name>/refine/pre-iter-N/<file>" ]; then cp "evals/<skill-name>/refine/pre-iter-N/<file>" "skills/<skill-name>/<file>"; else rm "skills/<skill-name>/<file>"; fi`
+     Then check that nothing else differs from the copy; this must print nothing:
+     `diff -rq -x SKILL-EVAL.md -x SKILL-REFINE-LOG.md "evals/<skill-name>/refine/pre-iter-N" "skills/<skill-name>"`
+     If it lists a file, restore it the same way; if it lists a folder the edit created, remove it.
      `SKILL-EVAL.md` and `SKILL-REFINE-LOG.md` are not restored.
    - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit. If it did, KEEP and sync as above, and the baseline stays as it was; if not, restore as above. A neutral Lever D or E edit is always reverted.
    Mark lever as exhausted if reverted ≥ 2× with no improvement (a neutral revert counts as a revert; a neutral KEEP is not an improvement).
