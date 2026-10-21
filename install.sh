@@ -244,6 +244,7 @@ function refuse(why) {
 }
 const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const raw = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+if (raw.charCodeAt(0) === 0xFEFF) refuse("it starts with a byte-order mark; save it as UTF-8 without one");   // review P6
 let settings = {};
 if (raw.trim()) {
     try { settings = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.message})`); }

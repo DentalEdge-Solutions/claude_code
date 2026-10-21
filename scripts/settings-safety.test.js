@@ -44,33 +44,40 @@ const tail = s => s.slice(-1500);
 
 const LOCAL = '.claude/settings.local.json';
 const SHARED = '.claude/settings.json';
+// [what is wrong, file text, the reason the scripts give, whether uninstall can read it too]
+// A list that is not a list, for one of the events the installers write, stops them (review P4:
+// pinned by its reason); uninstall can read such a file and keeps the value as found.
 const BAD = [
-  ['does not parse (trailing comma)', '{"hooks": {},}\n'],
-  ['is a JSON array', '[]\n'],
-  ['is JSON null', 'null\n'],
-  ['has a "hooks" list', '{"hooks": []}\n'],
-  ['has a "hooks" string', '{"hooks": "x"}\n'],
-  ['has an object for Stop, one of our events', '{"hooks": {"Stop": {"hooks": []}}}\n'],
+  ['does not parse (trailing comma)', '{"hooks": {},}\n', /it is not valid JSON/, true],
+  ['starts with a byte-order mark', '\uFEFF{"hooks": {}}\n', /it starts with a byte-order mark/, true],   // review P6
+  ['is a JSON array', '[]\n', /it is not a JSON object/, true],
+  ['is JSON null', 'null\n', /it is not a JSON object/, true],
+  ['has a "hooks" list', '{"hooks": []}\n', /its "hooks" is not an object/, true],
+  ['has a "hooks" string', '{"hooks": "x"}\n', /its "hooks" is not an object/, true],
+  ['has an object for Stop, one of our events', '{"hooks": {"Stop": {"hooks": []}}}\n', /its "hooks\.Stop" is not a list/, false],
+  ['has an empty string for Stop', '{"hooks": {"Stop": ""}}\n', /its "hooks\.Stop" is not a list/, false],
 ];
 
 try {
   fs.mkdirSync(HOME, { recursive: true });
 
   // 1. brain-self-install.sh stops, names the file, and leaves it byte for byte.
-  BAD.forEach(([why, text], i) => {
+  BAD.forEach(([why, text, reason], i) => {
     const t = target(`brain-bad-${i}`, { [LOCAL]: text });
     const r = run('scripts/brain/brain-self-install.sh', [t]);
     assert.notStrictEqual(r.status, 0, `brain install, settings ${why}: must fail\n${tail(r.out)}`);
     assert.match(r.out, /settings\.local\.json was not changed/, `brain install, settings ${why}: names the file`);
+    assert.match(r.out, reason, `brain install, settings ${why}: gives the reason`);
     assert.strictEqual(read(t, LOCAL), text, `brain install, settings ${why}: file unchanged`);
   });
 
   // 2. install.sh warns, leaves settings.json byte for byte, and finishes the install.
-  BAD.forEach(([why, text], i) => {
+  BAD.forEach(([why, text, reason], i) => {
     const t = target(`install-bad-${i}`, { [SHARED]: text });
     const r = run('install.sh', [t], 'y\n');
     assert.strictEqual(r.status, 0, `install, settings ${why}: the install goes on\n${tail(r.out)}`);
     assert.match(r.out, /telemetry hooks not merged: .*settings\.json was left unchanged/, `install, settings ${why}: warns`);
+    assert.match(r.out, reason, `install, settings ${why}: gives the reason`);
     assert.strictEqual(read(t, SHARED), text, `install, settings ${why}: file unchanged`);
     assert.ok(read(t, 'CLAUDE.md').includes('# >>> skill-builder >>>'), `install, settings ${why}: later steps ran`);
   });
@@ -104,12 +111,12 @@ try {
   {
     const t = target('uninstall-mixed', {
       [SHARED]: JSON.stringify({ hooks: {
-        PostToolUse: [{ matcher: 'Skill|Task', hooks: [own, inv] }, { matcher: 'Skill|Task', hooks: [inv] }],
+        PostToolUse: [{ matcher: 'Skill|Task', hooks: [own, inv, inv] }, { matcher: 'Skill|Task', hooks: [inv] }],
         Stop: [{ hooks: [end] }],
         SessionEnd: [null, { hooks: [null, end] }, { hooks: [] }],
       } }, null, 2),
       [LOCAL]: JSON.stringify({ hooks: {
-        Stop: [{ hooks: [own, brainEnd] }],
+        Stop: [{ hooks: [own, brainEnd] }, { hooks: [] }],
         SessionStart: [{ hooks: [brainLoad] }],
       } }, null, 2),
       'hooks/brain/brain-load.sh': 'x\n',
@@ -122,25 +129,49 @@ try {
       // a null entry, a null hook and an empty entry are the owner's, kept as found
       SessionEnd: [null, { hooks: [null] }, { hooks: [] }],
     }, 'telemetry hooks removed one by one; the owner hook, nulls and empty entry kept');
-    assert.match(r.out, /removed 4 telemetry hooks from/);
-    assert.deepStrictEqual(json(t, LOCAL).hooks, { Stop: [{ hooks: [own] }] },
-      "brain hooks removed one by one; the owner's hook in the same entry kept");
+    // the count is of hooks, not entries: two of ours in one entry count twice (review P3)
+    assert.match(r.out, /removed 5 telemetry hooks from/);
+    assert.deepStrictEqual(json(t, LOCAL).hooks, { Stop: [{ hooks: [own] }, { hooks: [] }] },
+      "brain hooks removed one by one; the owner's hook in the same entry and an empty entry kept (review P2)");
+    assert.match(r.out, /removed 2 brain hooks from .*settings\.local\.json/, 'the brain step counts what it removed (review P5)');
   }
 
   // 6. uninstall leaves settings it cannot read byte for byte, warns for each file, and goes on.
   //    A list that is not a list cannot hold our hooks: uninstall keeps it and has nothing to
   //    remove, so the file is not rewritten and there is no warning.
-  BAD.forEach(([why, text], i) => {
-    const unreadable = i < BAD.length - 1;
+  BAD.forEach(([why, text, reason, unreadable], i) => {
     const t = target(`uninstall-bad-${i}`, { [SHARED]: text, [LOCAL]: text, 'hooks/brain/brain-load.sh': 'x\n' });
     const r = run('uninstall.sh', [t], 'y\n');
     assert.strictEqual(r.status, 0, `uninstall, settings ${why}: the uninstall goes on\n${tail(r.out)}`);
     assert.strictEqual(/settings\.json was left unchanged/.test(r.out), unreadable, `uninstall, settings.json ${why}: warns iff unreadable`);
     assert.strictEqual(/settings\.local\.json was left unchanged/.test(r.out), unreadable, `uninstall, settings.local.json ${why}: warns iff unreadable`);
+    if (unreadable) assert.match(r.out, reason, `uninstall, settings ${why}: gives the reason`);
     assert.strictEqual(read(t, SHARED), text, `uninstall, settings.json ${why}: unchanged`);
     assert.strictEqual(read(t, LOCAL), text, `uninstall, settings.local.json ${why}: unchanged`);
     assert.ok(!fs.existsSync(path.join(t, 'hooks', 'brain')), `uninstall, settings ${why}: the brain files still go`);
   });
+
+  // 7. uninstall reads an empty or blank file as {}: nothing to remove, no warning, no write (review P1).
+  //    A file with only the owner's hooks: nothing removed, and the brain step says so (review P5).
+  for (const [i, text] of ['', ' \n'].entries()) {
+    const t = target(`uninstall-empty-${i}`, { [SHARED]: text, [LOCAL]: text, 'hooks/brain/brain-load.sh': 'x\n' });
+    const r = run('uninstall.sh', [t], 'y\n');
+    assert.strictEqual(r.status, 0, tail(r.out));
+    assert.ok(!/left unchanged/.test(r.out), `uninstall, empty settings: no warning\n${tail(r.out)}`);
+    assert.match(r.out, /no telemetry hook entries found in/);
+    assert.match(r.out, /no brain hook entries found in .*settings\.local\.json/);
+    assert.strictEqual(read(t, SHARED), text);
+    assert.strictEqual(read(t, LOCAL), text);
+  }
+  {
+    const ownOnly = JSON.stringify({ hooks: { Stop: [{ hooks: [own] }] } }, null, 2);
+    const t = target('uninstall-own-only', { [LOCAL]: ownOnly, 'hooks/brain/brain-load.sh': 'x\n' });
+    const r = run('uninstall.sh', [t], 'y\n');
+    assert.strictEqual(r.status, 0, tail(r.out));
+    assert.match(r.out, /no brain hook entries found in/);
+    assert.ok(!/brain hook entries removed|removed \d+ brain hook/.test(r.out), 'no false "removed" line');
+    assert.strictEqual(read(t, LOCAL), ownOnly, 'not rewritten');
+  }
 
   console.log('settings-safety.test.js: all assertions passed');
 } finally {

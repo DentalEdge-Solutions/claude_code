@@ -177,6 +177,7 @@ const file = process.argv[1];
 function refuse(why) { process.stderr.write(`Error: ${file}: ${why}.\n`); process.exit(3); }
 const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const raw = fs.readFileSync(file, "utf8");
+if (raw.charCodeAt(0) === 0xFEFF) refuse("it starts with a byte-order mark; save it as UTF-8 without one");   // review P6
 if (!raw.trim()) { process.stdout.write("0"); process.exit(0); }
 let settings;
 try { settings = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.message})`); }
@@ -230,18 +231,19 @@ if [ -d "${TARGET}/hooks/brain" ] || [ -d "${TARGET}/scripts/brain" ]; then
     # Remove our hook entries (match by command string; leave everything else)
     SETTINGS="${TARGET}/.claude/settings.local.json"
     if [ -f "${SETTINGS}" ] && command -v node &>/dev/null; then
-        if node -e '
+        if BRAIN_HOOKS_REMOVED="$(node -e '
 const fs = require("fs");
 const file = process.argv[1];
 // A file this cannot read is left as it is: exit non-zero and the shell warns (review N2, N3).
 function refuse(why) { process.stderr.write(`Error: ${file}: ${why}.\n`); process.exit(3); }
 const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const raw = fs.readFileSync(file, "utf8");
-if (!raw.trim()) process.exit(0);
+if (raw.charCodeAt(0) === 0xFEFF) refuse("it starts with a byte-order mark; save it as UTF-8 without one");   // review P6
+if (!raw.trim()) { process.stdout.write("0"); process.exit(0); }
 let s;
 try { s = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.message})`); }
 if (!plain(s)) refuse("it is not a JSON object");
-if (s.hooks == null) process.exit(0);
+if (s.hooks == null) { process.stdout.write("0"); process.exit(0); }
 if (!plain(s.hooks)) refuse("its \"hooks\" is not an object");
 // Remove our hooks one by one, keeping the owner hooks that share an entry with them; drop an
 // entry only when every hook in it was ours (review N10). Anything malformed is kept as found.
@@ -260,8 +262,13 @@ for (const ev of Object.keys(s.hooks)) {
   else delete s.hooks[ev];
 }
 if (removed) fs.writeFileSync(file, JSON.stringify(s, null, 2) + "\n");
-' "${SETTINGS}" >/dev/null; then
-            ok "brain hook entries removed from settings.local.json"
+process.stdout.write(String(removed));
+' "${SETTINGS}")"; then
+            if [ "${BRAIN_HOOKS_REMOVED}" != "0" ]; then
+                ok "removed ${BRAIN_HOOKS_REMOVED} brain hook$([ "${BRAIN_HOOKS_REMOVED}" = "1" ] || echo s) from ${SETTINGS}"
+            else
+                skip "no brain hook entries found in ${SETTINGS}"
+            fi
         else
             warn "brain hooks not removed: ${SETTINGS} was left unchanged (see the error above); remove them by hand"
         fi
