@@ -33,10 +33,13 @@ init:   Writes run-manifest.json at the iteration root. Refuses to re-init if on
         so a report states exactly which revision it measured; --commit adds the
         repo commit (git rev-parse --short HEAD). Both optional.
         --baseline-method snapshot is kept for an earlier-version baseline; no eval
-        flow uses it (E12): skill-eval and agent-eval record none.
+        flow uses it (E12): skill-eval and agent-eval record none. status treats a
+        snapshot manifest as stale (see below); a future snapshot flow must revisit that.
 mark:   Updates (or creates) a scenario's status entry.
 status: Prints a table, re-hashes the --subject and warns if it changed since init
-        (the exit code ignores that), and exits non-zero if any complete/graded scenario is
+        or is gone, and warns on a snapshot manifest. After either warning a failing
+        status closes with "Do not resume this iteration: start a new iteration";
+        the exit code ignores the warnings. Exits non-zero if any complete/graded scenario is
         missing output.md, timing.json, or evidence.json in either side, or if
         any scenario has not reached "graded". This is the resume/integrity gate.`);
   process.exit(code);

@@ -207,6 +207,16 @@ test('E10 review R1: a failing status after a subject change closes with "start 
   assert.doesNotMatch(last, RESUME_LINE);
 });
 
+test('E10 review R8: a failing status with the subject gone closes with "start a new iteration", not "Resume"', () => {
+  const { subject, dir } = gradedIteration();
+  run('mark', dir, 's2-x-r1', 'pending');
+  fs.rmSync(subject);
+  const last = run('status', dir).out.trim().split('\n').pop();
+  assert.match(last, /^STATUS: FAILED/);
+  assert.match(last, /start a new iteration/);
+  assert.doesNotMatch(last, RESUME_LINE);
+});
+
 test('E12 review R1: a snapshot manifest (made before E12) is warned about and not resumed', () => {
   const root = tmp();
   const dir = path.join(root, 'iteration-1');

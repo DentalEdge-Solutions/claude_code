@@ -35,6 +35,13 @@ const FLOWS = [
     run: '   Baseline: "Do NOT dispatch the <agent-name> agent. Execute this prompt with general' },
 ];
 
+// The eval agents' whole baseline prompt, whitespace collapsed: its first line alone let an added clause
+// ("after loading the committed copy …") through (review R9).
+const PROMPTS = {
+  '.claude/agents/skill-eval-agent.md': "Do NOT load any skill. Execute this prompt with general capabilities only: '<prompt>'. Any file you create MUST be written under evals/<skill-name>/iteration-<N>/s<id>-<type>-r<rep>/without_skill/workspace/ — never to the repo root. Never write the parenthesized token `Skill(<skill-name>)` in your output — it is the trigger marker reserved for genuine skill loads. Write to evals/<skill-name>/iteration-<N>/s<id>-<type>-r<rep>/without_skill/output.md and timing.json.",
+  '.claude/agents/agent-eval-agent.md': "Do NOT dispatch the <agent-name> agent. Execute this prompt with general capabilities only: '<prompt>'. Any file you create MUST be written under evals/agents/<agent-name>/iteration-<N>/s<id>-<type>-r<rep>/without_agent/workspace/ — never to the repo root. Never write the parenthesized token `Agent(<agent-name>)` in your output — it is the dispatch marker reserved for genuine dispatches. Write to evals/agents/<agent-name>/iteration-<N>/s<id>-<type>-r<rep>/without_agent/output.md and timing.json.",
+};
+
 // Forms that offer, take or dispatch a snapshot baseline.
 const SNAPSHOT_FORMS = [/eval-snapshot/, /--snapshot-path/, /none\|snapshot/, /baseline_method\s*=\s*`snapshot`/,
   /dispatch the snapshot/i, /\(or snapshot\)/i, /baseline snapshot/i, /snapshot of (?:the )?previous version/i,
@@ -55,6 +62,15 @@ for (const { file, none, run } of FLOWS) {
     assert.strictEqual(lines.length, 1, `expected one baseline instruction, got ${lines.length}`);
     assert.ok(lines[0].startsWith(run), `baseline instruction changed: ${lines[0].trim()}`);
   });
+
+  if (PROMPTS[file]) {
+    test(`${file}: the baseline prompt is exactly the no-${none.split(' ')[1]} prompt, all of it (review R9)`, () => {
+      const i = text.indexOf('Baseline: "');
+      const j = text.indexOf('"', i + 'Baseline: "'.length);
+      assert.ok(i !== -1 && j !== -1, 'no quoted baseline prompt');
+      assert.strictEqual(text.slice(i + 'Baseline: "'.length, j).replace(/\s+/g, ' '), PROMPTS[file]);
+    });
+  }
 
   test(`${file}: every run-manifest init records --baseline-method none`, () => {
     const inits = joined.split('\n').filter(l => /run-manifest\.js init /.test(l));
