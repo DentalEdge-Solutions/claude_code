@@ -254,7 +254,10 @@ Read `./skills/<skill-name>/SKILL-EVAL.md` for baseline scores and worst-perform
 1. State hypothesis: "Changing [section] will improve [scenario] because [reason]"
 2. Make ONE surgical edit to `./skills/<skill-name>/SKILL.md` (or REFERENCE.md for Lever D)
 3. Re-score the failing scenarios
-4. Score improved → keep; score same or dropped → revert the edit
+4. Keep or revert (`score` is the pass rate of the re-scored scenarios; the bands are in percentage points of it):
+   - score > baseline + 2% → KEEP
+   - score < baseline − 5% → REVERT the edit
+   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit; if it did, KEEP, and the baseline stays as it was. A neutral Lever D or E edit is always reverted.
 5. Log to `./skills/<skill-name>/SKILL-REFINE-LOG.md`
 
 Stop when: all thresholds met, 3-iteration budget exhausted, or no hypotheses remain.

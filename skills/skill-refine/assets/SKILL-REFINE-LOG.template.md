@@ -13,7 +13,8 @@
 - **Change:** [one-line summary]
 - **Before:** pass_rate=XX%, trigger_accuracy=XX%, resilience=X.X/10
 - **After:** pass_rate=XX%, trigger_accuracy=XX%, resilience=X.X/10
-- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT
+- **Size:** XXXX → XXXX bytes (`wc -c` of the edited file, before → after)
+- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT / NEUTRAL-REVERTED
 - **Note:** [why it worked or didn't]
 
 ## Final Results

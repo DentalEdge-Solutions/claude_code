@@ -115,15 +115,15 @@ own eval logic.
    Wait for EVAL_COMPLETE. Read updated `skills/<skill-name>/SKILL-EVAL.md`.
    Also run 1 regression rep on each previously-passing scenario.
 
-   7d. Keep or revert:
+   7d. Keep or revert (`score` is the training-set pass rate from 7c; the bands are in percentage points of it):
    - score > baseline + 2% → KEEP. Sync: `cp -r skills/<skill-name> ~/.claude/skills/`
    - score < baseline − 5% → REVERT. Restore: `cp evals/<skill-name>/refine/SKILL.md.pre-iter-N skills/<skill-name>/SKILL.md`
-   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made the edited file shorter, with fewer bytes (`wc -c`) than before the edit. If it did, KEEP and sync as above; if not, restore as above.
-   Mark lever as exhausted if reverted ≥ 2× with no improvement.
+   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit. If it did, KEEP and sync as above, and the baseline stays as it was; if not, restore as above. A neutral Lever D or E edit is always reverted.
+   Mark lever as exhausted if reverted ≥ 2× with no improvement (a neutral revert counts as a revert; a neutral KEEP is not an improvement).
 
    7e. Append to SKILL-REFINE-LOG.md:
    `## Iteration N — Lever A/B/C/D/E — YYYY-MM-DD`
-   `Hypothesis: ... | Change: ... | Before: X%/X% | After: X%/X% | KEEP/REVERT | Notes: ...`
+   `Hypothesis: ... | Change: ... | Before: X%/X% | After: X%/X% | Size: X→Y bytes | KEPT/REVERTED/NEUTRAL-KEPT/NEUTRAL-REVERTED | Notes: ...`
 
 8. Convergence criteria — stop on first true:
    - eval_pass_rate ≥ 80% AND trigger_accuracy ≥ 85% AND resilience_score ≥ 8 → target met

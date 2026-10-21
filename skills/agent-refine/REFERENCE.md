@@ -19,9 +19,9 @@
 |---------|-----------|----------|
 | **KEEP** | score > baseline + 2% | This is the new baseline |
 | **REVERT** | score < baseline − 5% | Restore exact prior content |
-| **NEUTRAL** | baseline − 5% ≤ score ≤ baseline + 2% | REVERT unless the edit made the edited file shorter, with fewer bytes (`wc -c`) than before the edit; if it did, KEEP |
+| **NEUTRAL** | baseline − 5% ≤ score ≤ baseline + 2% | REVERT unless the edit made the agent file shorter, with fewer bytes (`wc -c`) than before the edit; if it did, KEEP, and the baseline stays as it was |
 
-`score` is the training-set pass rate from the re-eval. A neutral edit is kept only when it shortens the agent file: at the same score, a shorter definition has a smaller context footprint, while a longer one adds text the score did not pay for. The size is counted in bytes, not lines, so rewrapping text never counts as shorter.
+`score` is the training-set pass rate from the re-eval, and the bands are in percentage points of it. A neutral edit is kept only when it shortens the agent file: at the same score, a shorter definition has a smaller context footprint, while a longer one adds text the score did not pay for. The size is counted in bytes, not lines, so rewrapping text never counts as shorter. A neutral KEEP leaves the baseline where it was, so a run of neutral edits cannot lower the score step by step. For the lever-exhaustion and convergence rules, a neutral KEEP is not an improvement and a neutral revert counts as a revert.
 
 ---
 
@@ -128,7 +128,8 @@ Save to `.claude/agents/<agent-name>-REFINE-LOG.md`.
 - **Before:** eval_pass_rate=XX%, dispatch_accuracy=XX%, resilience=X.X/10
 - **After:** eval_pass_rate=XX%, dispatch_accuracy=XX%, resilience=X.X/10
 - **Agent-audit:** PASS / BLOCK (if Lever E — always run)
-- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT
+- **Size:** XXXX → XXXX bytes (`wc -c` of the edited file, before → after)
+- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT / NEUTRAL-REVERTED
 - **Note:** [why it worked or didn't]
 
 ## Final Results
