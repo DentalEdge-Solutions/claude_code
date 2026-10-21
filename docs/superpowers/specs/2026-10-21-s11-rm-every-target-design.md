@@ -1,6 +1,6 @@
 # Design 2026-10-21: S11, the `rm` check reads every target
 
-Status: draft for the owner, revision 2 (after design review round 1, D-R1 to D-R13). Nothing is built. It
+Status: draft for the owner, revision 2 (after design review round 1, D-R1 to D-R13); design review round 2 requested changes (D-R14 to D-R20, below), and the owner is asked whether to build at all ("Is it worth building?"). Nothing is built. It
 changes how `rm-rf-root` in `skills/skill-audit/scripts/static-scan.js` reads Markdown; it does not touch the
 brain security guard.
 
@@ -210,3 +210,45 @@ Recommendations first; review round 1 agreed with D2 to D4 and proposed D5 to D9
 - **Mutants** of the quote, escape, `$'…'`, operator, redirection, normalization, option and suppression rules,
   and of the right-to-left pass.
 - **Independent review** under `docs/REVIEW_PROTOCOL.md`, then a `skill-audit` deploy.
+
+## Design review round 2 (2026-10-21): request changes
+
+Revision 2 closes D-R1, D-R3 to D-R5, D-R7 and D-R9 to D-R13 in the design; D-R2, D-R6 and D-R8 only in part.
+New findings, with the fix each would take in revision 3:
+
+- **D-R14, blocker:** each `rm` word starts its own reading and its own report, so the readings overlap:
+  `rm ` repeated 16,000 times (47 KB) took 1.4 s and gave 16,000 findings; at 1 MB, minutes and about 350,000.
+  Fix: at most one finding per stage, a cap per file, and suppression keyed to the exact position of the `rm`
+  word today's expression reports (one comparison per stage), never a regular expression run per span.
+- **D-R15, major:** suppression must read the original text. Seven forms (a word joiner or soft hyphen inside
+  `rm`, a fullwidth slash, tilde or `rm`, `$'r\x6d -rf ~'`, a continuation inside `sh -c "…"`) match today's
+  expression only after normalizing or decoding; read on the detector's copy, each would be suppressed and
+  pass. Fix: the position-keyed suppression above, with offsets carried through normalization and decoding.
+- **D-R16, major:** stripping Markdown before reading turns `**/node_modules` and `*/` into root targets and
+  `<dir>/x` into `/x`. Fix: strip in prose only, a closed list of inline tags, paired emphasis only, never a `*`
+  or `_` before `/`.
+- **D-R17, minor:** "10 times main's expression" cannot be met on inputs with no `rm`, and nine nesting levels
+  cost 266 ms at 1 MB and 975 ms at 4 MB in the prototype. Fix: absolute bounds on the whole scan, and re-read
+  a quoted piece only when it could hold `rm`.
+- **D-R18, minor:** nine levels cost about 1 KB and lower a BLOCK to a FLAG; `$'\x72m'` at the cap is missed.
+  Fix: FLAG at the cap on `rm` in any case, `$'` or a backslash; list "deeper than 8" as a limit.
+- **D-R19, minor:** the right-to-left pass must keep a root word in prose apart from one in inline code; two
+  more ways to lower a BLOCK to a FLAG go in the limits.
+- **D-R20, nit:** a lone `\r`, U+2028 and U+2029 are line ends; "command position" for `{` and `}` is after a
+  separator, `!`, `then`, `do`, `else` or `elif`.
+
+## Is it worth building?
+
+Each review round has closed one more way to spell a command, and the design has grown into a normalizing,
+quote-decoding, nesting-aware tokenizer with offset mapping. The easiest evasion stays open by design: a target
+built from a variable (`X=~; rm -rf ./a "$X"`) is out of scope, because a FLAG on every `rm -rf "$DIR"` would
+bury the reviewer. So against an author who sets out to evade, the check stays a tripwire, and against a careless
+one the measured benefit is 1 command in 5,076. The options:
+
+1. **Build revision 3** as above: the cheap textual evasions closed, the variable path open; a sizeable parser
+   to maintain, with the risk of new faults of the F1 kind, mitigated by the timing budget and review.
+2. **Accept S11 as a known limit:** record in REFERENCE.md that `rm-rf-root` reads the first target only and is
+   a tripwire, not a boundary, and that a skill is cleared by reading it; no code change.
+3. **A narrow version:** only the multi-target, options-after-targets and `--` forms (goal 1), with the plain
+   tokenizer of revision 1, one finding per stage, and every evasion of reviews 1 and 2 listed as a limit.
+   It catches a careless multi-target command, not a determined author.
