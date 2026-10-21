@@ -1,8 +1,8 @@
 # Design 2026-10-21: S11, the `rm` check reads every target
 
-Status: draft for the owner, revision 2 (after design review round 1, D-R1 to D-R13); design review round 2 requested changes (D-R14 to D-R20, below), and the owner is asked whether to build at all ("Is it worth building?"). Nothing is built. It
-changes how `rm-rf-root` in `skills/skill-audit/scripts/static-scan.js` reads Markdown; it does not touch the
-brain security guard.
+Status: **not built.** The owner accepted S11 as a known limit on 2026-10-21, after design review round 2 (see
+"Is it worth building?"). This revision 2 and the round-2 findings stay on record for a later revisit; skill-audit's
+REFERENCE.md says the check reads the first target only and is a tripwire, not a boundary.
 
 ## Goal
 
