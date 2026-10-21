@@ -79,6 +79,8 @@ const CASES = [
   // md: hardcoded secrets
   { ctx: 'md', check: 'hardcoded-api-key',      sev: 'FLAG',  text: 'api' + '_key: "' + rep('k', 20) + '"' },
   { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'pass' + 'word = "' + rep('h', 10) + '"' },
+  { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'basic' + '_auth: "admin:' + rep('h', 10) + '"', tag: 'basic-auth' },
+  { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'NPM_CONFIG' + '__AUTH: "' + rep('Z', 16) + '"', tag: 'npm-auth' },
   { ctx: 'md', check: 'hardcoded-bearer-token', sev: 'BLOCK', text: 'Authorization: Bear' + 'er ' + rep('z', 24) },
   { ctx: 'md', check: 'private-key-block',      sev: 'BLOCK', text: '-----BEGIN ' + 'RSA PRIVATE KEY-----' },
   { ctx: 'md', check: 'anthropic-api-key',      sev: 'BLOCK', text: ANT_KEY },
@@ -87,9 +89,13 @@ const CASES = [
   // js: the generic forms in code, one closed string without spaces (review P3)
   { ctx: 'js', check: 'hardcoded-api-key',      sev: 'FLAG',  text: 'const api' + '_key = "' + rep('k', 20) + '";' },
   { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const pass' + 'word = "' + rep('h', 10) + '";' },
+  { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const basic' + 'Auth = "admin:' + rep('h', 10) + '";', tag: 'basic-auth' },
+  { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const npm_config' + '__auth = "' + rep('Z', 16) + '";', tag: 'npm-auth' },
   // data: unquoted values, read in data and config files only (S13)
   { ctx: 'data', check: 'hardcoded-api-key',    sev: 'FLAG',  text: 'API' + '_KEY=' + rep('k', 20) },
   { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'PASS' + 'WORD=' + rep('h', 10) },
+  { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'BASIC' + '_AUTH=admin:' + rep('h', 10), tag: 'basic-auth' },
+  { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'NPM_CONFIG' + '__AUTH=' + rep('Z', 16), tag: 'npm-auth' },
   { ctx: 'md', check: 'github-pat-classic',     sev: 'BLOCK', text: 'gh' + 'p_' + rep('r', 36) },
   { ctx: 'md', check: 'github-pat-fine',        sev: 'BLOCK', text: 'github' + '_pat_' + rep('Z', 82) },
   { ctx: 'md', check: 'github-oauth-token',     sev: 'BLOCK', text: 'gh' + 'o_' + rep('r', 36) },
@@ -144,13 +150,15 @@ const CASES = [
   { ctx: 'sh', check: 'pip-break-system', sev: 'FLAG',  text: 'pip install x --break-system-packages' },
 ];
 
+// A tag keeps two cases of one check (two patterns that report it) in files of their own.
+const tagged = c => c.check + (c.tag ? `-${c.tag}` : '');
 const CASE_FILE = {
-  md: c => `md-${c.check}.md`,
-  config: c => `config-${c.check}/settings.json`,
-  js: c => `js-${c.check}.js`,
-  py: c => `py-${c.check}.py`,
-  sh: c => `sh-${c.check}.sh`,
-  data: c => `data-${c.check}.env`,
+  md: c => `md-${tagged(c)}.md`,
+  config: c => `config-${tagged(c)}/settings.json`,
+  js: c => `js-${tagged(c)}.js`,
+  py: c => `py-${tagged(c)}.py`,
+  sh: c => `sh-${tagged(c)}.sh`,
+  data: c => `data-${tagged(c)}.env`,
 };
 
 // Reads the pattern tables out of the scanner source, so a pattern added without a case
@@ -1628,6 +1636,111 @@ for (const [label, file, text] of [
 
 test('Q2: an .npmrc _auth at the line start or after a host is still a FLAG', () => {
   assert.deepStrictEqual(sevs(scanOne('.npmrc', '_auth=dXNlcjpwYXNzd29yZA==\n'), 'hardcoded-secret'), ['FLAG']);
+});
+
+// ── S13 follow-up: basic-auth names and npm's environment form of _auth (2026-10-21) ──
+// Q2 limited _auth to the start of a name, so a basic-auth variable set to user:pass stopped FLAGging, and npm's
+// environment form of _auth (npm 12.1.0, measured: it sets _auth, listed as "_auth = (protected)") never matched.
+// The names are written @ba@ and the like and filled in at run time, so this file does not FLAG itself (review V2).
+const NAMES = { '@ba@': 'basic' + '_auth', '@BA@': 'BASIC' + '_AUTH', '@bA@': 'basic' + 'Auth', '@b-a@': 'basic' + '-auth',
+  '@BbA@': 'Basic' + 'Auth', '@nc@': 'npm_config' + '__auth', '@NC@': 'NPM_CONFIG' + '__AUTH' };
+const ex = t => t.replace(/@[A-Za-z-]+@/g, k => NAMES[k] || k);
+const NPMAUTH = 'ZmFrZTpmYWtl' + 'ZmFrZQ==';   // base64 of a fake user:pass
+for (const [label, file, text] of [
+  ['@BA@ in .env', '.env', '@BA@=admin:hunter2pass\n'],
+  ['@BA@ in a compose list', 'docker-compose.yml', 'environment:\n  - @BA@=admin:hunter2pass\n'],
+  ['@bA@ in YAML', 'c.yml', '@bA@: YWRtaW46aHVudGVyMg==\n'],
+  ['@b-a@ in YAML', 'c.yml', '@b-a@: admin:hunter2pass\n'],
+  ['a quoted @ba@ key with an unquoted value (review V3)', 'c.yml', "'@ba@': admin:hunter2pass\n"],
+  ['an 8-character @BA@ value (review V3)', '.env', '@BA@=ab:cdefg\n'],
+  ['a @ba@ value that only starts with a switch word (review V3)', 'c.yml', '@ba@: optional_admin_pw1\n'],
+  ['a JSON @ba@', 'c.json', '{"@ba@": "admin:hunter2pass"}\n'],
+  ['an 8-character quoted @ba@ value (review V3)', 'c.json', '{"@ba@": "ab:cdefg"}\n'],
+  ['a JSON @ba@ that only starts with a switch word (review V3)', 'c.json', '{"@ba@": "requiredAdmin1"}\n'],
+  ['a quoted @ba@ in Markdown', 'notes.md', 'Set @ba@: "admin:hunter2pass" in the gateway.\n'],
+  ['a quoted @b-a@ in Markdown (review V3)', 'notes.md', 'Set @b-a@: "admin:hunter2pass" in the gateway.\n'],
+  ['a @ba@ in a script', 'deploy.sh', '@BA@="admin:hunter2pass"\n'],
+  ['a @b-a@ key in code (review V3)', 'c.js', 'const opts = { "@b-a@": "admin:hunter2pass" };\n'],
+  ['@NC@ in .env', '.env', `@NC@=${NPMAUTH}\n`],
+  ['@nc@ in .env', '.env', `@nc@=${NPMAUTH}\n`],
+  ['@NC@ in settings.json env', 'settings.json', `{"env": {"@NC@": "${NPMAUTH}"}}\n`],
+  ['@NC@ in a YAML CI file', 'ci.yml', `env:\n  @NC@: ${NPMAUTH}\n`],
+  ['@nc@ in a script', 'publish.py', `@nc@ = "${NPMAUTH}"\n`],
+  ['an 8-character @NC@ value (review V12)', '.env', '@NC@=abcdefgh\n'],
+  ['an 8-character quoted @NC@ value (review V12)', 'c.json', '{"@NC@": "abcdefgh"}\n'],
+  ['an 8-character @nc@ value in code (review V12)', 'c.js', 'const @nc@ = "abcdefgh";\n'],
+]) {
+  test(`S13 follow-up: ${ex(label)} → hardcoded-secret FLAG`, () => {
+    const json = scanOne(file, ex(text));
+    assert.deepStrictEqual(sevs(json, 'hardcoded-secret'), ['FLAG'], `got ${json.findings.map(f => f.check).join(', ') || 'none'}`);
+  });
+}
+
+for (const [label, file, text] of [
+  ['@ba@: disabled', 'c.yml', '@ba@: disabled\n'],
+  ['@ba@: required', 'c.yml', '@ba@: required\n'],
+  ['@ba@: optional', 'c.yml', '@ba@: optional\n'],
+  ['a quoted "optional" @ba@', 'c.json', '{"@ba@": "optional"}\n'],
+  ['@ba@: true', 'c.yml', '@ba@: true\n'],
+  ['@ba@: required, then a comment', 'c.yml', '@ba@: required  # set by the gateway\n'],
+  ['a quoted @ba@ word whose quote does not close', 'c.yml', "@bA@: 'disabled\nnext: value_here\n"],
+  ['a quoted @ba@ word in Markdown', 'notes.md', 'Set @ba@: "optional" to allow both.\n'],
+  ['a @ba@ switch in code', 'c.js', 'const @bA@ = "disabled";\n'],
+  ['a 7-character @BA@ value (review V3)', '.env', '@BA@=ab:cdef\n'],
+  ['a @BA@ value cut by a comment (review V3)', '.env', '@BA@=ab#cdefghij\n'],
+  ['a @ba@ key with a nested YAML block (review V3)', 'c.yml', '@ba@:\n  users_from_vault: admin\n'],
+  ['a @bA@ value with spaces in code (review V3)', 'c.js', 'const @bA@ = "admin pass words";\n'],
+  ['a @bA@ value that code continues (review V3)', 'c.js', 'const @bA@ = "admin:hunter2pass\n'],
+  ['a @BbA@ enum member named for the scheme (review V4)', 'c.js', "const @BbA@ = '@BbA@';\n"],
+  ['a constant whose value is the scheme name (review V4)', 'c.py', "AUTH_TYPE_@BA@ = '@ba@'\n"],
+  ['a JSON @bA@ set to the scheme name (review V4)', 'c.json', '{"@bA@": "@ba@"}\n'],
+  ['an unquoted @bA@ set to the scheme name (review V10)', 'c.yml', '@bA@: @ba@\n'],
+  ['an @nc@ value with spaces in code (review V12)', 'c.js', 'const @nc@ = "abc def ghi jkl";\n'],
+  ['an @nc@ string that code continues (review V12)', 'c.js', 'const @nc@ = "ZmFrZTpmYWtlZmFrZQ==\n'],
+  ['a 7-character @nc@ value in code (review V12)', 'c.js', 'const @nc@ = "abcdefg";\n'],
+  ['an @NC@ key with a nested YAML block (review V12)', 'c.yml', '@NC@:\n  from_vault_secret_name: x\n'],
+  ['an @NC@ value cut by a comment (review V12)', '.env', '@NC@=ab#cdefghij\n'],
+  ['a 7-character @NC@ value (review V12)', '.env', '@NC@=abcdefg\n'],
+  ['a 7-character quoted @NC@ value (review V12)', 'c.json', '{"@NC@": "abcdefg"}\n'],
+  ['@BA@_USER, a user name', '.env', '@BA@_USER=administrator\n'],
+  ['a @BA@ placeholder', '.env', '@BA@=${BASIC_AUTH}\n'],
+  ['@ba@_check, another name', 'c.yml', '@ba@_check: whenever_ok\n'],
+  ['@NC@OR, another name', '.env', '@NC@OR=someone_long\n'],
+  ['an @NC@ placeholder', '.env', '@NC@=${NPM_AUTH}\n'],
+]) {
+  test(`S13 follow-up: ${ex(label)} is not a secret`, () => {
+    const json = scanOne(file, ex(text));
+    assert.deepStrictEqual(json.findings.filter(f => /hardcoded/.test(f.check)).map(f => f.check), [],
+      `got ${json.findings.map(f => f.check).join(', ')}`);
+  });
+}
+
+// An npm _auth line before a password line hides neither: each has a pattern of its own, so main's generic pattern
+// still reports the password line (review V9: added to main's pattern, the npm placeholder line was shown instead).
+for (const [label, file, text] of [
+  ['quoted, in a CI file', 'ci.yml', `@NC@: "\${{ secrets.NPM_AUTH }}"\n${PW}: "Fak3Passw0rd99"\n`],
+  ['quoted, in Markdown', 'README.md', `Set @NC@: "\${{ secrets.NPM_AUTH }}" and ${PW}: "Fak3Passw0rd99".\n`],
+  ['unquoted, in .env', '.env', `@NC@=ZmFrZTpmYWtlZmFrZQ==\n${PW.toUpperCase()}=Fak3Passw0rd99\n`],
+  ['in code', 'c.js', `const @nc@ = "ZmFrZTpmYWtlZmFrZQ==";\nconst ${PW} = "Fak3Passw0rd99";\n`],
+  // .properties and .netrc read a space-separated password only when no hardcoded-secret was reported for the file;
+  // a new pattern's finding, a placeholder included, must not stop it (review V11)
+  ['in .properties, after a quoted basic-auth placeholder', 'application.properties', `server.@b-a@="\${BASIC_AUTH}"\nspring.datasource.${PW} Fak3Passw0rd99\n`],
+  ['in .netrc, after an npm line', '.netrc', `# @nc@="ZmFrZTpmYWtlZmFrZQ=="\nmachine h.test login u ${PW} Fak3Passw0rd99\n`],
+  // the unquoted (data-file) forms too (review V14)
+  ['in .properties, after an unquoted basic-auth value', 'application.properties', `server.@b-a@=admin:hunter2pass\nspring.datasource.${PW} Fak3Passw0rd99\n`],
+  ['in .netrc, after an unquoted npm line', '.netrc', `@NC@=ZmFrZTpmYWtlZmFrZQ==\nmachine h.test login u ${PW} Fak3Passw0rd99\n`],
+]) {
+  test(`S13 follow-up: a new pattern's line does not hide a ${PW} line, ${label} (review V9, V11)`, () => {
+    const details = scanOne(file, ex(text)).findings.filter(f => f.check === 'hardcoded-secret').map(f => f.detail);
+    assert.ok(details.some(d => d.includes('Fak3Passw0rd99')), `the ${PW} line is not shown: ${details.join(' | ')}`);
+  });
+}
+
+// One finding per pattern that matches, as on main: a file holding a quoted placeholder and an unquoted real value
+// reports both, so the line with the value is never hidden behind the placeholder (review V1).
+test('S13 follow-up: a quoted placeholder and an unquoted value both report, as on main (review V1)', () => {
+  assert.deepStrictEqual(sevs(scanOne('c.yml', `${PW}: "<your ${PW} here>"\nDB_${PW.toUpperCase()}=Fak3Passw0rd99\n`), 'hardcoded-secret'), ['FLAG', 'FLAG']);
+  assert.deepStrictEqual(sevs(scanOne('.env', ex(`${PW.toUpperCase()}=hunter2hunter2\n@BA@=admin:hunter2pass\n`)), 'hardcoded-secret'), ['FLAG', 'FLAG']);
 });
 
 if (!ok) process.exit(1);

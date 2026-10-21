@@ -146,6 +146,15 @@ const MD_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}/i,  name: 'hardcoded-api-key',     sev: 'FLAG'  },
   { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"]{8,}/i,
                                                                       name: 'hardcoded-secret',       sev: 'FLAG'  },
+  // npm's environment form of _auth: NPM_CONFIG__AUTH sets _auth (npm 12.1.0, measured 2026-10-21). A pattern
+  // of its own, so main's generic pattern still reports the line it reported before (review V9).
+  { re: /npm_config__auth['"]?\s*[:=]\s*['"][^'"]{8,}/i,                 name: 'hardcoded-secret',       sev: 'FLAG', extra: true },
+  // A basic-auth credential (user:pass, or its base64): basic_auth, basic-auth, basicAuth. The words a
+  // config uses for a switch (disabled, required, optional) are not one, nor is the scheme's own name
+  // (an enum member BasicAuth = 'BasicAuth', review V4). Each pattern that matches reports, as for the
+  // other generic forms, so one line never hides another (review V1).
+  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional|basic[_-]?auth)(?:['"\s]|$))[^'"]{8,}/i,
+                                                                      name: 'hardcoded-secret',       sev: 'FLAG', extra: true },
   { re: /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/,                          name: 'hardcoded-bearer-token', sev: 'BLOCK' },
   { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,          name: 'private-key-block',      sev: 'BLOCK' },
   // Anthropic keys and tokens: api03, admin01, oat01 (OAuth) … (S7: main knew api03 and admin only). The
@@ -185,6 +194,10 @@ const DATA_SECRETS = [
   // _auth only at the start of a name, as .npmrc writes it, not inside enable_auth (review Q2).
   { re: /(?:password|passwd|secret|token|(?<![A-Za-z0-9_])_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
                                                                                             name: 'hardcoded-secret',  sev: 'FLAG' },
+  // npm's environment form of _auth (NPM_CONFIG__AUTH), a pattern of its own (review V9).
+  { re: /npm_config__auth['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,                  name: 'hardcoded-secret',  sev: 'FLAG', extra: true },
+  { re: /basic[_-]?auth['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])(?!(?:disabled|required|optional|basic[_-]?auth)(?![^\s'"#;,]))[^\s'"#;,]{8,}/i,
+                                                                                            name: 'hardcoded-secret',  sev: 'FLAG', extra: true },
 ];
 
 // .netrc ("machine h login u password X", anywhere on a line) and .properties ("password X" or
@@ -201,6 +214,9 @@ const SCRIPT_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]/i, name: 'hardcoded-api-key', sev: 'FLAG' },
   { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,
                                                                                  name: 'hardcoded-secret',  sev: 'FLAG' },
+  { re: /npm_config__auth['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,             name: 'hardcoded-secret',  sev: 'FLAG', extra: true },
+  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional|basic[_-]?auth)['"])[^'"\s]{8,}['"]/i,
+                                                                                 name: 'hardcoded-secret',  sev: 'FLAG', extra: true },
 ];
 const GENERIC_SECRET_CHECKS = new Set(SCRIPT_SECRETS.map(p => p.name));
 
@@ -503,14 +519,19 @@ function scanSecrets(filePath, content, kind = 'config') {
   const rel = path.relative(findingRoot, filePath) || '.';
   const seen = checksByFile.get(rel) || new Set();
   const table = kind === 'data' ? [...MD_SECRETS, ...DATA_SECRETS] : kind === 'code' ? CODE_SECRETS : MD_SECRETS;
-  for (const { re, name, sev } of table) {
+  // mainSecret: a hardcoded-secret from one of main's patterns. The basic-auth and npm patterns (extra) do not
+  // stop the space-separated .netrc/.properties check, so their line, a placeholder included, never hides a
+  // password line main would show (review V11).
+  let mainSecret = seen.has('hardcoded-secret');
+  for (const { re, name, sev, extra } of table) {
     if (seen.has(name)) continue;
     const m = content.match(re);
     if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
+    if (m && !extra && name === 'hardcoded-secret') mainSecret = true;
   }
   const base = path.basename(filePath).toLowerCase();
   const spaced = kind !== 'data' ? null : base === '.netrc' ? NETRC_SECRET : path.extname(base) === '.properties' ? PROPERTIES_SECRET : null;
-  if (spaced && !(checksByFile.get(rel) || new Set()).has('hardcoded-secret')) {
+  if (spaced && !mainSecret) {
     const m = content.match(spaced);
     if (m) flag(filePath, 'hardcoded-secret', 'FLAG', `"${m[0].trim().slice(0, 80)}"`);
   }
