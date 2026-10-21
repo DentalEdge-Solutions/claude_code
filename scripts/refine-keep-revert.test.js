@@ -81,6 +81,10 @@ for (const { file, track, sync } of RULE_DOCS) {
     }
   });
 
+  test(`${file}: the bands are stated in percentage points (review R9)`, () => {
+    assert.ok(text.includes('the bands are in percentage points'), 'unit of the bands not stated');
+  });
+
   test(`${file}: no older form of the neutral rule is left`, () => {
     const old = [/NEUTRAL\s*\**\s*→\s*\**\s*KEEP/i, /neutral\s*→\s*\**\s*REVERT/i, /±\s*2\s*[–-]\s*5\s*%/, /simpler/i,
       /\bimproved\s*→/i, /\bRegressed\b[^\n]*→/, /same or dropped/i, /kept unless/i, /\bthe edited file shorter/i,
@@ -142,7 +146,7 @@ test('no document copies a project agent under the home folder (E15, review R1)'
   assert.ok(files.length > 0, 'no documents found');
   const bad = [];
   for (const f of files) {
-    const text = fs.readFileSync(f, 'utf8');
+    const text = fs.readFileSync(f, 'utf8').replace(/\\\r?\n[ \t]*/g, ' ');   // shell line continuations joined (review R9)
     for (const m of text.matchAll(COPY)) {
       const ops = m[1].trim().split(/[ \t]+/).filter(o => !o.startsWith('-'));
       if (ops.length < 2) continue;
@@ -153,6 +157,14 @@ test('no document copies a project agent under the home folder (E15, review R1)'
       if (agentDst || agentSrc) bad.push(`${path.relative(REPO, f)}: ${m[0].trim()}`);
     }
   }
+  assert.deepStrictEqual(bad, []);
+});
+
+// No document points at the user-level agents folder at all, in a command or in prose (review R9).
+test('no document names the user-level agents folder (E15, review R9)', () => {
+  const files = [...mdFiles(path.join(REPO, 'skills')), ...mdFiles(path.join(REPO, '.claude', 'agents'))];
+  const re = /(?:~|\$\{?HOME\}?|\/Users\/[^/\s]+|\/home\/[^/\s]+|\$\{?CLAUDE_[A-Z_]*(?::-[^}]*)?\}?)\/?\.?(?:claude)?\/agents\b/;
+  const bad = files.filter(f => re.test(fs.readFileSync(f, 'utf8'))).map(f => path.relative(REPO, f));
   assert.deepStrictEqual(bad, []);
 });
 
