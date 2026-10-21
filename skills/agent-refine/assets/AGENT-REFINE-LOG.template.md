@@ -14,7 +14,8 @@
 - **Before:** eval_pass_rate=XX%, dispatch_accuracy=XX%, resilience=X.X/10
 - **After:** eval_pass_rate=XX%, dispatch_accuracy=XX%, resilience=X.X/10
 - **Agent-audit:** PASS / BLOCK (if Lever E — always run)
-- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT
+- **Size:** XXXX → XXXX bytes (`wc -c` of the edited file, before → after)
+- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT / NEUTRAL-REVERTED
 - **Note:** [why it worked or didn't]
 
 ## Final Results

@@ -17,11 +17,11 @@
 
 | Outcome | Condition | Decision |
 |---------|-----------|----------|
-| **KEEP** | pass_rate > baseline + 2% | This is the new baseline |
-| **REVERT** | pass_rate < baseline − 5% | Restore exact prior content |
-| **NEUTRAL → KEEP** | Within ±2–5% | Keep — slight preference for new; simpler isn't worse |
+| **KEEP** | score > baseline + 2% | This is the new baseline |
+| **REVERT** | score < baseline − 5% | Restore exact prior content |
+| **NEUTRAL** | baseline − 5% ≤ score ≤ baseline + 2% | REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit; if it did, KEEP, and the baseline stays as it was. A neutral Lever D or E edit is always reverted. |
 
-A neutral result that makes the skill *shorter* is a win. Simplification that maintains the score reduces context footprint.
+`score` is the training-set pass rate from the re-eval, and the bands are in percentage points of it. A neutral edit is kept only when it shortens `SKILL.md`, the definition loaded whenever the skill triggers: at the same score, a shorter definition has a smaller context footprint, while a longer one adds text the score did not pay for. A neutral edit to REFERENCE.md (Lever D) or `scripts/` (Lever E) is reverted: a shorter script can mean a dropped check rather than a smaller footprint. The size is counted in bytes, not lines, so rewrapping text never counts as shorter. A neutral KEEP leaves the baseline where it was, so a run of neutral edits cannot lower the score step by step. For the lever-exhaustion and convergence rules, a neutral KEEP is not an improvement and a neutral revert counts as a revert.
 
 ---
 
@@ -126,7 +126,8 @@ Save to `skills/<skill-name>/SKILL-REFINE-LOG.md`.
 - **Change:** [one-line summary]
 - **Before:** pass_rate=XX%, trigger_accuracy=XX%, resilience=X.X/10
 - **After:** pass_rate=XX%, trigger_accuracy=XX%, resilience=X.X/10
-- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT
+- **Size:** XXXX → XXXX bytes (`wc -c` of the edited file, before → after)
+- **Decision:** KEPT / REVERTED / NEUTRAL-KEPT / NEUTRAL-REVERTED
 - **Note:** [why it worked or didn't]
 
 ## Final Results

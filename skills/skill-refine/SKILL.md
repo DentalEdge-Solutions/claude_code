@@ -15,7 +15,8 @@ Apply Karpathy's autoresearch loop to measurably improve a skill. Diagnose → t
 ## The Loop
 
 ```
-RULE:    One lever per iteration. Score ↑ (>+2%) → keep. Score ↓ (>−5%) → revert. Repeat.
+RULE:    One lever per iteration. Score > baseline + 2 pts → keep. Score < baseline − 5 pts → revert.
+         Between → revert unless the definition got shorter. Repeat.
 TARGET:  eval_pass_rate ≥ 80%  AND  trigger_accuracy ≥ 85%  AND  resilience_score ≥ 8/10
 BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 ```
@@ -53,9 +54,10 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 7. **Re-eval (training set only)** — re-run the failing scenarios using skill-eval's exact methodology: parallel subagents (with-skill vs baseline snapshot), 3 reps each, programmatic trigger detection first, then LLM judge scoring using the rubric in skill-eval's REFERENCE.md. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Trigger × 0.4) + (Checklist × 0.3) + (Output × 0.3)`.
 
-8. **Keep or revert** (see thresholds in REFERENCE.md):
-   - Improved → **KEEP**. Sync to runtime: `cp -r skills/<skill-name> ~/.claude/skills/`
-   - Regressed or neutral → **REVERT** to prior content exactly.
+8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
+   - score > baseline + 2% → **KEEP**. Sync to runtime: `cp -r skills/<skill-name> ~/.claude/skills/`
+   - score < baseline − 5% → **REVERT** to prior content exactly.
+   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → **REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit**; if it did, **KEEP** and sync as above, and the baseline stays as it was. A neutral Lever D or E edit is always reverted.
    - Log the iteration either way — failed hypotheses are data.
 
 9. **Repeat** steps 5–8 until any convergence criterion is met (see REFERENCE.md).

@@ -19,7 +19,7 @@ The proposal's own `P` numbers are kept.
 | Item | Proposal | Status | Evidence (2026-10-15) |
 |---|---|---|---|
 | P1 | The brain and telemetry secret-pattern lists diverge | **Done 2026-10-15** (see "P1 repair") | Before: the brain set (6 patterns) missed GitHub fine-grained, Slack, Google, JWT, Bearer and `key = value` secrets. The telemetry set (12) missed Anthropic admin keys, `ghs_` tokens, Google keys without the `AIzaSy` prefix, a lone private-key header and short passwords. **Correction to the first probe:** telemetry did catch `AIzaSy…` keys and complete private-key blocks, so its gaps were narrower than first reported. |
-| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6: E1 fixed 2026-10-15, E2–E5 fixed and E6 disclosed 2026-10-19 (see "E2–E6 repair"); E7, found in that review, fixed the same day; E8, E9 and E13 are fixed; E10 and E11 (from E9's review), E12 (from E8's) and E14 and E15 (from E13's) are open |
+| P2 | No test for `harvest-evidence.js` | **Done 2026-10-15** (see "P2 repair") | `scripts/harvest-evidence.test.js`. **Correction:** the first probe missed two end-to-end tests already in `scripts/codex/test-runners.js` (the file name search could not find them). The tests found 6 weaknesses, E1–E6: E1 fixed 2026-10-15, E2–E5 fixed and E6 disclosed 2026-10-19 (see "E2–E6 repair"); E7, found in that review, fixed the same day; E8, E9, E13, E14 and E15 are fixed; E10 and E11 (from E9's review), E12 (from E8's) and E16 (found while fixing E14) are open |
 | P3 | No test for `static-scan.js` | **Done 2026-10-15** (see "P3 repair") | `scripts/static-scan.test.js`; the tests found 9 scanner gaps, S1–S9, still open |
 | P4 | No test for `run-manifest.js` | Done | test added in Phase 3 (PR #131) |
 | P5 | No CI | Done | `.github/workflows/ci.yml` and the `main-protection` ruleset (4 required checks) |
@@ -75,7 +75,7 @@ The proposal's own `P` numbers are kept.
 1. ~~**P13:** isolate the test fixtures and repair the Codex baselines.~~ Done on 2026-10-15 (see "P13 repair").
 2. ~~**P1:** one shared secret-pattern module (the superset), with a test per token format.~~ Done on 2026-10-15 (see "P1 repair"). HR1 from `2026-10-14-gsd-global-install-audit.md` §7 (a secret-read guard covering `settings.json`-style key files) is separate and still open.
 3. ~~**P3:** tests for the security scanner.~~ Done on 2026-10-15 (see "P3 repair"). Its gaps S1–S3 were fixed the same day (see "S1–S3 repair"), and S4–S9 on 2026-10-16 (see "S4–S9 repair"); S10–S13 are open.
-   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E5 are fixed (see "E1 repair" and "E2–E6 repair"), and E6, a method question, is disclosed in the eval report instructions and waits on an owner decision. E7 (the eval agents' inline report templates lacked Evidence and Limits) is fixed, as are E8, E9 and E13; E10–E12, E14 and E15 are open.
+   ~~**P2:** tests for the eval grader (`harvest-evidence.js`).~~ Done on 2026-10-15 (see "P2 repair"); its findings E1–E5 are fixed (see "E1 repair" and "E2–E6 repair"), and E6, a method question, is disclosed in the eval report instructions and waits on an owner decision. E7 (the eval agents' inline report templates lacked Evidence and Limits) is fixed, as are E8, E9, E13, E14 and E15; E10–E12 and E16 are open.
 4. ~~**P11:** make the brain security guard's fail-open visible (a log) or fail closed.~~ Done on 2026-10-15 (see "P11 repair"); its gaps G1–G3 are open.
 5. ~~**P9, then P6:** an `rm -rf` target guard and portable `sed` in `uninstall.sh`.~~ Done on 2026-10-16 (PR #144; see "P9 repair").
 6. **P8:** an eval path for Hermes skills (a full skill-eval, or a structural check).
@@ -407,7 +407,7 @@ Verdict: **approve**. W1–W3 closed. A fuzz run of the settings reader against 
   - 10 mutations of the harvester, each reverted, all failed the suite: loaded from any marker, an unescaped step marker, a flipped time window, md5 for sha256, the wrong agent key, an 800-character claim window, no repo-root fallback, `some` for `every`, a directory counted as an artifact, and a case-sensitive marker.
 - **No behavior change.** `harvest-evidence.js` is untouched.
 
-### Harvester weaknesses found (E1–E6; E1–E5 fixed, E6 disclosed — see "E1 repair" and "E2–E6 repair"; E7 is recorded and fixed there, E8, E9 and E13 fixed there; E10–E12, E14 and E15 recorded there as open)
+### Harvester weaknesses found (E1–E6; E1–E5 fixed, E6 disclosed — see "E1 repair" and "E2–E6 repair"; E7 is recorded and fixed there, E8, E9, E13, E14 and E15 fixed there; E10–E12 and E16 recorded there as open)
 
 Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
 
@@ -534,8 +534,46 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **N4:** `install.sh` no longer adds `skills/*.baseline`, which never matched the nested file. It keeps `skills/*-backup-*/` and `skills/*-eval-snapshot/` for folders that earlier versions may have left in target projects.
     - **N5:** `uninstall.sh` says `evals/` also holds the refine and adapt safety copies.
     - **N6:** extends E14.
-- **E14 (open, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)"). Each skill's own `REFERENCE.md` threshold table ("**NEUTRAL → KEEP** | Within ±2–5%") also contradicts its step 8, which points to that table (review N6).
-- **E15 (open, found while fixing E13):** `agent-refine` `SKILL.md` step 8's "Sync to runtime: `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`" copies the agent into the root of `~/.claude/`, not `~/.claude/agents/`. CLAUDE.md says agents are project-scoped (installed to target projects only), so this leaves a stray file in `~/.claude/`.
+- **E14 (fixed 2026-10-20, found while fixing E13):** a neutral refine result is handled differently. `skill-refine`/`agent-refine` `SKILL.md` step 8 reverts a neutral result ("Regressed or neutral → REVERT"), while both refine agents' step 7d keep it ("NEUTRAL → KEEP (simpler is better)"). Each skill's own `REFERENCE.md` threshold table ("**NEUTRAL → KEEP** | Within ±2–5%") also contradicts its step 8, which points to that table (review N6).
+- **E15 (fixed 2026-10-20, found while fixing E13):** `agent-refine` `SKILL.md` step 8's "Sync to runtime: `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`" copies the agent into the root of `~/.claude/`, not `~/.claude/agents/`. CLAUDE.md says agents are project-scoped (installed to target projects only), so this leaves a stray file in `~/.claude/`.
+- **E14 and E15 repair (2026-10-20):**
+  - **Owner decision (E14, 2026-10-20):** a neutral result is reverted unless the edit made the definition shorter.
+  - **Fix (E14):** seven documents now state the same three bands, one per line, in the same words. They are both refine `SKILL.md` step 8, both `REFERENCE.md` threshold tables, both refine agents' step 7d and `skill-guardian`'s refine loop (review R4: it kept any gain and reverted any neutral result). The bands:
+    - `score > baseline + 2%` → KEEP;
+    - `score < baseline − 5%` → REVERT;
+    - `baseline − 5% ≤ score ≤ baseline + 2%` (neutral) → REVERT, unless the definition has fewer bytes (`wc -c`) than before the edit; then KEEP, and the baseline stays as it was.
+
+    How the rule reads the decision:
+    - **The definition:** for a skill, `SKILL.md`, the file loaded whenever the skill triggers. A neutral Lever D or E edit (`REFERENCE.md`, `scripts/`) is always reverted, since a shorter script can mean a dropped check rather than a smaller footprint (review R2). For an agent, the agent file.
+    - **The neutral band:** the old "within ±2–5%" left it undefined. It is now the gap between the two thresholds, which are percentage points of the training-set pass rate (review R6).
+    - **The size:** counted in bytes, not lines, so rewrapping text never counts as shorter.
+    - **The baseline after a neutral KEEP:** unchanged, so a run of shortening edits can't lower the score step by step (review R5). For lever exhaustion and convergence, a neutral KEEP is not an improvement and a neutral revert counts as a revert.
+    - **The summaries and logs (review R7):** both loops' RULE summary states the neutral band. Every log format records the size before and after, and offers KEPT, REVERTED, NEUTRAL-KEPT and NEUTRAL-REVERTED.
+  - **Fix (E15):** `agent-refine` step 8 no longer copies the agent anywhere.
+    - **Source:** the official sub-agents page (code.claude.com/docs/en/sub-agents, read 2026-10-20, installed Claude Code 2.1.302; the reviewer re-read it and confirmed). Claude Code watches `.claude/agents/` and `~/.claude/agents/`, and an edited file is used on the next delegation with no restart. A restart is needed only for an `agents` folder created after the session started, a folder added with `--add-dir`, or a session started with `--disable-slash-commands`.
+    - **Why not `~/.claude/agents/`:** a copy there would make the agent user-scoped in every project, though the project copy wins on a name clash.
+    - **Stray file:** none existed in `~/.claude/`.
+  - **Checked:** `scripts/refine-keep-revert.test.js`, 52 checks. It reads each band's line in all seven documents: the definition named, the byte measure ending the condition, "if it did, KEEP", the baseline unchanged, Lever D/E reverted for skills, and the sync for the two that sync. It also reads the RULE summaries, the `REFERENCE.md` counting rules and every log format, and fails on any older form of the rule. For E15 it reads every `cp`, `rsync`, `install` or `ln` in every Markdown file under `skills/` and `.claude/agents/`, found at run time. Shell line continuations are joined, and redirections such as `2>/dev/null` dropped, before the destination is read (review R11). It fails when the destination is `~/.claude/agents`, or when a project agent (or an `$…AGENT…` variable) is copied anywhere under the home folder. A separate check fails on any mention of the user-level agents folder (`~/.claude/agents`, `$HOME/…`, `${CLAUDE_…}/agents` but not `$CLAUDE_PROJECT_DIR`), in prose too (review R9, R12). Both matchers are also run on fixed inputs, among them the literal cc5bf74 line, so a rewrite that stops catching the original bug fails (review R11). The percentage-point unit is pinned in all seven documents.
+    - **Failures on earlier commits** (the 42 checks of the second commit): on main (cc5bf74), 37 fail. On the first fix (b993f12), 28 fail: every check added after round 1.
+    - **On main, with the final test:** 45 of 52 fail, the E15 copy check among them.
+    - **Correction (review R11):** the second and third commits (818d6e3, 97b6d33) said the copy check fails on a project agent copied under the home folder. It did not catch the original line, `cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`: the redirection was read as the destination. Only the wording check ("no copy") still failed on main. Fixed in the fourth commit.
+    - **Correction (review R8):** this record first said the first test failed on main with "24 rule checks and both E15 checks". It was 20 of 24 rule checks: the two refine agents' keep and revert lines already used these thresholds.
+    - **Mutants:** 26 fail it against a passing control. They are the reviewer's round-1 10 (all had survived the first test), 10 of the author's, and 6 of the reviewer's round-2 10. These include a copy split over lines, a prose "sync into ~/.claude/agents/", a `${CLAUDE_HOME:-…}` destination and the unit removed from the guardian or an agent.
+  - **Limits:**
+    - The test reads the documents, not a refine run.
+    - A neutral line that adds an unconditional "KEEP" after the stated rule still passes, as does a contradicting sentence elsewhere in a document, such as "a neutral KEEP counts as an improvement" in a convergence line. These are the 4 surviving round-2 mutants; a text test can't catch every contradiction.
+    - So does a copy made with a tool other than `cp`, `rsync`, `install` or `ln`.
+    - So does GNU `cp -t DIR SRC`, which names the destination first (review R13; macOS `cp` has no `-t`).
+    - Not addressed, and older than this change: whether the one regression rep on scenarios that already passed counts toward `score` (review R6).
+  - **Independent review, round 1 (b993f12):** approve with changes, R1–R8, all minor.
+  - **Round 2 (818d6e3):** approve; R1–R8 fixed (R3 as a record, the gap staying in E16). R9 (test gaps) and R10 (E16 omitted `skill-guardian`) are new and minor, and are answered in the next commit.
+  - **Round 3 (97b6d33):** request changes. R9 and R10 fixed. R11 (blocking): the E15 copy check no longer caught the original line (above). R12 (minor): the user-level folder check matched `$CLAUDE_PROJECT_DIR/.claude/agents`. Both are answered in the fourth commit.
+  - **Round 4 (9af4383):** approve; R1–R12 fixed. R13 (minor): `cp -t` isn't read, now listed under Limits as the reviewer accepted.
+- **E16 (open, found while fixing E14; widened by review R3):** a refine can't always restore "prior content exactly", or measure the size "before the edit".
+  - **`skill-refine-agent`:** step 7b snapshots only `SKILL.md` (`…/SKILL.md.pre-iter-N`), and its revert restores only `SKILL.md`. Lever D edits `REFERENCE.md` and Lever E edits `scripts/`, so a reverted D or E edit stays in the skill.
+  - **Both refine skills** (`skill-refine`, `agent-refine`): step 6 makes no per-iteration copy at all; only step 2's once-per-session `.baseline` exists. After the first KEEP, step 8's revert has no stated source, for `SKILL.md` and the agent file as well.
+  - **`skill-guardian`** (review R10): step 2 edits `SKILL.md`, or `REFERENCE.md` for Lever D, and step 4 says to revert the edit and compare bytes "before the edit", but the file has no snapshot step at all.
+  - **Not affected:** `agent-refine-agent`, which snapshots its single file at every iteration.
 - **F1 (mitigated 2026-10-20, root cause parked; found 2026-10-19):** `scripts/brain/brain-hooks.test.js` fails intermittently, seen 4 times (plus 1 hang in a timing probe, below). The cause was named on its first run under the new runner (review R1):
   - **The failing check:** `brain-hooks.test.js:24`, runHook's `assert.ok(!r.error)`: "brain-security-guard.sh failed to run or timed out: spawnSync bash ETIMEDOUT".
   - **Where:** it is called from the 512 KB guard-timing loop (`:463`). The hook passed the test's 15 s timeout; this is not the `ms < 3000` check.
