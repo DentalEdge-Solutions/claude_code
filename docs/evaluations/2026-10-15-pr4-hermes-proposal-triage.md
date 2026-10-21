@@ -653,6 +653,7 @@ Probed on 2026-10-15 in a scratch folder. None is pinned by a test.
     - **R10:** the `run-manifest.js` help now describes the warnings and the closing line, and says a future snapshot flow must revisit `status` treating every snapshot manifest as stale.
 
     The reviewer's three surviving mutants for these now fail the tests.
+  - **Round 3 (87f1514):** approve; R8–R10 fixed, nothing new. All of R1–R10 are closed.
   - **E6 (owner decision, 2026-10-20):** the instructed `Skill(<name>)` / `Agent(<name>)` marker is kept, as disclosed in every report's Evidence source bullet.
 - **Evidence:**
   - **Tests:** 12 new tests in `scripts/harvest-evidence.test.js`, plus 2 existing tests updated for the side-folder rule. Before the fix, 7 of the round-1 tests failed; the rest pin behaviour that review mutants broke. Round 3 added cases for W1 (failed first) and W3 to the E5 tests. All 49 pass, and `node scripts/run-all-tests.js` passes 31/31, including the Codex end-to-end claim test.
