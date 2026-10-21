@@ -79,6 +79,7 @@ for (const file of SKILL_FLOWS) {
     assert.ok(flat.includes('`SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E'), 'the lever → file mapping');
     assert.ok(flat.includes('`wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit'), 'the size before the edit');
     assert.ok(flat.includes('`SKILL-EVAL.md` and `SKILL-REFINE-LOG.md` are not restored'), 'the logs are kept');
+    assert.ok(flat.includes('Then check that nothing else differs from the copy; this must print nothing:'), 'the check must print nothing (review Q11)');
     assert.ok(flat.includes('If it lists a file, restore it the same way; if it lists a folder the edit created, remove it.'), 'what to do when the check prints');
     assert.ok(flat.includes('A symlinked `<file>` is out of scope: a revert can\'t restore it, so pick another file.'), 'symlinks (review Q4)');
   });
@@ -156,6 +157,10 @@ for (const [file, what] of [['skills/skill-refine/SKILL.md', 'the skill folder']
     assert.ok(text.includes("- **Revert faithfully** — restore the exact prior content from the iteration's copy, not a rewrite of it."));
   });
 }
+test('.claude/agents/skill-refine-agent.md: a neutral revert restores as the REVERT bullet does, check included (review Q11)', () => {
+  assert.ok(/^ {3}- baseline − 5% ≤ score ≤ baseline \+ 2% \(neutral\) → .*; if not, restore as above\. A neutral Lever D or E edit is always reverted\.$/m
+    .test(read('.claude/agents/skill-refine-agent.md')), 'the neutral line no longer restores "as above"');
+});
 test('.claude/agents/skill-refine-agent.md: the edit may create a file (review Q7)', () => {
   assert.ok(read('.claude/agents/skill-refine-agent.md').includes('(use Edit, or Write for a new file)'));
 });
@@ -171,7 +176,9 @@ test('skills/agent-refine/SKILL.md: a per-iteration copy before the edit, and th
   assert.ok(snap, 'no per-iteration copy');
   assert.ok(restore, 'no restore from it');
   assert.ok(snap.at < restore.at, 'restore before copy');
-  for (const e of text.matchAll(EDIT_STEP)) assert.ok(snap.at < e.index, `the copy comes after the edit step: ${e[0]}`);
+  const edits = [...text.matchAll(EDIT_STEP)];
+  assert.ok(edits.length >= 1, 'no edit step found (review Q10)');
+  for (const e of edits) assert.ok(snap.at < e.index, `the copy comes after the edit step: ${e[0]}`);
   const rest = [AGENT_SNAPSHOT, AGENT_RESTORE].reduce((t, c) => t.split(c).join(''), text);
   assert.ok(!/\b(?:cp|rsync|ditto)\b[^\n]*pre-iter-N/.test(rest), 'another copy from or to the snapshot');
   assert.ok(!/REVERT to prior content exactly\./.test(text), 'a revert with no stated source');
