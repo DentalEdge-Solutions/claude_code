@@ -137,34 +137,84 @@ function mdFiles(dir, out = []) {
   return out;
 }
 
-// A copy command's operands, flags dropped; the last one is the destination.
+// A copy command's operands, flags and redirections dropped; the last one is the destination.
 const COPY = /\b(?:cp|rsync|install|ln)\b((?:[ \t]+[^\s`;|&]+)+)/g;
-const HOME = /^["']?(?:~|\$HOME|\$\{HOME\}|\/Users\/[^/]+|\/home\/[^/]+)(?:\/|["']?$)/;
+const HOME = /^["']?(?:~|\$HOME|\$\{HOME\}|\/Users\/[^/]+|\/home\/[^/]+)["']?(?:\/|$)/;
+const REDIRECT = /^(?:\d*|&)[<>]/;   // 2>/dev/null, >log, &>/dev/null; a bare "2>" also takes the next operand
 
-test('no document copies a project agent under the home folder (E15, review R1)', () => {
-  const files = [...mdFiles(path.join(REPO, 'skills')), ...mdFiles(path.join(REPO, '.claude', 'agents'))];
-  assert.ok(files.length > 0, 'no documents found');
-  const bad = [];
-  for (const f of files) {
-    const text = fs.readFileSync(f, 'utf8').replace(/\\\r?\n[ \t]*/g, ' ');   // shell line continuations joined (review R9)
-    for (const m of text.matchAll(COPY)) {
-      const ops = m[1].trim().split(/[ \t]+/).filter(o => !o.startsWith('-'));
-      if (ops.length < 2) continue;
-      const dst = ops[ops.length - 1];
-      if (!HOME.test(dst)) continue;
-      const agentDst = /\.claude\/agents\b/.test(dst);
-      const agentSrc = ops.slice(0, -1).some(o => /\.claude\/agents\b/.test(o) || /^["']?\$\{?[A-Z_]*AGENT/.test(o));
-      if (agentDst || agentSrc) bad.push(`${path.relative(REPO, f)}: ${m[0].trim()}`);
-    }
+function operands(args) {
+  const out = [];
+  const words = args.trim().split(/[ \t]+/);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (REDIRECT.test(w)) { if (/[<>]$/.test(w)) i++; continue; }
+    if (!w.startsWith('-')) out.push(w);
   }
+  return out;
+}
+
+// The copy commands in `text` that put a project agent, or anything, into a home folder's agents folder.
+function homeAgentCopies(text) {
+  const joined = text.replace(/\\\r?\n[ \t]*/g, ' ');   // shell line continuations joined (review R9)
+  const bad = [];
+  for (const m of joined.matchAll(COPY)) {
+    const ops = operands(m[1]);
+    if (ops.length < 2) continue;
+    const dst = ops[ops.length - 1];
+    if (!HOME.test(dst)) continue;
+    const agentDst = /\.claude\/agents\b/.test(dst);
+    const agentSrc = ops.slice(0, -1).some(o => /\.claude\/agents\b/.test(o) || /^["']?\$\{?[A-Z_]*AGENT/.test(o));
+    if (agentDst || agentSrc) bad.push(m[0].trim());
+  }
+  return bad;
+}
+
+// Whether `text` names the user-level agents folder, in a command or in prose (review R9).
+// CLAUDE_PROJECT_DIR is the project root, so a path under it is project-scoped (review R12).
+const USER_AGENTS = /(?:~|\$\{?HOME\}?|\/Users\/[^/\s]+|\/home\/[^/\s]+|\$\{?CLAUDE_(?!PROJECT_DIR)[A-Z_]*(?::-[^}]*)?\}?)["']?\/?\.?(?:claude)?\/agents\b/;
+const namesUserAgents = text => USER_AGENTS.test(text);
+
+// The matchers on fixed inputs, so a rewrite that stops catching the original bug fails here (review R11).
+test('the copy matcher flags the original E15 line and its variants, and nothing project-local', () => {
+  const flagged = [
+    '`cp .claude/agents/<name>.md ~/.claude/ 2>/dev/null || true`',   // cc5bf74 skills/agent-refine/SKILL.md:60
+    'cp .claude/agents/<name>.md ~/.claude/ &>/dev/null',
+    'cp .claude/agents/x.md "$HOME"/.claude/agents/',
+    'cp -r .claude/agents ~/.claude/',
+    'cp "$AGENT_FILE" ~/.claude/agents/',
+    'install -m644 .claude/agents/<agent-name>.md ~/.claude/agents/',
+    'cp .claude/agents/<name>.md \\\n     ~/.claude/agents/',
+  ];
+  for (const s of flagged) assert.strictEqual(homeAgentCopies(s).length, 1, `not flagged: ${s}`);
+  const clean = [
+    '`cp -r skills/<skill-name> ~/.claude/skills/`',
+    '`cp .claude/agents/<name>.md evals/agents/<name>/refine/<name>.md.baseline`',
+    '`cp evals/agents/<agent-name>/refine/<agent-name>.md.pre-iter-N .claude/agents/<agent-name>.md`',
+  ];
+  for (const s of clean) assert.deepStrictEqual(homeAgentCopies(s), [], `flagged: ${s}`);
+});
+
+test('the user-level folder matcher flags home and config-folder paths, not the project folder (review R12)', () => {
+  for (const s of ['~/.claude/agents/', '$HOME/.claude/agents', '"$HOME"/.claude/agents/', '${HOME}/.claude/agents',
+    '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/agents/"', '/Users/someone/.claude/agents/x.md']) {
+    assert.ok(namesUserAgents(s), `not flagged: ${s}`);
+  }
+  for (const s of ['$CLAUDE_PROJECT_DIR/.claude/agents/x.md', '${CLAUDE_PROJECT_DIR}/.claude/agents/', '.claude/agents/<name>.md',
+    '"$CLAUDE_PROJECT_DIR"/.claude/agents/']) {
+    assert.ok(!namesUserAgents(s), `flagged: ${s}`);
+  }
+});
+
+const DOC_FILES = [...mdFiles(path.join(REPO, 'skills')), ...mdFiles(path.join(REPO, '.claude', 'agents'))];
+
+test('no document copies a project agent under the home folder (E15, review R1, R11)', () => {
+  assert.ok(DOC_FILES.length > 0, 'no documents found');
+  const bad = DOC_FILES.flatMap(f => homeAgentCopies(fs.readFileSync(f, 'utf8')).map(c => `${path.relative(REPO, f)}: ${c}`));
   assert.deepStrictEqual(bad, []);
 });
 
-// No document points at the user-level agents folder at all, in a command or in prose (review R9).
 test('no document names the user-level agents folder (E15, review R9)', () => {
-  const files = [...mdFiles(path.join(REPO, 'skills')), ...mdFiles(path.join(REPO, '.claude', 'agents'))];
-  const re = /(?:~|\$\{?HOME\}?|\/Users\/[^/\s]+|\/home\/[^/\s]+|\$\{?CLAUDE_[A-Z_]*(?::-[^}]*)?\}?)\/?\.?(?:claude)?\/agents\b/;
-  const bad = files.filter(f => re.test(fs.readFileSync(f, 'utf8'))).map(f => path.relative(REPO, f));
+  const bad = DOC_FILES.filter(f => namesUserAgents(fs.readFileSync(f, 'utf8'))).map(f => path.relative(REPO, f));
   assert.deepStrictEqual(bad, []);
 });
 
