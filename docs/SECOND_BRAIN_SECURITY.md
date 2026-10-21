@@ -66,10 +66,10 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
        only `-[dfnqxX]…`, `--dry-run`, `--quiet`, `--force` and plain paths, with an `n`
        before any `--`, and no quote, escape, variable, glob, redirect, comment or `=` in
        the stage. So `git clean -nd -- <path>` passes, while `git clean -n -e foo …`,
-       `env git clean -n …` or
-       `git clean -n … 2>/dev/null` are conservatively denied. So is any `git -c …` stage
-       containing the word `clean` (`git -c color.ui=never log --grep clean …`): a `-c`
-       value can run a program, so the guard does not try to tell them apart.
+       `env git clean -n …` or `git clean -n … 2>/dev/null` are conservatively denied. So
+       is any `git -c …` stage containing the word `clean`
+       (`git -c color.ui=never log --grep clean …`): a `-c` value can run a program, so
+       the guard does not try to tell them apart.
      - **The git subcommand** is found from shell-split words after skipping git's global
        options together with the value of those that take one (`-C`, `-c`, `--git-dir`,
        `--work-tree`, `--namespace`, `--config-env`, `--attr-source`, `--shallow-file`; git

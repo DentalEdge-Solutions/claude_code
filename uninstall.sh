@@ -187,7 +187,7 @@ for (const eventName of Object.keys(settings.hooks)) {
     const list = settings.hooks[eventName];
     if (!Array.isArray(list)) continue;
     const kept = list.filter((entry) => {
-        if (!Array.isArray(entry.hooks)) return true;
+        if (!entry || !Array.isArray(entry.hooks)) return true;   // a null entry is kept as found (review N1)
         const isOurs = entry.hooks.length > 0 && entry.hooks.every((h) => h && ours.has(h.command));
         if (isOurs) removed++;
         return !isOurs;
@@ -223,8 +223,9 @@ const s = JSON.parse(fs.readFileSync(file, "utf8"));
 let removed = 0;
 for (const ev of Object.keys(s.hooks || {})) {
   const before = s.hooks[ev].length;
+  // a null entry, or a null hook inside an entry, is kept as found (review N1)
   s.hooks[ev] = s.hooks[ev].filter(e =>
-    !(Array.isArray(e.hooks) && e.hooks.some(h => /hooks\/brain\//.test(h.command || ""))));
+    !(e && Array.isArray(e.hooks) && e.hooks.some(h => h && /hooks\/brain\//.test(h.command || ""))));
   removed += before - s.hooks[ev].length;
   if (!s.hooks[ev].length) delete s.hooks[ev];
 }

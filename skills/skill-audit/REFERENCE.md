@@ -98,6 +98,8 @@ A generic `api_key`/`password`/`secret`/`token` assignment is a FLAG when the na
 
 Not matched: values containing `;`, `#` or `,`; in code, quoted values with spaces (`password = 'p@ss word'`), values split by string concatenation or built in a template literal, and unquoted assignments (`export PASSWORD=x` in a shell script, `ENV DB_PASSWORD=x` in a Dockerfile, `password: x` in a `.yml.j2` template), since files of no known type are read as code.
 
+Known BLOCKs to clear by hand (kept by owner decision, 2026-10-20): since every file is read, a bundled binary can BLOCK on a string packed inside it that looks like a token (a Bearer-like string in a native executable), and a document that quotes a whole private-key header line (five dashes, `BEGIN … PRIVATE KEY`, five dashes) BLOCKs as a private key. The gate errs toward clearance; check the quoted match before clearing.
+
 ### Prompt Injection (in .md files)
 
 | Pattern | Severity | Risk |

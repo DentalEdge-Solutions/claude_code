@@ -1,8 +1,10 @@
 // scripts/install-hooks-merge.test.js — install.sh step 7 merges the telemetry hooks into the
 // target's .claude/settings.json without clobbering: a null entry, or a null hook inside an entry,
 // is kept as found and does not stop the install (review G11), and a re-run adds nothing.
-// Runs the real install.sh on a temp target with HOME pointed at a temp fake home, so the
-// runtime skill sync writes only temp files.
+// uninstall.sh, its mirror, removes our hooks past the same nulls and keeps them (review N1: it
+// crashed after deleting the telemetry scripts, leaving hooks that pointed at deleted files).
+// Runs the real install.sh and uninstall.sh on a temp target with HOME pointed at a temp fake
+// home, so the runtime skill sync writes only temp files.
 'use strict';
 const { spawnSync } = require('child_process');
 const fs = require('fs');
@@ -15,13 +17,14 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'install-hooks-test-'));
 const HOME = path.join(TMP, 'home');
 const PROJECT = path.join(TMP, 'project');
 const SETTINGS = path.join(PROJECT, '.claude', 'settings.json');
+const LOCAL = path.join(PROJECT, '.claude', 'settings.local.json');
 
-function install() {
-  const r = spawnSync('bash', [path.join(REPO, 'install.sh'), PROJECT], {
-    encoding: 'utf8', cwd: TMP, input: 'y\n', timeout: 120000,
+function install(script = 'install.sh', args = [], input = 'y\n') {
+  const r = spawnSync('bash', [path.join(REPO, script), ...args, PROJECT], {
+    encoding: 'utf8', cwd: TMP, input, timeout: 120000,
     env: { ...process.env, HOME, USERPROFILE: HOME },
   });
-  assert.ok(!r.error, `install.sh failed to run: ${r.error && r.error.message}`);
+  assert.ok(!r.error, `${script} failed to run: ${r.error && r.error.message}`);
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
@@ -55,6 +58,31 @@ try {
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(r.stdout, /telemetry hook entries already present/);
   assert.strictEqual(fs.readFileSync(SETTINGS, 'utf8'), before, 'a re-run over null entries changes nothing');
+
+  // 3. With the second brain, over null entries in settings.local.json too, then uninstall: the
+  //    uninstall finishes, removes every hook we added, and keeps the nulls and the owner's hook.
+  const BRAIN_EVENTS = ['PreToolUse', 'PostToolUse', 'SessionStart', 'PreCompact', 'SessionEnd', 'Stop'];
+  const ownCmd = 'echo own-hook';
+  fs.writeFileSync(LOCAL, JSON.stringify({ hooks: {
+    ...Object.fromEntries(BRAIN_EVENTS.map(ev => [ev, [null]])),
+    Stop: [null, { hooks: [null, { type: 'command', command: ownCmd }] }],
+  } }, null, 2));
+  r = install('install.sh', ['--with-second-brain']);
+  assert.strictEqual(r.status, 0, `install --with-second-brain failed:\n${r.stdout.slice(-2000)}\n${r.stderr}`);
+  assert.ok(/hooks\/brain\//.test(fs.readFileSync(LOCAL, 'utf8')), 'brain hooks registered');
+  r = install('uninstall.sh', [], 'y\nn\n');
+  assert.strictEqual(r.status, 0, `uninstall.sh failed on null entries:\n${r.stdout.slice(-2000)}\n${r.stderr}`);
+  const after = JSON.parse(fs.readFileSync(SETTINGS, 'utf8')).hooks;
+  // The entries install added go; the PostToolUse entry that also holds a null hook is not ours
+  // alone, so uninstall keeps it whole, as it keeps any mixed entry.
+  assert.ok(!/scripts\/telemetry\//.test(JSON.stringify({ ...after, PostToolUse: [] })), 'added telemetry hooks removed');
+  assert.deepStrictEqual(after.PostToolUse, [null, { matcher: 'Skill|Task', hooks: [null, { type: 'command', command: invCmd }] }],
+    'the mixed PostToolUse entry is kept as found');
+  for (const ev of EVENTS) assert.strictEqual(after[ev][0], null, `settings.json ${ev}: the null entry is kept`);
+  const local = JSON.parse(fs.readFileSync(LOCAL, 'utf8')).hooks;
+  assert.ok(!/hooks\/brain\//.test(JSON.stringify(local)), 'brain hooks removed');
+  for (const ev of BRAIN_EVENTS) assert.strictEqual(local[ev][0], null, `settings.local.json ${ev}: the null entry is kept`);
+  assert.deepStrictEqual(local.Stop[1], { hooks: [null, { type: 'command', command: ownCmd }] }, "the owner's hook is kept");
 
   console.log('install-hooks-merge.test.js: all assertions passed');
 } finally {

@@ -132,10 +132,11 @@ function extractHooks(settingsRaw, into) {
     const settings = JSON.parse(settingsRaw);
     const hooksObj = settings.hooks || {};
     for (const [event, entries] of Object.entries(hooksObj)) {
-      for (const entry of (entries || [])) {
-        if (!entry) continue;   // a null entry: skip it, keep reading the file (review G11)
+      // A malformed list, entry or hook is skipped, so the rest of the file is still read (review G11, N4)
+      for (const entry of (Array.isArray(entries) ? entries : [])) {
+        if (!entry) continue;
         const matcher = entry.matcher || null;
-        for (const h of (entry.hooks || [])) {
+        for (const h of (Array.isArray(entry.hooks) ? entry.hooks : [])) {
           if (h && h.command) {
             // Commands are like: `"<node-bin>" "<script.js>"` or `bash "<script.sh>"`
             // Find the last token ending with a known script extension

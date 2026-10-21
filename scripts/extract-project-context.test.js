@@ -119,11 +119,14 @@ try {
   out = extract(many).file;
   assert.deepStrictEqual(out.artifact_paths, Array.from({ length: 10 }, (_, i) => `./p${i}`), 'first 10 paths');
 
-  // 7. A null entry, or a null hook inside an entry, is skipped; the other hooks in the same file
-  //    are still read (review G11: the TypeError was caught and the whole file's hooks dropped).
+  // 7. A null entry, a null hook inside an entry, an event value that is not a list and an entry
+  //    whose hooks are not a list are skipped; the other hooks in the same file are still read
+  //    (review G11 and N4: the TypeError was caught and the whole file's hooks dropped).
   const nul = path.join(TMP, 'null-hooks');
   write(path.join(nul, '.claude', 'settings.json'), JSON.stringify({ hooks: {
+    Notification: { matcher: 'x', hooks: [{ type: 'command', command: 'node /x/not-a-list.js' }] },
     PreToolUse: [null, { matcher: 'Bash', hooks: [null, { type: 'command', command: 'bash "$CLAUDE_PROJECT_DIR/hooks/guard.sh"' }] }],
+    PostToolUse: [{ hooks: { type: 'command', command: 'node /x/hooks-not-a-list.js' } }],
     Stop: [{ hooks: [{ type: 'command', command: 'node /x/after-null.js' }] }],
   } }));
   out = extract(nul).file;
