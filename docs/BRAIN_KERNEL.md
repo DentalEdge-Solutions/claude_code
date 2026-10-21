@@ -23,7 +23,7 @@ CommonJS, zero-dependency, deterministic, offline.
 | `brain-promote.js` | `<capsule-rel-file> --approve [--to active\|canon] [--force] [--target <dir>]` | the ONLY writer to `canon/` and `decisions/active/`; exit 2 without `--approve` |
 | `brain-search.js` | `--query "…" [--limit N] [--json] [--dir sub] [--target <dir>]` | authority × keyword × recency ranking; exports `search()` |
 | `brain-context-pack.js` | `--intent "…" [--per-bucket N] [--target <dir>]` | §7.3 context object; fail-open on missing profile |
-| `brain-self-install.sh` | `[target-dir]` | capsule + hook merge + `.gitignore` + verify; idempotent |
+| `brain-self-install.sh` | `[target-dir]` | capsule + hook merge + `.gitignore` + verify; idempotent. Stops, changing nothing in it, on a `.claude/settings.local.json` it cannot read (invalid JSON, not an object, `hooks` or one of its event lists of the wrong type); an empty file counts as `{}` |
 | `reference-lib.js` | (library) | registry load/save/render |
 | `brain-reference-repo-{add,audit,map,refresh}.js` | see `REFERENCE_REPOSITORY_LIBRARY.md` | registry management; audit exit 3 on executables/secrets |
 | `secondbrainbench-{generate,run,report}.js`, `bench-brain-kernel-adapter.js` | `run.js --adapter brain-kernel --mode smoke\|standard --workspace <dir>` | sealed-answer benchmark; exit 1 if any gate fails |

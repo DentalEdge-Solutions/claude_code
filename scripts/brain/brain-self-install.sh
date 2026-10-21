@@ -35,13 +35,26 @@ else
 fi
 
 # 2. Hook registration → .claude/settings.local.json (merge, never clobber —
-#    same ensureHookEntry pattern as install.sh's telemetry step)
+#    same ensureHookEntry pattern as install.sh's telemetry step). A file it cannot
+#    read stops the install here, unchanged (set -e).
 mkdir -p "${TARGET}/.claude"
 ADDED="$(node -e '
 const fs = require("fs");
 const file = process.argv[1] + "/.claude/settings.local.json";
+// Never write a file this cannot read: it would replace the owner settings with ours (review N2,
+// N3). Stop instead, so the guard hook is never silently missing. An empty file counts as {}.
+function refuse(why) {
+  process.stderr.write(`Error: ${file} was not changed: ${why}. Fix it, then re-run this installer.\n`);
+  process.exit(3);
+}
+const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const raw = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
 let settings = {};
-if (fs.existsSync(file)) { try { settings = JSON.parse(fs.readFileSync(file, "utf8")); } catch { settings = {}; } }
+if (raw.trim()) { try { settings = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.message})`); } }
+if (!plain(settings)) refuse("it is not a JSON object");
+if (settings.hooks != null && !plain(settings.hooks)) refuse("its \"hooks\" is not an object");
+for (const ev of ["PreCompact", "SessionEnd", "Stop", "PreToolUse", "PostToolUse", "SessionStart"])
+  if (settings.hooks && settings.hooks[ev] != null && !Array.isArray(settings.hooks[ev])) refuse(`its "hooks.${ev}" is not a list`);
 settings.hooks = settings.hooks || {};
 function ensureHookEntry(eventName, matcher, command, timeout) {
   settings.hooks[eventName] = settings.hooks[eventName] || [];
