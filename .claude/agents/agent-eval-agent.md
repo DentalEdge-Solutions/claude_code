@@ -70,8 +70,6 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
    - The baseline is the same prompt with no agent dispatched (general capabilities only): baseline_method = `none`,
      for a new agent and an existing one alike; a baseline of an earlier version is not run:
      a copy taken now would be identical to the agent being measured.
-   - Unchanged agent with current AGENT-EVAL.md: reuse prior baseline scores (no new
-     manifest needed).
 
 5. Create the iteration directory and initialize the run manifest — record the
    baseline method here **once**:

@@ -178,6 +178,12 @@ if (cmd === 'status') {
   const entries = Object.entries(manifest.scenario_status || {});
   console.log(`Run manifest: ${manifestPath(iterationDir)}`);
   console.log(`baseline_method=${manifest.baseline_method}  methodology_version=${manifest.methodology_version}  started_at=${manifest.started_at}`);
+  // stale: this iteration must not be resumed, only replaced by a new one (E10, E12 review R1).
+  let stale = false;
+  if (manifest.baseline_method === 'snapshot') {
+    stale = true;
+    console.log('WARNING: this manifest records baseline_method=snapshot, which no eval flow uses since E12 (its snapshot was identical to the subject) — start a new iteration rather than resuming.');
+  }
   if (manifest.subject) {
     console.log(`subject=${manifest.subject.path}  sha256=${manifest.subject.sha256.slice(0, 12)}  commit=${manifest.subject.commit || '-'}`);
     // Re-hash the subject (E10): a resume after an edit would measure a different text than init recorded.
@@ -186,8 +192,10 @@ if (cmd === 'status') {
     let now = null;
     try { now = crypto.createHash('sha256').update(fs.readFileSync(manifest.subject.path)).digest('hex'); } catch {}
     if (now === null) {
+      stale = true;
       console.log(`WARNING: the subject ${manifest.subject.path} is not found — this iteration's measured text cannot be checked; start a new iteration rather than resuming.`);
     } else if (now !== manifest.subject.sha256) {
+      stale = true;
       console.log(`WARNING: the subject changed since init (sha256 now ${now.slice(0, 12)}, recorded ${manifest.subject.sha256.slice(0, 12)}) — resumed scenarios would measure a different text; start a new iteration rather than resuming.`);
     } else {
       console.log('subject unchanged since init');
@@ -240,7 +248,9 @@ if (cmd === 'status') {
   console.log('');
   console.log(ok
     ? 'STATUS: OK — all scenarios graded, no missing artifacts.'
-    : 'STATUS: FAILED — see missing files / ungraded scenarios above. Resume by dispatching only the incomplete scenarios, using the recorded baseline_method.');
+    : stale
+      ? 'STATUS: FAILED — see missing files / ungraded scenarios above. Do not resume this iteration: start a new iteration (see the WARNING above).'
+      : 'STATUS: FAILED — see missing files / ungraded scenarios above. Resume by dispatching only the incomplete scenarios, using the recorded baseline_method.');
   process.exit(ok ? 0 : 1);
 }
 

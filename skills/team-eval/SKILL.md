@@ -43,7 +43,9 @@ All fields are required (members non-empty; every `members[].agent` must exist a
 
 1. **Load the manifest** — read team.json, the orchestrator definition, and every member
    definition in full. Aggregate context footprint = total lines across orchestrator + all member
-   definitions × 4 estimated tokens/line.
+   definitions × 4 estimated tokens/line. Before any run, record the sha256 of the orchestrator and
+   of every member definition (`shasum -a 256 <file>`) and the commit (`git rev-parse --short HEAD`):
+   team-eval writes no run manifest, so these are the revisions the report cites.
 
 2. **Generate scenarios**:
    `node skills/team-eval/scripts/generate-team-evals.js <team.json> --context evals/project-context.json`
@@ -90,9 +92,10 @@ All fields are required (members non-empty; every `members[].agent` must exist a
 
 7. **Write the report** to `evals/teams/<team_name>/TEAM-EVAL.md` (same table format family as
    SKILL-EVAL.md), with per-scenario results and analyst observations, and the same **Evidence and
-   Limits** section: the revisions, untested items with reasons, limitations. team-eval writes no
-   run manifest, so the revisions are the sha256 of the orchestrator and of every member definition
-   (`shasum -a 256 <file>`) and the commit (`git rev-parse --short HEAD`).
+   Limits** section: the revisions recorded in step 1, untested items with reasons, limitations.
+   Before writing, re-hash every definition; if any differs from step 1, the report says which, since
+   the runs may have measured either text. As in skill and agent reports, the commit is HEAD when the
+   run started, so it does not contain uncommitted edits.
    Its evidence line states that member dispatch is read from the `Agent(<member>)` token the run is
    instructed to write — a marker in the transcript, not an independent tool-call log.
 

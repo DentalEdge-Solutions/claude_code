@@ -23,25 +23,37 @@ function test(label, fn) {
 
 const read = f => fs.readFileSync(path.join(REPO, f), 'utf8');
 
+// run: the baseline instruction the flow gives at dispatch (step 6), which is what actually runs (review R2).
 const FLOWS = [
-  { file: 'skills/skill-eval/SKILL.md', none: 'no skill loaded' },
-  { file: '.claude/agents/skill-eval-agent.md', none: 'no skill loaded' },
-  { file: 'skills/agent-eval/SKILL.md', none: 'no agent dispatched' },
-  { file: '.claude/agents/agent-eval-agent.md', none: 'no agent dispatched' },
+  { file: 'skills/skill-eval/SKILL.md', none: 'no skill loaded',
+    run: '   - **Baseline**: no skill loaded, same prompt, save to' },
+  { file: '.claude/agents/skill-eval-agent.md', none: 'no skill loaded',
+    run: '   Baseline: "Do NOT load any skill. Execute this prompt with general capabilities' },
+  { file: 'skills/agent-eval/SKILL.md', none: 'no agent dispatched',
+    run: '   - **Baseline**: no agent dispatched (general capabilities only), same prompt, save to' },
+  { file: '.claude/agents/agent-eval-agent.md', none: 'no agent dispatched',
+    run: '   Baseline: "Do NOT dispatch the <agent-name> agent. Execute this prompt with general' },
 ];
 
 // Forms that offer, take or dispatch a snapshot baseline.
 const SNAPSHOT_FORMS = [/eval-snapshot/, /--snapshot-path/, /none\|snapshot/, /baseline_method\s*=\s*`snapshot`/,
   /dispatch the snapshot/i, /\(or snapshot\)/i, /baseline snapshot/i, /snapshot of (?:the )?previous version/i,
-  /Existing (?:skill|agent) being improved/i];
+  /Existing (?:skill|agent) being improved/i, /git show/, /HEAD~\d/, /previous version/i, /earlier version (?:is|as) the baseline/i,
+  /reuse prior baseline scores/i];   // the reuse bullet could carry snapshot-era scores in (review R4)
 
-for (const { file, none } of FLOWS) {
+for (const { file, none, run } of FLOWS) {
   const text = read(file);
   const joined = text.replace(/\\\r?\n\s*/g, ' ');   // fenced commands continue over backslash-newlines
   const flat = text.replace(/\s+/g, ' ');   // prose wrapped over lines reads as one sentence
 
   test(`${file}: no snapshot baseline is offered, taken or dispatched`, () => {
     for (const re of SNAPSHOT_FORMS) assert.ok(!re.test(text), `still matches ${re}`);
+  });
+
+  test(`${file}: the dispatched baseline is exactly the no-${none.split(' ')[1]} instruction (review R2)`, () => {
+    const lines = text.split('\n').filter(l => /^\s*(?:- \*\*Baseline\*\*:|Baseline: ")/.test(l));
+    assert.strictEqual(lines.length, 1, `expected one baseline instruction, got ${lines.length}`);
+    assert.ok(lines[0].startsWith(run), `baseline instruction changed: ${lines[0].trim()}`);
   });
 
   test(`${file}: every run-manifest init records --baseline-method none`, () => {
@@ -82,6 +94,12 @@ for (const [track, none] of [['skill', 'no skill loaded'], ['agent', 'no agent d
     });
   }
 }
+
+// Eval flows write under evals/ in target projects too; install.sh must keep it ignored there (moved here from
+// the retired eval-snapshot-paths.test.js, review R6).
+test('install.sh ignores evals/ in target projects', () => {
+  assert.match(read('install.sh'), /^\s*"evals\/"\s*$/m);
+});
 
 if (!ok) process.exit(1);
 console.log('\nAll eval-baseline tests passed.');

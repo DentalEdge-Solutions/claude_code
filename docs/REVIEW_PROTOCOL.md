@@ -32,7 +32,7 @@ review is the independent one. A self-reported "done" or "passing" is not eviden
 
 Evals follow the same contract: the `Evidence and Limits` section of SKILL-EVAL, AGENT-EVAL and
 TEAM-EVAL. SKILL-EVAL and AGENT-EVAL pin the measured definition with `run-manifest.js init --subject`;
-TEAM-EVAL lists the sha256 of the orchestrator and of every member (team-eval step 7).
+TEAM-EVAL lists the sha256 of the orchestrator and of every member, taken before the runs (team-eval steps 1 and 7).
 
 ## Not used here
 

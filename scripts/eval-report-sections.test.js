@@ -105,18 +105,25 @@ for (const { file, subject } of INIT_SUBJECT) {
 
 // E11: team-eval writes no run manifest, so its report pins every definition by sha256 itself, and the review
 // protocol says which report pins its revision how.
-test('team-eval step 7 pins the orchestrator and every member by sha256 and the commit (E11)', () => {
-  const text = fs.readFileSync(path.join(REPO, 'skills/team-eval/SKILL.md'), 'utf8');
-  assert.ok(text.includes('the sha256 of the orchestrator and of every member definition'), 'no per-definition sha256');
-  assert.ok(text.includes('`shasum -a 256 <file>`'), 'no command for the sha256');
-  assert.ok(text.includes('`git rev-parse --short HEAD`'), 'no commit');
+// Hashed before any run, like run-manifest.js init, and re-checked when the report is written (review R5).
+test('team-eval pins the orchestrator and every member by sha256 before the runs, and re-checks them (E11)', () => {
+  const text = fs.readFileSync(path.join(REPO, 'skills/team-eval/SKILL.md'), 'utf8').replace(/\s+/g, ' ');
+  const pin = text.indexOf('record the sha256 of the orchestrator and of every member definition');
+  const step3 = text.indexOf('3. **Execute scenarios**');
+  const step7 = text.indexOf('7. **Write the report**');
+  assert.ok(pin !== -1, 'no per-definition sha256');
+  assert.ok(step3 !== -1 && pin < step3, 'the sha256 must be recorded before step 3 runs the scenarios');
+  assert.ok(text.includes('`shasum -a 256 <file>`') && text.includes('`git rev-parse --short HEAD`'), 'no commands');
+  const report = text.slice(step7);
+  assert.ok(report.includes('re-hash every definition; if any differs from step 1, the report says which'), 'no re-check at step 7');
+  assert.ok(report.includes('the commit is HEAD when the run started, so it does not contain uncommitted edits'), 'no commit caveat');
 });
 
 test('REVIEW_PROTOCOL.md says how each eval report pins its revision (E11)', () => {
   const text = fs.readFileSync(path.join(REPO, 'docs/REVIEW_PROTOCOL.md'), 'utf8');
   assert.ok(!/TEAM-EVAL, with the revision pinned by `run-manifest\.js init --subject`/.test(text), 'still says team-eval uses run-manifest');
   assert.ok(text.includes('SKILL-EVAL and AGENT-EVAL pin the measured definition with `run-manifest.js init --subject`'), 'skill/agent rule');
-  assert.ok(text.includes('TEAM-EVAL lists the sha256 of the orchestrator and of every member (team-eval step 7)'), 'team rule');
+  assert.ok(text.includes('TEAM-EVAL lists the sha256 of the orchestrator and of every member, taken before the runs (team-eval steps 1 and 7)'), 'team rule');
 });
 
 if (!ok) process.exit(1);
