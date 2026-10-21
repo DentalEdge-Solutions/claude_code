@@ -119,5 +119,68 @@ test('R6: --subject pointing at a directory fails cleanly, without a stack trace
   assert.doesNotMatch(r.out, /EISDIR|at Object\./);
 });
 
+// E10 (PR #4 triage): the subject's sha256 is taken once, at init. A resumed run must see when the definition
+// changed since then, because the resumed scenarios would measure a different text. status re-hashes the
+// subject and warns; its exit code is unchanged (it stays the artifacts-and-grading gate).
+function gradedIteration() {
+  const root = tmp();
+  const subject = path.join(root, 'SKILL.md');
+  fs.writeFileSync(subject, 'v1');
+  const dir = path.join(root, 'iteration-1');
+  run('init', dir, '--baseline-method', 'none', '--subject', subject, '--commit', 'abcdef1');
+  for (const side of ['with_skill', 'without_skill']) {
+    const d = path.join(dir, 's1-x-r1', side);
+    fs.mkdirSync(d, { recursive: true });
+    for (const f of ['output.md', 'timing.json', 'evidence.json']) fs.writeFileSync(path.join(d, f), '{}');
+  }
+  run('mark', dir, 's1-x-r1', 'graded');
+  return { subject, dir };
+}
+
+test('E10: status says the subject is unchanged when it is', () => {
+  const { dir } = gradedIteration();
+  const r = run('status', dir);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.match(r.out, /subject unchanged since init/);
+  assert.doesNotMatch(r.out, /WARNING/);
+});
+
+test('E10: status warns when the subject changed since init, with the same exit code', () => {
+  const { subject, dir } = gradedIteration();
+  fs.writeFileSync(subject, 'v2');
+  const r = run('status', dir);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.match(r.out, /WARNING: the subject changed since init/);
+  const now = crypto.createHash('sha256').update('v2').digest('hex').slice(0, 12);
+  assert.ok(r.out.includes(now), `the current sha256 ${now} is not printed`);
+  assert.match(r.out, /start a new iteration/);
+  assert.doesNotMatch(r.out, /subject unchanged/);
+});
+
+test('E10: status warns when the subject is gone, with the same exit code', () => {
+  const { subject, dir } = gradedIteration();
+  fs.rmSync(subject);
+  const r = run('status', dir);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.match(r.out, /WARNING: the subject .*SKILL\.md is not found/);
+});
+
+test('E10: a changed subject does not turn a failing status into a passing one', () => {
+  const { subject, dir } = gradedIteration();
+  run('mark', dir, 's2-x-r1', 'pending');
+  fs.writeFileSync(subject, 'v2');
+  const r = run('status', dir);
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.out, /WARNING: the subject changed since init/);
+});
+
+test('E10: no subject, no check line', () => {
+  const root = tmp();
+  const dir = path.join(root, 'iteration-1');
+  run('init', dir, '--baseline-method', 'none');
+  const r = run('status', dir);
+  assert.doesNotMatch(r.out, /subject unchanged|WARNING: the subject/);
+});
+
 if (!ok) process.exit(1);
 console.log('\nrun-manifest.test.js: all tests passed');

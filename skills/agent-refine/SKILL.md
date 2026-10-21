@@ -55,7 +55,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
      ```
      A BLOCK verdict counts as a score of 0 for this iteration — revert immediately and log.
 
-7. **Re-eval (training set only)** — re-run the failing scenarios using agent-eval's exact methodology: parallel subagents (with-agent vs baseline snapshot), 3 reps each, programmatic dispatch detection first, then LLM judge scoring. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Dispatch × 0.4) + (Workflow × 0.3) + (Output × 0.3)`.
+7. **Re-eval (training set only)** — re-run the failing scenarios using agent-eval's exact methodology: parallel subagents (with-agent vs no-agent baseline), 3 reps each, programmatic dispatch detection first, then LLM judge scoring. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Dispatch × 0.4) + (Workflow × 0.3) + (Output × 0.3)`.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. No copy is needed: the agent is project-scoped, and Claude Code watches `.claude/agents/` and uses the edited file on the next delegation.

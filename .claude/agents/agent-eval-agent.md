@@ -53,6 +53,7 @@ If it reports incomplete or ungraded scenarios, resume that iteration instead of
 starting a new one: dispatch only the scenarios not yet `graded`, using the
 **recorded** `baseline_method` from that manifest — never re-decide the baseline
 method mid-iteration.
+If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming.
 
 1. Read `.claude/agents/<agent-name>.md` in full. Extract frontmatter: name, description,
    model, tools. Compute context footprint: total lines × 4 estimated tokens/line.
@@ -66,9 +67,9 @@ method mid-iteration.
    Without --context: 6 scenarios. Never skip --context when project-context.json exists.
 
 4. Establish baseline:
-   - New agent (no prior AGENT-EVAL.md): baseline_method = `none` (no agent dispatched, general capabilities only)
-   - Existing agent being improved: baseline_method = `snapshot`; step 5 copies the agent
-     file into the iteration folder (gitignored; `.claude/agents/` is not).
+   - The baseline is the same prompt with no agent dispatched (general capabilities only): baseline_method = `none`,
+     for a new agent and an existing one alike; a baseline of an earlier version is not run:
+     a copy taken now would be identical to the agent being measured.
    - Unchanged agent with current AGENT-EVAL.md: reuse prior baseline scores (no new
      manifest needed).
 
@@ -77,11 +78,9 @@ method mid-iteration.
    Count existing `evals/agents/<agent-name>/iteration-*` dirs. N = count + 1 (or the
    resumed N from the check above).
    `mkdir -p evals/agents/<agent-name>/iteration-<N>`
-   Snapshot only: `mkdir -p evals/agents/<agent-name>/iteration-<N>/eval-snapshot` and
-   `cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md`
-   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<agent-name>/iteration-<N> --baseline-method <none|snapshot> [--snapshot-path evals/agents/<agent-name>/iteration-<N>/eval-snapshot/<agent-name>.md] --subject .claude/agents/<agent-name>.md --commit <short SHA from git rev-parse --short HEAD>`
+   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<agent-name>/iteration-<N> --baseline-method none --subject .claude/agents/<agent-name>.md --commit <short SHA from git rev-parse --short HEAD>`
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
-   On resume, skip the snapshot copy and this call entirely — the manifest already exists and re-init is
+   On resume, skip this call entirely — the manifest already exists and re-init is
    refused by design. Every scenario in this iteration uses the recorded method.
 
 6. Dispatch ALL pairs simultaneously — spawn up to 42 subagents in ONE Agent call.
@@ -215,6 +214,7 @@ method mid-iteration.
 
     ## Evidence and Limits
     - **Subject revision:** definition sha256 <first 12> · commit <short SHA> — copied from `run-manifest.json` `subject`. The sha256 identifies the measured text; the commit is HEAD when the run started, so it does not contain an uncommitted definition (a refine loop measures edits before they are committed). Write "not recorded" for whichever of `subject` and its `commit` is null, keeping the other
+    - **Baseline:** the same prompt with no agent dispatched (`baseline_method: none`). The delta measures the agent against no agent, not against an earlier version of it: no earlier-version baseline is run
     - **Evidence source:** `evidence.json` per scenario (harvest-evidence.js); subagent self-reports are not grading input. `agent_dispatched` is the `Agent(<agent-name>)` token the with-agent subagent is instructed to write when it runs the agent — a marker in its own output, not an independent tool-call log, so dispatch accuracy assumes the subagent follows that rule
     - **Untested:** (every scenario type, rep or check not run, each with its reason — never omitted silently; "none" if complete)
     - **Limitations:** (anything that bounds these numbers — e.g. whether the subject's description was in the skill listing during the run, reduced reps, judge model)

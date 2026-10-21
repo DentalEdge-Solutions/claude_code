@@ -52,7 +52,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 6. **Mutate** — make exactly the targeted edit. No other changes.
 
-7. **Re-eval (training set only)** — re-run the failing scenarios using skill-eval's exact methodology: parallel subagents (with-skill vs baseline snapshot), 3 reps each, programmatic trigger detection first, then LLM judge scoring using the rubric in skill-eval's REFERENCE.md. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Trigger × 0.4) + (Checklist × 0.3) + (Output × 0.3)`.
+7. **Re-eval (training set only)** — re-run the failing scenarios using skill-eval's exact methodology: parallel subagents (with-skill vs no-skill baseline), 3 reps each, programmatic trigger detection first, then LLM judge scoring using the rubric in skill-eval's REFERENCE.md. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Trigger × 0.4) + (Checklist × 0.3) + (Output × 0.3)`.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. Sync to runtime: `cp -r skills/<skill-name> ~/.claude/skills/`

@@ -31,7 +31,8 @@ review is the independent one. A self-reported "done" or "passing" is not eviden
 | Anything not verified | Listed as **untested**, with the reason. Never omitted silently |
 
 Evals follow the same contract: the `Evidence and Limits` section of SKILL-EVAL, AGENT-EVAL and
-TEAM-EVAL, with the revision pinned by `run-manifest.js init --subject`.
+TEAM-EVAL. SKILL-EVAL and AGENT-EVAL pin the measured definition with `run-manifest.js init --subject`;
+TEAM-EVAL lists the sha256 of the orchestrator and of every member (team-eval step 7).
 
 ## Not used here
 

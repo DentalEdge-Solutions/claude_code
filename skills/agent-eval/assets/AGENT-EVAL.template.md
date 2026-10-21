@@ -6,7 +6,7 @@
 **Tools:** <declared tools list>  
 **Subject revision:** agent .md sha256 <first 12> · commit <short SHA> (from run-manifest.json; "not recorded" when missing, see Evidence and Limits)  
 **Scenarios run:** N (×3 reps for dispatch-type scenarios)  
-**Baseline:** no-agent | snapshot of previous version
+**Baseline:** no agent dispatched (`baseline_method: none`)
 
 ## Metrics
 
@@ -41,6 +41,7 @@
 ## Evidence and Limits
 
 - **Subject revision:** definition sha256 <first 12> · commit <short SHA> — copied from `run-manifest.json` `subject`. The sha256 identifies the measured text; the commit is HEAD when the run started, so it does not contain an uncommitted definition (a refine loop measures edits before they are committed). Write "not recorded" for whichever of `subject` and its `commit` is null, keeping the other
+- **Baseline:** the same prompt with no agent dispatched (`baseline_method: none`). The delta measures the agent against no agent, not against an earlier version of it: no earlier-version baseline is run
 - **Evidence source:** `evidence.json` per scenario (harvest-evidence.js); subagent self-reports are not grading input. `agent_dispatched` is the `Agent(<agent-name>)` token the with-agent subagent is instructed to write when it runs the agent — a marker in its own output, not an independent tool-call log, so dispatch accuracy assumes the subagent follows that rule
 - **Untested:** (every scenario type, rep or check not run, each with its reason — never omitted silently; "none" if complete)
 - **Limitations:** (anything that bounds these numbers — e.g. whether the subject's description was in the skill listing during the run, reduced reps, judge model)

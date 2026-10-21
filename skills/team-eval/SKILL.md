@@ -90,7 +90,9 @@ All fields are required (members non-empty; every `members[].agent` must exist a
 
 7. **Write the report** to `evals/teams/<team_name>/TEAM-EVAL.md` (same table format family as
    SKILL-EVAL.md), with per-scenario results and analyst observations, and the same **Evidence and
-   Limits** section (orchestrator and member revisions, untested items with reasons, limitations).
+   Limits** section: the revisions, untested items with reasons, limitations. team-eval writes no
+   run manifest, so the revisions are the sha256 of the orchestrator and of every member definition
+   (`shasum -a 256 <file>`) and the commit (`git rev-parse --short HEAD`).
    Its evidence line states that member dispatch is read from the `Agent(<member>)` token the run is
    instructed to write — a marker in the transcript, not an independent tool-call log.
 

@@ -50,19 +50,15 @@ User: evaluate the skill-adapt skill
    node skills/skill-eval/scripts/generate-seed-evals.js <path-to-UAT.md> --context evals/project-context.json
    ```
 
-4. **Establish baseline** — before running with-skill tests, determine what to compare against, and record it as the `baseline_method` for the whole iteration:
-   - **New skill**: `none` — run each scenario with no skill loaded
-   - **Existing skill being improved**: `snapshot` — step 5 copies the skill folder into the iteration (`evals/<skill-name>/iteration-<N>/eval-snapshot/`), then that copy is the baseline. It stays out of `skills/`, because install.sh syncs every folder there into `~/.claude/skills/`, so a snapshot there would become a second copy of the skill; the iteration folder is gitignored
+4. **Establish baseline** — the baseline is the same prompt with no skill loaded, recorded as `baseline_method` `none` for the whole iteration. This holds for a new skill and an existing one alike: a baseline of an earlier version is not run, because a copy taken now would be identical to the skill being measured.
 
-   **Resume check:** if `evals/<skill-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here.
+   **Resume check:** if `evals/<skill-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here. If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming.
 
 5. **Create the iteration dir and initialize the run manifest** (once per iteration — skip on resume):
    ```bash
    mkdir -p evals/<skill-name>/iteration-<N>
-   # snapshot only: the skill as it is now, before any change — this iteration's baseline
-   cp -R skills/<skill-name> evals/<skill-name>/iteration-<N>/eval-snapshot
    node skills/skill-eval/scripts/run-manifest.js init evals/<skill-name>/iteration-<N> \
-     --baseline-method <none|snapshot> [--snapshot-path evals/<skill-name>/iteration-<N>/eval-snapshot/SKILL.md] \
+     --baseline-method none \
      --subject skills/<skill-name>/SKILL.md --commit <short SHA from git rev-parse --short HEAD>
    ```
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
@@ -75,7 +71,7 @@ User: evaluate the skill-adapt skill
    `<eval-name>` forms.
    - Mark each scenario `dispatched`: `node skills/skill-eval/scripts/run-manifest.js mark evals/<skill-name>/iteration-<N> s<id>-<type>-r<rep> dispatched`
    - **With-skill**: load the skill, execute the prompt, save output to `evals/<skill-name>/iteration-<N>/s<id>-<type>-r<rep>/with_skill/`. Any file the prompt asks the subagent to produce must be written under that scenario's `with_skill/workspace/` subdirectory — never to the repo root or a real skill directory.
-   - **Baseline**: no skill (or snapshot), same prompt, save to `evals/<skill-name>/iteration-<N>/s<id>-<type>-r<rep>/without_skill/` — with its own `without_skill/workspace/` sandbox.
+   - **Baseline**: no skill loaded, same prompt, save to `evals/<skill-name>/iteration-<N>/s<id>-<type>-r<rep>/without_skill/` — with its own `without_skill/workspace/` sandbox.
    - Mark each completed pair `complete`: `node skills/skill-eval/scripts/run-manifest.js mark evals/<skill-name>/iteration-<N> s<id>-<type>-r<rep> complete`
 
    Run each scenario 3 times to measure trigger consistency. Record `total_tokens` and `duration_ms` from each task notification as it arrives — save to `timing.json` in the run directory. A self-reported status header (`did_trigger`, `workflow_steps_executed`) in a transcript is narrative color only — it is never read for scoring.
