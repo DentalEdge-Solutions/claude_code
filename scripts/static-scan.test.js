@@ -80,6 +80,7 @@ const CASES = [
   { ctx: 'md', check: 'hardcoded-api-key',      sev: 'FLAG',  text: 'api' + '_key: "' + rep('k', 20) + '"' },
   { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'pass' + 'word = "' + rep('h', 10) + '"' },
   { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'basic' + '_auth: "admin:' + rep('h', 10) + '"', tag: 'basic-auth' },
+  { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'NPM_CONFIG' + '__AUTH: "' + rep('Z', 16) + '"', tag: 'npm-auth' },
   { ctx: 'md', check: 'hardcoded-bearer-token', sev: 'BLOCK', text: 'Authorization: Bear' + 'er ' + rep('z', 24) },
   { ctx: 'md', check: 'private-key-block',      sev: 'BLOCK', text: '-----BEGIN ' + 'RSA PRIVATE KEY-----' },
   { ctx: 'md', check: 'anthropic-api-key',      sev: 'BLOCK', text: ANT_KEY },
@@ -89,10 +90,12 @@ const CASES = [
   { ctx: 'js', check: 'hardcoded-api-key',      sev: 'FLAG',  text: 'const api' + '_key = "' + rep('k', 20) + '";' },
   { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const pass' + 'word = "' + rep('h', 10) + '";' },
   { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const basic' + 'Auth = "admin:' + rep('h', 10) + '";', tag: 'basic-auth' },
+  { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const npm_config' + '__auth = "' + rep('Z', 16) + '";', tag: 'npm-auth' },
   // data: unquoted values, read in data and config files only (S13)
   { ctx: 'data', check: 'hardcoded-api-key',    sev: 'FLAG',  text: 'API' + '_KEY=' + rep('k', 20) },
   { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'PASS' + 'WORD=' + rep('h', 10) },
   { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'BASIC' + '_AUTH=admin:' + rep('h', 10), tag: 'basic-auth' },
+  { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'NPM_CONFIG' + '__AUTH=' + rep('Z', 16), tag: 'npm-auth' },
   { ctx: 'md', check: 'github-pat-classic',     sev: 'BLOCK', text: 'gh' + 'p_' + rep('r', 36) },
   { ctx: 'md', check: 'github-pat-fine',        sev: 'BLOCK', text: 'github' + '_pat_' + rep('Z', 82) },
   { ctx: 'md', check: 'github-oauth-token',     sev: 'BLOCK', text: 'gh' + 'o_' + rep('r', 36) },
@@ -1688,6 +1691,7 @@ for (const [label, file, text] of [
   ['a @BbA@ enum member named for the scheme (review V4)', 'c.js', "const @BbA@ = '@BbA@';\n"],
   ['a constant whose value is the scheme name (review V4)', 'c.py', "AUTH_TYPE_@BA@ = '@ba@'\n"],
   ['a JSON @bA@ set to the scheme name (review V4)', 'c.json', '{"@bA@": "@ba@"}\n'],
+  ['an unquoted @bA@ set to the scheme name (review V10)', 'c.yml', '@bA@: @ba@\n'],
   ['@BA@_USER, a user name', '.env', '@BA@_USER=administrator\n'],
   ['a @BA@ placeholder', '.env', '@BA@=${BASIC_AUTH}\n'],
   ['@ba@_check, another name', 'c.yml', '@ba@_check: whenever_ok\n'],
@@ -1698,6 +1702,20 @@ for (const [label, file, text] of [
     const json = scanOne(file, ex(text));
     assert.deepStrictEqual(json.findings.filter(f => /hardcoded/.test(f.check)).map(f => f.check), [],
       `got ${json.findings.map(f => f.check).join(', ')}`);
+  });
+}
+
+// An npm _auth line before a password line hides neither: each has a pattern of its own, so main's generic pattern
+// still reports the password line (review V9: added to main's pattern, the npm placeholder line was shown instead).
+for (const [label, file, text] of [
+  ['quoted, in a CI file', 'ci.yml', `@NC@: "\${{ secrets.NPM_AUTH }}"\n${PW}: "Fak3Passw0rd99"\n`],
+  ['quoted, in Markdown', 'README.md', `Set @NC@: "\${{ secrets.NPM_AUTH }}" and ${PW}: "Fak3Passw0rd99".\n`],
+  ['unquoted, in .env', '.env', `@NC@=ZmFrZTpmYWtlZmFrZQ==\n${PW.toUpperCase()}=Fak3Passw0rd99\n`],
+  ['in code', 'c.js', `const @nc@ = "ZmFrZTpmYWtlZmFrZQ==";\nconst ${PW} = "Fak3Passw0rd99";\n`],
+]) {
+  test(`S13 follow-up: an npm _auth line does not hide a ${PW} line, ${label} (review V9)`, () => {
+    const details = scanOne(file, ex(text)).findings.filter(f => f.check === 'hardcoded-secret').map(f => f.detail);
+    assert.ok(details.some(d => d.includes('Fak3Passw0rd99')), `the ${PW} line is not shown: ${details.join(' | ')}`);
   });
 }
 

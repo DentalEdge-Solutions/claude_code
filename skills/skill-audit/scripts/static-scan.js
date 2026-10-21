@@ -144,9 +144,11 @@ const MD_SECRETS = [
   // Generic patterns. The name may be quoted, as a JSON key is: "password": "…" (S13), and may carry a
   // key suffix: SECRET_KEY, AWS_SECRET_ACCESS_KEY, secretKey, private_key (review Q1).
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}/i,  name: 'hardcoded-api-key',     sev: 'FLAG'  },
-  // npm's environment form of _auth too: NPM_CONFIG__AUTH sets _auth (npm 12.1.0, measured 2026-10-21).
-  { re: /(?:password|passwd|secret|token|npm_config__auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"]{8,}/i,
+  { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"]{8,}/i,
                                                                       name: 'hardcoded-secret',       sev: 'FLAG'  },
+  // npm's environment form of _auth: NPM_CONFIG__AUTH sets _auth (npm 12.1.0, measured 2026-10-21). A pattern
+  // of its own, so main's generic pattern still reports the line it reported before (review V9).
+  { re: /npm_config__auth['"]?\s*[:=]\s*['"][^'"]{8,}/i,                 name: 'hardcoded-secret',       sev: 'FLAG'  },
   // A basic-auth credential (user:pass, or its base64): basic_auth, basic-auth, basicAuth. The words a
   // config uses for a switch (disabled, required, optional) are not one, nor is the scheme's own name
   // (an enum member BasicAuth = 'BasicAuth', review V4). Each pattern that matches reports, as for the
@@ -189,10 +191,11 @@ const DATA_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?[ \t]*[:=][ \t]*[A-Za-z0-9_\-]{16,}/i,                name: 'hardcoded-api-key', sev: 'FLAG' },   // its value class already excludes $ < { %
   // SECRET_KEY, AWS_SECRET_ACCESS_KEY, secretKey, PRIVATE_KEY and an .npmrc _auth too (review P4). A
   // value starting with "-" is the default of a ${VAR:-default}, not the secret (review P5).
-  // _auth only at the start of a name, as .npmrc writes it, not inside enable_auth (review Q2), or after
-  // npm_config_, its environment form (NPM_CONFIG__AUTH).
-  { re: /(?:password|passwd|secret|token|(?:npm_config_|(?<![A-Za-z0-9_]))_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
+  // _auth only at the start of a name, as .npmrc writes it, not inside enable_auth (review Q2).
+  { re: /(?:password|passwd|secret|token|(?<![A-Za-z0-9_])_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
                                                                                             name: 'hardcoded-secret',  sev: 'FLAG' },
+  // npm's environment form of _auth (NPM_CONFIG__AUTH), a pattern of its own (review V9).
+  { re: /npm_config__auth['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,                  name: 'hardcoded-secret',  sev: 'FLAG' },
   { re: /basic[_-]?auth['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])(?!(?:disabled|required|optional|basic[_-]?auth)(?![^\s'"#;,]))[^\s'"#;,]{8,}/i,
                                                                                             name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
@@ -209,8 +212,9 @@ const PROPERTIES_SECRET = /^[ \t]*(?:[\w-]+\.)*(?:password|passwd)[ \t]+(?![$<{%
 // ("access_token=" + tok) is not a secret. Main never read scripts for secrets, so nothing is lost.
 const SCRIPT_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]/i, name: 'hardcoded-api-key', sev: 'FLAG' },
-  { re: /(?:password|passwd|secret|token|npm_config__auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,
+  { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,
                                                                                  name: 'hardcoded-secret',  sev: 'FLAG' },
+  { re: /npm_config__auth['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,             name: 'hardcoded-secret',  sev: 'FLAG' },
   { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional|basic[_-]?auth)['"])[^'"\s]{8,}['"]/i,
                                                                                  name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
