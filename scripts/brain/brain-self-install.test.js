@@ -105,6 +105,30 @@ try {
   pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
   assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [30, 30, 30, 0], 'every untimed guard copy gained 30; owner 0 kept');
 
+  // 7. A null entry, or a null hook inside an entry, in any list the installer writes to is kept
+  //    as found and does not stop the install (review G11: it exited 1 with "Cannot read
+  //    properties of null (reading 'matcher')" and wrote nothing).
+  const EVENTS = ['PreToolUse', 'PostToolUse', 'SessionStart', 'PreCompact', 'SessionEnd', 'Stop'];
+  fs.writeFileSync(settingsFile, JSON.stringify({ hooks: {
+    ...Object.fromEntries(EVENTS.map(ev => [ev, [null]])),
+    PreToolUse: [null, { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [null, { type: 'command', command: guardCmd }] }],
+  } }, null, 2));
+  r = run();
+  assert.strictEqual(r.status, 0, `install failed on null entries:\n${r.stdout}\n${r.stderr}`);
+  // 5 other hooks added + the guard's timeout added = 6; the existing guard is found past the nulls
+  assert.match(r.stdout, /hook entries merged \(6 added or updated\)/);
+  let hooks = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks;
+  for (const ev of EVENTS) assert.strictEqual(hooks[ev][0], null, `${ev}: the null entry is kept`);
+  assert.strictEqual(hooks.PreToolUse[1].hooks[0], null, 'the null hook inside an entry is kept');
+  const real = list => list.filter(Boolean).map(e => ({ ...e, hooks: (e.hooks || []).filter(Boolean) }));
+  assert.deepStrictEqual(guardHooks(real(hooks.PreToolUse)).map(h => h.timeout), [30], 'one guard, timeout 30');
+  for (const h of ['brain-pre-compact.sh', 'brain-session-end.sh', 'brain-post-lint.sh', 'brain-load.sh'])
+    assert.ok(JSON.stringify(hooks).includes(h), `${h} registered next to a null entry`);
+  const before = fs.readFileSync(settingsFile, 'utf8');
+  r = run();
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(fs.readFileSync(settingsFile, 'utf8'), before, 'a re-run over null entries changes nothing');
+
   console.log('brain-self-install.test.js: all assertions passed');
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });

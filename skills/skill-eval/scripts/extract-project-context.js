@@ -133,9 +133,10 @@ function extractHooks(settingsRaw, into) {
     const hooksObj = settings.hooks || {};
     for (const [event, entries] of Object.entries(hooksObj)) {
       for (const entry of (entries || [])) {
+        if (!entry) continue;   // a null entry: skip it, keep reading the file (review G11)
         const matcher = entry.matcher || null;
         for (const h of (entry.hooks || [])) {
-          if (h.command) {
+          if (h && h.command) {
             // Commands are like: `"<node-bin>" "<script.js>"` or `bash "<script.sh>"`
             // Find the last token ending with a known script extension
             const scriptRe = /["']?([^\s"']+\.(?:js|mjs|cjs|ts|sh|py|rb))["']?/gi;

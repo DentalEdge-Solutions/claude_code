@@ -46,7 +46,7 @@ settings.hooks = settings.hooks || {};
 function ensureHookEntry(eventName, matcher, command, timeout) {
   settings.hooks[eventName] = settings.hooks[eventName] || [];
   const list = settings.hooks[eventName];
-  const already = list.some((entry) =>
+  const already = list.some((entry) => entry &&
     (entry.matcher || null) === (matcher || null) &&
     Array.isArray(entry.hooks) && entry.hooks.some((h) => h && h.command === command));
   if (already) return false;
