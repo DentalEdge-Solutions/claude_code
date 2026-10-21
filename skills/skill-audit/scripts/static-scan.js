@@ -144,7 +144,12 @@ const MD_SECRETS = [
   // Generic patterns. The name may be quoted, as a JSON key is: "password": "…" (S13), and may carry a
   // key suffix: SECRET_KEY, AWS_SECRET_ACCESS_KEY, secretKey, private_key (review Q1).
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}/i,  name: 'hardcoded-api-key',     sev: 'FLAG'  },
-  { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"]{8,}/i,
+  // npm's environment form of _auth too: NPM_CONFIG__AUTH sets _auth (npm 12.1.0, measured 2026-10-21).
+  { re: /(?:password|passwd|secret|token|npm_config__auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"]{8,}/i,
+                                                                      name: 'hardcoded-secret',       sev: 'FLAG'  },
+  // A basic-auth credential (user:pass, or its base64): basic_auth, basic-auth, basicAuth. The words a
+  // config uses for a switch (disabled, required, optional) are not one.
+  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional)(?:['"\s]|$))[^'"]{8,}/i,
                                                                       name: 'hardcoded-secret',       sev: 'FLAG'  },
   { re: /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/,                          name: 'hardcoded-bearer-token', sev: 'BLOCK' },
   { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,          name: 'private-key-block',      sev: 'BLOCK' },
@@ -182,8 +187,11 @@ const DATA_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?[ \t]*[:=][ \t]*[A-Za-z0-9_\-]{16,}/i,                name: 'hardcoded-api-key', sev: 'FLAG' },   // its value class already excludes $ < { %
   // SECRET_KEY, AWS_SECRET_ACCESS_KEY, secretKey, PRIVATE_KEY and an .npmrc _auth too (review P4). A
   // value starting with "-" is the default of a ${VAR:-default}, not the secret (review P5).
-  // _auth only at the start of a name, as .npmrc writes it, not inside enable_auth (review Q2).
-  { re: /(?:password|passwd|secret|token|(?<![A-Za-z0-9_])_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
+  // _auth only at the start of a name, as .npmrc writes it, not inside enable_auth (review Q2), or after
+  // npm_config_, its environment form (NPM_CONFIG__AUTH).
+  { re: /(?:password|passwd|secret|token|(?:npm_config_|(?<![A-Za-z0-9_]))_auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])[^\s'"#;,]{8,}/i,
+                                                                                            name: 'hardcoded-secret',  sev: 'FLAG' },
+  { re: /basic[_-]?auth['"]?[ \t]*[:=][ \t]*(?![$<{%'"-])(?!(?:disabled|required|optional)(?![^\s'"#;,]))[^\s'"#;,]{8,}/i,
                                                                                             name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
 
@@ -199,7 +207,9 @@ const PROPERTIES_SECRET = /^[ \t]*(?:[\w-]+\.)*(?:password|passwd)[ \t]+(?![$<{%
 // ("access_token=" + tok) is not a secret. Main never read scripts for secrets, so nothing is lost.
 const SCRIPT_SECRETS = [
   { re: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]/i, name: 'hardcoded-api-key', sev: 'FLAG' },
-  { re: /(?:password|passwd|secret|token|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,
+  { re: /(?:password|passwd|secret|token|npm_config__auth|private[_-]?key)(?:[_-]?(?:access[_-]?)?key)?['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]/i,
+                                                                                 name: 'hardcoded-secret',  sev: 'FLAG' },
+  { re: /basic[_-]?auth['"]?\s*[:=]\s*['"](?!(?:disabled|required|optional)['"])[^'"\s]{8,}['"]/i,
                                                                                  name: 'hardcoded-secret',  sev: 'FLAG' },
 ];
 const GENERIC_SECRET_CHECKS = new Set(SCRIPT_SECRETS.map(p => p.name));
@@ -376,7 +386,10 @@ function scanMarkdown(filePath, content) {
     const c = content.match(re);
     if (c) flag(filePath, name, 'FLAG', quote(c, '(in code) '));
   }
+  // Two patterns of one check (hardcoded-secret's basic-auth form) report it once, as in scanSecrets.
+  const rel = path.relative(findingRoot, filePath) || '.';
   for (const { re, name, sev } of MD_SECRETS) {
+    if ((checksByFile.get(rel) || new Set()).has(name)) continue;
     const m = content.match(re);
     if (m) flag(filePath, name, sev, quote(m));
   }
@@ -501,10 +514,11 @@ function scanConfig(filePath, content) {
 const CODE_SECRETS = [...SCRIPT_SECRETS, ...MD_SECRETS.filter(p => !GENERIC_SECRET_CHECKS.has(p.name))];
 function scanSecrets(filePath, content, kind = 'config') {
   const rel = path.relative(findingRoot, filePath) || '.';
-  const seen = checksByFile.get(rel) || new Set();
+  // Read at each pattern: two patterns of one check (hardcoded-secret's basic-auth form) report it once.
+  const seen = name => (checksByFile.get(rel) || new Set()).has(name);
   const table = kind === 'data' ? [...MD_SECRETS, ...DATA_SECRETS] : kind === 'code' ? CODE_SECRETS : MD_SECRETS;
   for (const { re, name, sev } of table) {
-    if (seen.has(name)) continue;
+    if (seen(name)) continue;
     const m = content.match(re);
     if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
   }

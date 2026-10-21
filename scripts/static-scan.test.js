@@ -79,6 +79,7 @@ const CASES = [
   // md: hardcoded secrets
   { ctx: 'md', check: 'hardcoded-api-key',      sev: 'FLAG',  text: 'api' + '_key: "' + rep('k', 20) + '"' },
   { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'pass' + 'word = "' + rep('h', 10) + '"' },
+  { ctx: 'md', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'basic' + '_auth: "admin:' + rep('h', 10) + '"', tag: 'basic-auth' },
   { ctx: 'md', check: 'hardcoded-bearer-token', sev: 'BLOCK', text: 'Authorization: Bear' + 'er ' + rep('z', 24) },
   { ctx: 'md', check: 'private-key-block',      sev: 'BLOCK', text: '-----BEGIN ' + 'RSA PRIVATE KEY-----' },
   { ctx: 'md', check: 'anthropic-api-key',      sev: 'BLOCK', text: ANT_KEY },
@@ -87,9 +88,11 @@ const CASES = [
   // js: the generic forms in code, one closed string without spaces (review P3)
   { ctx: 'js', check: 'hardcoded-api-key',      sev: 'FLAG',  text: 'const api' + '_key = "' + rep('k', 20) + '";' },
   { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const pass' + 'word = "' + rep('h', 10) + '";' },
+  { ctx: 'js', check: 'hardcoded-secret',       sev: 'FLAG',  text: 'const basic' + 'Auth = "admin:' + rep('h', 10) + '";', tag: 'basic-auth' },
   // data: unquoted values, read in data and config files only (S13)
   { ctx: 'data', check: 'hardcoded-api-key',    sev: 'FLAG',  text: 'API' + '_KEY=' + rep('k', 20) },
   { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'PASS' + 'WORD=' + rep('h', 10) },
+  { ctx: 'data', check: 'hardcoded-secret',     sev: 'FLAG',  text: 'BASIC' + '_AUTH=admin:' + rep('h', 10), tag: 'basic-auth' },
   { ctx: 'md', check: 'github-pat-classic',     sev: 'BLOCK', text: 'gh' + 'p_' + rep('r', 36) },
   { ctx: 'md', check: 'github-pat-fine',        sev: 'BLOCK', text: 'github' + '_pat_' + rep('Z', 82) },
   { ctx: 'md', check: 'github-oauth-token',     sev: 'BLOCK', text: 'gh' + 'o_' + rep('r', 36) },
@@ -144,13 +147,15 @@ const CASES = [
   { ctx: 'sh', check: 'pip-break-system', sev: 'FLAG',  text: 'pip install x --break-system-packages' },
 ];
 
+// A tag keeps two cases of one check (two patterns that report it) in files of their own.
+const tagged = c => c.check + (c.tag ? `-${c.tag}` : '');
 const CASE_FILE = {
-  md: c => `md-${c.check}.md`,
-  config: c => `config-${c.check}/settings.json`,
-  js: c => `js-${c.check}.js`,
-  py: c => `py-${c.check}.py`,
-  sh: c => `sh-${c.check}.sh`,
-  data: c => `data-${c.check}.env`,
+  md: c => `md-${tagged(c)}.md`,
+  config: c => `config-${tagged(c)}/settings.json`,
+  js: c => `js-${tagged(c)}.js`,
+  py: c => `py-${tagged(c)}.py`,
+  sh: c => `sh-${tagged(c)}.sh`,
+  data: c => `data-${tagged(c)}.env`,
 };
 
 // Reads the pattern tables out of the scanner source, so a pattern added without a case
@@ -1628,6 +1633,61 @@ for (const [label, file, text] of [
 
 test('Q2: an .npmrc _auth at the line start or after a host is still a FLAG', () => {
   assert.deepStrictEqual(sevs(scanOne('.npmrc', '_auth=dXNlcjpwYXNzd29yZA==\n'), 'hardcoded-secret'), ['FLAG']);
+});
+
+// ── S13 follow-up: basic-auth names and npm's environment form of _auth (2026-10-21) ──
+// Q2 limited _auth to the start of a name, so BASIC_AUTH=user:pass stopped FLAGging, and npm's environment form
+// NPM_CONFIG__AUTH (npm 12.1.0, measured: it sets _auth, listed as "_auth = (protected)") never matched.
+const NPMAUTH = 'ZmFrZTpmYWtl' + 'ZmFrZQ==';   // base64 of a fake user:pass
+for (const [label, file, text] of [
+  ['BASIC_AUTH in .env', '.env', 'BASIC_AUTH=admin:hunter2pass\n'],
+  ['BASIC_AUTH in a compose list', 'docker-compose.yml', 'environment:\n  - BASIC_AUTH=admin:hunter2pass\n'],
+  ['basicAuth in YAML', 'c.yml', 'basicAuth: YWRtaW46aHVudGVyMg==\n'],
+  ['basic-auth in YAML', 'c.yml', 'basic-auth: admin:hunter2pass\n'],
+  ['a JSON basic_auth', 'c.json', '{"basic_auth": "admin:hunter2pass"}\n'],
+  ['a quoted basic_auth in Markdown', 'notes.md', 'Set basic_auth: "admin:hunter2pass" in the gateway.\n'],
+  ['a basic_auth in a script', 'deploy.sh', 'BASIC_AUTH="admin:hunter2pass"\n'],
+  ['NPM_CONFIG__AUTH in .env', '.env', `NPM_CONFIG__AUTH=${NPMAUTH}\n`],
+  ['npm_config__auth in .env', '.env', `npm_config__auth=${NPMAUTH}\n`],
+  ['NPM_CONFIG__AUTH in settings.json env', 'settings.json', `{"env": {"NPM_CONFIG__AUTH": "${NPMAUTH}"}}\n`],
+  ['NPM_CONFIG__AUTH in a YAML CI file', 'ci.yml', `env:\n  NPM_CONFIG__AUTH: ${NPMAUTH}\n`],
+  ['npm_config__auth in a script', 'publish.py', `npm_config__auth = "${NPMAUTH}"\n`],
+]) {
+  test(`S13 follow-up: ${label} → hardcoded-secret FLAG`, () => {
+    const json = scanOne(file, text);
+    assert.deepStrictEqual(sevs(json, 'hardcoded-secret'), ['FLAG'], `got ${json.findings.map(f => f.check).join(', ') || 'none'}`);
+  });
+}
+
+for (const [label, file, text] of [
+  ['basic_auth: disabled', 'c.yml', 'basic_auth: disabled\n'],
+  ['basic_auth: required', 'c.yml', 'basic_auth: required\n'],
+  ['basic_auth: optional', 'c.yml', 'basic_auth: optional\n'],
+  ['a quoted "optional" basic_auth', 'c.json', '{"basic_auth": "optional"}\n'],
+  ['basic_auth: true', 'c.yml', 'basic_auth: true\n'],
+  ['basic_auth: required, then a comment', 'c.yml', 'basic_auth: required  # set by the gateway\n'],
+  ['a quoted basic_auth word whose quote does not close', 'c.yml', "basicAuth: 'disabled\nnext: value_here\n"],
+  ['a quoted basic_auth word in Markdown', 'notes.md', 'Set basic_auth: "optional" to allow both.\n'],
+  ['a basic_auth switch in code', 'c.js', 'const basicAuth = "disabled";\n'],
+  ['BASIC_AUTH_USER, a user name', '.env', 'BASIC_AUTH_USER=administrator\n'],
+  ['a BASIC_AUTH placeholder', '.env', 'BASIC_AUTH=${BASIC_AUTH}\n'],
+  ['basic_auth_check, another name', 'c.yml', 'basic_auth_check: whenever_ok\n'],
+  ['NPM_CONFIG__AUTHOR, another name', '.env', 'NPM_CONFIG__AUTHOR=someone_long\n'],
+  ['an NPM_CONFIG__AUTH placeholder', '.env', 'NPM_CONFIG__AUTH=${NPM_AUTH}\n'],
+]) {
+  test(`S13 follow-up: ${label} is not a secret`, () => {
+    const json = scanOne(file, text);
+    assert.deepStrictEqual(json.findings.filter(f => /hardcoded/.test(f.check)).map(f => f.check), [],
+      `got ${json.findings.map(f => f.check).join(', ')}`);
+  });
+}
+
+// A check is reported once per file, also when two of its patterns match (the "already reported" set was read
+// once, before any finding, so it missed findings made in the same pass).
+test('S13 follow-up: a password line and a basic_auth line give one hardcoded-secret', () => {
+  assert.deepStrictEqual(sevs(scanOne('.env', `${PW.toUpperCase()}=hunter2hunter2\nBASIC_AUTH=admin:hunter2pass\n`), 'hardcoded-secret'), ['FLAG']);
+  // Markdown reads MD_SECRETS in a loop of its own (found in the real-input check: an ngrok README)
+  assert.deepStrictEqual(sevs(scanOne('notes.md', `${PW} = "hunter2hunter2"\nbasic_auth: "admin:hunter2pass"\n`), 'hardcoded-secret'), ['FLAG']);
 });
 
 if (!ok) process.exit(1);
