@@ -433,7 +433,7 @@ rendering changes are recommended but not implemented in code (`SKILL.md:300-301
 
 | Component | Path | Kind | Dependencies | License | Security notes | Reuse class | Limits and compatibility constraints |
 |---|---|---|---|---|---|---|---|
-| Greptile review freshness helper | `greploop/scripts/github_review.py` | script | Python 3.10+, `gh` with `--slurp`, Greptile app | MIT (folder `greploop/LICENSE`, © Greptile AI) | Posts one PR comment on `start`; trusts fixed bot logins (`:14`) | needs adaptation | GitHub only; score regex and "Last reviewed commit" marker are Greptile-format specific (`:36`, `:41`); 30 s `gh` timeout per call (`:125`) |
+| Greptile review freshness helper | `greploop/scripts/github_review.py` | script | Python 3.10+, `gh` with `--slurp`, Greptile app | MIT (folder `greploop/LICENSE`, © Greptile AI); its regression tests (`tests/test_github_review.py`) have no license, so reuse with tests means reimplementing them | Posts one PR comment on `start`; trusts fixed bot logins (`:14`) | needs adaptation | GitHub only; score regex and "Last reviewed commit" marker are Greptile-format specific (`:36`, `:41`); 30 s `gh` timeout per call (`:125`) |
 | Trigger/snapshot/head-recheck freshness pattern | `github_review.py:45-212` | pattern | any bot reviewer with timestamps and commit ids | MIT | — | reimplement the idea | Needs the reviewer to expose revision metadata; otherwise the pattern says report "freshness could not be verified" (`references/github.md:53-54`) |
 | Bounded review-fix loop | `greploop/SKILL.md:40-72` | skill (workflow) | Greptile, `gh`/`glab`/`p4` | MIT | Agent-enforced cap only | needs adaptation | GitLab/Perforce paths are prose without tooling |
 | Evidence recorder CLI | `evidence-driven-testing/scripts/evidence.py` | script | Python 3.10+, ffmpeg/ffprobe with libx264 + ass; wf-recorder for Wayland | **none** (issues #11, #12 open) | Spawns detached processes; records full screen | reference only (no license grant) / reimplement the idea | Needs a GUI capture source; GNOME/KDE Wayland unsupported (`:155-182`); annotation timing offset (PR #17) |
@@ -443,7 +443,7 @@ rendering changes are recommended but not implemented in code (`SKILL.md:300-301
 | Multi-agent repo rules | `AGENTS.md:54-91` | pattern | — | none | — | reimplement the idea | Prose; no enforcement |
 | Service-layer guidance | `code-structure/SKILL.md` | skill | — | none | — | reference only | Generic architecture advice |
 | `unslop` prose editor | `unslop/SKILL.md` | skill | — | MIT (© Lauren Tan) | Auto-invocation on all human-facing text | directly reusable | Body has drifted from current upstream (see section 16) |
-| Before/after capture + upload | `before-and-after/` | skill + scripts | `@vercel/before-and-after`, `agent-browser`, curl, 0x0.st | file titled "PolyForm Shield 1.0.0" with non-canonical MIT-style text plus noncompete (`LICENSE:1-27`) | Public upload by default; broad `allowed-tools` | reference only (license ambiguity) | Depends on an external unpinned CLI |
+| Before/after capture + upload | `before-and-after/` | skill + scripts | `@vercel/before-and-after`, `agent-browser`, curl, 0x0.st | file titled "PolyForm Shield 1.0.0" with non-canonical MIT-style text plus noncompete, © James Clements (`LICENSE:1-27`, licensor at `:3`) | Public upload by default; broad `allowed-tools` | reference only (license ambiguity) | Depends on an external unpinned CLI |
 | `greploop-apps` alias pattern | `greploop-apps/SKILL.md` | skill | `greploop` | MIT | — | directly reusable | Must be installed beside `greploop` |
 
 ## 14. Evidence against the value dimensions
@@ -601,3 +601,5 @@ Earlier statements that the current evidence contradicts or qualifies:
 
 - V2-1: header — `feat/address-skill-review-0906` also differs from main in `README.md` (skills.sh badge, `cp -r` vs `npx skills add` install section); PR #17 touched 7 files, not README.
 - V2-2: §2 — the grep for `model:`, `subagent`, `hooks`, `dangerously` returns nothing; `before-and-after/SKILL.md:4` is the `allowed-tools:` key. Conclusion unchanged.
+- E2 (phase 2 erratum): §13 — the `github_review.py` licence cell now states that its regression tests in `tests/` have no license (header), so reuse with tests means reimplementing them.
+- E4 (phase 2 erratum): §13 — the `before-and-after` licence cell now names the licensor, James Clements (`before-and-after/LICENSE:3`).

@@ -619,16 +619,16 @@ permission. Archon is MIT. Ideas and patterns can be reimplemented.
 | Default-input injection with caller override | `consumer.py:221-256` | pattern | none | none | Keeps policy facts out of agent discretion | reimplement the idea | Assumes `--input k=v` CLI grammar |
 | Launch gate (board signature, choosing window, idle lap, stuck sweep) | `consumer.py:535-687` | script/pattern | Archon `runs` JSON, gate script | none | Fails open by design | reimplement the idea | Tuned constants (300 s, 1800 s, 600 s); depends on Archon trigger log format |
 | Single-flight OS lock | `consumer.py:512-532` | library | stdlib | none | Lock dies with the process | reimplement the idea (trivial) | Advisory locks only |
-| Cross-platform timer generation (systemd user unit, hidden Task XML) | `consumer.py:442-509` | script | systemd / schtasks | none | Embeds full PATH; `IS_SANDBOX=1`; no `KillMode` (issue #59) | needs adaptation | Fix KillMode; Windows runs only while logged on |
+| Cross-platform timer generation (systemd user unit, hidden Task XML) | `consumer.py:442-509` | script | systemd / schtasks | none | Embeds full PATH; `IS_SANDBOX=1`; no `KillMode` (issue #59) | reimplement the idea (no licence) | Fix KillMode; Windows runs only while logged on |
 | STOP/PAUSE brake files | `consumer.py:286-311,734-773` | pattern | none | none | Local only, not remote-safe | reimplement the idea | Per-checkout shared root |
-| Runtime host (fresh snapshot, port, state, identity, loopback token API) | `template/factory/runtime_host.py`, `runtime_process.py` | library | Python stdlib; Windows ctypes | none | Not a sandbox (documented); stripped env; generic errors | needs adaptation | Python/Node executables only; no containers/remote DBs; macOS path bug (issue #4) |
-| Revision-bound resource materializer | `template/factory/runtime_resource.py` | script | git | none | Zip-slip and symlink checks; refuses unowned dirs | needs adaptation | Requires helper and cwd in the same delivering checkout |
+| Runtime host (fresh snapshot, port, state, identity, loopback token API) | `template/factory/runtime_host.py`, `runtime_process.py` | library | Python stdlib; Windows ctypes | none | Not a sandbox (documented); stripped env; generic errors | reimplement the idea (no licence) | Python/Node executables only; no containers/remote DBs; macOS path bug (issue #4) |
+| Revision-bound resource materializer | `template/factory/runtime_resource.py` | script | git | none | Zip-slip and symlink checks; refuses unowned dirs | reimplement the idea (no licence) | Requires helper and cwd in the same delivering checkout |
 | Mutation apply/score tool | `template/harness/mutations/run.py` | script | stdlib | none | Sanitized output | reimplement the idea (no licence) | Marker vocabulary tied to `ci.py` output |
 | Defect-catalogue guidance | `template/harness/mutations/defects.json` | pattern/doc | none | none | File meant to be protected | reimplement the idea | Ships empty |
 | Ordinary gate runner | `template/harness/ci.py` | script | stdlib | none | Windows quoting fix | reimplement the idea (no licence) | Static/unit only |
 | Guard self-mutation check | `bin/selfcheck-mutations.py` | script/pattern | unittest | none | Runs tests in temp copies | reimplement the idea | Anchors are literal source lines |
 | Ownership auditor (ban YAML/skills/provider imports) | `bin/audit.py` | script/pattern | ast | none | Static only | reimplement the idea | Repo-specific lists |
-| MISSION / WORKFLOW_POLICY / FACTORY_RULES / HOLDOUT templates | `template/*.md`, `template/factory/WORKFLOW_POLICY.md` | pattern/template | none | none | Governance only by convention plus protected_paths | needs adaptation | Archon state-label vocabulary |
+| MISSION / WORKFLOW_POLICY / FACTORY_RULES / HOLDOUT templates | `template/*.md`, `template/factory/WORKFLOW_POLICY.md` | pattern/template | none | none | Governance only by convention plus protected_paths | reimplement the idea (no licence) | Archon state-label vocabulary |
 | Incident log | `docs/incidents.md` | reference | none | none | Describes mostly removed code | reference only | Historical; mechanisms now live in Archon |
 | Ubuntu bootstrap | `bin/bootstrap-ubuntu.sh` | script | apt, curl | none | curl-pipe installers unpinned; root | reference only | Ubuntu, root |
 
@@ -771,3 +771,6 @@ committed `.factory/ledger.jsonl` holds fabricated self-test data (placeholder r
 - C-4 (corrector finding): §5.3 — the symlink check is limited to `.archon` and `packages/cli/src` (`consumer.py:102-107`), not the whole pinned tree.
 - N10-1 (verifier, closure pass): the §15 strengths bullet now limits the ignored-file and symlink checks to `.archon`
   and `packages/cli/src`, matching §1, §5.3, §12.1 and §14.
+- E1 (phase 2 erratum): §13 — the four remaining "needs adaptation" rows (cross-platform timer generation, runtime host,
+  revision-bound resource materializer, MISSION/WORKFLOW_POLICY/FACTORY_RULES/HOLDOUT templates) reclassed to
+  "reimplement the idea (no licence)", completing V10-1, since the repo has no licence.

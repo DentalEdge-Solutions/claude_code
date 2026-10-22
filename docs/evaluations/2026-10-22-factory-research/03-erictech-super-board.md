@@ -292,8 +292,8 @@ Limited. There is no specification extraction or replication of an existing prod
 | Card I/O cache | `scripts/super-board-card.sh` | script | bash, gh GraphQL | MIT | Writes card moves | needs adaptation | GitHub Projects v2 only |
 | PR body block editor | `scripts/super-board-pr-body.sh` | script | bash, gh | MIT | `--expect-head` guard | directly reusable | Marker-block convention `<!-- sb:NAME -->` |
 | Skill-readiness resolver | `scripts/super-board-skills-ready.py` | library | python3 | MIT | Rejects interactive skills; validates names | needs adaptation | Registry hardcodes lane → skill chains (`:19-41`) |
-| Guard hooks | `hooks/guard-*.py`, `hooks/settings-snippet.json` | hooks | python3 stdlib | MIT (two credit an "ai-builder-starter-kit" / "BookKeepingApp" origin by the same author) | Fail open; regex heuristics | directly reusable | Claude Code hook JSON contract; Windows path issues open (#72) |
-| Worktree cleanup hook | `hooks/cleanup-wt.py` | hook | python3, git | MIT | Deletes merged worktrees/branches (with recovery file) | needs adaptation | Expects `.claude/worktrees/` layout |
+| Guard hooks | `hooks/guard-*.py`, `hooks/settings-snippet.json` | hooks | python3 stdlib | MIT (three credit an origin by the same author: "ai-builder-starter-kit" in `guard-secrets.py:9` and `guard-key-literals.py:13`, "BookKeepingApp" in `guard-worktree-path.py:13`) | Fail open; regex heuristics | directly reusable | Claude Code hook JSON contract; Windows path issues open (#72) |
+| Worktree cleanup hook | `hooks/cleanup-wt.py` | hook | python3, git | MIT (credits a "BookKeepingApp" origin by the same author, `cleanup-wt.py:34`) | Deletes merged worktrees/branches (with recovery file) | needs adaptation | Expects `.claude/worktrees/` layout |
 | Eval-staleness Stop hook | `hooks/dev/gate-skill-evals.py` | hook | python3, git | MIT | Blocks turn end (exit 2); fails open | directly reusable | Assumes `claude plugin eval` result locations |
 | Usage guard | `scripts/super-board-usage.sh` | script | bash, jq | MIT | Reads the status-line JSON snapshot | directly reusable | Pro/Max only; needs a status-line hook to record |
 | Throttle | `scripts/super-board-throttle.sh` | script | bash, jq, gh | MIT | Writes config | needs adaptation | `max_workers` key semantics |
@@ -422,3 +422,4 @@ Completeness rating: **mostly** — the factory core (orchestration, gates, stat
 - N3-1 (verifier, closure pass): §8 and the §16 row on lane permissions now cite the official workflows page
   (subagents "use your permission rules"); the acceptEdits mode stays unconfirmed [U]; the §16 status is "partly".
 - N3-2 (verifier, closure pass): the legend now defines [F docs], and the two official-docs facts in §16 and §17 use it.
+- E10 (phase 2 erratum): §13 — the guard-hook provenance count is three, not two (`guard-secrets.py:9`, `guard-key-literals.py:13`, `guard-worktree-path.py:13`), and the cleanup-hook row now records its "BookKeepingApp" credit (`cleanup-wt.py:34`): four hook files with adaptation notes in all.

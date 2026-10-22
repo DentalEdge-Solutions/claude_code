@@ -75,7 +75,7 @@ Code with no licence is never classed directly reusable.
   self-reported by the working agent.
 - 71 test cases, no CI. Vendoring claims are partly accurate for `greploop` (a near-total rewrite still credited to
   upstream), and `unslop` no longer matches current upstream.
-- **Reusable:** review-freshness pattern (**reimplement the idea**); `github_review.py` (**needs adaptation**, MIT);
+- **Reusable:** review-freshness pattern (**reimplement the idea**); `github_review.py` (**needs adaptation**, MIT; its tests are unlicensed);
   `unslop` (**directly reusable**, MIT); evidence recorder (**reference only / reimplement**, no licence).
 
 ### 3. Eric Tech — Super-Board ([report](03-erictech-super-board.md))
@@ -139,7 +139,7 @@ Code with no licence is never classed directly reusable.
 - Security: marks target-derived results as untrusted and declares effects per tool, pins dependencies and CI actions;
   but "not a sandbox", 15 tools run foreign code with user permissions, HTTP mode has no authentication (documented).
 - Large and churning: about 2,081 test files, six major versions in three months, unstable main CI during a bulk merge.
-- **Reusable:** the REA MCP server as a whole (**directly reusable** as an external tool, not as code); proof-authority
+- **Reusable:** the REA MCP server as a whole (**directly reusable** as an external tool, not as code; bundled third-party tools carry LGPL, GPL and EULA terms, see report §13); proof-authority
   rules, per-tool effects table, untrusted-content marker, reconstruction ledger (**reimplement the idea**); evidence
   record model, concurrent-behaviour comparison, transcript scorer (**needs adaptation**).
 
@@ -179,9 +179,9 @@ Code with no licence is never classed directly reusable.
 - Checks must be shown to fail before they are trusted: three-valued mutation scoring and a self-mutation check of the
   factory's own guards.
 - Low maturity: 7 weeks old, no releases, no CI; setup runs as root with unpinned installer scripts.
-- **Reusable (no licence, so ideas or with the author's permission):** pinned-source verifier, guard self-mutation
-  check, board-aware launch gate, mutation scorer and CI gate (**reimplement the idea**); runtime host (**needs
-  adaptation**, with permission).
+- **Reusable (all reimplement the idea, no licence; code only with the author's permission):** pinned-source
+  verifier, guard self-mutation check, board-aware launch gate, mutation scorer and CI gate, runtime host, timer
+  generation, resource materializer, governance templates.
 
 ### 11. Jake Schincariol — Replica Skill ([report](11-schincariol-replica-skill.md))
 - 11 skills and 6 small Python tools guide one person through rebuilding someone else's app, through to deploy; fully
@@ -290,6 +290,11 @@ Each report's §17 has a "Changes since the 2026-10-14 evaluation" subsection; t
 
 N3-2 (the `[F docs]` legend entry) was raised on report 03 and applied to every report that uses the tag (03, 04, 06,
 11). Closures are from the verifiers' returns to the coordinator.
+
+Phase 2 errata E1-E10 (`../2026-10-22-factory-comparison/05-architecture-intelligence-report.md`, "Report
+discrepancies found") were applied on 2026-10-22 after a re-check against the clones: reports 01 (E5), 02 (E2, E4),
+03 (E10), 05 (E6), 07 (E3, E9), 08 (E7), 10 (E1) and this index (§10 reusable line, E1). E8 needed no change (the
+recount is within the report's "~1,416"). Each changed report's "Verification corrections" subsection lists them.
 
 **Process deviations, disclosed** (from the researchers', verifiers' and corrector's own returns to the
 coordinator). No repository code was executed by anyone. A few writes went outside the brief's
