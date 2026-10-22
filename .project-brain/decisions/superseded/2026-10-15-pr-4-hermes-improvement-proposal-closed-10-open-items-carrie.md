@@ -5,7 +5,7 @@ description: Draft PR #4 (a stale Hermes proposal from 2026-07-24) was closed af
 tags: [hermes, proposal, triage, codex-eval, testing]
 timestamp: 2026-10-15T03:07:00
 sources: [sessions/daily/2026-10-15.md]
-status: active
+status: superseded
 promoted_at: 2026-10-15
 ---
 
