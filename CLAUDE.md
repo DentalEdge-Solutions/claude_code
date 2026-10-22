@@ -12,6 +12,7 @@ A self-contained pipeline for sourcing, vetting, adapting, measuring, and auto-i
 - **Lint**: `node --check skills/skill-eval/scripts/extract-project-context.js` (syntax check)
 - **Install**: `./install.sh /path/to/target-project`
 - **Uninstall**: `./uninstall.sh /path/to/target-project`
+- **Deploy check**: `node scripts/check-skill-deploy.js` — compares every project skill with its installed copy in `~/.claude/skills/`; exit 0 only when all match. Run after every deploy and before an eval campaign. The live check is not part of `run-all-tests.js` (its unit tests are): CI has no installed skills, and a skill changed on a branch is normally deployed after it merges
 
 ## Key Directories
 
@@ -71,7 +72,7 @@ project-setup → project-audit → skill-scout → skill-audit → skill-adapt 
 - Pass `--context evals/project-context.json` to `generate-agent-evals.js` — same rule applies for agent-eval; agent artifacts go to `evals/agents/<name>/`
 - Discover skills and agents dynamically (`find skills/ -mindepth 1 -maxdepth 1 -type d`) — never hardcode skill names in scripts
 - Keep `install.sh` and `uninstall.sh` in sync — every step in install must have a mirror in uninstall
-- Deploy to `~/.claude/skills/` after editing any skill so changes take effect immediately in Claude Code
+- After a skill change merges to main, deploy it to `~/.claude/skills/` (`cp -R skills/<name>/. ~/.claude/skills/<name>/`), then run `node scripts/check-skill-deploy.js` — Claude Code loads skills from `~/.claude/skills/`, not from this repo's `skills/`, so its skill loading does not see an undeployed change. skill-adapt and skill-refine sync their own result to `~/.claude/skills/`; run the check after them too
 - Verify against primary sources before an important project decision (an upgrade, the security posture, an architecture or vendor choice): the official repository, release notes, docs and advisory databases, plus a measurement where one is possible. Community sources corroborate; they never decide alone. Record each source, its access date and what it verified in `docs/evaluations/`, and keep recurring sources in the reference library (`reference-repositories/`). Hermes sources and the last verified data: `docs/evaluations/2026-10-03-hermes-v0-21-5-upgrade-evaluation.md`
 - When a task depends on how Claude Code itself behaves (features, config, limits, versions, security), follow `docs/CLAUDE_CODE_KNOWLEDGE.md` — official docs first, cite, check the installed version; community guides only corroborate
 - Review and verify work per `docs/REVIEW_PROTOCOL.md` — re-run the checks yourself, number findings, never let the author close its own findings; a self-reported pass is not evidence
