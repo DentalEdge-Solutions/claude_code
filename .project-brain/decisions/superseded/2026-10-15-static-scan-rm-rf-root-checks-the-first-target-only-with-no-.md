@@ -5,7 +5,7 @@ description: static-scan.js rm-rf-root checks only the first target, as on main;
 tags: [static-scan, skill-audit, security, rm-rf-root]
 timestamp: 2026-10-15T15:50:00
 sources: [sessions/daily/2026-10-15.md]
-status: active
+status: superseded
 promoted_at: 2026-10-15
 ---
 
