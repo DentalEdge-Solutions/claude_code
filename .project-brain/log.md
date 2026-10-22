@@ -56,3 +56,5 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-10-22 superseded decisions/active/2026-10-15-pr-4-hermes-improvement-proposal-closed-10-open-items-carrie.md → decisions/superseded/ (replaced by 2026-10-21-pr-4-follow-ups-finished-p8-and-the-brain-guard-gaps-stay-op.md; owner's verdict)
 - 2026-10-22 promoted decisions/candidates/2026-10-21-static-scan-rm-check-stays-first-target-only-s11-accepted-as.md → decisions/active/2026-10-21-static-scan-rm-check-stays-first-target-only-s11-accepted-as.md
 - 2026-10-22 promoted decisions/candidates/2026-10-21-pr-4-follow-ups-finished-p8-and-the-brain-guard-gaps-stay-op.md → decisions/active/2026-10-21-pr-4-follow-ups-finished-p8-and-the-brain-guard-gaps-stay-op.md
+- 2026-10-22 promoted decisions/candidates/2026-10-22-software-factory-value-definition-the-yardstick-for-the-eval.md → decisions/active/2026-10-22-software-factory-value-definition-the-yardstick-for-the-eval.md
+- 2026-10-22 promoted decisions/candidates/2026-10-22-software-factory-value-definition-the-yardstick-for-the-eval.md → decisions/active/2026-10-22-software-factory-value-definition-the-yardstick-for-the-eval.md
