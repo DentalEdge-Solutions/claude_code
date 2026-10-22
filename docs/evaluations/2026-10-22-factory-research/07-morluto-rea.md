@@ -131,7 +131,9 @@ reads only already-ready provider state and is capped at 100 values (`docs/mcp-p
 220 MCP tools are declared in the effect table `TOOL_EFFECTS` (`src/contracts/toolEffects.ts:55-728`, 220 keys) [F, counted].
 Each public tool has one `ToolContract` (name, title, description, kind, Zod input/output schema, effects, MCP
 annotations, `returnsTargetContent`, validated examples) (`src/contracts/toolContractTypes.ts:43-68`) [F]. MCP
-annotations are "derived only from canonical effects" (`toolEffects.ts:24-31`) [F]. CLI and MCP share application
+annotations are "derived only from canonical effects" (`toolEffects.ts:24-31`) [F]. A dedicated test,
+`src/contracts/toolEffects.test.ts` (229 lines, 6 cases), checks that every public tool is audited exactly once and
+that each advertised annotation equals the one derived from its effects (`:116-120`, `:223-228`) [F; not executed]. CLI and MCP share application
 workflows; the CLI is generated from `src/cli/` with Incur. A complete generated catalog is produced by
 `npm run docs:generate` (`docs/mcp-contracts.md:1185-1196`) [C; not run].
 
@@ -313,7 +315,8 @@ temporary project (`SECURITY.md:38-45`) [F for files and call sites; runtime beh
 - **Permission model**: REA has no per-call permission flags; it relies on the host client's approval policy
   (`SKILL.md:391-395`) [F]. Every tool declares effects (`mutatesTarget`, `writesFilesystem`, `launchesProcess`,
   `accessesNetwork`, `executesForeignCode`, `mutatesDevice`, `mayDiscardData`, …) and MCP annotations are derived from
-  them (`src/contracts/toolEffects.ts:1-31`) [F]. Fifteen tools declare `executesForeignCode: true`, including
+  them (`src/contracts/toolEffects.ts:1-31`) [F]; `toolEffects.test.ts` pins the list of tools that execute foreign
+  code or mutate a device and checks they are marked destructive (`:145-150`) [F; not executed]. Fifteen tools declare `executesForeignCode: true`, including
   `capture_process_scenario`, `capture_browser_scenario`, `capture_electron_scenario`, `instrument_with_frida`,
   `load_frida_script`, `gdb_console`, `cutter_command`, `execute_rizin_command`, `rizin_debug_command`
   (`toolEffects.ts`, e.g. `:706-713`) [F]. Hosts that honour MCP annotations can gate these; hosts that do not will
@@ -461,7 +464,8 @@ key (§6), the ledger cannot distinguish an honest verifier record from a fabric
 4. **Untrusted-content provenance marker** on every tool result that may carry target text, plus server-level
    instructions (`toolResultEncoding.ts:26-37`) [F].
 5. **Effect declarations as the single source for MCP annotations** — `executesForeignCode`, `mayDiscardData`,
-   `mutatesDevice` etc. audited per tool (`toolEffects.ts`) [F].
+   `mutatesDevice` etc. audited per tool (`toolEffects.ts`), with a dedicated test (`toolEffects.test.ts`) [F; test
+   not executed].
 6. **Digest-verified recorded tool catalog** for fast, lazy MCP startup without constructing validators
    (`deferredRuntime.ts:25-46`) [F].
 7. **Agent-experience evaluation** that scores real agent transcripts on routing, repetition, validation failures,
@@ -479,13 +483,13 @@ key (§6), the ledger cannot distinguish an honest verifier record from a fabric
 | Reconstruction coverage + verification + readiness stages | `src/domain/reconstructionCoverage*.ts`, `reconstructionVerification.ts`, `reconstructionReadiness*.ts`, `docs/reconstruction-*.md` | pattern | Evidence model | MIT | Readiness evaluator is internal, not a public tool | reimplement the idea | Nine-stage readiness list is a good checklist; code is not standalone |
 | Process trace specification (partial order / finite traces) | `src/domain/process/processTraceSpecification.ts` | library | zod | MIT | n/a | needs adaptation | Bound to REA process-capture observations |
 | Untrusted-content result marker | `src/server/toolResultEncoding.ts:26-37`, `toolContractTypes.ts:61-65` | pattern | MCP SDK `_meta` | MIT | Labelling, not enforcement; depends on host honouring it | reimplement the idea | Any MCP server can copy the pattern |
-| Tool effects table → MCP annotations | `src/contracts/toolEffects.ts` | pattern | none | MIT | Makes risky tools machine-visible | reimplement the idea | Annotation semantics vary by MCP host |
+| Tool effects table → MCP annotations | `src/contracts/toolEffects.ts` | pattern | none | MIT | Makes risky tools machine-visible; tested by `toolEffects.test.ts` (coverage of every tool, annotation derivation) | reimplement the idea | Annotation semantics vary by MCP host |
 | Agent-experience eval scorer | `src/evaluation/CodexAgentEval.ts`, `KnownAnswerEvaluation.ts`, `scripts/verify-agent-experience.mjs`, `scripts/lib/agent-evaluation-commands.mjs` | script / library | Codex CLI, local auth | MIT | Runs Codex `--sandbox read-only`, `approval_policy=never` with a tool allow-list | needs adaptation | Parses Codex JSONL specifically; heuristics (regex epistemic cue) are coarse |
 | `reverse-engineer-anything` skill | `.agents/skills/reverse-engineer-anything/` | skill | REA MCP server | MIT | Uses `npx -y rea-agents@latest` for diagnosis and the approved setup-apply step | reference only (usable as-is only with REA installed) | 451 lines + references; tightly bound to REA tool names |
 | `rea-analysis-optimization` skill | `.agents/skills/rea-analysis-optimization/` | skill | REA docs | MIT | none | reimplement the idea | Its oracle-first, measure-first workflow generalizes |
 | Setup planner with dry-run, backups, approval | `src/application/Setup*.ts`, `SetupSkill.ts`, `ClientConfiguration*.ts` | library / workflow | Node fs, `write-file-atomic`, `jsonc-parser`, `smol-toml`, `yaml` | MIT | Additive and idempotent per `AGENTS.md:11`; writes many agents' configs | reference only | Supports ~15 clients; large, product-specific |
 | Process ownership/supervision | `src/process/`, `src/windows/`, `native/windows/` | library | Node-API native module on Windows | MIT | Not a sandbox (`SECURITY.md:33`) | reference only | Large and platform-specific |
-| REA MCP server as a whole | package `rea-agents` | tool server | Node ≥ 22.19; external engines per target | MIT (+ third-party licenses; commercial tools need user licences) | Foreign-code tools; HTTP mode unauthenticated | directly reusable (as an external tool, not code) | Fast-moving (6 majors in 3 months); main ahead of npm release |
+| REA MCP server as a whole | package `rea-agents` | tool server | Node ≥ 22.19; external engines per target | MIT (+ third-party licenses; commercial tools need user licences). Not MIT: optional `frida` is LGPL-2.0 WITH WxWindows-exception-3.1; the Windows addon statically links the GCC runtime (GPLv3 with the GCC Runtime Library Exception 3.1); bring-your-own engines include Unicorn (GPL-2.0) and GNU GDB (GPL-3.0-or-later); JEB's EULA restricts disclosure of decompiled code and analysis reports (`THIRD_PARTY_NOTICES.md:21,31-35,69,71,98`; `licenses/`). Rizin, TShark/capinfos, sigrok-cli and objdump are named in `README.md:212-214,224` but absent from the notices [F, grep] | Foreign-code tools; HTTP mode unauthenticated | directly reusable (as an external tool, not code) | Fast-moving (6 majors in 3 months); main ahead of npm release |
 
 ## 14. Evidence against the value dimensions
 
@@ -633,4 +637,6 @@ evidence-schema pattern, the need for external isolation, and the churn risk.
 - V7-7: §1 — the pitch is split between `README.md:10` and `README.md:61`.
 - V7-8: §13 — "Proof-authority lattice" and "Tool effects table" reclassed to "reimplement the idea".
 - V7-9: §1, §14 — CI figures restated with the method: 19 success, 14 failure, 66 cancelled, 1 `action_required` of the last 100 completed main `ci.yml` runs created on or before 2026-10-22 20:00Z; the evaluated commit's `CI` run has since concluded `cancelled`.
+- E3 (phase 2 erratum): §13 — the "REA MCP server as a whole" licence cell now lists the non-MIT third-party terms (LGPL-2.0 `frida`, GPLv3 GCC runtime with exception in the Windows addon, Unicorn GPL-2.0, GDB GPL-3.0-or-later, JEB's disclosure restriction) and the four README-listed tools missing from `THIRD_PARTY_NOTICES.md`.
+- E9 (phase 2 erratum): §4, §8, §12.5, §13 — the tool-effects table's dedicated test, `src/contracts/toolEffects.test.ts` (6 cases), is now cited; it exists [F] but was not executed. No status in §16 depended on it, so no ledger row changed.
 - C-1 (corrector finding): §13 — "Untrusted-content result marker" reclassed from "directly reusable" to "reimplement the idea"; like the V7-8 rows it is a pattern to copy, not code to reuse.

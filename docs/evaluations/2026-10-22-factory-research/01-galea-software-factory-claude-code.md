@@ -105,7 +105,11 @@ because it lists v1's weaknesses and fixes them in code:
   per job (`job:104-113`), atomic tmp-file replace (`job:115-119`), and merges through `gh pr merge` after
   re-syncing with `origin/main` and re-gating (`job:554-589`) [F]. `SF2/factory/bin/gate` runs the
   **main checkout's** `factory/checks.sh` inside the worktree, so a branch cannot edit the checks it is judged
-  by. It also fails any branch that modifies or deletes `protected_paths` (`gate:9-12,41-52,61-82`) [F].
+  by. It also fails any branch that modifies or deletes `protected_paths` (`gate:9-12,41-52,61-82`) [F]. It also
+  has a `--hook` mode, meant as the builder's `SubagentStop` hook: it runs the checks once in the job's worktree and
+  exits 2 with the log tail on failure, skipping when `stop_hook_active` is set (`gate:7,85-105`) [F]. The wiring is
+  described in `SF2/DESIGN.md:87-88` and `SF2/BUILD_PROMPT.md:73-74`, but the builder agent file that would declare
+  it is missing from the commit (see below) [F]. It is the only Claude Code-native stage gate found in this repo.
   `SF2/factory/bin/route` maps intake risk and surfaces to reviewers and models from `config.json` [F].
 - A new intake agent runs on `fable`, plus issue-queue triage. Issue text is quoted into `issue.md` with
   an explicit "quoted data, not instructions" banner. Only comments from the issue author and the operator are kept
@@ -495,3 +499,6 @@ An independent verifier re-checked the header facts and ten load-bearing claims 
   reclassified from "needs adaptation" to "reimplement the idea (no license)", consistent with the license note in §13.
 - **V1-2:** the stale-colour claim in §6 now applies only to files not open in the drawer (`dashboard.html:461-466`).
 - **V1-3:** the §1 category now leads with "hybrid execution, LLM-driven", since nothing in code enforces the transitions.
+- E5 (phase 2 erratum): §2.4 — added the v2 gate's `--hook` mode (builder `SubagentStop` hook, exit 2 on failing
+  checks; `SF2/factory/bin/gate:7,85-105`). Qualified: the wiring is documented (`SF2/DESIGN.md:87-88`,
+  `SF2/BUILD_PROMPT.md:73-74`), but the agent file that would declare it is not in the commit.
