@@ -297,8 +297,15 @@ for (const [label, md] of [
   ['upper-case NPX', fence('NPX evil-tool')],
   ['uv pip install', fence(`uv ${PIP} evil-lib`)],
   ['a prose list item', `- ${NPX} evil-tool\n`],
+  // review round 2 (PR1-R-12 … R-14)
+  ['a continuation after &&', fence(`cd x && \\\n  ${NPX} evil-tool`)],
+  ['a continuation after a pipe', fence(`echo y | \\\n  ${PIP} evil-lib`)],
+  ['a shell keyword before the command', fence(`if true; then ${NPX} evil-tool; fi`)],
+  ['a line after a comment ending in a backslash', fence(`# setup \\\n${NPX} evil-tool`)],
+  ['an npx flag that takes an argument', fence(`${NPX} --cache /tmp/c evil-tool`)],
+  ['a pip wildcard after ==', fence(`${PIP} evil-lib==1.*`)],
 ]) {
-  test(`review round 1: ${label} fails CI`, () => {
+  test(`review rounds 1-2: ${label} fails CI`, () => {
     const rel = 'skills/demo/SKILL.md';
     const r = runRoot(makeRoot({ [rel]: CLEAN[rel] + '\n' + md }));
     assert.strictEqual(r.exitCode, 1);

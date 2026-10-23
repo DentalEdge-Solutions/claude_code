@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// test-categorize-files.js — unit tests for categorize-files.js
-// Run: node skills/repo-audit/scripts/test-categorize-files.js
+// categorize-files.test.js — unit tests for categorize-files.js
+// Run: node skills/repo-audit/scripts/categorize-files.test.js (also run by scripts/run-all-tests.js)
 
 const assert = require('assert');
 const fs     = require('fs');

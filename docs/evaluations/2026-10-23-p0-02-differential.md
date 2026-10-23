@@ -102,4 +102,82 @@ The two `unpinned-install` table entries were deleted from `static-scan.js`. Bot
 ## 6. Known limits
 
 Listed in `skills/skill-audit/REFERENCE.md`, under the Dangerous Bash table: "`unpinned-install`: what it reads"
-and "Known limits".
+and "Known limits". Each listed miss, false positive and catch was checked against the shipped pattern in round 3.
+
+## 7. Round 3 (review findings PR1-R-12 … R-15) and a scanner crash found on the way
+
+**What changed:**
+- R-12: blanks and continuations are allowed after a command-start character (`&& \`, `| \`, `; \`, `$( \`).
+- R-13: shell keywords (`if`, `then`, `do`, `else`, `elif`, `while`, `until`) before the command.
+- R-14:
+  - a word with `==` and a `*` is not a pin;
+  - the npx flags that take an argument are skipped;
+  - a comment line's trailing backslash, and an escaped `\\`, no longer continue a line;
+  - a task-list marker counts;
+  - so does a tool given by a path or with a leading backslash;
+  - the limits list was made exact.
+- R-15: the categorize-files test runs in `run-all-tests.js` (43 suites).
+
+**Why only comment lines break a continuation.** A design where any `#` in a line breaks the continuation would be
+quadratic. On `A=# \` lines repeated, every line would become a command start, and each run of prefix words would
+scan to the end. So only a line whose first non-blank character is `#` breaks the continuation, and no run of
+words can cross such a line.
+
+**Scanner crash (found by the author while applying R-12).**
+
+On large crafted input, V8 throws "Maximum call stack size exceeded" inside the regex. The scanner then exits with
+no JSON and no verdict. Main does not crash on these inputs:
+
+| Input | Crashes |
+|---|---|
+| `npx` + 8 MB of `-a ` | 467086e |
+| `npx` + 11 MB of blanks | e3e73fb |
+| a command start + 11 MB of blanks | the first round-3 draft, including the existing test "S10: an 11 MB file is scanned whole" |
+
+The cause is a repeated group, which pushes one backtrack entry per repetition.
+
+Fixes:
+- Blank runs are now a single character-class loop. Only a continuation repeats the group (`SPS`, `SPP`).
+- A pattern that still cannot finish counts as found, with the detail "could not finish (RangeError); treated as
+  found", instead of crashing. This applies in `scanMarkdown` and `scanScript`.
+
+Result of the probe (8 inputs of 8-11 MB, through the CLI):
+- the round-3 scanner returns JSON on all 8;
+- the three inputs with millions of repeated words (npx options, continuations, `sudo -E`) are reported as
+  `unpinned-install` BLOCK "could not finish";
+- main returns JSON on all 8, with no `unpinned-install` check.
+
+**Differential (main vs round 3).**
+
+| Corpus | Files | Main findings lost | New findings of another check |
+|---|---|---|---|
+| main's tree | 832 | 0 | 0 |
+| branch tree | 834 | 0 | 0 |
+| synthetic | 118,188 | 0 | 0 |
+
+- All new findings are `unpinned-install`.
+- The synthetic set adds 7 round-3 commands, 10 command-position prefixes and 2 prose-position prefixes. 0 samples
+  disagree with their labels.
+- Against e3e73fb: 1,590 synthetic hits were dropped, all labelled not-a-hit (`--registry …` and `-w …` before a
+  pinned package). 14,163 were added.
+
+**Timing.** 105 hostile inputs:
+- 103 are about 1 MB: the round-2 set, plus 27 round-3 forms such as `&& \⏎` repeated, keyword runs, comment and
+  escaped-backslash continuation lines, `A=# \⏎`, `==1.*` runs, npx flag-argument pairs, path prefixes and task
+  markers;
+- 2 are 11 MB blank runs.
+
+Runs: 4 patterns (the shipped regex and its npx, pip and `@latest` parts) × 2 modes (`test`, global `matchAll`) = 840.
+
+| Inputs | Worst | Over 50 ms |
+|---|---|---|
+| ~1 MB | 25.5 ms | 0 |
+| 11 MB | 168 ms (about 15 ms per MB) | the 11 MB runs only |
+| 44 MB (worst input × 4) | 658 ms | |
+
+No run threw. In the suite, `static-scan.test.js` adds 54 1 MB scans and 6 large-input scans of 9-11 MB through the
+CLI.
+
+**Mutant (round 3).** The two `unpinned-install` entries were deleted:
+- `ci-scan-skills.test.js`: 37 failures;
+- `static-scan.test.js`: 127 failures.

@@ -1989,5 +1989,133 @@ for (const [label, text] of [
   }
 }
 
+// ── unpinned-install, review round 2 (PR1-R-12 … R-14) ────────────────────────────────────────────
+// R-12: a continuation right after an operator (&& \⏎, | \⏎, ; \⏎, $( \⏎). R-13: shell keywords before the
+// command (if, then, do, else, elif, while, until). R-14: a word with == and a * is not a pin; npx flags that
+// take an argument are skipped; a # comment line's trailing backslash, and an escaped \\, are not continuations;
+// a task-list marker; a tool given by path or with a leading backslash.
+for (const cmd of [
+  // R-12
+  `cd x && \\\n  ${NPX} evil-tool`, `cd x &&\\\n${NPX} evil-tool`, `echo y | \\\n  ${PIPI} evil-lib`, `a; \\\n${NPX} evil-tool`,
+  `V=$( \\\n ${NPX} evil-tool)`, `cd x && \\\r\n  ${NPX} evil-tool`,
+  // R-13
+  `if true; then ${NPX} evil-tool; fi`, `for f in a; do ${NPX} evil-tool; done`, `else ${NPX} evil-tool`,
+  `elif ${PIPI} evil-lib; then :; fi`, `while ${NPX} evil-tool; do :; done`, `until ${PIPI} evil-lib; do :; done`,
+  `if ${NPX} evil-tool; then :; fi`,
+  // R-14
+  `${PIPI} evil-lib==1.*`, `${PIPI} "evil-lib==1.*"`, `${PIPI} good==1.0 evil-lib==2.*`,
+  `${NPX} --cache /tmp/c evil-tool`, `${NPX} --prefix ./p evil-tool`, `${NPX} --userconfig ~/.npmrc evil-tool`,
+  `${NPX} --registry https://r.test evil-tool`, `${NPX} -w pkgs/a evil-tool`, `${NPX} --workspace pkgs/a evil-tool`,
+  `${NPX} --node-options --max-old-space-size=4096 evil-tool`, `${NPX} --loglevel warn evil-tool`,
+  `- [ ] ${NPX} evil-tool`, `- [x] ${PIPI} evil-lib`, `/usr/bin/${NPX} evil-tool`, `./node_modules/.bin/${NPX} evil-tool`,
+  `\\${NPX} evil-tool`, `~/.local/bin/pip3 install evil-lib`,
+]) {
+  test(`unpinned-install (review R-12/R-13/R-14): ${JSON.stringify(cmd)} at a prose line start is a BLOCK`, () => {
+    const r = run([makeDir({ 'SKILL.md': `To set up, run:\n${cmd}\n` })]);
+    assert.strictEqual(sevOf(r.json, 'unpinned-install'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+// R-14: a comment line's trailing backslash, and an escaped \\, do not continue the line in bash, so the next line
+// is a new command.
+for (const [label, sh] of [
+  ['after a # comment line ending in a backslash', `# setup \\\n${NPX} evil-tool\n`],
+  ['after an indented # comment line ending in a backslash', `  # setup \\\n${NPX} evil-tool\n`],
+  ['after a line ending in an escaped backslash', `echo a\\\\\n${NPX} evil-tool\n`],
+]) {
+  test(`unpinned-install (review R-14): ${label} the next line is a command`, () => {
+    const r = run([makeDir({ 'x.sh': sh })]);
+    assert.strictEqual(sevOf(r.json, 'unpinned-install'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+for (const cmd of [
+  `${NPX} --registry https://r.test evil-tool@1.2.3`, `${NPX} --cache /tmp/c tool@1.2.3`, `${NPX} -w pkgs/a tool@1.2.3`,
+  `cd x && \\\n  ${NPX} tool@1.2.3`, `if true; then ${NPX} tool@1.2.3; fi`, `${PIPI} lib==1.2.3`, `/usr/bin/${NPX} tool@1.2.3`,
+  `- [ ] ${NPX} tool@1.2.3`,
+]) {
+  test(`unpinned-install (review round 2): ${JSON.stringify(cmd)} is not flagged`, () => {
+    const r = run([makeDir({ 'SKILL.md': `Run:\n${cmd}\n`, 'x.sh': `${cmd}\n` })]);
+    assert.ok(!checks(r.json).includes('unpinned-install'), `got ${JSON.stringify(r.json.findings)}`);
+  });
+}
+
+// Known false positives (fail-closed), listed in REFERENCE.md: prose after (, ! or a list marker, or a line
+// starting with a shell keyword, followed by the tool name and a word.
+for (const md of ['(npx is required)\n', 'Note! npx caches packages.\n', '- npx is the npm runner.\n',
+  '1. npx is used for Repomix.\n', 'do npx checks first.\n']) {
+  test(`unpinned-install: known false positive stays flagged (round 2): ${JSON.stringify(md)}`, () => {
+    const r = run([makeDir({ 'SKILL.md': md })]);
+    assert.ok(checks(r.json).includes('unpinned-install'), `got ${JSON.stringify(r.json.findings)}`);
+  });
+}
+
+// Hostile 1 MB inputs for the round-2 forms, each under 2 s.
+for (const [label, text] of [
+  ['&& backslash-newline repeated', fill('&& \\\n')],
+  ['| backslash-newline repeated', fill('| \\\n')],
+  ['$( backslash-newline repeated', fill('$( \\\n')],
+  ['keyword run', fill('if then do else ')],
+  ['keyword lines continued', fill('do \\\n')],
+  ['comment lines ending in a backslash', fill('# x \\\n')],
+  ['lines of escaped backslashes', fill('a\\\\\n')],
+  ['lines of blanks then a backslash', fill('   \\\n')],
+  ['a long line ending in a backslash', fill('a') + '\\\n' + NPX + ' x'],
+  ['pip ==* run', `${PIPI} ` + fill('a==1.* ')],
+  ['pip ==a== run', `${PIPI} ` + fill('a==a==')],
+  ['pip *== run', `${PIPI} ` + fill('*==')],
+  ['npx arg-flag pairs', `${NPX} ` + fill('--cache x ')],
+  ['npx --registry run', `${NPX} ` + fill('--registry ')],
+  ['path prefix run', fill('a/')],
+  ['path prefix lines', fill('./a/b/c\n')],
+  ['task markers', fill('- [ ] ')],
+  ['backslash run', fill('\\')],
+]) {
+  for (const [kind, file, wrap] of [
+    ['md', 'f.md', t => t + '\n'],
+    ['md, in code', 'f.md', t => '```\n' + t + '\n```\n'],
+    ['sh', 'f.sh', t => t + '\n'],
+  ]) {
+    test(`unpinned-install (review round 2) stays fast on 1 MB of ${label} (${kind})`, () => {
+      const t = Date.now();
+      const r = run([makeDir({ [file]: wrap(text) })]);
+      const ms = Date.now() - t;
+      assert.ok(r.json, `no JSON output (status ${r.status}, ${(r.stderr || '').slice(0, 200)})`);
+      assert.ok(ms < 2000, `scan took ${ms} ms`);
+    });
+  }
+}
+
+// ── Large input never crashes the scan (found while applying review round 2) ─────────────────────────
+// A repeated group in a pattern pushes one backtrack entry per repetition, and V8 throws "Maximum call stack size
+// exceeded" past a limit: a long blank run after a command start, or millions of option words, crashed the scanner
+// with no JSON at all (467086e and e3e73fb). Blank runs are now one character-class loop; a pattern that still
+// cannot finish reports its check as found ("could not finish", fail-closed) instead of crashing.
+const BIG = 11 * 1024 * 1024;
+for (const [label, text] of [
+  ['blanks after a line start', 'Read this.\n' + ' '.repeat(BIG)],
+  ['blanks after npx', NPX + ' '.repeat(BIG)],
+  ['blanks after (', '(' + ' '.repeat(BIG)],
+  ['blanks after pip install', PIPI + ' '.repeat(BIG)],
+]) {
+  test(`large input: 11 MB of ${label} is scanned, not crashed, and not flagged`, () => {
+    const r = run([makeDir({ 'SKILL.md': text + '\n', 'x.sh': text + '\n' })]);
+    assert.ok(r.json, `no JSON output (status ${r.status}, ${(r.stderr || '').slice(0, 200)})`);
+    assert.ok(!checks(r.json).includes('unpinned-install'), `got ${JSON.stringify(r.json.findings)}`);
+  });
+}
+
+for (const [label, text] of [
+  ['npx option words', NPX + ' ' + '-a '.repeat(3 * 1024 * 1024)],
+  ['pip pinned words', PIPI + ' ' + 'a==1 '.repeat(2 * 1024 * 1024)],
+]) {
+  test(`large input: ${label} by the million give JSON, and a pattern that cannot finish is reported, not passed`, () => {
+    const r = run([makeDir({ 'SKILL.md': text + '\n' })]);
+    assert.ok(r.json, `no JSON output (status ${r.status}, ${(r.stderr || '').slice(0, 200)})`);
+    const f = r.json.findings.find(x => x.check === 'unpinned-install');
+    if (f) assert.ok(/could not finish/.test(f.detail), `unexpected finding: ${JSON.stringify(f)}`);
+  });
+}
+
 if (!ok) process.exit(1);
 console.log('\nAll static-scan tests passed.');

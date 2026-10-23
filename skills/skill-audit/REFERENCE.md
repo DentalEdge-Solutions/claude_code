@@ -166,19 +166,49 @@ BLOCK rows are BLOCK in prose. When the command appears only in what the scanner
 | `chmod <mode>` | FLAG |
 | WebFetch to unknown domains | FLAG |
 
-**`unpinned-install`: what it reads.** It reads `npx` (any case), and `pip install` (also `pip3`, `pip3.12`, `python -m pip` and `uv pip`, any case). Only a command in command position counts: at a line start, or just after a backtick, `;`, `&`, `\|`, `(`, `{` or `!`. Before the command it allows a list or quote marker (`-`, `*`, `+`, `>`, `1.`), a `$ ` prompt and the prefixes `VAR=val`, `env`, `exec`, `time`, `command`, `nohup`, `sudo`, an option word such as `-E`, and `sh -c "` / `bash -c '`. Words may be split by a backslash-newline continuation; a line that continues the one above is not a new command.
+**`unpinned-install`: what it reads.** It reads `npx` (any case), and `pip install` (also `pip3`, `pip3.12`, `python -m pip` and `uv pip`, any case). The tool may be given by a path (`/usr/bin/…`, `./node_modules/.bin/…`) or with a leading backslash. Only a command in command position counts: at a line start, or just after a backtick, `;`, `&`, `\|`, `(`, `{` or `!` (blanks and backslash-newline continuations may follow these). Before the command it allows:
 
-- npx: the first word that is not an option is the package; it may be quoted or scoped. With `-p` / `--package`, every `-p` value is read instead, and the word after them is the command.
-- pip: every word after `install` is read. It skips a word with `==`, a path (`.`, `/`, `~`), an option, a redirect (`2>x`, `> x`), and the argument of a pip flag that takes one (`-r`, `-c`, `-t`, `-C`, `-i`, `-f`, `--target`, `--trusted-host`, `--upgrade-strategy`, `--prefix`, `--root`, `--src` and the other long forms in `PIP_ARG_FLAG`). The first other word is a hit.
+- a list, task-list or quote marker (`-`, `*`, `+`, `>`, `1.`, `1)`, `- [ ]`, `- [x]`);
+- a `$ ` prompt;
+- the prefixes `VAR=val`, `env`, `exec`, `time`, `command`, `nohup`, `sudo`, and the shell keywords `if`, `then`, `do`, `else`, `elif`, `while`, `until`;
+- an option word such as `-E` or `-i`;
+- `sh -c "` / `bash -c '`.
 
-**Known limits** (a tripwire, not a boundary; a skill is cleared by reading it):
+Words may be split by a backslash-newline continuation. A line that continues the one above is not a new command. A line is a continuation only when the line above ends in a backslash that is not itself escaped (`\\`) and is not a comment line (first non-blank character `#`).
 
-- A command that is not in command position is not read: mid-sentence prose (`Install: npx <pkg>`), and `xargs`, `watch` or other wrappers.
-- Not read either: `sudo -u <user>` and other prefix options that take an argument, `env -i`, a `VAR="a b"` value with blanks, and `bash -e -c "…"` (one option before `-c` only).
-- pip stops reading at a word it cannot place (`<pkg>`, `$VAR`, `${VAR}`, `2>&1`, a word holding `{`, `}` or `!`), so a package after such a word is not read.
-- `pip install -e <vcs-url>` is read as a package (a hit); `-r`/`-c` files are not read, so pins inside a requirements file are not checked.
+- npx: the first word that is not an option is the package; it may be quoted or scoped. The argument of an npx flag that takes one (`--cache`, `--prefix`, `--userconfig`, `--registry`, `-w`, `--workspace`, `--node-options`, `--loglevel`) is skipped. With `-p` / `--package`, every `-p` value is read instead, and the word after them is the command.
+- pip: every word after `install` is read. It skips:
+  - a word with `==` and no `*` (`==1.*` is a wildcard, not a pin);
+  - a path (`.`, `/`, `~`);
+  - an option;
+  - a redirect-shaped word (`2>x`, `> x`, `<x>`);
+  - the argument of a pip flag that takes one (`-r`, `-c`, `-t`, `-C`, `-i`, `-f`, `--target`, `--trusted-host`, `--upgrade-strategy`, `--prefix`, `--root`, `--src` and the other long forms in `PIP_ARG_FLAG`).
+
+  The first other word is a hit.
+- A pattern that cannot finish on huge input (millions of repeated words, past V8's regex backtrack stack) counts as found: the finding says "could not finish (RangeError); treated as found". Before, the scan crashed with no output.
+
+**Known limits** (a tripwire, not a boundary; a skill is cleared by reading it). Each was measured on the shipped pattern:
+
+- A command that is not in command position is not read:
+  - mid-sentence prose (`Install: npx <pkg>`);
+  - `xargs`, `watch` or other wrappers;
+  - a tool found at run time (`"$(which npx)" <pkg>`);
+  - a tool name split by a continuation (`n\` then `px` on the next line).
+- Not read either:
+  - `sudo -u <user>` and other prefix options that take an argument;
+  - a `VAR="a b"` value with blanks;
+  - `bash -e -c "…"` (only one option before `-c` is read);
+  - an unlisted task-list marker such as `- [-]`.
+- npx: a package given by a variable (`npx $PKG`) is not read.
+- pip stops reading at a word it cannot place (`$VAR`, `${VAR}`, `2>&1`, a word holding `{`, `}` or `!`), so a package after such a word is not read.
+- `-r`/`-c` files are not read, so pins inside a requirements file are not checked.
 - Other runners are not read: `npm exec`, `npm install`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx`, `py -m pip`, and a command inside a JSON or YAML string. `npm install <pkg>` is caught only with `@` + `latest`.
-- Known false positives (fail-closed): prose that starts a line or a table cell with the tool name and a word, such as a line that starts "npx is the package runner", or a table cell that starts with "npx" and another word.
+- A `#` later in a line is not read as a comment. So `pip install <pkg>==1 # note \` continues into the next line, and a command there is not a new start, although bash would start one.
+- Known false positives (fail-closed), when the tool name is followed by another word:
+  - prose that starts a line, a table cell, or follows `(`, `!`, a list marker or a shell keyword. Examples: a line "npx is the package runner"; a parenthesis that opens on "npx is required"; "Note!" followed by "npx caches packages"; a numbered item "1. npx is used for Repomix"; lines "do npx checks first" and "if npx fails, retry";
+  - `npx -c '<command>'`, where the command's first word is read as the package;
+  - a line after one that ends in three backslashes (bash continues it; the scan reads it as a new command);
+  - `pip install -e <vcs-url>`, which is read as an unpinned package.
 - One finding per file and check: a file is reported once, at its first hit.
 
 ### Dangerous Shell Script Operations
