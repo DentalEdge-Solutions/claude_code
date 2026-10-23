@@ -175,7 +175,19 @@ Runs: 4 patterns (the shipped regex and its npx, pip and `@latest` parts) × 2 m
 | 11 MB | 168 ms (about 15 ms per MB) | the 11 MB runs only |
 | 44 MB (worst input × 4) | 658 ms | |
 
-No run threw. In the suite, `static-scan.test.js` adds 54 1 MB scans and 6 large-input scans of 9-11 MB through the
+No run threw on these inputs, but that holds only for this set, whose two 11 MB cases are blank runs. The
+independent review measured 17 of 109 inputs throwing `RangeError` at 11 MB on Node 26, and none at 4 MB.
+
+- **Which inputs throw:** inputs of millions of repeated words in one command throw at about 11 MB on Node 26.
+  Examples are one line of `A=1 ` pairs; `a/`, `./` or `~/` path runs; `-E` and `sh -c '` runs; pip flag-argument,
+  pinned, redirect or path words after `install`; `A=# \⏎` repeated; and 11 MB of continuations after a command
+  start.
+- **How they are reported:** as a could-not-finish BLOCK (fail-closed). A single-line `key=value` dump of that
+  size is the realistic false BLOCK.
+- **Platform dependence:** the threshold depends on V8's stack and may differ on CI's Node 24. So the tests assert
+  only "if found, then could not finish".
+
+`skills/skill-audit/REFERENCE.md` says the same. In the suite, `static-scan.test.js` adds 54 1 MB scans and 6 large-input scans of 9-11 MB through the
 CLI.
 
 **Mutant (round 3).** The two `unpinned-install` entries were deleted:

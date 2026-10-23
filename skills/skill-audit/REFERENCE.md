@@ -186,21 +186,26 @@ Words may be split by a backslash-newline continuation. A line that continues th
 
   The first other word is a hit.
 - A pattern that cannot finish on huge input (millions of repeated words, past V8's regex backtrack stack) counts as found: the finding says "could not finish (RangeError); treated as found". Before, the scan crashed with no output.
+  - On Node 26 this happens at about 11 MB, for input of millions of repeated words in one command. Examples: a line of `A=1 ` pairs; runs of `a/`, `./` or `~/`; `-E` or `sh -c '` runs; pip flag-argument, pinned, redirect or path words after `install`; `A=# \` lines repeated; continuations after a command start. None of these throws at 4 MB.
+  - Such input is reported as a could-not-finish BLOCK (fail-closed). A single-line `key=value` dump of that size is the realistic false BLOCK.
+  - The threshold depends on V8's stack and may differ on other Node versions, such as CI's Node 24. The tests therefore assert only that a finding, if any, says "could not finish".
 
 **Known limits** (a tripwire, not a boundary; a skill is cleared by reading it). Each was measured on the shipped pattern:
 
 - A command that is not in command position is not read:
   - mid-sentence prose (`Install: npx <pkg>`);
   - `xargs`, `watch` or other wrappers;
-  - a tool found at run time (`"$(which npx)" <pkg>`);
-  - a tool name split by a continuation (`n\` then `px` on the next line).
+  - a tool found at run time (`"$(which npx)" <pkg>`), a tool path through a variable or in quotes (`$HOME/bin/npx <pkg>`, `"$NODE_BIN/npx" <pkg>`, `"/usr/bin/npx" <pkg>`), `env` given by a path (`/usr/bin/env npx <pkg>`), and `npx.cmd <pkg>`;
+  - a tool name split by a continuation (`n\` then `px` on the next line);
+  - a command in a `case` branch (`case x in a) npx <pkg>;; esac`): `)` is not a command start;
+  - a command on the line after a markdown hard line break in prose (a line `Run this:\` followed by `npx <pkg>`): the backslash is read as a continuation, so the next line is not a new start.
 - Not read either:
   - `sudo -u <user>` and other prefix options that take an argument;
   - a `VAR="a b"` value with blanks;
   - `bash -e -c "…"` (only one option before `-c` is read);
   - an unlisted task-list marker such as `- [-]`.
 - npx: a package given by a variable (`npx $PKG`) is not read.
-- pip stops reading at a word it cannot place (`$VAR`, `${VAR}`, `2>&1`, a word holding `{`, `}` or `!`), so a package after such a word is not read.
+- pip stops reading at a word it cannot place (`$VAR`, `${VAR}`, `2>&1`), so a package after such a word is not read. A word that starts with `{`, `}` or `!` ends the read. A word that only contains them is read up to that character: `pip install` followed by the word `a{b` and a package is a hit on `a`.
 - `-r`/`-c` files are not read, so pins inside a requirements file are not checked.
 - Other runners are not read: `npm exec`, `npm install`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx`, `py -m pip`, and a command inside a JSON or YAML string. `npm install <pkg>` is caught only with `@` + `latest`.
 - A `#` later in a line is not read as a comment. So `pip install <pkg>==1 # note \` continues into the next line, and a command there is not a new start, although bash would start one.
