@@ -1,0 +1,863 @@
+{
+  "meta": {
+    "head": "cbb6d4e04dc22f72c274e7b44c9740a8a2e2f165",
+    "head_commit_time": "2026-10-23T16:03:32Z",
+    "population_rule": "PRs merged at or after 2026-08-01T00:00:00Z and at or before HEAD's commit time",
+    "population_size": 170,
+    "population_range": [
+      5,
+      174
+    ],
+    "all_merges_first_parent_ancestors": true,
+    "merge_parent_counts": {
+      "2": 170
+    },
+    "fix_subject_regex": "^fix(\\([^)]*\\))?!?:",
+    "fix_pr_title_regex": "^fix\\b"
+  },
+  "metric1_first_pass": {
+    "population": 170,
+    "review_recorded": {
+      "yes": 62,
+      "none": 100,
+      "spec-review-only": 1,
+      "automated-only": 1,
+      "placeholder": 3,
+      "unattributed": 3
+    },
+    "reviewed_first_round_blocking": {
+      "0": 5,
+      "ND": 46,
+      "1+": 11
+    },
+    "reviewed_any_round_incl_per_task": {
+      "ND": 47,
+      "1+": 11,
+      "0": 4
+    },
+    "reviewed_body_plus_linked_record": {
+      "0": 11,
+      "ND": 37,
+      "1+": 14
+    },
+    "by_kind": {
+      "sdd": 16,
+      "whole-branch": 1,
+      "final-review": 3,
+      "independent": 41,
+      "design-review": 1
+    },
+    "first_pass_determinable": {
+      "zero": 5,
+      "determinable": 16,
+      "rate": 0.312,
+      "lower_bound_all_reviewed": 0.081,
+      "upper_bound_all_reviewed": 0.823
+    },
+    "by_pr_type": {
+      "code_touching": {
+        "prs": 83,
+        "reviewed": 53,
+        "0": 5,
+        "1+": 9,
+        "ND": 39
+      },
+      "docs_only": {
+        "prs": 87,
+        "reviewed": 9,
+        "0": 0,
+        "1+": 2,
+        "ND": 7
+      }
+    },
+    "numbered_findings": {
+      "from_id_ranges": {
+        "n": 29,
+        "min": 2,
+        "p25": 7.0,
+        "median": 12.0,
+        "p75": 15.0,
+        "p90": 20.4,
+        "max": 34,
+        "mean": 12.03
+      },
+      "from_id_ranges_n": 29,
+      "stated_counts_without_ids": {
+        "n": 5,
+        "min": 3,
+        "p25": 3.0,
+        "median": 7.0,
+        "p75": 10.0,
+        "p90": 14.2,
+        "max": 17,
+        "mean": 8.0
+      },
+      "id_or_stated": {
+        "n": 34,
+        "min": 2,
+        "p25": 7.0,
+        "median": 10.0,
+        "p75": 14.75,
+        "p90": 19.4,
+        "max": 34,
+        "mean": 11.44
+      },
+      "first_round_blocking_count": {
+        "n": 16,
+        "min": 0,
+        "p25": 0.0,
+        "median": 1.0,
+        "p75": 2.0,
+        "p90": 3.0,
+        "max": 6,
+        "mean": 1.44
+      },
+      "first_round_blocking_count_hist": {
+        "0": 5,
+        "2": 3,
+        "1": 5,
+        "3": 2,
+        "6": 1
+      }
+    },
+    "before_pr131": {
+      "prs": 126,
+      "reviewed": 29,
+      "first_round_blocking": {
+        "0": 4,
+        "ND": 15,
+        "1+": 10
+      },
+      "findings_from_id_ranges": {
+        "n": 1,
+        "min": 2,
+        "p25": 2,
+        "median": 2,
+        "p75": 2,
+        "p90": 2,
+        "max": 2,
+        "mean": 2.0
+      }
+    },
+    "from_pr131": {
+      "prs": 44,
+      "reviewed": 33,
+      "first_round_blocking": {
+        "0": 1,
+        "ND": 31,
+        "1+": 1
+      },
+      "findings_from_id_ranges": {
+        "n": 28,
+        "min": 2,
+        "p25": 7.75,
+        "median": 12.0,
+        "p75": 15.0,
+        "p90": 20.6,
+        "max": 34,
+        "mean": 12.39
+      }
+    }
+  },
+  "metric2_rework": {
+    "fixc_path_7d": {
+      "complete_window_prs": 138,
+      "prs_with_>=1": 79,
+      "share": 0.572,
+      "events_total": 1054,
+      "censored_prs": 32
+    },
+    "fixc_path_7d_code_prs_only": {
+      "complete_window_prs": 60,
+      "prs_with_>=1": 54,
+      "share": 0.9,
+      "events_total": 931,
+      "censored_prs": 23
+    },
+    "fixc_pathcode_7d": {
+      "complete_window_prs": 138,
+      "prs_with_>=1": 43,
+      "share": 0.312,
+      "events_total": 399,
+      "censored_prs": 32
+    },
+    "fixc_pathcode_7d_code_prs_only": {
+      "complete_window_prs": 60,
+      "prs_with_>=1": 43,
+      "share": 0.717,
+      "events_total": 399,
+      "censored_prs": 23
+    },
+    "fixc_ref_7d": {
+      "complete_window_prs": 138,
+      "prs_with_>=1": 2,
+      "share": 0.014,
+      "events_total": 2,
+      "censored_prs": 32
+    },
+    "fixc_ref_7d_code_prs_only": {
+      "complete_window_prs": 60,
+      "prs_with_>=1": 1,
+      "share": 0.017,
+      "events_total": 1,
+      "censored_prs": 23
+    },
+    "fixpr_path_7d": {
+      "complete_window_prs": 138,
+      "prs_with_>=1": 79,
+      "share": 0.572,
+      "events_total": 382,
+      "censored_prs": 32
+    },
+    "fixpr_path_7d_code_prs_only": {
+      "complete_window_prs": 60,
+      "prs_with_>=1": 49,
+      "share": 0.817,
+      "events_total": 307,
+      "censored_prs": 23
+    },
+    "fixpr_pathcode_7d": {
+      "complete_window_prs": 138,
+      "prs_with_>=1": 35,
+      "share": 0.254,
+      "events_total": 93,
+      "censored_prs": 32
+    },
+    "fixpr_pathcode_7d_code_prs_only": {
+      "complete_window_prs": 60,
+      "prs_with_>=1": 35,
+      "share": 0.583,
+      "events_total": 93,
+      "censored_prs": 23
+    },
+    "fixpr_ref_7d": {
+      "complete_window_prs": 138,
+      "prs_with_>=1": 8,
+      "share": 0.058,
+      "events_total": 8,
+      "censored_prs": 32
+    },
+    "fixpr_ref_7d_code_prs_only": {
+      "complete_window_prs": 60,
+      "prs_with_>=1": 6,
+      "share": 0.1,
+      "events_total": 6,
+      "censored_prs": 23
+    },
+    "landref_7d": {
+      "complete_window_prs": 138,
+      "prs_with_>=1": 12,
+      "share": 0.087,
+      "events_total": 13,
+      "censored_prs": 32
+    },
+    "landref_7d_code_prs_only": {
+      "complete_window_prs": 60,
+      "prs_with_>=1": 9,
+      "share": 0.15,
+      "events_total": 10,
+      "censored_prs": 23
+    },
+    "fixc_path_30d": {
+      "complete_window_prs": 37,
+      "prs_with_>=1": 16,
+      "share": 0.432,
+      "events_total": 326,
+      "censored_prs": 133
+    },
+    "fixc_path_30d_code_prs_only": {
+      "complete_window_prs": 18,
+      "prs_with_>=1": 15,
+      "share": 0.833,
+      "events_total": 305,
+      "censored_prs": 65
+    },
+    "fixc_pathcode_30d": {
+      "complete_window_prs": 37,
+      "prs_with_>=1": 15,
+      "share": 0.405,
+      "events_total": 218,
+      "censored_prs": 133
+    },
+    "fixc_pathcode_30d_code_prs_only": {
+      "complete_window_prs": 18,
+      "prs_with_>=1": 15,
+      "share": 0.833,
+      "events_total": 218,
+      "censored_prs": 65
+    },
+    "fixc_ref_30d": {
+      "complete_window_prs": 37,
+      "prs_with_>=1": 0,
+      "share": 0.0,
+      "events_total": 0,
+      "censored_prs": 133
+    },
+    "fixc_ref_30d_code_prs_only": {
+      "complete_window_prs": 18,
+      "prs_with_>=1": 0,
+      "share": 0.0,
+      "events_total": 0,
+      "censored_prs": 65
+    },
+    "fixpr_path_30d": {
+      "complete_window_prs": 37,
+      "prs_with_>=1": 17,
+      "share": 0.459,
+      "events_total": 103,
+      "censored_prs": 133
+    },
+    "fixpr_path_30d_code_prs_only": {
+      "complete_window_prs": 18,
+      "prs_with_>=1": 14,
+      "share": 0.778,
+      "events_total": 87,
+      "censored_prs": 65
+    },
+    "fixpr_pathcode_30d": {
+      "complete_window_prs": 37,
+      "prs_with_>=1": 14,
+      "share": 0.378,
+      "events_total": 50,
+      "censored_prs": 133
+    },
+    "fixpr_pathcode_30d_code_prs_only": {
+      "complete_window_prs": 18,
+      "prs_with_>=1": 14,
+      "share": 0.778,
+      "events_total": 50,
+      "censored_prs": 65
+    },
+    "fixpr_ref_30d": {
+      "complete_window_prs": 37,
+      "prs_with_>=1": 1,
+      "share": 0.027,
+      "events_total": 1,
+      "censored_prs": 133
+    },
+    "fixpr_ref_30d_code_prs_only": {
+      "complete_window_prs": 18,
+      "prs_with_>=1": 0,
+      "share": 0.0,
+      "events_total": 0,
+      "censored_prs": 65
+    },
+    "landref_30d": {
+      "complete_window_prs": 37,
+      "prs_with_>=1": 2,
+      "share": 0.054,
+      "events_total": 2,
+      "censored_prs": 133
+    },
+    "landref_30d_code_prs_only": {
+      "complete_window_prs": 18,
+      "prs_with_>=1": 1,
+      "share": 0.056,
+      "events_total": 1,
+      "censored_prs": 65
+    }
+  },
+  "metric2_1014_proxy": {
+    "window": [
+      "2026-08-24T16:03:32Z",
+      "2026-10-23T16:03:32Z"
+    ],
+    "fix_commits_in_window": 291,
+    "referencing_pr_merged_prior_7d_commit_msg": 2,
+    "referencing_pr_merged_prior_7d_landing_pr_text": 54,
+    "landing_pr_to_referenced_prs": {
+      "165": [
+        164
+      ],
+      "143": [
+        142
+      ],
+      "140": [
+        139
+      ],
+      "138": [
+        137
+      ],
+      "115": [
+        114
+      ],
+      "111": [
+        110
+      ],
+      "100": [
+        99
+      ],
+      "99": [
+        96
+      ],
+      "97": [
+        96
+      ],
+      "86": [
+        85
+      ],
+      "82": [
+        81
+      ],
+      "69": [
+        68
+      ],
+      "35": [
+        33
+      ],
+      "26": [
+        25
+      ]
+    },
+    "commit_msg_refs": [
+      {
+        "sha": "5d0c9d400885",
+        "landing_pr": 111,
+        "refs": [
+          110
+        ]
+      },
+      {
+        "sha": "52c20a5fed9c",
+        "landing_pr": 82,
+        "refs": [
+          81
+        ]
+      }
+    ],
+    "fix_commits_total_since_2026-08-01": 320,
+    "fix_prs_since_2026-08-01": 48
+  },
+  "metric3_spec_to_delivery": {
+    "specs_top_level": {
+      "files": 37,
+      "matched": 27,
+      "match_rate": 0.73,
+      "days": {
+        "n": 27,
+        "min": 0.0,
+        "p25": 0.11499999999999999,
+        "median": 0.85,
+        "p75": 3.88,
+        "p90": 11.780000000000001,
+        "max": 13.07,
+        "mean": 2.88
+      },
+      "by_method": {
+        "body-names-file": 1,
+        "body-names-file+branch-contains-slug+same-pr-as-file": 10,
+        "body-names-file+same-pr-as-file": 5,
+        "branch-contains-slug+same-pr-as-file": 4,
+        "same-pr-as-file": 7
+      }
+    },
+    "specs_archived": {
+      "files": 7,
+      "matched": 7,
+      "match_rate": 1.0,
+      "days": {
+        "n": 7,
+        "min": 15.2,
+        "p25": 15.97,
+        "median": 15.97,
+        "p75": 15.97,
+        "p90": 16.034,
+        "max": 16.13,
+        "mean": 15.88
+      },
+      "by_method": {
+        "same-pr-as-file": 7
+      }
+    },
+    "plans_top_level": {
+      "files": 50,
+      "matched": 37,
+      "match_rate": 0.74,
+      "days": {
+        "n": 37,
+        "min": 0.01,
+        "p25": 0.08,
+        "median": 0.66,
+        "p75": 2.19,
+        "p90": 11.435999999999998,
+        "max": 23.79,
+        "mean": 2.79
+      },
+      "by_method": {
+        "body-names-file": 1,
+        "body-names-file+branch-contains-slug": 1,
+        "body-names-file+branch-contains-slug+same-pr-as-file": 13,
+        "body-names-file+same-pr-as-file": 5,
+        "branch-contains-slug": 1,
+        "branch-contains-slug+same-pr-as-file": 5,
+        "same-pr-as-file": 11
+      }
+    },
+    "plans_archived": {
+      "files": 6,
+      "matched": 6,
+      "match_rate": 1.0,
+      "days": {
+        "n": 6,
+        "min": 15.2,
+        "p25": 15.97,
+        "median": 15.97,
+        "p75": 15.97,
+        "p90": 16.045,
+        "max": 16.12,
+        "mean": 15.87
+      },
+      "by_method": {
+        "same-pr-as-file": 6
+      }
+    },
+    "all_top_level": {
+      "files": 87,
+      "matched": 64,
+      "match_rate": 0.736,
+      "days": {
+        "n": 64,
+        "min": 0.0,
+        "p25": 0.09,
+        "median": 0.71,
+        "p75": 2.8299999999999996,
+        "p90": 11.781,
+        "max": 23.79,
+        "mean": 2.83
+      },
+      "by_method": {
+        "body-names-file": 2,
+        "body-names-file+branch-contains-slug": 1,
+        "body-names-file+branch-contains-slug+same-pr-as-file": 23,
+        "body-names-file+same-pr-as-file": 10,
+        "branch-contains-slug": 1,
+        "branch-contains-slug+same-pr-as-file": 9,
+        "same-pr-as-file": 18
+      }
+    }
+  },
+  "metric4_interventions": {
+    "reviewed_prs": 62,
+    "rounds_stated": 61,
+    "rounds_not_stated": 1,
+    "rounds": {
+      "n": 61,
+      "min": 1,
+      "p25": 1.0,
+      "median": 2.0,
+      "p75": 3.0,
+      "p90": 4.0,
+      "max": 6,
+      "mean": 2.26
+    },
+    "rounds_hist": {
+      "1": 20,
+      "2": 20,
+      "3": 10,
+      "4": 8,
+      "5": 2,
+      "6": 1
+    },
+    "prs_without_any_review_recorded": 108,
+    "before_pr131": {
+      "prs": 126,
+      "reviewed": 29,
+      "rounds_stated": 29,
+      "rounds": {
+        "n": 29,
+        "min": 1,
+        "p25": 1.0,
+        "median": 1.0,
+        "p75": 2.0,
+        "p90": 2.0,
+        "max": 2,
+        "mean": 1.38
+      },
+      "rounds_hist": {
+        "1": 18,
+        "2": 11
+      }
+    },
+    "from_pr131": {
+      "prs": 44,
+      "reviewed": 33,
+      "rounds_stated": 32,
+      "rounds": {
+        "n": 32,
+        "min": 1,
+        "p25": 2.0,
+        "median": 3.0,
+        "p75": 4.0,
+        "p90": 4.0,
+        "max": 6,
+        "mean": 3.06
+      },
+      "rounds_hist": {
+        "1": 2,
+        "2": 9,
+        "3": 10,
+        "4": 8,
+        "5": 2,
+        "6": 1
+      }
+    }
+  },
+  "metric5_size": {
+    "all": {
+      "changed_files": {
+        "n": 170,
+        "min": 1,
+        "p25": 2.0,
+        "median": 3.5,
+        "p75": 8.0,
+        "p90": 18.1,
+        "max": 66,
+        "mean": 7.05
+      },
+      "lines_changed": {
+        "n": 170,
+        "min": 4,
+        "p25": 64.0,
+        "median": 176.0,
+        "p75": 501.5,
+        "p90": 3188.5,
+        "max": 12995,
+        "mean": 977.58
+      },
+      "additions": {
+        "n": 170,
+        "min": 2,
+        "p25": 59.25,
+        "median": 168.0,
+        "p75": 424.0,
+        "p90": 3041.1,
+        "max": 12995,
+        "mean": 948.71
+      },
+      "deletions": {
+        "n": 170,
+        "min": 0,
+        "p25": 0.0,
+        "median": 4.0,
+        "p75": 26.0,
+        "p90": 69.0,
+        "max": 620,
+        "mean": 28.87
+      }
+    },
+    "code_touching": {
+      "changed_files": {
+        "n": 83,
+        "min": 1,
+        "p25": 4.0,
+        "median": 8.0,
+        "p75": 16.5,
+        "p90": 21.8,
+        "max": 66,
+        "mean": 11.55
+      },
+      "lines_changed": {
+        "n": 83,
+        "min": 40,
+        "p25": 180.0,
+        "median": 428.0,
+        "p75": 2373.0,
+        "p90": 5071.8,
+        "max": 12995,
+        "mean": 1701.93
+      },
+      "additions": {
+        "n": 83,
+        "min": 31,
+        "p25": 167.5,
+        "median": 392.0,
+        "p75": 2308.5,
+        "p90": 4920.8,
+        "max": 12995,
+        "mean": 1648.31
+      },
+      "deletions": {
+        "n": 83,
+        "min": 0,
+        "p25": 8.0,
+        "median": 23.0,
+        "p75": 52.5,
+        "p90": 133.8,
+        "max": 620,
+        "mean": 53.61
+      }
+    },
+    "docs_only": {
+      "changed_files": {
+        "n": 87,
+        "min": 1,
+        "p25": 1.0,
+        "median": 2.0,
+        "p75": 3.0,
+        "p90": 5.4,
+        "max": 22,
+        "mean": 2.76
+      },
+      "lines_changed": {
+        "n": 87,
+        "min": 4,
+        "p25": 30.0,
+        "median": 80.0,
+        "p75": 178.5,
+        "p90": 248.8,
+        "max": 5961,
+        "mean": 286.54
+      },
+      "additions": {
+        "n": 87,
+        "min": 2,
+        "p25": 25.0,
+        "median": 78.0,
+        "p75": 171.0,
+        "p90": 247.2,
+        "max": 5961,
+        "mean": 281.28
+      },
+      "deletions": {
+        "n": 87,
+        "min": 0,
+        "p25": 0.0,
+        "median": 0.0,
+        "p75": 4.0,
+        "p90": 12.8,
+        "max": 67,
+        "mean": 5.26
+      }
+    },
+    "n_docs_only": 87,
+    "n_code_touching": 83,
+    "gh_vs_git_mismatch": [],
+    "gh_vs_git_checked_fields": [
+      "additions",
+      "deletions",
+      "changedFiles"
+    ]
+  },
+  "metric5_definition_count": {
+    "skills/* (dirs)": 30,
+    ".claude/agents/*.md": 17,
+    ".claude/agents/*.md excluding *-EVAL.md and *-REFINE-LOG.md": 16,
+    ".claude/skills/* (entries)": 1,
+    "packs/*/skills/* (entries)": 3,
+    "infra/hermes-agent/skills/* (entries)": 6
+  },
+  "metric5_footprint": {
+    "definition": "skills/skill-eval/SKILL.md:96 (lines x 4 tokens) and :21 (files counted)",
+    "by_location": {
+      "skills": {
+        "skills": 30,
+        "skill_md_lines": {
+          "n": 30,
+          "min": 22,
+          "p25": 36.25,
+          "median": 61.0,
+          "p75": 114.75,
+          "p90": 177.5,
+          "max": 433,
+          "mean": 89.77
+        },
+        "skill_md_lines_total": 2693,
+        "bundled_lines": {
+          "n": 30,
+          "min": 22,
+          "p25": 36.25,
+          "median": 75.5,
+          "p75": 249.0,
+          "p90": 582.1,
+          "max": 2255,
+          "mean": 282.5
+        },
+        "bundled_lines_total": 8475,
+        "binary_skipped": 0
+      },
+      ".claude/skills": {
+        "skills": 1,
+        "skill_md_lines": {
+          "n": 1,
+          "min": 69,
+          "p25": 69,
+          "median": 69,
+          "p75": 69,
+          "p90": 69,
+          "max": 69,
+          "mean": 69.0
+        },
+        "skill_md_lines_total": 69,
+        "bundled_lines": {
+          "n": 1,
+          "min": 69,
+          "p25": 69,
+          "median": 69,
+          "p75": 69,
+          "p90": 69,
+          "max": 69,
+          "mean": 69.0
+        },
+        "bundled_lines_total": 69,
+        "binary_skipped": 0
+      },
+      "packs": {
+        "skills": 3,
+        "skill_md_lines": {
+          "n": 3,
+          "min": 26,
+          "p25": 26.5,
+          "median": 27.0,
+          "p75": 27.0,
+          "p90": 27.0,
+          "max": 27,
+          "mean": 26.67
+        },
+        "skill_md_lines_total": 80,
+        "bundled_lines": {
+          "n": 3,
+          "min": 26,
+          "p25": 26.5,
+          "median": 27.0,
+          "p75": 27.0,
+          "p90": 27.0,
+          "max": 27,
+          "mean": 26.67
+        },
+        "bundled_lines_total": 80,
+        "binary_skipped": 0
+      },
+      "infra/hermes-agent/skills": {
+        "skills": 6,
+        "skill_md_lines": {
+          "n": 6,
+          "min": 36,
+          "p25": 44.25,
+          "median": 64.5,
+          "p75": 90.75,
+          "p90": 101.0,
+          "max": 104,
+          "mean": 67.67
+        },
+        "skill_md_lines_total": 406,
+        "bundled_lines": {
+          "n": 6,
+          "min": 36,
+          "p25": 44.25,
+          "median": 64.5,
+          "p75": 90.75,
+          "p90": 101.0,
+          "max": 104,
+          "mean": 67.67
+        },
+        "bundled_lines_total": 406,
+        "binary_skipped": 0
+      }
+    },
+    "committed_skill_eval_reports": {
+      "with_parsable_footprint": 27,
+      "equal_to_skill_md_lines_at_head": 4,
+      "equal_to_bundled_lines_at_head": 4
+    }
+  }
+}

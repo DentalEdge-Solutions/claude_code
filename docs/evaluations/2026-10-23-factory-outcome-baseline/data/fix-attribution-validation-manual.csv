@@ -1,0 +1,37 @@
+set,earlier_pr,later_pr,verdict,reason
+landref-7d,25,26,fix-known-at-merge,"#26 hardens Content-Length parsing in the proxy #25 added; the framing disagreements were found by #25's scoped re-review and listed in #25 as open follow-ups (known at merge, not an escape)"
+landref-7d,33,35,not-a-fix-of-earlier,"#33 is the bring-up record (docs); F10 was a layout gap in earlier code, found during the bring-up #33 records"
+landref-7d,68,69,not-a-fix-of-earlier,#69 implements the spec #68 defined; fix(...) commits are its own review fixes
+landref-7d,81,82,fix-found-after-merge,"#82 corrects checklist v1.9 from #81, which required a mode the audit tool does not create (escape)"
+landref-7d,85,86,fix-known-at-merge,"B0-R-5: #86 fixes items from #85's review that #85 merged with ('Carried from part 1': SIGTERM during cleanup; proxy.log write failure); known at merge, same rule as #25 by #26"
+landref-7d,96,97,not-a-fix-of-earlier,#97 cites #96 only for batching the box pull
+landref-7d,96,99,not-a-fix-of-earlier,#99 cites #96 only for batching the box pull
+landref-7d,99,100,fix-found-after-merge,#100 keeps the API server off that the v0.21.5 re-pin in #99 turned on; found on the box after #99 (escape)
+landref-7d,110,111,not-a-fix-of-earlier,"#111 changes brain-lint staleness rules; it cites #110 for a recorded lesson, not to fix #110's content"
+landref-7d,114,115,fix-found-after-merge,"#115 corrects summarize-review-bundle.py, added by #114, after the rollout showed a false LOOK line (escape)"
+landref-7d,137,138,not-a-fix-of-earlier,#137 added tests; #138 fixes scanner gaps the tests found in older code
+landref-7d,139,140,not-a-fix-of-earlier,#139 added tests; #140 fixes a harvester gap the tests found in older code
+landref-7d,142,143,fix-found-after-merge,#143 closes real bypasses a re-review found in the guard merged by #142 (escape; #143 also says some predate #142)
+landref-30d,25,26,fix-known-at-merge,as above
+landref-30d,33,35,not-a-fix-of-earlier,as above
+path-sample-7d,73,100,not-a-fix-of-earlier,shared checklist/collector files; #100 is a v0.21.5 upgrade consequence
+path-sample-7d,74,100,not-a-fix-of-earlier,shared files only
+path-sample-7d,67,96,not-a-fix-of-earlier,shared findings document
+path-sample-7d,136,138,not-a-fix-of-earlier,S1-S3 are older scanner gaps
+path-sample-7d,86,92,plausible-fix-found-after-merge,"#92 makes chat audit replies reach Hermes, the chat-trigger path #86 built; found on the box rollout (not referenced)"
+path-sample-7d,71,96,not-a-fix-of-earlier,shared findings/checklist files
+path-sample-7d,137,143,not-a-fix-of-earlier,unrelated (brain guard)
+path-sample-7d,90,96,not-a-fix-of-earlier,#96 is the review #6 follow-up batch
+path-sample-7d,25,35,not-a-fix-of-earlier,F10 layout gap predates #25
+path-sample-7d,121,161,not-a-fix-of-earlier,unrelated (static-scan)
+path-sample-7d,36,38,not-a-fix-of-earlier,#36 is a session prompt (docs)
+path-sample-7d,115,130,not-a-fix-of-earlier,F61 is a pre-existing collector limit
+path-sample-7d,67,92,not-a-fix-of-earlier,shared docs
+path-sample-7d,78,92,not-a-fix-of-earlier,shared files only
+path-sample-7d,86,100,not-a-fix-of-earlier,v0.21.5 upgrade consequence
+path-sample-7d,76,96,not-a-fix-of-earlier,shared runbook
+path-sample-7d,138,163,not-a-fix-of-earlier,unrelated (eval baseline)
+path-sample-7d,73,90,not-a-fix-of-earlier,shared checklist file
+path-sample-7d,137,140,not-a-fix-of-earlier,unrelated (harvester)
+path-sample-7d,86,90,plausible-fix-found-after-merge,#90 fixes a runner restart spin in the runner #86 added (#88 lists it as a follow-up; not referenced)
+proxy-60d-only,164,165,not-a-fix-of-earlier,"B0-R-6: #165 fixes N2, N3, N8, which #164 listed as 'Open, pre-existing' (older installer code); #164 has no complete 7-day window, so the pair is in the 60-day proxy only"

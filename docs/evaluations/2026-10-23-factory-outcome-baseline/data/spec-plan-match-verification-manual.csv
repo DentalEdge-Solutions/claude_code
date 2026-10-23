@@ -1,0 +1,32 @@
+file,verdict,corrected_pr,note
+2026-07-23-hermes-improvement-proposals-design.md,correct,5,Increment 2 shipped in PR #5
+2026-07-24-hermes-kanban-review-pipeline-design.md,correct,5,Increment 1 shipped in PR #5
+2026-07-24-hermes-proposal-draft-pr-design.md,correct,5,Increment 2 shipped in PR #5
+2026-08-03-hermes-ads-read-execute-design.md,correct,5,Increment 3 shipped in PR #5
+2026-08-05-hermes-ads-analyst-pilot-design.md,correct,5,P6 pilot shipped in PR #5
+2026-08-06-two-tier-memory-design.md,correct,7,
+2026-08-12-hermes-mutation-tier-design.md,correct,8,
+2026-08-19-hermes-mutation-syscall-design.md,partial,25,"B0-R-7: three-part delivery: #16 (Plan 1, runtime boundary), #19 (Phase A syscall), #25 (Phase B socket proxy, spec section 6.4); corrected to the last part"
+2026-09-04-s3b-audit-log-integrity-design.md,correct,23,
+2026-09-16-phase-b-proxy-and-units-design.md,correct,25,
+2026-09-18-vps-provisioning-and-bring-up-design.md,correct,30,
+2026-09-21-f10-governance-store-and-spool-layout-design.md,correct,35,
+2026-09-21-vps-first-bring-up-findings.md,not-a-spec,,A findings record kept under specs/ (F1-F62); excluded from the corrected lead time
+2026-09-22-f9-bind-paths-and-proxy-allow-list-design.md,correct,38,
+2026-09-23-f12-approvals-and-run-records-design.md,correct,42,
+2026-09-23-f14-attested-executor-exit-design.md,correct,46,
+2026-09-23-f18-attach-pass-through-design.md,correct,50,
+2026-09-23-proxy-framing-hardening-design.md,correct,48,
+2026-09-24-f19-container-scope-design.md,correct,53,
+2026-09-24-s6b-audit-log-append-only-design.md,correct,57,
+2026-09-28-hermes-security-review-design.md,correct,69,Spec landed in docs-only PR #68; implementation PR #69
+2026-09-29-ads-audits-on-the-box-design.md,correct,75,
+2026-09-30-hermes-chat-triggered-audits-design.md,partial,88,Three-part delivery: #85 (part 1) #86 (part 2) #88 (part 3); corrected to the last part
+2026-10-07-review-9-box-change-design.md,correct,107,
+2026-10-09-review-10-box-change-design.md,correct,114,
+2026-10-13-ads-report-job-design.md,partial,121,Two-plan delivery: #120 (Plan A) and #121 (Plan B); corrected to the last part
+2026-10-21-s11-rm-every-target-design.md,decision-not-implementation,,PR #168 records the decision to accept S11 as a known limit; the design was not built. Excluded from the corrected lead time
+2026-08-24-hermes-governed-syscall.md,correct,25,"B0-R-7: #19 delivered most tasks; #25 delivered Tasks 10-11 (its body: 'Amends Tasks 10-11' of this plan). The last-part rule gives #25, which the automatic rule chose"
+2026-09-30-option-b-1-isolation-and-egress.md,correct,85,
+2026-09-30-option-b-2-chat-trigger.md,correct,86,
+2026-09-30-option-b-3-review-tooling.md,correct,88,

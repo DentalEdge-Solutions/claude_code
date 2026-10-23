@@ -1,0 +1,75 @@
+{
+  "skills": [
+    "skills/agent-adapt",
+    "skills/agent-audit",
+    "skills/agent-eval",
+    "skills/agent-refine",
+    "skills/agent-scout",
+    "skills/brain-capture",
+    "skills/brain-compile",
+    "skills/brain-context-pack",
+    "skills/brain-kernel",
+    "skills/brain-promote",
+    "skills/brain-search",
+    "skills/brain-weekly-review",
+    "skills/capture-learning",
+    "skills/gstack-pattern-audit",
+    "skills/project-audit",
+    "skills/project-brain-bootstrap",
+    "skills/project-idea",
+    "skills/project-setup",
+    "skills/reference-repo-add",
+    "skills/reference-repo-audit",
+    "skills/reference-repo-pattern-extract",
+    "skills/repo-audit",
+    "skills/second-brain-setup",
+    "skills/skill-adapt",
+    "skills/skill-audit",
+    "skills/skill-discovery",
+    "skills/skill-eval",
+    "skills/skill-refine",
+    "skills/skill-scout",
+    "skills/team-eval"
+  ],
+  ".claude/agents": [
+    ".claude/agents/agent-eval-agent.md",
+    ".claude/agents/agent-refine-agent.md",
+    ".claude/agents/repo-audit-ai-llm.md",
+    ".claude/agents/repo-audit-auth.md",
+    ".claude/agents/repo-audit-cicd.md",
+    ".claude/agents/repo-audit-claude-code.md",
+    ".claude/agents/repo-audit-database.md",
+    ".claude/agents/repo-audit-framework.md",
+    ".claude/agents/repo-audit-runtime.md",
+    ".claude/agents/repo-audit-testing.md",
+    ".claude/agents/skill-eval-agent-EVAL.md",
+    ".claude/agents/skill-eval-agent.md",
+    ".claude/agents/skill-guardian.md",
+    ".claude/agents/skill-needs-analysis-agent.md",
+    ".claude/agents/skill-refine-agent.md",
+    ".claude/agents/skill-scout-agent.md",
+    ".claude/agents/skill-synthesizer-agent.md"
+  ],
+  ".claude/skills": [
+    ".claude/skills/codex-eval"
+  ],
+  "packs": {
+    "packs/google-ads": [
+      "packs/google-ads/skills/gads-manage"
+    ],
+    "packs/google-analytics": [
+      "packs/google-analytics/skills/ga-report"
+    ],
+    "packs/wordpress": [
+      "packs/wordpress/skills/wp-manage"
+    ]
+  },
+  "infra/hermes-agent/skills": [
+    "infra/hermes-agent/skills/ads-audits",
+    "infra/hermes-agent/skills/ads-reports",
+    "infra/hermes-agent/skills/claude-code-ads-analyst",
+    "infra/hermes-agent/skills/claude-code-operator",
+    "infra/hermes-agent/skills/claude-code-proposer",
+    "infra/hermes-agent/skills/claude-code-reviewer"
+  ]
+}
