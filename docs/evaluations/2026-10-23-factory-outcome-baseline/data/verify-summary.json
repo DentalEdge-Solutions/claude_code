@@ -1,0 +1,145 @@
+{
+  "top_level_files": 87,
+  "direct_to_main_before_pr_flow": 19,
+  "in_scope": 68,
+  "matched_auto": 64,
+  "unmatched_in_scope": [
+    "2026-09-03-s3b-audit-log-integrity-brief.md",
+    "2026-09-16-phase-b-brief.md",
+    "2026-09-19-tailscale-access-design.md",
+    "2026-10-14-review-11-rollout.md"
+  ],
+  "manual_verdicts": {
+    "correct": 59,
+    "partial": 3,
+    "not-a-spec": 1,
+    "decision-not-implementation": 1
+  },
+  "auto_rule_precision_exact": 0.922,
+  "auto_days": {
+    "n": 64,
+    "min": 0.0,
+    "p25": 0.09,
+    "median": 0.71,
+    "p75": 2.83,
+    "max": 23.79
+  },
+  "corrected_days": {
+    "n": 62,
+    "min": 0.01,
+    "p25": 0.1,
+    "median": 0.84,
+    "p75": 2.85,
+    "max": 28.87
+  },
+  "corrected_days_specs": {
+    "n": 25,
+    "min": 0.04,
+    "p25": 0.28,
+    "median": 0.9,
+    "p75": 4.9,
+    "max": 28.87
+  },
+  "corrected_days_plans": {
+    "n": 37,
+    "min": 0.01,
+    "p25": 0.08,
+    "median": 0.66,
+    "p75": 2.19,
+    "max": 23.79
+  },
+  "fixpr_path_7d_pairs": 382,
+  "review_coverage_by_pr_type": {
+    "code_touching": {
+      "prs": 83,
+      "review_recorded": 53,
+      "first_round_0": 5,
+      "first_round_1+": 9,
+      "first_round_ND": 39
+    },
+    "docs_only": {
+      "prs": 87,
+      "review_recorded": 9,
+      "first_round_0": 0,
+      "first_round_1+": 2,
+      "first_round_ND": 7
+    }
+  },
+  "hand_validated_fixes": {
+    "7d": {
+      "complete_window_prs": 138,
+      "fixes_of_own_change": {
+        "prs": [
+          25,
+          81,
+          85,
+          99,
+          114,
+          142
+        ],
+        "n": 6,
+        "share": 0.043
+      },
+      "with_plausible_unreferenced": {
+        "prs": [
+          25,
+          81,
+          85,
+          86,
+          99,
+          114,
+          142
+        ],
+        "n": 7,
+        "share": 0.051
+      },
+      "found_after_merge": {
+        "prs": [
+          81,
+          99,
+          114,
+          142
+        ],
+        "n": 4,
+        "share": 0.029
+      },
+      "found_after_merge_with_plausible": {
+        "n": 5,
+        "share": 0.036
+      }
+    },
+    "30d": {
+      "complete_window_prs": 37,
+      "fixes_of_own_change": {
+        "prs": [
+          25
+        ],
+        "n": 1,
+        "share": 0.027
+      },
+      "with_plausible_unreferenced": {
+        "prs": [
+          25
+        ],
+        "n": 1,
+        "share": 0.027
+      },
+      "found_after_merge": {
+        "prs": [],
+        "n": 0,
+        "share": 0.0
+      },
+      "found_after_merge_with_plausible": {
+        "n": 0,
+        "share": 0.0
+      }
+    },
+    "proxy_60d": {
+      "landing_prs": 14,
+      "pairs": 14,
+      "pairs_without_verdict": [],
+      "fix_pairs": 6,
+      "found_after_merge_pairs": 4
+    }
+  }
+}

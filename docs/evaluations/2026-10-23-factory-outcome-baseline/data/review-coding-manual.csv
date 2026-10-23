@@ -1,0 +1,72 @@
+pr,review_recorded,review_kind,pr_level_rounds,first_round_blocking,any_round_blocking_incl_per_task,linked_record,linked_first_round_blocking,basis,findings_ids,findings_count_ids,findings_count_stated,first_round_blocking_count
+5,yes,sdd,1,0,ND,,,"Per-task review loop fixed real defects (severity not labelled); each increment 'passed a final whole-branch review (merge-ready)', no fix after it reported | B0-R-9: rounds recoded to 1 by the one-pass rule",,ND,ND,0
+7,yes,sdd,1,ND,ND,,,"Per-task review + opus whole-branch review; outcome of whole-branch review not stated (live gate, not review, found 4 bugs) | B0-R-9: rounds recoded to 1 by the one-pass rule",,ND,ND,ND
+8,yes,whole-branch,1,1+,1+,,,'Review round': two whole-branch passes; two Criticals fixed in a fix round; no re-review stated,,ND,ND,2
+16,yes,sdd,2,1+,1+,,,Eleven per-task reviews + whole-branch review that found one Critical; re-verified by independent probe matrix,,ND,ND,1
+19,yes,sdd,2,1+,1+,,,"Per-task reviews with fix loop; Task 12 seam review: no Criticals, three Important (S3,S6,S7); fix wave; readiness pass | B0-R-9: rounds recoded to 2 by the one-pass rule",,ND,ND,3
+20,yes,final-review,1,ND,ND,,,Final review mentioned only as triaging four deferred minors; whether other findings existed is not stated | B0-R-9: rounds recoded to 1 by the one-pass rule,,ND,ND,ND
+23,yes,final-review,1,ND,ND,,,'after the final review' the gate was changed; finding severity not stated | B0-R-9: rounds recoded to 1 by the one-pass rule,,ND,ND,ND
+25,yes,sdd,2,1+,1+,,,Six task reviews; final whole-branch review found the CL.TE Critical; scoped re-review,,ND,ND,1
+30,yes,sdd,1,ND,ND,,,"Per-task review and re-review; nine defects found during review (severity not stated); final whole-branch review 'returned clean' (reduced-capability model) | B0-R-2: PR comment of 2026-09-20 (before merge) is a review with 3 findings (1 Normal, 2 Nit), contradicting 'returned clean' -> ND",,ND,ND,ND
+42,yes,final-review,1,ND,ND,,,"Review process caught R1,R2 (by tracing); final review found an escaping RuntimeError, fixed; severities not stated | B0-R-9: rounds recoded to 1 by the one-pass rule",R1-R2,2,ND,ND
+57,yes,sdd,2,ND,ND,,,"Per-task reviews (Task 4 one fix round); whole-branch Opus review + one fix wave, re-reviewed; severities not stated",,ND,ND,ND
+61,yes,independent,1,1+,1+,,,"Independent Opus review: two Important + five minor, all fixed",,ND,7,2
+62,yes,independent,2,1+,1+,,,Opus review 'with fixes': 2 Important + 8 minor; scoped re-review confirmed,,ND,10,2
+69,yes,sdd,2,1+,1+,,,"Per-task spec+quality reviews with fix rounds; whole-branch review: 0 Critical, 6 Important, fixed and re-reviewed",,ND,ND,6
+75,yes,sdd,2,ND,ND,,,Every task reviewed; whole-branch review + scoped re-review of the fix wave; severities not stated,,ND,ND,ND
+85,yes,sdd,1,ND,ND,,,Review per task + final whole-branch review; 'residual minors' recorded; outcome of whole-branch round not stated | B0-R-9: rounds recoded to 1 by the one-pass rule,,ND,ND,ND
+86,yes,sdd,1,ND,ND,,,Review per task + final whole-branch review + one fix wave; severities not stated | B0-R-9: rounds recoded to 1 by the one-pass rule,,ND,ND,ND
+96,yes,sdd,1,ND,ND,,,Seven tasks each reviewed with fix rounds; whole-branch review; one fix wave; severities not stated | B0-R-9: rounds recoded to 1 by the one-pass rule,,ND,ND,ND
+97,yes,independent,1,0,0,,,Independent reviewer: Approved; no fix reported,,ND,ND,0
+99,yes,independent,1,0,0,,,Independent review: Approved; no fix reported,,ND,ND,0
+100,yes,independent,2,ND,ND,,,Independent review Approved; one fix round from box measurement and review; scoped re-review | B0-R-1: approved round followed by a fix round and re-review -> ND,,ND,ND,ND
+102,yes,independent,1,1+,1+,,,"Fact-check reviewer raised 17 points, 3 'to fix before publishing'",,ND,17,3
+105,yes,independent,1,1+,1+,,,"Automated security review of first commit (F53,F54 fixed, severity not stated) then independent reviewer: 'One blocker'",,ND,ND,1
+107,yes,sdd,2,ND,ND,,,"Per-task reviewer, whole-branch review, one fix wave + re-review, final edit review; severities not stated | B0-R-9: rounds recoded to 2 by the one-pass rule",,ND,ND,ND
+114,yes,sdd,1,ND,ND,,,"Per-task reviews, whole-branch review, one fix wave; 'No critical or important finding is open' (open, not found) | B0-R-9: rounds recoded to 1 by the one-pass rule",,ND,ND,ND
+115,automated-only,automated,1,ND,ND,,,"Only an automatic review of the first commit (finding fixed, severity not stated); no independent review",,,,
+120,yes,sdd,1,ND,ND,,,Six tasks each reviewed; final whole-branch review; defects fixed; severities not stated | B0-R-9: rounds recoded to 1 by the one-pass rule,,ND,ND,ND
+121,yes,sdd,2,ND,ND,,,Nine tasks each reviewed; two final reviewers on the whole branch; re-review of fixes; severities not stated,,ND,ND,ND
+123,yes,independent,1,0,0,,,Independent review: APPROVE; three minor points applied,,ND,3,0
+130,yes,independent,2,1+,1+,,,Independent review: one blocking issue + two smaller; fixed and confirmed on re-check,,ND,3,1
+131,yes,independent,1,0,0,,,"Independent reviewer (REVIEW_PROTOCOL): findings R1-R7, 'none blocking'",R1-R8,8,ND,0
+132,placeholder,template,ND,ND,ND,,,Review section is the unfilled template ('Findings: none yet'),,,,
+133,placeholder,template,ND,ND,ND,,,"Review section is the unfilled template ('command @ <sha>', 'R1 ...'); HR1-HR9 are findings of a hook audit, not a PR review",,,,
+134,unattributed,content-review-unattributed,ND,ND,ND,,,"Review section is the unfilled template; body records 'a review against live state' with wording fixes C1-C4, reviewer and severity not stated | B0-R-8: reviewer not identified, so not counted as a review by someone other than the author",,,,
+135,placeholder,template,ND,ND,ND,,,Review section is the unfilled template,,,,
+136,unattributed,content-review-unattributed,ND,ND,ND,,,"Review section is the unfilled template; 'review fixes C1-C2' for the brain decision, reviewer and severity not stated | B0-R-8: reviewer not identified, so not counted as a review by someone other than the author",,,,
+138,yes,independent,5,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (S1-S3 repair),ND,"Five independent review rounds + background checks; severities in body not stated. Linked record: R-series unlabelled; later rounds contain Blockers (F1, H1) and NOT READY verdicts",,ND,ND,ND
+141,unattributed,content-review-unattributed,ND,ND,ND,,,"Candidates 'reviewed against the scanner code and the triage record' (C1-C6 incl. two factual errors); reviewer and severity not stated | B0-R-8: reviewer not identified, so not counted as a review by someone other than the author",,,,
+142,yes,independent,3,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (P11 repair),1+,"Body: three rounds, reviewer R1-R9 drove round 2, final APPROVE; severity of round 1 not in body. Linked: round 1 REQUEST CHANGES, R1-R3 blocking",R1-R9,9,ND,ND
+143,yes,independent,4,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (P11 re-review),1+,"Body: rounds 1-4, V1-V5,W1-W5,X1-X3, final approve; severity not in body. Linked: round 1 request changes, V1-V4 blocking",V1-V5 W1-W5 X1-X3,13,ND,ND
+144,yes,independent,2,1+,1+,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (P9 repair),1+,"Two rounds, U1-U5; U1 was blocking (round 1 per numbering; linked record confirms round 1)",U1-U5,5,ND,1
+145,yes,independent,1,ND,ND,,,"Independent review: approve; no fix reported | B0-R-1: reviewer raised P7-1, fixed, and P7-2, recorded -> ND",P7-1 P7-2,2,ND,ND
+146,yes,independent,2,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (P12 repair),0,"Body: reviewer's mutants caught 8/29 at first, tests widened, re-review approve; severity not stated. Linked: 'approved with minor findings'",,ND,ND,ND
+147,yes,independent,2,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (P14 and P10),0,"Body: two re-checks, D-1..D-6, final approve; severity not stated. Linked: 'approved with minor findings'",D-1-D-6,6,ND,ND
+149,yes,independent,5,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (S4-S9 repair),1+,"Body: two background security reviews + five independent rounds, final approve; severity not stated. Linked: round 1 'changes needed', T1-T3 blocker | B0-R-16: findings recounted by the highest-index rule (B to 9, T 11, U 7, W 4, X 3 = 34)",B8 B9 T1-T11 U1-U7 W1-W4 X1-X3,34,ND,ND
+150,yes,independent,2,ND,ND,,,"Two rounds, Y1-Y3 fixed with tests, approve; severity not stated",Y1-Y5 Z1-Z2,7,ND,ND
+151,yes,independent,3,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E2-E6 repair),ND,"Three rounds V1-V8, W1-W5, approve. Linked: round 1 'approved with changes', severities not labelled",V1-V8 W1-W5,13,ND,ND
+152,yes,independent,2,ND,ND,,,"Two rounds, approve; findings and severity not stated",,ND,ND,ND
+154,yes,independent,4,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E7),ND,"Four rounds K1-K7, approve. Linked: round 1 'approve with changes (K1-K4)', unlabelled",K1-K7,7,ND,ND
+155,yes,independent,3,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E9),ND,"Three rounds L1-L7, approve. Linked: round 1 'approve with changes (L1-L5)', unlabelled",L1-L7,7,ND,ND
+156,yes,independent,4,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E8),ND,"Four rounds M1-M9, approve. Linked: round 1 'approve with changes (M1-M5)', unlabelled",M1-M9,9,ND,ND
+157,yes,independent,2,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E13),ND,"Two rounds N1-N6, approve. Linked: round 1 'approve with changes (N1-N6)', unlabelled",N1-N6,6,ND,ND
+158,yes,independent,3,ND,ND,,,Three rounds; R1-R8 closed by the reviewer; severity not stated,R1-R8,8,ND,ND
+159,yes,independent,2,ND,ND,,,"Two rounds; G1-G10 closed; G11,G12 non-blocking (round-2 findings); round-1 severity not stated",G1-G12,12,ND,ND
+160,yes,independent,4,ND,ND,,,"Background security reviews (three fixed) + four independent rounds K1-K23, approved; severity not stated",K1-K23,23,ND,ND
+161,yes,independent,3,ND,ND,,,"Three rounds (P1-P8, Q1-Q6, R1), all closed, approved; severity not stated",P1-P8 Q1-Q6 R1,15,ND,ND
+162,yes,independent,4,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E14/E15),0,"Body: 4 rounds R1-R13, final approve; severity not stated. Linked: round 1 'approve with changes, R1-R8, all minor'; round 3 R11 blocking",R1-R13,13,ND,ND
+163,yes,independent,3,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E10-E12),0,"Body: 3 rounds R1-R10 closed, approve. Linked: round 1 'approve with changes, R1-R7, all minor'",R1-R10,10,ND,ND
+164,yes,independent,3,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (G11/G12),ND,"Body: 3 rounds, approve, N-findings closed. Linked: round 1 'approve with changes', N1 labelled 'major' (not the protocol's blocking/minor scale)",N1-N10,10,ND,ND
+165,yes,independent,3,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (N2/N3),0,"Body: 3 rounds, approve, P1-P12. Linked: round 1 'approve with changes, P1-P9, none blocking'",P1-P12,12,ND,ND
+166,yes,independent,3,ND,ND,docs/evaluations/2026-10-15-pr4-hermes-proposal-triage.md (E16),0,"Body: 3 rounds, approve, Q1-Q12 closed. Linked: round 1 'approve with changes, Q1-Q9, none blocking'",Q1-Q12,12,ND,ND
+167,yes,independent,4,ND,ND,,,"Four rounds, approve, V1-V12 and V14 closed; severity not stated",V1-V14,14,ND,ND
+168,yes,design-review,2,ND,ND,,,Two independent design reviews; each round found more disguises; severity not stated,,ND,ND,ND
+169,yes,independent,4,ND,ND,,,Four rounds R1-R18 closed by the reviewer; severity not stated,R1-R18,18,ND,ND
+170,yes,independent,4,ND,ND,,,"Four rounds C1-C15 closed by the reviewer, approve; severity not stated",C1-C15,15,ND,ND
+171,yes,independent,6,ND,ND,,,"Six rounds R1-R20 closed by the reviewer, approve; severity not stated",R1-R20,20,ND,ND
+172,yes,independent,2,ND,ND,,,Index reviewer: two rounds (I1-I20 closed; I21-I22 cosmetic); four verifiers closed V/C/N items; severity of round 1 not stated,I1-I22,22,ND,ND
+173,yes,independent,3,ND,ND,,,"Index review C1-C17, approved after three rounds; severity not stated",C1-C17,17,ND,ND
+174,yes,independent,ND,ND,ND,,,'two independent reviews and five correction rounds'; round count per review and severity not stated,,ND,ND,ND
+26,none,explicitly-unreviewed,0,ND,ND,,,PR #27 body records that #26 merged without independent review,,,,
+35,spec-review-only,spec-review,ND,ND,ND,,,Only the design spec was 'amended after review: R1-R3'; no review of the PR change recorded,,,,

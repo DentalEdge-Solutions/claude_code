@@ -1,0 +1,321 @@
+sha,landing_pr,landed_at,committed_at,subject,n_files
+d5064b737ddf,5,2026-08-05T19:16:48Z,2026-07-22T14:42:01Z,fix(hermes-agent): harden claude-auth bootstrap (security review),1
+c6945029cdd5,5,2026-08-05T19:16:48Z,2026-07-23T23:14:01Z,fix(hermes): harden proposer helpers (fast-follow from final review),30
+273183e8358f,5,2026-08-05T19:16:48Z,2026-07-24T19:28:03Z,fix(hermes): reviewer synthesis stores proposal in result+metadata (reliable large-doc carrier),1
+9c2d23c8401a,5,2026-08-05T19:16:48Z,2026-07-24T22:47:07Z,fix(hermes): setup-review-team.sh — resolve worker skill + correct describe syntax,1
+47dc5f4fd10f,5,2026-08-05T19:16:48Z,2026-07-24T23:01:01Z,fix(hermes): address final whole-branch review findings (all Minor),5
+0549e6452bae,5,2026-08-05T19:16:48Z,2026-07-25T21:22:29Z,fix(hermes): harden draft-PR write path from final whole-branch review,3
+7f9049a8a4ff,5,2026-08-05T19:16:48Z,2026-08-03T17:21:47Z,fix(hermes): strip inline YAML comments in read-execute registry parser (Inc 3 Task 3 review),2
+7c88417eb953,5,2026-08-05T19:16:48Z,2026-08-03T20:21:20Z,fix(hermes): restrict reader subprocess env + close scrub/cred test gaps (Inc 3 Task 4 review),2
+103fbaf5ee5d,5,2026-08-05T19:16:48Z,2026-08-03T22:09:39Z,fix(hermes): reframe operator read-execute as host-operator capability (Inc 3 Task 5 review),2
+92f1dd3c96bc,5,2026-08-05T19:16:48Z,2026-08-05T14:11:29Z,fix(hermes): collect wrapper — reject unknown args + pre-flight collector check (P6 Task 2 review),1
+470e24679308,5,2026-08-05T19:16:48Z,2026-08-05T14:20:29Z,fix(hermes): keep test_connection in read-execute allow-list (P6 Task 3 review),1
+179bca80c310,5,2026-08-05T19:16:48Z,2026-08-05T17:34:13Z,fix(hermes): close shell-injection + path-traversal in run-ads-audit.sh (P6 Task 4 review),2
+ed34c8b82803,5,2026-08-05T19:16:48Z,2026-08-05T17:42:42Z,fix(hermes): reject explicit empty project arg in run-ads-audit.sh (P6 Task 4 re-review nit),2
+e834001e0273,7,2026-08-12T01:28:43Z,2026-08-06T18:26:21Z,"fix(vault): fullmatch validation, drop roster leak, exit-2 on any error",2
+6dfc7cbde161,7,2026-08-12T01:28:43Z,2026-08-07T12:35:19Z,fix(vault): distinct exit 3 for post-destruction failure; harden guard tests,2
+90e33f8cbe27,7,2026-08-12T01:28:43Z,2026-08-07T12:57:40Z,fix(vault): fail-closed cross-client isolation assertion + temp-file trap,1
+710cf2375c78,7,2026-08-12T01:28:43Z,2026-08-07T18:55:36Z,fix(vault): isolate report inputs per run (clear stale cross-client reports),1
+e8f9f63126eb,7,2026-08-12T01:28:43Z,2026-08-07T18:55:36Z,fix(vault): snapshot reads campaign_perf_30d (the file collection refreshes),2
+89aed1ef6b62,7,2026-08-12T01:28:43Z,2026-08-07T19:22:08Z,fix(vault): scrub real client IDs from tracked files; atomic registry write,8
+e7369d321d75,7,2026-08-12T01:28:43Z,2026-08-12T01:12:38Z,fix(vault): suppress analyst plan-mode preamble in the draft,2
+d642dfeddb3e,8,2026-08-17T15:44:40Z,2026-08-13T14:53:07Z,fix(hermes): refuse non-string identity fields instead of coercing them,2
+5ed427d69f19,8,2026-08-17T15:44:40Z,2026-08-13T15:53:38Z,fix(hermes): refuse duplicate registry keys instead of merging them,2
+862f0559dc14,8,2026-08-17T15:44:40Z,2026-08-13T18:45:42Z,fix(hermes): refuse unreadable approvals; fsync the audit-log directory,2
+8260edfcd140,8,2026-08-17T15:44:40Z,2026-08-14T01:24:38Z,fix(hermes): drop propose's post-write resolve; fsync its directory,2
+0517ec526211,8,2026-08-17T15:44:40Z,2026-08-14T13:09:14Z,"fix(hermes): undo cross-client guard, guard order, resource shape validation",2
+1904d8620083,8,2026-08-17T15:44:40Z,2026-08-16T15:42:12Z,"fix(hermes): restore the spec-mandated Hermes-side undo guard, harden the exit contract",9
+2d5d3d3562db,10,2026-08-18T16:10:09Z,2026-08-17T22:44:10Z,fix(hermes): remove the implicit default account from the read credential,3
+c0df50659cd1,10,2026-08-18T16:10:09Z,2026-08-18T16:09:33Z,fix(hermes): review pass on the credential audit tool,2
+61efeeb9f3b3,11,2026-08-18T19:21:59Z,2026-08-18T18:23:50Z,fix(hermes): refuse to label audit_data with an account it does not belong to,2
+f2268d385814,16,2026-08-24T17:01:38Z,2026-08-19T19:25:32Z,fix(hermes): make the vault-location regression test actually discriminate,1
+5319a847344f,16,2026-08-24T17:01:38Z,2026-08-19T22:42:58Z,fix(hermes): close review gaps in approval snapshot tests and edge cases,3
+8956a942c146,16,2026-08-24T17:01:38Z,2026-08-20T15:37:02Z,fix(hermes): close retry-poisoning and truncation gaps in the governance migration,2
+26c3c3c8a89a,16,2026-08-24T17:01:38Z,2026-08-20T21:14:35Z,fix(hermes): persist result.json at the canonical changeset_lib path,2
+5b294ba85276,16,2026-08-24T17:01:38Z,2026-08-20T21:37:04Z,fix(hermes): mount seen/ read-write and stop persist failures masking executor status,2
+725688214362,16,2026-08-24T17:01:38Z,2026-08-21T02:12:09Z,fix(hermes): scope the mask-mount invariant to real mounts; make the tmpfs mask read-only,2
+8b5eba4140b2,16,2026-08-24T17:01:38Z,2026-08-21T12:53:44Z,fix(hermes): close the host-side symlink escape and correct four overclaimed guarantees,18
+2c353842d820,18,2026-08-26T13:54:02Z,2026-08-25T19:51:12Z,fix(ci): replace static-scan-skills job with a reviewed baseline diff,4
+c6b0ffdbd8db,18,2026-08-26T13:54:02Z,2026-08-25T19:51:12Z,fix(skills): add compatibility field and meaningful Use-when clauses,16
+3c2d8069afb0,19,2026-08-31T13:39:02Z,2026-08-24T19:59:29Z,fix(hermes): make the partial-file test observe the mid-write state it names,1
+4cc3423c9f96,19,2026-08-31T13:39:02Z,2026-08-24T20:10:08Z,fix(hermes): stop syscall client from leaking raw exception text on refusal,2
+19c198822330,19,2026-08-31T13:39:02Z,2026-08-25T01:27:22Z,fix(hermes): make reserve_approval/record_outcome self-defending against concurrent callers,3
+bbc6a6338cd8,19,2026-08-31T13:39:02Z,2026-08-25T01:36:18Z,fix(hermes): close write_approval's shared-tmp-path race with the same approval lock,2
+919c5e2b4128,19,2026-08-31T13:39:02Z,2026-08-25T09:05:47Z,fix(hermes): stop the broker from converting Task 6's stub into a refusal,1
+bb866712681f,19,2026-08-31T13:39:02Z,2026-08-25T09:30:22Z,fix(hermes): stop a single poisoned spool entry from bricking the broker,3
+bf3671b4f21d,19,2026-08-31T13:39:02Z,2026-08-25T19:25:41Z,fix(hermes): guard against false refusals and detail-lookup KeyError in broker execute,2
+6dc2349cd76a,19,2026-08-31T13:39:02Z,2026-08-26T02:52:21Z,fix(hermes): bound run-bin-tests.sh per-suite so a hang cannot wedge the runner,1
+7395e82030e4,19,2026-08-31T13:39:02Z,2026-08-26T03:04:01Z,fix(hermes): fail closed on a malformed run-bin-tests timeout value,1
+f72bfc0749d3,19,2026-08-31T13:39:02Z,2026-08-26T03:04:01Z,fix(hermes): reject non-positive --interval at parse time,2
+516aaa0363e9,19,2026-08-31T13:39:02Z,2026-08-26T03:12:43Z,"fix(hermes): stat governance-store FILES too, not just directories (R19)",2
+53f612b95d88,19,2026-08-31T13:39:02Z,2026-08-26T03:22:52Z,"fix(hermes): allowlist approval-file suffixes, stop false-refusing reserved stores",2
+022526ada331,19,2026-08-31T13:39:02Z,2026-08-26T07:36:38Z,"fix(hermes): close R20 residuals — hardlinks, directory TOCTOU, mkdir-before-check",2
+f67931c773b7,19,2026-08-31T13:39:02Z,2026-08-26T07:55:33Z,fix(hermes): close the R20(a) O_TRUNC hardlink window structurally (O_EXCL),2
+4bcf1d0b2a0a,19,2026-08-31T13:39:02Z,2026-08-26T08:11:59Z,fix(hermes): require --expect-sha256 so approval binds the reviewed bytes by default,5
+ca9d30bfa26d,19,2026-08-31T13:39:02Z,2026-08-27T12:55:30Z,fix(hermes): stop exposing the seen-set to the governed party (S3-a),4
+85368d986177,19,2026-08-31T13:39:02Z,2026-08-27T12:58:48Z,fix(hermes): withhold the resolved customer id from the emitted run record (S7),3
+4f4c1ef16eaf,19,2026-08-31T13:39:02Z,2026-08-27T13:05:17Z,fix(hermes): stop the broker bypassing its own fixed-vocabulary detail policy (S6),4
+976a57066383,19,2026-08-31T13:39:02Z,2026-08-27T13:10:05Z,fix(hermes): close the dir_fd guard's drift and stop its exception escaping (S1-M1),3
+0ad965af25c8,19,2026-08-31T13:39:02Z,2026-08-27T17:50:26Z,"fix(hermes): an fstat failure in _open_regular_ro is a refusal, not a raw OSError",2
+22f3aa092cba,19,2026-08-31T13:39:02Z,2026-08-27T17:52:23Z,fix(hermes): an unreachable spool is not a usage error in hermes-syscall,2
+1214f290e7f4,19,2026-08-31T13:39:02Z,2026-08-27T17:57:14Z,"fix(hermes): stop swallowing persist refusals, which are attack detections (S1-M2)",2
+c84c07760cfb,19,2026-08-31T13:39:02Z,2026-08-27T17:58:55Z,fix(hermes): check the approvals slug directory's own traverse bits (S5-M1),2
+f2c29225a3fc,19,2026-08-31T13:39:02Z,2026-08-27T18:00:47Z,fix(hermes): allowlist the log/ walk so a rotated log cannot block startup (S5-M2),2
+9f31ae1271f2,19,2026-08-31T13:39:02Z,2026-08-27T18:02:31Z,"fix(hermes): an unhashable exit_code is a refusal, not an uncaught TypeError (S6-M1)",2
+703d6d7b3970,20,2026-09-03T18:57:33Z,2026-09-02T15:43:35Z,fix(hermes): let the executor accept the reservation made for its own run,2
+1624cd707d5b,20,2026-09-03T18:57:33Z,2026-09-02T17:23:50Z,fix(hermes): broker passes the request id it reserved the approval with,2
+fc3d92e199af,20,2026-09-03T18:57:33Z,2026-09-03T13:12:13Z,fix(hermes): stop docstrings claiming the broker can retry its own reservation,1
+66458791f074,20,2026-09-03T18:57:33Z,2026-09-03T13:12:18Z,fix(hermes): unify REQUEST_ID_RE into governance_lib to stop the drift,3
+abeb6621f50d,23,2026-09-16T13:41:39Z,2026-09-04T19:11:09Z,"fix(hermes): require read+traverse on log/, not write (S3-b 1 of 4)",4
+372fb9716fe5,23,2026-09-16T13:41:39Z,2026-09-04T22:16:30Z,"fix(hermes): revert bootstrap_logs' dry_run default, close the O_EXCL coverage gap (S3-b 2 of 4, fix round 1)",2
+a467888f71ca,23,2026-09-16T13:41:39Z,2026-09-04T22:33:14Z,fix(hermes): refuse at startup when a registered client has no log (S3-b 3 of 4),2
+f91e1f1321b3,23,2026-09-16T13:41:39Z,2026-09-04T22:45:10Z,"fix(hermes): make the registered-logs refusal's count assertion discriminating (S3-b 3 of 4, fix round 2)",2
+0803adfe9166,23,2026-09-16T13:41:39Z,2026-09-04T23:03:51Z,fix(hermes): a missing audit log fails closed (S3-b 4 of 4),4
+cdb92373227f,23,2026-09-16T13:41:39Z,2026-09-05T14:54:17Z,fix(hermes): close ownership-remedy hazard that reinstated the D-finding,2
+3d23200dbb9e,23,2026-09-16T13:41:39Z,2026-09-05T15:04:10Z,fix(hermes): close I1-I4 findings from the S3-b final review,8
+fdeda94fac08,23,2026-09-16T13:41:39Z,2026-09-06T20:33:06Z,fix(hermes): enforce no-executor-write on log/ in the pre-flight gate,3
+a58b44b07cfc,23,2026-09-16T13:41:39Z,2026-09-16T13:35:26Z,fix(hermes): carve log/ out of the CLI test's store — it was red on Linux CI,1
+450b51b09a9a,25,2026-09-17T14:28:40Z,2026-09-16T19:13:59Z,"fix(hermes): bound response buffering, guard chunk parsing, fix a real header/body split",2
+582072a414a9,25,2026-09-17T14:28:40Z,2026-09-17T00:22:02Z,"fix(hermes): units.test.py governance-group guard was illusory, not the config",1
+341ed1e91f86,25,2026-09-17T14:28:40Z,2026-09-17T00:57:46Z,fix(hermes): refuse Transfer-Encoding on requests to close CL.TE smuggling,2
+65df9b1cb339,26,2026-09-17T21:48:20Z,2026-09-17T14:52:35Z,"fix(hermes): parse Content-Length the way HTTP defines it, not the way Python does",2
+bd9872f19598,30,2026-09-21T13:45:07Z,2026-09-18T18:34:53Z,fix(hermes/deploy): close false-pass vector in reserved-name refusal test,1
+9db6add734c3,30,2026-09-21T13:45:07Z,2026-09-18T18:41:51Z,fix(hermes/deploy): make the strictness test check activation and position,2
+fe4fccd6e8d3,30,2026-09-21T13:45:07Z,2026-09-18T18:59:03Z,fix(hermes/deploy): parse os-release instead of sourcing it (Fix round 1),2
+880f858a6c78,30,2026-09-21T13:45:07Z,2026-09-19T01:36:27Z,fix(hermes/deploy): check_* parity gaps and SSH_PUBKEY validation (Fix round 1),2
+019ab913701e,30,2026-09-21T13:45:07Z,2026-09-19T03:04:19Z,fix(hermes/deploy): parity blind spot and structural SSH_PUBKEY validation (Fix round 2),2
+e3b78d0f4646,30,2026-09-21T13:45:07Z,2026-09-19T03:18:25Z,fix(hermes/deploy): single source of truth for sshd policy (Fix round 3),2
+77ee5af0c783,30,2026-09-21T13:45:07Z,2026-09-19T08:14:38Z,fix(hermes/deploy): check_firewall must use verbose ufw status (Fix round 1),2
+10b8cc7423d7,30,2026-09-21T13:45:07Z,2026-09-19T08:28:34Z,"fix(hermes/deploy): pin LC_ALL=C, ufw's status strings are locale-dependent (Fix round 2)",2
+84c586bb5b80,30,2026-09-21T13:45:07Z,2026-09-19T14:17:57Z,"fix(hermes/deploy): never source the os-release file, anywhere (Fix round 1)",2
+ed734ec2f572,30,2026-09-21T13:45:07Z,2026-09-19T14:31:18Z,fix(hermes/bring-up): check count and permission handling,1
+784add78efea,30,2026-09-21T13:45:07Z,2026-09-20T17:01:35Z,"fix(provision): add authorized_keys and unattended-upgrades checks, extract in_group helper, fix test masking",3
+83971dd8b4c2,35,2026-09-22T13:10:08Z,2026-09-21T23:31:41Z,"fix(hermes): F10 apply — report failed rollback, prove order and post-create check",2
+d28e6a7ac57e,35,2026-09-22T13:10:08Z,2026-09-21T23:42:09Z,fix(hermes): init-host-layout surfaces the rollback note,2
+ff5e30d5c6e7,35,2026-09-22T13:10:08Z,2026-09-21T23:45:46Z,"fix(hermes): spool files are 0640, set on the fd (F10a)",4
+9819592c4c4c,35,2026-09-22T13:10:08Z,2026-09-21T23:50:25Z,fix(hermes): spool fchmod inside the file object so the fd cannot leak,2
+8bb275a0f0db,35,2026-09-22T13:10:08Z,2026-09-21T23:53:56Z,"fix(hermes): verify .quarantine before use; rmdir empty planted dirs (F10b, R1)",2
+c943401ecfad,35,2026-09-22T13:10:08Z,2026-09-22T00:01:27Z,"fix(hermes): pre-flight says 'missing' or 'cannot enter', once (F10)",3
+c7d50ff9a2bc,35,2026-09-22T13:10:08Z,2026-09-22T02:20:21Z,fix(hermes): host_layout refuses overlapping store and spool roots (F10 M6),2
+164bf0caf9dc,35,2026-09-22T13:10:08Z,2026-09-22T02:20:21Z,fix(hermes): broker never overwrites a completed result with a refusal (F10 I2),2
+59f93a7be9b3,38,2026-09-22T18:45:05Z,2026-09-22T17:09:10Z,fix(hermes): bind_agreement — document unit_exec_args contract for interpreter+script,2
+e200b2237db7,38,2026-09-22T18:45:05Z,2026-09-22T17:11:53Z,fix(hermes): bind_agreement — add allow_binds clarification to unit_exec_args docstring,1
+bfa50ad51651,38,2026-09-22T18:45:05Z,2026-09-22T17:16:37Z,"fix(hermes): F9 — absolute executor bind sources, pinned against the proxy",5
+ef4fe84718af,38,2026-09-22T18:45:05Z,2026-09-22T17:23:54Z,fix(hermes): F9 — the mutation wrapper never lets Compose read .env,4
+5caca9153ac6,38,2026-09-22T18:45:05Z,2026-09-22T17:40:23Z,fix(hermes): F9 Tier 2 — the host-safety guard must also check the spool,1
+c823db06acd9,38,2026-09-22T18:45:05Z,2026-09-22T17:57:49Z,fix(hermes): F9 Tier 2 — create the store/spool's shared parent before --apply,1
+78c53cc256f1,38,2026-09-22T18:45:05Z,2026-09-22T18:23:57Z,"fix(hermes): final-review findings — F9 renumbering, runbook/wrapper drift guard, integration-test blast radius, hostenv",8
+a9087764abea,40,2026-09-22T19:54:12Z,2026-09-22T19:48:48Z,fix(hermes): F15 — the proxy unit's script must be executable in git,5
+4181f7710f89,42,2026-09-23T16:48:32Z,2026-09-23T14:02:49Z,fix(hermes): F12 — run records are written into the governance store,4
+1937df71f39c,42,2026-09-23T16:48:32Z,2026-09-23T14:27:23Z,"fix(hermes): F12 review — setgid mode, layout-is-a-prerequisite, name validation order",4
+ccde58ac97c4,42,2026-09-23T16:48:32Z,2026-09-23T14:36:14Z,fix(hermes): F12 — approval artifacts get explicit modes and ownership,2
+9e8ca0a1213f,42,2026-09-23T16:48:32Z,2026-09-23T14:48:25Z,fix(hermes): F12 — approve-changeset refuses non-root on Linux,3
+cb78460ef287,42,2026-09-23T16:48:32Z,2026-09-23T15:04:27Z,fix(hermes): F12 R2 — the per-client approvals dir gets owner and mode too,2
+50440c4eddf9,42,2026-09-23T16:48:32Z,2026-09-23T15:15:47Z,"fix(hermes): F12 Tier 2 review — R2 control, real per-slug dirs, group-read proof",1
+7183e5e19625,42,2026-09-23T16:48:32Z,2026-09-23T15:25:25Z,"fix(hermes): F12 R2 review — sound control, actionable EPERM, third makedirs closed",2
+0b8588db3668,42,2026-09-23T16:48:32Z,2026-09-23T16:16:36Z,fix(hermes): F12 C1 — _apply_owner_mode's RuntimeError is caught by both callers,4
+a094b5472281,42,2026-09-23T16:48:32Z,2026-09-23T16:16:58Z,"fix(hermes): F12 C2/I1 — fire the records-root refusal, stop calling a setup slip an attack",6
+b788dd8ac351,42,2026-09-23T16:48:32Z,2026-09-23T16:39:53Z,fix(hermes): F12 CI — approve-changeset tests reach real logic on non-root Linux,1
+d2e22ad99a84,46,2026-09-23T19:17:05Z,2026-09-23T18:40:30Z,fix(hermes): F14 — the executor attests the exits it chose,2
+726d42fb07a6,46,2026-09-23T19:17:05Z,2026-09-23T18:45:04Z,fix(hermes): F14 — the wrapper trusts only an attested exit; else 4,2
+b0c084a4f0de,46,2026-09-23T19:17:05Z,2026-09-23T18:48:58Z,fix(hermes): F14 — broker and client read status 4 as possibly modified,5
+489127f79340,46,2026-09-23T19:17:05Z,2026-09-23T19:07:19Z,fix(hermes): F14 review — set +eu after Compose; comments say $final decides,3
+6d9e2dc00e4c,48,2026-09-23T22:19:51Z,2026-09-23T21:25:17Z,"fix(hermes): framing hardening — _parse_head, a strict request-head grammar",2
+a580b4dffa75,48,2026-09-23T22:19:51Z,2026-09-23T21:28:13Z,fix(hermes): framing hardening — bound Content-Length to 19 digits,2
+f8a883a3844f,48,2026-09-23T22:19:51Z,2026-09-23T21:31:57Z,fix(hermes): framing hardening — _handle refuses any head _parse_head refuses,2
+8af98e1e3480,48,2026-09-23T22:19:51Z,2026-09-23T21:40:46Z,fix(hermes): UMask=0077 on the proxy and broker units,4
+ecc4cf712b07,50,2026-09-24T13:16:12Z,2026-09-24T12:14:20Z,fix(hermes): F18 — one definition of attach; a strict upstream status reader,2
+76618c57a92e,50,2026-09-24T13:16:12Z,2026-09-24T12:20:33Z,fix(hermes): F18 — pass through only for an attach dockerd upgraded; else relay and close,2
+eec858d4a3ab,50,2026-09-24T13:16:12Z,2026-09-24T12:45:21Z,fix(hermes): F18 review — log DENY-FOLLOWUP on every attach exit,2
+42fd27524965,53,2026-09-24T16:58:58Z,2026-09-24T15:28:04Z,fix(hermes): F19 — container-scoped entries take only a full 64-hex id,2
+6f0112e7a5cc,53,2026-09-24T16:58:58Z,2026-09-24T15:59:32Z,fix(hermes): F19 — container-scoped calls are forwarded only to ads-mutator runs,2
+707b75710178,53,2026-09-24T16:58:58Z,2026-09-24T16:39:10Z,fix(hermes): F19 residual — narrow the CI no-DENY gate to the target check,4
+6cdf1f62305b,57,2026-09-25T15:16:25Z,2026-09-24T19:42:05Z,fix(hermes): §6B close the silent-pass gap in the already-reported skip,2
+bd28e9484e06,57,2026-09-25T15:16:25Z,2026-09-24T20:06:45Z,"fix(hermes): §6B final review — sealed-log chmod remedy, same-fd verify, migrated mode, F21",6
+9be447d346d7,62,2026-09-25T19:05:48Z,2026-09-25T18:53:22Z,fix(hermes): F22 — broker ProtectHome=tmpfs so the Docker client finds its Compose plugin,4
+8e244c0520fe,62,2026-09-25T19:05:48Z,2026-09-25T19:00:17Z,fix(hermes): F22 review — sandbox test carries every unit directive (deny-list); re-run pre-check; installed-unit verifi,4
+856fef501db0,69,2026-09-29T12:14:27Z,2026-09-28T15:26:25Z,fix(hermes): verify_installed — catch FileNotFoundError and raise ValueError (spec §6.5),2
+84f127065eb2,69,2026-09-29T12:14:27Z,2026-09-28T16:45:41Z,"fix(hermes): tighten slug-boundary redaction, fail-closed getent group probes (Task 7 review round 1)",4
+c5b9aeccc310,69,2026-09-29T12:14:27Z,2026-09-28T17:18:25Z,"fix(hermes): Task 8 review round 1 — discriminating redaction test, full main/package_hash coverage, ITEMS function refe",2
+3327e68925c8,69,2026-09-29T12:14:27Z,2026-09-28T18:17:03Z,fix(hermes): Task 8 review round 2 — exercise real package_hash against temp repo,2
+820d0e0b70ea,69,2026-09-29T12:14:27Z,2026-09-28T19:06:03Z,"fix(hermes): clarify D5.4 dormant_pilots rule, bump checklist version to 1.1",1
+505300b7d494,69,2026-09-29T12:14:27Z,2026-09-28T20:22:18Z,"fix(hermes): make the credential sweep honest (final-review Group A, E4)",4
+fa7253e43df8,69,2026-09-29T12:14:27Z,2026-09-28T20:22:31Z,fix(hermes): run guard 7's mutator in isolated mode (final-review Group C),2
+6268b2daaae1,69,2026-09-29T12:14:27Z,2026-09-28T20:22:41Z,"fix(hermes): cheap minors — unused import, package_hash scratch-dir leak (final-review Group E)",4
+bb584ec89d42,69,2026-09-29T12:14:27Z,2026-09-29T01:29:48Z,fix(hermes): stop hashing volatile firewall output in the box fingerprint,5
+9a3816aa044f,69,2026-09-29T12:14:27Z,2026-09-29T01:56:49Z,fix(hermes): stop hashing fail2ban's live ban list in the box fingerprint,4
+15ddc905ae88,75,2026-09-29T21:53:49Z,2026-09-29T19:51:23Z,fix(hermes): audit-mounts test sets every required compose variable; negative tests assert the right failure,1
+444948bc2eac,75,2026-09-29T21:53:49Z,2026-09-29T19:53:13Z,fix(hermes): audit-mounts test gives compose an empty gateway env file and shows config stderr,1
+94bee099203d,75,2026-09-29T21:53:49Z,2026-09-29T20:03:48Z,fix(hermes): run-client-audit — isolation check before vault-write; plan() inside the pre-check try,2
+727846773eb4,75,2026-09-29T21:53:49Z,2026-09-29T20:23:41Z,fix(hermes): client_audit_lib refuses a registry customer id that is not exactly 10 digits (M7),2
+3b84939758c9,75,2026-09-29T21:53:49Z,2026-09-29T20:25:56Z,fix(hermes): run-client-audit logs move out of the collector's rw mount; O_EXCL|O_NOFOLLOW everywhere root touches (C1),4
+4c41d48f1969,75,2026-09-29T21:53:49Z,2026-09-29T20:26:28Z,fix(hermes): run-client-audit names each compose run container and removes it on timeout; analyst under timeout 1150 (I2,2
+21b856519841,75,2026-09-29T21:53:49Z,2026-09-29T20:26:48Z,fix(hermes): run-client-audit removes the transient draft on every exit path (I3),2
+905cb946c5b3,75,2026-09-29T21:53:49Z,2026-09-29T20:27:37Z,"fix(hermes): run-client-audit passes ISO collected-at, inline draft values, and catches Type/AttributeError (M8, M9, M12",2
+0c4d10bb3405,75,2026-09-29T21:53:49Z,2026-09-29T20:28:17Z,fix(hermes): D7.1 vault rows carry the registry status; checklist fails retired/unregistered rows and pins audit-logs (I,3
+bc8d917d5b3f,75,2026-09-29T21:53:49Z,2026-09-29T21:33:31Z,fix(hermes): root reaches data/ one O_NOFOLLOW component at a time; a planted symlink is rc 1 (F1),4
+71ff95a1a787,75,2026-09-29T21:53:49Z,2026-09-29T21:34:08Z,"fix(hermes): the metrics snapshot runs as uid 10000, not root, over collector-controlled files (F2)",2
+f078219117b5,75,2026-09-29T21:53:49Z,2026-09-29T21:34:19Z,"fix(hermes): the in-container analyst timeout gets a hard kill, timeout -k 30 1150 (F3)",2
+59902cce2b90,75,2026-09-29T21:53:49Z,2026-09-29T21:48:04Z,fix(hermes): the packaged-doc id guard also refuses any run of 10+ digits (campaign and ad-group ids),2
+4647a8bd5cfd,77,2026-09-30T13:06:03Z,2026-09-30T13:02:43Z,fix(hermes): run-client-audit passes compose the symlink-resolved path,1
+155bd2266d59,78,2026-09-30T14:15:22Z,2026-09-30T14:07:34Z,fix(hermes): run-client-audit ensures data/reports belongs to the container uid,3
+66af8cba020e,78,2026-09-30T14:15:22Z,2026-09-30T14:09:59Z,"fix(hermes): ensure_reports_dir review round 1 (unmasked tests, chown/chmod on owned dir, fail closed without data/)",2
+c9fcc552197c,81,2026-09-30T15:00:16Z,2026-09-30T14:54:52Z,fix(hermes): resolve host script dirs with pwd -P so compose binds never go through the symlink,9
+21a4c986a595,81,2026-09-30T15:00:16Z,2026-09-30T14:57:49Z,"fix(hermes): register-client refusal tests assert their reason; owner-only .new, robust post-swap summary",2
+0540a13110de,81,2026-09-30T15:00:16Z,2026-09-30T14:57:58Z,"fix(hermes): D7.1 probes use lstat, report symlinked roots; checklist names the keys and roots' owner",3
+52c20a5fed9c,82,2026-09-30T15:26:41Z,2026-09-30T15:16:46Z,"fix(hermes): checklist v1.10 — audit_logs rows are 0o711, not 0o700",1
+99ab5f5ffd81,85,2026-10-01T12:15:12Z,2026-10-01T01:03:15Z,"fix(hermes): egress-proxy fixes for port validation, pump error handling, and log safety",2
+19a2df9ccba1,85,2026-10-01T12:15:12Z,2026-10-01T01:11:20Z,"fix(hermes): egress-proxy fix round 2 - byte count preservation, log polling, dynamic ports",2
+0ca1d13131d9,85,2026-10-01T12:15:12Z,2026-10-01T01:18:43Z,"fix(hermes): egress-proxy fix round 3 - cleanup, finally block, bare except",2
+3d71f79edc34,85,2026-10-01T12:15:12Z,2026-10-01T01:22:42Z,fix(hermes): egress-proxy fix round 4 — discriminating _pump and client-gone tests,2
+c614e31f2725,85,2026-10-01T12:15:12Z,2026-10-01T01:41:32Z,fix(hermes): run-client-audit --json prints one line on unexpected exceptions too (Review Focus 5),2
+6158b97f373f,85,2026-10-01T12:15:12Z,2026-10-01T01:46:26Z,"fix(hermes): install-env-secret — cleanup on rename failure, full writes, no getpass stdin fallback, byte-exact lines",2
+a4d390910345,85,2026-10-01T12:15:12Z,2026-10-01T01:51:53Z,"fix(hermes): migrate-client-data — gate removal on an unchanged source, O_NOFOLLOW verify",2
+089aeba74a0c,85,2026-10-01T12:15:12Z,2026-10-01T02:08:52Z,"fix(hermes): run-client-audit — SIGTERM runs cleanup, proxy decision log kept, cleanup bounded",3
+88145a1a5886,85,2026-10-01T12:15:12Z,2026-10-01T02:12:32Z,"fix(hermes): seams test gets .env.anthropic, drafter DNS probe, proxy limits, BRING-UP part-1 gate/checks/rollback, spec",4
+a58c78fe2cd7,85,2026-10-01T12:15:12Z,2026-10-01T02:12:32Z,"fix(hermes): migrate-client-data rc 3 on source-removal failure, dirs applied top-last; show-audit strips terminal contr",4
+b87253d8306b,86,2026-10-01T13:36:50Z,2026-10-01T12:26:12Z,"fix(hermes): app_lib review round 1 — torn-line-safe ledger append, ordered release, status-tied reasons, vault_path ts ",2
+f038890448f6,86,2026-10-01T13:36:50Z,2026-10-01T12:40:36Z,"fix(hermes): app broker review round 1 — directory DoS, result before ledger, one journal line per request",2
+d96be0fe7be5,86,2026-10-01T13:36:50Z,2026-10-01T12:44:16Z,"fix(hermes): app broker review round 2 — failed job write closes its reservation, an orphan result stands",2
+802e0619dbd9,86,2026-10-01T13:36:50Z,2026-10-01T12:48:49Z,"fix(hermes): run-client-audit — hold SIGTERM during cleanup, a failed proxy.log write never skips rm (part 1 carried)",2
+689a9b461407,86,2026-10-01T13:36:50Z,2026-10-01T13:10:31Z,fix(hermes): a stranded job temp file can no longer wedge the runner path unit,6
+e33a19c759b8,86,2026-10-01T13:36:50Z,2026-10-01T13:12:48Z,"fix(hermes): broker ledger reads once per pass, caps recorded refusals, recovers periodically",4
+515ae3f11d6b,86,2026-10-01T13:36:50Z,2026-10-01T13:14:17Z,fix(hermes): runner recovery keeps a real done; a non-file job entry never crashes it,3
+f089e4564f3d,88,2026-10-01T17:25:22Z,2026-10-01T14:30:46Z,fix(hermes): env probe reports sentinel-holding env names (spec §8),2
+e2e2c68ff3bd,88,2026-10-01T17:25:22Z,2026-10-01T15:09:20Z,fix(hermes): D10.8 whitelist never raises on nested JSON; D10.7 counts the runner journal too,4
+1fa5b4569527,88,2026-10-01T17:25:22Z,2026-10-01T15:37:15Z,fix(hermes): nsfs handles reach memory_sweep; checklist D4.2/D10.2 wording; D10.7 live checks in BRING-UP,4
+1e17e3d8b3aa,88,2026-10-01T17:25:22Z,2026-10-01T16:15:41Z,fix(hermes): laptop review collector refuses a key file with group or other access,2
+7dc12b95805e,88,2026-10-01T17:25:22Z,2026-10-01T16:15:41Z,fix(hermes): egress probe measures the DNS exit; probe_runner echoes a bounded stderr tail,2
+a0e02a177137,88,2026-10-01T17:25:22Z,2026-10-01T16:15:41Z,fix(hermes): review collector — D10.6 compares the MCP block instead of printing it; OpenRouter key joins the known secr,2
+e78a96b08795,88,2026-10-01T17:25:22Z,2026-10-01T17:08:53Z,fix(hermes): D10.6 — secret check before the listing cut; checklist states the block comparison's limit,3
+3b2c1af1e36c,90,2026-10-01T19:15:49Z,2026-10-01T18:22:48Z,fix(hermes): broker sweeps stray entries out of jobs/ every pass (runner restart spin),2
+839c0aba50fa,90,2026-10-01T19:15:49Z,2026-10-01T18:30:08Z,fix(hermes): sweep jobs/ before recover(); pin no-follow and matching-name cases in tests,3
+42c00eb3f63a,92,2026-10-02T14:33:25Z,2026-10-02T13:04:37Z,fix(hermes): app MCP server answers pings while a call waits (chat audit replies were lost),2
+5572782ad710,92,2026-10-02T14:33:25Z,2026-10-02T13:21:32Z,fix(hermes): MCP server sets closed on any loop exit; runbook and test margins from review,3
+eb16bfa73bbb,92,2026-10-02T14:33:25Z,2026-10-02T13:57:37Z,fix(hermes): D10.6 compares the parsed MCP block (the gateway rewrites config.yaml); checklist v1.13,5
+faf24bcbab4e,92,2026-10-02T14:33:25Z,2026-10-02T14:15:41Z,fix(hermes): D10.6 parser limits apply to the block only; checklist states each refusal,4
+93dd274368f7,96,2026-10-02T23:21:18Z,2026-10-02T19:05:24Z,fix(hermes): load_env_value strips an inline comment,2
+3101fc329c91,96,2026-10-02T23:21:18Z,2026-10-02T19:08:00Z,fix(hermes): probes report a mounted credential file and their own exit codes,2
+d41dc901ba99,96,2026-10-02T23:21:18Z,2026-10-02T19:10:50Z,fix(hermes): collector lets a timed-out probe clean up; D10.3 keeps its other parts,2
+494bbffbdbcf,96,2026-10-02T23:21:18Z,2026-10-02T19:14:13Z,fix(hermes): the collector's runner never waits on a pipe after killing a child,2
+f8895a2b3244,96,2026-10-02T23:21:18Z,2026-10-02T19:23:15Z,fix(hermes): the leak checks always get the non-Google secrets; a too-short one is reported,2
+06d54f17c697,96,2026-10-02T23:21:18Z,2026-10-02T19:28:47Z,fix(hermes): one unreadable secret file never drops the other file's values,2
+43abb39f429d,96,2026-10-02T23:21:18Z,2026-10-02T20:04:26Z,fix(hermes): a secret file is read once and tolerantly; every value of a name is a known secret,4
+1bfeba835eae,96,2026-10-02T23:21:18Z,2026-10-02T21:51:26Z,fix(hermes): the collector takes the gateway's secrets from the running gateway; the guard checks escaped forms,4
+5b418e8f23e1,96,2026-10-02T23:21:18Z,2026-10-02T22:08:08Z,fix(hermes): trimmed forms of a secret are known secrets; the gateway's text is withheld when its secrets are not,2
+632d3b29c605,97,2026-10-04T03:11:20Z,2026-10-03T20:19:25Z,fix(brain): compile skips promoted entries; frontmatter keeps block lists,6
+b62fc8a743a4,99,2026-10-05T14:21:15Z,2026-10-05T14:05:04Z,fix(hermes): re-pin the base image to v0.21.5 (v2026.9.24); re-run the image audit,4
+b636d35fab85,100,2026-10-05T15:49:04Z,2026-10-05T15:25:26Z,"fix(hermes): keep the v0.21.5 API server off, inventory its key, measure container listeners (checklist v1.16)",7
+b40429e4faf1,100,2026-10-05T15:49:04Z,2026-10-05T15:40:44Z,fix(hermes): D4.1 excludes Docker's embedded DNS listener; D2.1 states the hermes-home-env owner and mode,4
+f57de6c39975,105,2026-10-07T14:51:06Z,2026-10-07T14:11:26Z,"fix(hermes): the listener check reads the host's /proc, keeps an untrimmed alert log; the installer takes a piped value",7
+b076bc0122a7,105,2026-10-07T14:51:06Z,2026-10-07T14:32:44Z,fix(hermes): the independent review of the review #8 change — one blocker and the should-fixes,12
+46b23160afcb,107,2026-10-08T17:41:06Z,2026-10-08T13:10:45Z,"fix(hermes): d1_7 reads a key line as sshd does, and opens key files without following links",2
+acd7aba11810,107,2026-10-08T17:41:06Z,2026-10-08T13:46:35Z,fix(hermes): the unprivileged-port setting is read as bytes and accepted only as one plain ASCII number,2
+370a3cc7897d,107,2026-10-08T17:41:06Z,2026-10-08T13:57:44Z,fix(hermes): checklist v1.18 — D1.7 requires one key of each kind and judges every setting it names; D4.6 pins its basel,1
+40e51f7b0f68,107,2026-10-08T17:41:06Z,2026-10-08T13:58:05Z,"fix(hermes): F56 and F57 say what is written and what is run, and where the limits were measured",1
+52f0fb303e8e,107,2026-10-08T17:41:06Z,2026-10-08T13:59:25Z,fix(hermes): checklist v1.18 — D4.6's baseline must be the previous report's collection time,1
+76e3b45ec5d9,107,2026-10-08T17:41:06Z,2026-10-08T15:29:20Z,"fix(hermes): BRING-UP step 7f — one gate login before any other test, a guarded login-item switch, a passphrase check be",2
+c3bd08e7234f,107,2026-10-08T17:41:06Z,2026-10-08T16:00:58Z,fix(hermes): BRING-UP step 7f — stop the login item when its check fails; step 7e says which stop conditions are reasone,1
+dab6302d35ec,107,2026-10-08T17:41:06Z,2026-10-08T16:25:45Z,fix(hermes): the runbook produces D1.7's and D4.6's evidence statements; checklist v1.18 says what a short fingerprint a,3
+1b70427c2cf4,107,2026-10-08T17:41:06Z,2026-10-08T16:25:45Z,fix(hermes): d1_7 refuses a malformed account line; ASCII digits only in times and option values; a script too deep to p,2
+21471c9a7991,107,2026-10-08T17:41:06Z,2026-10-08T17:16:52Z,fix(hermes): BRING-UP step 7f starts with the read-only look it relies on; an optional block for a key on root; the keyc,2
+5d0c9d400885,111,2026-10-09T19:20:55Z,2026-10-09T19:19:06Z,fix(brain): lint no longer calls superseded or retired items stale; reviewed_at resets the 90 days,4
+2bb087745b0a,114,2026-10-12T14:20:11Z,2026-10-10T18:01:23Z,"fix(hermes): D1.7 reads a key line as sshd does (a quote in the comment, a CR line ending)",2
+5ce9e236eaa0,114,2026-10-12T14:20:11Z,2026-10-10T18:03:39Z,fix(hermes): D1.7 counts a Match or Include keyword written in double quotes,3
+24b157b0ec2f,114,2026-10-12T14:20:11Z,2026-10-10T18:12:29Z,"fix(hermes): D1.7 reads a configuration keyword as sshd's tokenizer does (quotes, CR)",3
+e76a8cba926b,114,2026-10-12T14:20:11Z,2026-10-10T18:20:18Z,"fix(hermes): D1.7's Match and Include count is a superset of what sshd reads, never an under-count",3
+3829a734ed99,114,2026-10-12T14:20:11Z,2026-10-10T18:26:46Z,fix(hermes): D1.7 recognises the standard Include only in a closed set of spellings,3
+228830157c4a,114,2026-10-12T14:20:11Z,2026-10-10T18:50:44Z,fix(hermes): D1.7's daemon_options is could-not-check for any sshd process line it does not recognise,4
+3f9daddff407,114,2026-10-12T14:20:11Z,2026-10-10T18:57:47Z,fix(hermes): D1.7 ignores a bare 'sshd: NAME' process line only for a real account,3
+b1e13a3aee1d,114,2026-10-12T14:20:11Z,2026-10-10T19:10:51Z,"fix(hermes): the journal settings, spans, sizes and oldest entry are read by closed grammars that fail closed",3
+b5aaed154a24,114,2026-10-12T14:20:11Z,2026-10-10T19:26:16Z,fix(hermes): the journal settings are read from the files systemd lists as well as from its printout,3
+67837d6cb43a,114,2026-10-12T14:20:11Z,2026-10-10T19:37:57Z,fix(hermes): the journal settings reader refuses an odd drop-in name and never follows a link,3
+88ca2758e44d,114,2026-10-12T14:20:11Z,2026-10-10T20:05:06Z,"fix(hermes): D2.4 refuses a linked settings directory, reads Storage= and whether the journal service runs; a limit no l",5
+1dcf83776a86,114,2026-10-12T14:20:11Z,2026-10-10T20:19:18Z,fix(hermes): D2.4 shows whether the on-disk journal is the one being written,5
+5e2175d7ccbc,114,2026-10-12T14:20:11Z,2026-10-10T20:23:38Z,fix(hermes): D2.4 reads systemd's own flag that the journal is on disk,5
+5bfc72ccd962,114,2026-10-12T14:20:11Z,2026-10-10T20:31:39Z,fix(hermes): D2.4's on-disk evidence refuses a link where a file or a directory must be,4
+d61a3068737f,114,2026-10-12T14:20:11Z,2026-10-10T20:44:16Z,fix(hermes): a journal read that ends with a warning is could-not-check; D2.3 says it searches the message text,5
+91406421953b,114,2026-10-12T14:20:11Z,2026-10-10T20:48:21Z,fix(hermes): the journal search survives a byte that is not text and never puts journalctl's words in a bundle,4
+2473f56f3d0e,114,2026-10-12T14:20:11Z,2026-10-10T20:57:05Z,"fix(hermes): the journal is read as root only, a warning on any journal read is could-not-check, and D2.3 says how many ",5
+340bdea03dc3,114,2026-10-12T14:20:11Z,2026-10-10T21:14:28Z,"fix(hermes): the summary tool prints strings from closed sets only, never by their shape",2
+dbf8b0f0f409,114,2026-10-12T14:20:11Z,2026-10-11T02:15:56Z,"fix(hermes): the summary tool's closing list covers leak counts, the settings file's owner and mode, other directories a",2
+d43bc2b71ddc,115,2026-10-12T16:20:52Z,2026-10-12T16:16:25Z,fix(hermes): the summary tool's new note prints its count under the tool's number rule,2
+3fc9be569587,130,2026-10-14T19:16:43Z,2026-10-14T18:59:23Z,fix(review): the collector judges named volumes by their options (F61) and reads provider_routing (checklist v1.23),7
+3b548f0deb8b,130,2026-10-14T19:16:43Z,2026-10-14T19:04:23Z,fix(review): F61's volume reading after the independent review,4
+bca59c5b8040,131,2026-10-15T01:03:25Z,2026-10-14T20:16:41Z,fix(pipeline): route build-from-scratch to writing-skills and gate it; CI fails on dangling skill references (P0-A),8
+11b531c858be,131,2026-10-15T01:03:25Z,2026-10-14T20:22:33Z,fix(brain): --use/--risk keep each value verbatim and repeat; repair three fragmented registry entries (P0-D),5
+c4179536fa91,131,2026-10-15T01:03:25Z,2026-10-14T21:51:32Z,fix(review): close independent-review findings R2-R7 on the Phase 3 branch,6
+78210771a9dc,131,2026-10-15T01:03:25Z,2026-10-14T22:26:37Z,"fix(pipeline): make the build-from-scratch path portable — writing-skills if installed, by hand otherwise",11
+4f4c4f527b88,135,2026-10-15T03:17:21Z,2026-10-15T03:14:39Z,fix(codex-tests): stop the suite overwriting real Codex baselines (P13),2
+830dcfd5b5ef,136,2026-10-15T12:27:09Z,2026-10-15T03:28:21Z,fix(security): one shared secret-pattern list for the brain gate and telemetry redaction (P1),6
+12a378c892ea,138,2026-10-15T15:02:11Z,2026-10-15T12:49:07Z,fix(skill-audit): close scanner gaps S1-S3 in static-scan.js,6
+6704960a6e95,138,2026-10-15T15:02:11Z,2026-10-15T12:55:44Z,fix(skill-audit): restore rm-rf-root coverage and bound curl-pipe-shell (review R1),4
+913ae8a5fcd8,138,2026-10-15T15:02:11Z,2026-10-15T13:01:06Z,"fix(skill-audit): linear-time rm-rf-root and curl/wget-pipe-shell, no length cap",4
+c16364952874,138,2026-10-15T15:02:11Z,2026-10-15T13:06:51Z,fix(skill-audit): linear-time base64-blob and html-comment-block,3
+911335e0cdcd,138,2026-10-15T15:02:11Z,2026-10-15T13:10:19Z,fix(skill-audit): rm-rf-root checks every target; temp exemption can't escape,4
+376788b4504d,138,2026-10-15T15:02:11Z,2026-10-15T13:13:36Z,fix(skill-audit): curl/wget-pipe-shell line start after \n only,3
+cdb2d5c20386,138,2026-10-15T15:02:11Z,2026-10-15T13:34:44Z,fix(skill-audit): code-only commands are FLAG; simple linear rm-rf-root (final review),4
+3f93cbff03f9,138,2026-10-15T15:02:11Z,2026-10-15T13:56:38Z,fix(skill-audit): close re-check findings G1-G5 on the scanner redesign,4
+c685ef80105e,138,2026-10-15T15:02:11Z,2026-10-15T14:01:06Z,fix(skill-audit): git rm exclusion stays on one line,3
+dbbd09a12abc,138,2026-10-15T15:02:11Z,2026-10-15T14:27:26Z,fix(skill-audit): close pre-push review H1-H5,4
+fc1e32cd983e,138,2026-10-15T15:02:11Z,2026-10-15T14:50:43Z,fix(skill-audit): --cached skip stops at -- (verification V1),4
+c8f51e13314b,140,2026-10-15T15:32:05Z,2026-10-15T15:23:53Z,fix(skill-eval): artifacts must resolve inside the side's workspace (E1),3
+509ac1ce9682,142,2026-10-16T13:15:38Z,2026-10-15T17:15:22Z,"fix(brain): security guard fails closed on bad input, visibly open on node failure (P11)",6
+ce9f530c23a0,142,2026-10-16T13:15:38Z,2026-10-15T19:33:29Z,fix(brain): guard delete rule is a superset of main again (P11 review round 2),5
+0c82c6d76529,142,2026-10-16T13:15:38Z,2026-10-16T03:42:57Z,"fix(brain): guard round 3 — parser-immune floor, grouping-safe cd, linear floor (P11)",4
+8a50ae19d223,143,2026-10-16T17:10:42Z,2026-10-16T14:51:29Z,fix(brain): guard reads the real git subcommand and git clean dry runs (P11 re-review),5
+4beb0007b51e,143,2026-10-16T17:10:42Z,2026-10-16T15:02:18Z,fix(brain): allowlist plain git clean dry runs; read git words as the shell does (review round 1),4
+0e4db9200ce8,143,2026-10-16T17:10:42Z,2026-10-16T15:23:43Z,"fix(brain): anchor git words on the command, deny unsafe subcommands and nested clean (review round 2)",4
+d941d39b4de3,143,2026-10-16T17:10:42Z,2026-10-16T15:28:04Z,"fix(brain): join line continuations before every guard rule (review round 2, W3)",4
+1c9ca50aeb3d,143,2026-10-16T17:10:42Z,2026-10-16T15:42:15Z,"fix(brain): quote-aware line joining, fail closed on kept continuations (W3 follow-up)",3
+c261755593ef,143,2026-10-16T17:10:42Z,2026-10-16T16:34:02Z,"fix(brain): deny a kept line continuation next to the capsule outright (review round 3, X2)",4
+5c918672b519,143,2026-10-16T17:10:42Z,2026-10-16T16:37:17Z,"fix(brain): look for the capsule in the fully joined text when a continuation is kept (review round 4, X3)",3
+f727ae1fffde,144,2026-10-16T17:19:48Z,2026-10-16T14:54:35Z,"fix(uninstall): refuse root, home or the toolkit itself as the target (P9)",3
+83fed660d3ef,144,2026-10-16T17:19:48Z,2026-10-16T14:55:55Z,"fix(uninstall): remove the CLAUDE.md section portably, not with BSD sed -i (P6)",3
+aa427bd3f83b,144,2026-10-16T17:19:48Z,2026-10-16T15:04:40Z,"fix(uninstall): compare targets with -ef, refuse ~/.claude, keep a symlinked CLAUDE.md (P9 review round 1)",3
+ac860ebf73a3,144,2026-10-16T17:19:48Z,2026-10-16T15:09:01Z,fix(uninstall): refuse another clone of the toolkit as the target (P9 review round 2),3
+8e2863339a7d,145,2026-10-16T17:53:07Z,2026-10-16T15:15:48Z,fix(hermes): make-review-board reads the registry with the shared walker (P7),3
+aee1c6688436,145,2026-10-16T17:53:07Z,2026-10-16T15:30:01Z,fix(hermes): report an undecodable registry as unreadable (P7 review),3
+dc61b2cdfcd4,149,2026-10-19T12:59:07Z,2026-10-16T18:45:16Z,fix(skill-audit): close static-scan gaps S4–S9,4
+c136334d6922,149,2026-10-19T12:59:07Z,2026-10-16T19:35:08Z,fix(skill-audit): close review findings on the S4–S9 scanner fix,4
+d2a82b2d5e52,149,2026-10-19T12:59:07Z,2026-10-16T20:07:42Z,fix(skill-audit): read settings with a duplicate-keeping reader (review round 2),4
+93394edf18fc,149,2026-10-19T12:59:07Z,2026-10-16T20:24:59Z,fix(skill-audit): skip unused settings values without recursion (review round 3),4
+43baf0399f82,149,2026-10-19T12:59:07Z,2026-10-16T22:13:54Z,fix(skill-audit): find JSON string ends without a regex (review round 4),3
+f40c8a17b0ec,150,2026-10-19T13:50:14Z,2026-10-19T13:16:13Z,fix(ci): fail the static fallback on a scanner error (U7),4
+decb18cc9a10,151,2026-10-19T14:22:48Z,2026-10-19T14:13:53Z,"fix(skill-eval): close harvester weaknesses E2–E5, disclose E6",8
+c371885329c6,152,2026-10-19T17:15:31Z,2026-10-19T16:26:12Z,"fix(security): deny Claude Code reads of the repo's secret files (HR1, layer A)",5
+9c28de1e60e7,154,2026-10-19T18:02:38Z,2026-10-19T17:39:56Z,fix(eval-agents): add Evidence and Limits to the agents' report templates (E7),3
+43e6d51b6de9,155,2026-10-19T18:27:03Z,2026-10-19T18:06:40Z,"fix(eval): say what the subject revision pins, and when it is missing (E9)",10
+15942613bb08,155,2026-10-19T18:27:03Z,2026-10-19T18:15:50Z,fix(eval): align the report header and tighten the E9 tests (review L1–L5),9
+e98339c9aadf,155,2026-10-19T18:27:03Z,2026-10-19T18:18:19Z,"fix(eval): ""not recorded"" for whichever part is null; pin the header phrase (E9 review L6, L7)",8
+0271b38a6dfd,156,2026-10-19T19:34:20Z,2026-10-19T18:51:11Z,fix(eval): keep baseline snapshots in the iteration folder (E8),6
+3ae14cfa4dad,157,2026-10-19T22:17:03Z,2026-10-19T20:13:26Z,fix(refine): keep refine and adapt safety copies under evals/ (E13),8
+52afe0827570,157,2026-10-19T22:17:03Z,2026-10-19T20:24:32Z,fix(refine): read the test's paths from the docs; guard the baseline; never nest backups (E13 review N1–N6),9
+e6f225a1f069,158,2026-10-20T02:17:11Z,2026-10-19T22:21:53Z,fix(tests): keep a failing suite's assertion message in run-all-tests output,3
+9e68f4fb190e,158,2026-10-20T02:17:11Z,2026-10-19T22:26:54Z,"fix(tests): clearer failure report — spawn errors, empty exits, long lines (review R2–R5)",2
+b66ea3fc090a,158,2026-10-20T02:17:11Z,2026-10-19T22:33:28Z,fix(tests): pin the no-output and line-cut edges; F1 states exactly what was measured (review R6–R8),3
+9279ffe3c4f8,159,2026-10-20T15:01:35Z,2026-10-20T14:45:45Z,fix(brain): register the security guard with a 30 s timeout (F1),6
+ea78abeca857,159,2026-10-20T15:01:35Z,2026-10-20T14:53:21Z,fix(brain): time every untimed guard copy; correct the F1 figures (review G1–G10),4
+3fb556be749a,160,2026-10-20T19:26:24Z,2026-10-20T15:24:57Z,fix(static-scan): report content it cannot check instead of passing it (S10),5
+58a22a759b7b,160,2026-10-20T19:26:24Z,2026-10-20T15:35:01Z,"fix(static-scan): never lower a verdict below main's (S10, security review)",5
+1dc3557a7ed5,160,2026-10-20T19:26:24Z,2026-10-20T15:44:55Z,fix(static-scan): content that could not be read at all is BLOCK (S10),5
+ea4e2b8b2a3d,160,2026-10-20T19:26:24Z,2026-10-20T16:09:46Z,fix(static-scan): keep the most severe chunk finding; 2 GiB ceiling; review K4–K14 (S10),5
+cc700f8cc928,160,2026-10-20T19:26:24Z,2026-10-20T18:34:51Z,"fix(static-scan): a symlink that leaves the tree is BLOCK (S10, owner decision)",5
+e069a75a9746,160,2026-10-20T19:26:24Z,2026-10-20T19:02:25Z,"fix(static-scan): resolve symlinks as the OS does (S10, security review + K16–K20)",4
+ec05766f33a9,161,2026-10-20T23:02:03Z,2026-10-20T19:49:46Z,"fix(static-scan): secrets in scripts and generic secret forms in data files (S12, S13)",12
+767b22ff9c28,161,2026-10-20T23:02:03Z,2026-10-20T20:24:00Z,"fix(static-scan): secrets in every file, stricter in code; review P1–P8 (S12, S13)",4
+9266ad31a242,161,2026-10-20T23:02:03Z,2026-10-20T22:04:26Z,"fix(static-scan): quoted suffixed names, _auth and .properties anchors; review Q1–Q6 (S13)",4
+b993f12476ad,162,2026-10-21T01:19:51Z,2026-10-21T00:45:37Z,"fix(refine): one keep/revert rule for a neutral result; no agent copy into ~/.claude (E14, E15)",8
+818d6e39ff6f,162,2026-10-21T01:19:51Z,2026-10-21T00:55:45Z,"fix(refine): neutral rule names the definition, keeps the baseline; skill-guardian; review R1–R8",11
+7fb6a5848cd7,163,2026-10-21T09:24:58Z,2026-10-21T01:50:05Z,"fix(eval): the report names the no-skill baseline that runs; status re-checks the subject; team-eval revisions (E10, E11",18
+c1f24925a33c,163,2026-10-21T09:24:58Z,2026-10-21T02:02:04Z,fix(eval): status never says resume after a warning; pinned baselines; team hashes before runs; review R1–R7,9
+22dac1e4a471,164,2026-10-21T13:14:50Z,2026-10-21T12:48:14Z,"fix(install): null hook entries no longer crash the installers; reflow the security doc (G11, G12, Q5)",9
+3b8069ff833b,164,2026-10-21T13:14:50Z,2026-10-21T12:58:51Z,"fix(uninstall): keep null hook entries instead of crashing; extractor skips non-list shapes; review N1, N4-N7",7
+dc32ac1fd341,165,2026-10-21T14:06:35Z,2026-10-21T13:24:30Z,"fix(install): never write settings the scripts cannot read; uninstall removes only our hooks (N2, N3, N8, N10)",8
+c09630b04820,165,2026-10-21T14:06:35Z,2026-10-21T13:36:01Z,fix(install): name a byte-order mark; uninstall's brain step counts what it removed; tests for review P1-P8,7
+d22461a6280d,166,2026-10-21T14:52:45Z,2026-10-21T14:26:16Z,fix(refine): every refine flow can restore the file an iteration edited (E16),9
+79ff88cc47a7,166,2026-10-21T14:52:45Z,2026-10-21T14:37:17Z,fix(refine): quote the snapshot paths; check nothing else differs after a revert; review Q1-Q9,6
+86885154b3aa,167,2026-10-21T19:44:24Z,2026-10-21T16:20:41Z,fix(static-scan): basic-auth credentials and NPM_CONFIG__AUTH are secrets again; one report per check,4
+386a31d7a339,167,2026-10-21T19:44:24Z,2026-10-21T17:20:43Z,"fix(static-scan): report every matching pattern again, as on main; scheme names are not secrets; review V1-V8",4
+521eaa9b5a34,167,2026-10-21T19:44:24Z,2026-10-21T18:13:50Z,"fix(static-scan): npm _auth forms are patterns of their own, so main's patterns are unchanged; review V9, V10",3
+9f1d78192970,167,2026-10-21T19:44:24Z,2026-10-21T18:53:57Z,"fix(static-scan): only main's patterns stop the .netrc/.properties password check; npm guard tests; review V11, V12",3
