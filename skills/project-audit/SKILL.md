@@ -177,7 +177,7 @@ Report which fixes were applied. Re-run Step 3 to show the updated score.
 | A or B | "Security posture is strong. Safe to proceed with skill-scout." |
 | C | "Acceptable but improvements recommended — review medium findings before sourcing production skills." |
 | D | "Below threshold — address critical and high findings before installing new skills. Run `/project-audit` again after fixing." |
-| F | "Critical issues found — do not install new skills until resolved. Run `npx ecc-agentshield scan --fix` and address manual findings." |
+| F | "Critical issues found — do not install new skills until resolved. Run `npx ecc-agentshield@1.4.0 scan --fix` and address manual findings." |
 
 For grade C or above: print handoff message:
 > "Next: 'find a skill for <capability>' or run skill-needs-analysis-agent to get a prioritized skill shortlist."

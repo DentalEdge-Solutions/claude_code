@@ -2,7 +2,7 @@
 name: repo-audit
 description: "Use when: auditing a GitHub repository to extract tech stack signals for informing future Claude Code project architecture, running a deep reference audit from project-setup Phase 0 with --deep flag, or when asked to scan/map/audit a GitHub repo. Accepts a public GitHub URL and optional flags: --pipeline (inject into project-context.json), --layer <names> (comma-separated subset), --estimate (preview token count before running). Triggers on: audit this repo, scan this GitHub repo, deep audit, repo-audit, extract stack from, analyze this repository."
 tools: Read, Write, Bash, Agent
-compatibility: "Claude Code. Node.js ≥ 18. Requires npx (Repomix) and network access to GitHub; falls back to Gitingest on Repomix timeout."
+compatibility: "Claude Code. Node.js ≥ 22 (required by Repomix 1.18.1). Requires npx (Repomix, pinned) and network access to GitHub; stops if Repomix fails (no fallback)."
 ---
 
 # Repo Audit
@@ -32,7 +32,7 @@ Normalize URL to `owner/repo`:
 ### Phase 1 — Estimate (if --estimate)
 
 ```bash
-npx repomix --remote <owner/repo> --compress --output-format json \
+npx -y repomix@1.18.1 --remote <owner/repo> --compress --output-format json \
   --output /tmp/repo-audit-estimate-$(date +%s).json 2>&1 | head -5
 ```
 
@@ -52,17 +52,13 @@ If `--estimate` was not passed: skip Phase 1 entirely and go to Phase 2.
 
 ```bash
 mkdir -p /tmp/repo-audit-<owner>-<repo>
-npx repomix --remote <owner>/<repo> --compress --output-format xml \
+npx -y repomix@1.18.1 --remote <owner>/<repo> --compress --output-format xml \
   --output /tmp/repo-audit-<owner>-<repo>/packed.xml
 ```
 
-If Repomix exits non-zero (private repo, network error, timeout after 60s):
-```bash
-pip install gitingest -q 2>/dev/null && \
-  gitingest https://github.com/<owner>/<repo> --output /tmp/repo-audit-<owner>-<repo>/packed.xml 2>&1
-```
+Repomix is pinned to an exact version (source and date: `docs/evaluations/2026-10-23-repomix-pin-source.md`). Change the version only deliberately, never to `latest`.
 
-If both fail: print `"Could not fetch repo. It may be private or inaccessible."` and stop. Copy packed.xml to `docs/audits/raw/<owner>-<repo>-<date>.xml` if it exists before stopping.
+If Repomix exits non-zero (private repo, network error, timeout after 60s): print `"Could not fetch repo with Repomix 1.18.1. It may be private or inaccessible, or the network is unavailable. No fallback is run."` and stop. Copy packed.xml to `docs/audits/raw/<owner>-<repo>-<date>.xml` if it exists before stopping. Do not install or run another packer instead: this skill runs only pinned tools.
 
 ### Phase 3 — Categorize files
 
@@ -242,8 +238,8 @@ Print final summary:
 
 | Failure | Response |
 |---|---|
-| Private/inaccessible repo | Gitingest fallback → if also fails, abort cleanly |
-| Repomix timeout (>60s) | Gitingest fallback |
+| Private/inaccessible repo | Stop with the Phase 2 message (no fallback) |
+| Repomix timeout (>60s) | Stop with the Phase 2 message (no fallback) |
 | categorize-files.js returns 0 file blocks | Abort: "No files found in packed output." |
 | Layer agent fails | Mark layer with error, continue other layers |
 | All agents fail | Abort merge, preserve packed.xml in docs/audits/raw/ |

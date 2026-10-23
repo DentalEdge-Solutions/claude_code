@@ -158,7 +158,8 @@ BLOCK rows are BLOCK in prose. When the command appears only in what the scanner
 | Pattern | Severity |
 |---------|----------|
 | `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`), whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included; an option run holding `--cached` before any `--` (`git rm --cached`; plain `rm` refuses that option) is not matched. Only the first target is read (S11, a known limit by owner decision 2026-10-21): a later target (`rm -rf ./build ~/`), options after a target, or a target the shell builds (`"$DIR"`) passes. The check is a tripwire, not a boundary; a skill is cleared by reading it | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
+| `curl` or `wget` output piped into a shell (`bash`, `sh`, `zsh`) on one line | BLOCK |
+| Unpinned install (`unpinned-install`, P0-02): `npx <pkg>` without an exact `@x.y.z` version (a range, a partial version or none), `pip install <pkg>` without `==` (also `pip3`, `python -m pip`), and `<pkg>@` + `latest` anywhere. `npx` and `pip` count only in command position: at a line start or just after a backtick, `$(`, `;`, `&` or `\|` (an optional `$ ` prompt and `sudo` allowed), so prose that names the tool is quiet. Only the first package after `npx` or `pip install` is read; `-r`/`-c` files and local paths are not packages. Not read: `npm exec`, `pnpm dlx`, `bunx`, `uvx`, `pipx` and a command in a JSON or YAML string. A tripwire, not a boundary | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |
 | `sudo` | FLAG |
@@ -170,8 +171,9 @@ BLOCK rows are BLOCK in prose. When the command appears only in what the scanner
 | Pattern | Severity |
 |---------|----------|
 | `eval "..."` | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
+| `curl` or `wget` output piped into `bash` or `sh` on one line | BLOCK |
 | `pip install --break-system-packages` | FLAG |
+| Unpinned install (`unpinned-install`), read as in markdown above | BLOCK |
 
 ---
 

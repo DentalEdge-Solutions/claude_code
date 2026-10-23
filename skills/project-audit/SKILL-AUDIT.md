@@ -17,7 +17,7 @@
 
 ## Permissions Audit
 
-**Tools requested by skill:** Bash (to run `npx ecc-agentshield`), Read, Write (to save audit artifact to evals/)
+**Tools requested by skill:** Bash (to run `npx ecc-agentshield@1.4.0`), Read, Write (to save audit artifact to evals/)
 **Purpose stated:** Wraps ecc-agentshield to scan .claude/ configuration files across 5 categories and return an A-F grade with numbered findings.
 **Mismatches:** none — npx invocation, read of .claude/ config, and write to evals/ are all scoped to the skill's stated purpose
 

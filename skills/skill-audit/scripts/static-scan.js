@@ -3,7 +3,7 @@
 // Deterministic security scanner for Claude Code skill directories, agent files,
 // and configuration files. Pattern categories:
 //   - Prompt injection / persona override (MD_INJECTION)
-//   - Dangerous Bash in instructions (MD_BASH)
+//   - Dangerous Bash in instructions (MD_BASH), unpinned installs included (unpinned-install, P0-02)
 //   - Hardcoded secrets in markdown/config (MD_SECRETS)
 //   - Overly permissive settings.json rules (CONFIG_PATTERNS)
 //   - Malicious JS/Python/Shell in scripts (JS/PY/SH_PATTERNS); a file with no known extension is
@@ -112,6 +112,35 @@ const MD_INJECTION = [
   { re: /system\s*prompt/i,                                           name: 'system-prompt-ref',     sev: 'FLAG'  },
 ];
 
+// ─── Unpinned installs (P0-02) ─────────────────────────────────────────────
+// One check, unpinned-install, for code fetched at run time without an exact version:
+//   - npx <pkg> unless <pkg> ends in @x.y.z (a prerelease or build suffix is allowed): a range (@^1, @~1),
+//     a partial version (@1.2) or none is a hit. A scope (@scope/pkg) is allowed. A path (./x) is not a package.
+//   - pip install <pkg> (pip, pip3, pip3.12, python -m pip) unless <pkg> carries ==. -r/-c (a requirements or
+//     constraints file) is not a package; -i, -f and their long forms take an argument that is skipped.
+//   - <pkg>@latest anywhere.
+// Curl or wget piped to a shell is curl-pipe-shell / wget-pipe-shell below, not repeated here.
+// npx and pip count only in command position: a line start, or just after a backtick, $(, ;, & or |, then an
+// optional "$ " prompt and sudo. So prose that names the tool ("npx prints an error", "access to npx") is
+// quiet, and so is "Install: npx x" (a known limit: this is a tripwire, not a boundary, like rm-rf-root).
+// Only the first package after npx or pip install is read; every npx or pip in command position is read.
+// Linear: an option token cannot hold a backtick, ;, &, |, ( or ), so no option run can contain a later
+// command start; an argument skipped after -r/-c/-i/-f cannot start with -, so an option run has one parse.
+// The CMD_AT anchor is what keeps it linear: NPX_UNPINNED without it took 350 s on 1 MB of "npx<TAB>-"
+// repeated (every npx inside an option run became a new start). With it, the worst 1 MB input took 12 ms.
+const OPT_TOKEN = String.raw`-[^\s\x60;&|()]*[ \t]+`;
+const PIP_ARG_FLAG = String.raw`-[rcif]|--(?:requirement|constraint|index-url|extra-index-url|find-links)`;
+const CMD_AT = String.raw`(?:(?<![^\n])|(?<=[\x60;&|]|\$\())[ \t]*(?:\$[ \t]+)?(?:sudo[ \t]+)*`;
+// The exact version may be followed by sentence punctuation (".", ",", ":") before the token ends.
+const EXACT_NPM = String.raw`(?:@[\w.-]+\/)?[\w.-]+@\d+\.\d+\.\d+(?:[-+][\w.+-]*)?[.,:]?(?![^\s\x60'"();&|])`;
+const NPX_UNPINNED = String.raw`npx[ \t]+(?:${OPT_TOKEN})*(?=[@A-Za-z0-9])(?!${EXACT_NPM})(?:@[\w.-]+\/)?[A-Za-z0-9][\w.-]*`;
+const PIP_UNPINNED = String.raw`(?:python[\d.]*[ \t]+-m[ \t]+)?pip[\d.]*[ \t]+install[ \t]+` +
+  String.raw`(?:(?:${PIP_ARG_FLAG})[ \t]+[^\s\x60;&|()-][^\s\x60;&|()]*[ \t]+|${OPT_TOKEN})*` +
+  String.raw`(?<![ \t](?:${PIP_ARG_FLAG})[ \t]+)["']?(?![^\s\x60'";&|()]*==)[A-Za-z0-9]`;
+// A full stop ends it too ("…@latest."), but a name goes on after one ("user@latest.test").
+const AT_LATEST = String.raw`[\w.\/-]@latest(?![\w-]|\.[\w-])`;
+const UNPINNED_INSTALL = new RegExp(`${CMD_AT}(?:${NPX_UNPINNED}|${PIP_UNPINNED})|${AT_LATEST}`);
+
 // ─── Markdown: Dangerous Bash in instructions ──────────────────────────────
 const MD_BASH = [
   // rm with a recursive/force option (any spelling: -rf, -r -f, -Rf, -rfv, --recursive, --force, --)
@@ -133,6 +162,7 @@ const MD_BASH = [
   // every curl on the line and took seconds on a long line of repeated "curl |".
   { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
   { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
+  { re: UNPINNED_INSTALL,                 name: 'unpinned-install', sev: 'BLOCK' },
   { re: /\bsudo\s+/,                      name: 'sudo',             sev: 'FLAG'  },
   { re: /chmod\s+[0-7]{3}\s/,            name: 'chmod',            sev: 'FLAG'  },
   { re: /~\/.ssh\//,                      name: 'ssh-dir-access',   sev: 'BLOCK' },
@@ -374,6 +404,7 @@ const SH_PATTERNS = [
   { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'curl-pipe-shell', sev: 'BLOCK' },
   { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'wget-pipe-shell', sev: 'BLOCK' },
   { re: /--break-system-packages/,        name: 'pip-break-system',  sev: 'FLAG'  },
+  { re: UNPINNED_INSTALL,                 name: 'unpinned-install',  sev: 'BLOCK' },
 ];
 
 // Which text each markdown table reads (S2, and the owner's decision R2 of 2026-10-15):
