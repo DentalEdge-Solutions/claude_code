@@ -58,7 +58,7 @@ npx -y repomix@1.18.1 --remote <owner>/<repo> --compress --output-format xml \
 
 Repomix is pinned to an exact version (source and date: `docs/evaluations/2026-10-23-repomix-pin-source.md`). Change the version only deliberately, never to `latest`.
 
-If Repomix exits non-zero (private repo, network error, timeout after 60s): print `"Could not fetch repo with Repomix 1.18.1. It may be private or inaccessible, or the network is unavailable. No fallback is run."` and stop. Copy packed.xml to `docs/audits/raw/<owner>-<repo>-<date>.xml` if it exists before stopping. Do not install or run another packer instead: this skill runs only pinned tools.
+If Repomix exits non-zero (private repo, network error, timeout after 60s): print `"Could not fetch repo with Repomix 1.18.1. It may be private or inaccessible, the network may be unavailable, or Node.js may be older than 22 (Repomix 1.18.1 requires Node.js >= 22). No fallback is run."` and stop. Copy packed.xml to `docs/audits/raw/<owner>-<repo>-<date>.xml` if it exists before stopping. Do not install or run another packer instead: this skill runs only pinned tools.
 
 ### Phase 3 — Categorize files
 
@@ -102,8 +102,7 @@ Collect all layer JSON objects. Build the final audit document:
   "repomix_stats": {
     "total_files": "<N>",
     "total_tokens": "<N>",
-    "compressed": true,
-    "fallback_tool": null
+    "compressed": true
   },
   "layers": {
     "runtime":    "<layer object>",

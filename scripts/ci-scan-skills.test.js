@@ -280,6 +280,32 @@ for (const [label, md] of [
   });
 }
 
+// Review round 1 (PR1-R-1, R-2): forms ordinary authors write. Each in a fenced block of a skills/ SKILL.md
+// (and the list item in prose) must fail CI.
+for (const [label, md] of [
+  ['a continuation before the npx package', fence(`${NPX} -y \\\n  evil-tool --help`)],
+  ['a continuation before the pip package', fence(`${PIP} \\\n  evil-lib`)],
+  ['a second, unpinned pip package', fence(`${PIP} good-lib==1.0.0 evil-lib`)],
+  ['a second, unpinned npx -p', fence(`${NPX} -p good@1.2.3 -p evil-tool good`)],
+  ['a quoted npx package', fence(`${NPX} "evil-tool" --help`)],
+  ['a VAR=val prefix', fence(`CI=1 ${NPX} evil-tool`)],
+  ['an env prefix', fence(`env FOO=1 ${NPX} evil-tool`)],
+  ['a time prefix', fence(`time ${NPX} evil-tool`)],
+  ['a subshell', fence(`( ${NPX} evil-tool )`)],
+  ['bash -c', fence(`bash -c "${NPX} evil-tool"`)],
+  ['sudo -E', fence(`sudo -E ${NPX} evil-tool`)],
+  ['upper-case NPX', fence('NPX evil-tool')],
+  ['uv pip install', fence(`uv ${PIP} evil-lib`)],
+  ['a prose list item', `- ${NPX} evil-tool\n`],
+]) {
+  test(`review round 1: ${label} fails CI`, () => {
+    const rel = 'skills/demo/SKILL.md';
+    const r = runRoot(makeRoot({ [rel]: CLEAN[rel] + '\n' + md }));
+    assert.strictEqual(r.exitCode, 1);
+    assert.deepStrictEqual(unmatchedOf(r, 'general'), [`${rel} [unpinned-install]`]);
+  });
+}
+
 // P0-01: the lines this PR replaces fail, the lines it puts in pass.
 test('P0-01: the old repo-audit and project-audit lines fail', () => {
   const oldRepoAudit = fence(`${NPX} repomix --remote <owner>/<repo> --compress --output-format xml \\\n  --output /tmp/x/packed.xml`)

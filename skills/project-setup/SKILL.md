@@ -34,7 +34,7 @@ Ask exactly once at the start of every `/project-setup` run:
 
 Strip `--deep` from the URL before normalisation. Set `deep_mode = true` for that URL.
 
-For a deep-mode URL, instead of the lightweight fetch (0b), invoke the `repo-audit` skill:
+For a deep-mode URL, instead of the lightweight fetch (0b), invoke the `repo-audit` skill (it needs Node.js ≥ 22, required by the Repomix 1.18.1 it pins):
 ```
 repo-audit <url>
 ```

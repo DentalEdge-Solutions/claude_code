@@ -1,7 +1,7 @@
 ---
 name: project-audit
 description: "Use when: auditing Claude Code project security, checking for hardcoded secrets or overly permissive Bash rules, reviewing hooks for injection risks, scanning MCP server configurations, checking agents for prompt injection, or before installing new skills. Wraps ecc-agentshield to scan .claude/ configuration files across 5 categories — Secrets, Permissions, Hooks, MCP Servers, Agents — and returns an A–F grade with numbered findings. Offers auto-fix for safe issues. Run after project-setup and before skill-scout as part of the pipeline, or standalone at any time. Requires Node.js ≥ 18 for npx."
-compatibility: "Claude Code. Node.js ≥ 18 required (npx ecc-agentshield). No install needed — runs via npx."
+compatibility: "Claude Code. Node.js ≥ 18 required (npx ecc-agentshield@1.4.0). No install needed — runs via npx."
 risk_tier: critical
 ---
 

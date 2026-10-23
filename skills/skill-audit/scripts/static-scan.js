@@ -115,28 +115,49 @@ const MD_INJECTION = [
 // ─── Unpinned installs (P0-02) ─────────────────────────────────────────────
 // One check, unpinned-install, for code fetched at run time without an exact version:
 //   - npx <pkg> unless <pkg> ends in @x.y.z (a prerelease or build suffix is allowed): a range (@^1, @~1),
-//     a partial version (@1.2) or none is a hit. A scope (@scope/pkg) is allowed. A path (./x) is not a package.
-//   - pip install <pkg> (pip, pip3, pip3.12, python -m pip) unless <pkg> carries ==. -r/-c (a requirements or
-//     constraints file) is not a package; -i, -f and their long forms take an argument that is skipped.
+//     a partial version (@1.2) or none is a hit. A scope (@scope/pkg) and quotes are allowed. A path (./x) is
+//     not a package. With -p/--package, every -p value is read and the positional is a command, not a package.
+//   - pip install (pip, pip3, pip3.12, python -m pip, uv pip): every word after install is read. A word with ==,
+//     a path (. / ~), an option, a redirect (2>x) and the argument of a pip flag that takes one (-r, -c, -t, -i,
+//     -f, -C and the long forms in PIP_ARG_FLAG) are skipped; the first other word is the package, a hit. A word
+//     the read cannot place (<pkg>, $VAR, 2>&1) ends the read.
 //   - <pkg>@latest anywhere.
 // Curl or wget piped to a shell is curl-pipe-shell / wget-pipe-shell below, not repeated here.
-// npx and pip count only in command position: a line start, or just after a backtick, $(, ;, & or |, then an
-// optional "$ " prompt and sudo. So prose that names the tool ("npx prints an error", "access to npx") is
-// quiet, and so is "Install: npx x" (a known limit: this is a tripwire, not a boundary, like rm-rf-root).
-// Only the first package after npx or pip install is read; every npx or pip in command position is read.
-// Linear: an option token cannot hold a backtick, ;, &, |, ( or ), so no option run can contain a later
-// command start; an argument skipped after -r/-c/-i/-f cannot start with -, so an option run has one parse.
-// The CMD_AT anchor is what keeps it linear: NPX_UNPINNED without it took 350 s on 1 MB of "npx<TAB>-"
-// repeated (every npx inside an option run became a new start). With it, the worst 1 MB input took 12 ms.
-const OPT_TOKEN = String.raw`-[^\s\x60;&|()]*[ \t]+`;
-const PIP_ARG_FLAG = String.raw`-[rcif]|--(?:requirement|constraint|index-url|extra-index-url|find-links)`;
-const CMD_AT = String.raw`(?:(?<![^\n])|(?<=[\x60;&|]|\$\())[ \t]*(?:\$[ \t]+)?(?:sudo[ \t]+)*`;
-// The exact version may be followed by sentence punctuation (".", ",", ":") before the token ends.
-const EXACT_NPM = String.raw`(?:@[\w.-]+\/)?[\w.-]+@\d+\.\d+\.\d+(?:[-+][\w.+-]*)?[.,:]?(?![^\s\x60'"();&|])`;
-const NPX_UNPINNED = String.raw`npx[ \t]+(?:${OPT_TOKEN})*(?=[@A-Za-z0-9])(?!${EXACT_NPM})(?:@[\w.-]+\/)?[A-Za-z0-9][\w.-]*`;
-const PIP_UNPINNED = String.raw`(?:python[\d.]*[ \t]+-m[ \t]+)?pip[\d.]*[ \t]+install[ \t]+` +
-  String.raw`(?:(?:${PIP_ARG_FLAG})[ \t]+[^\s\x60;&|()-][^\s\x60;&|()]*[ \t]+|${OPT_TOKEN})*` +
-  String.raw`(?<![ \t](?:${PIP_ARG_FLAG})[ \t]+)["']?(?![^\s\x60'";&|()]*==)[A-Za-z0-9]`;
+// Words may be separated by blanks or a backslash-newline continuation. npx, pip and uv may be written in any
+// case (a case-insensitive file system runs NPX as npx).
+// npx and pip count only in command position: a line start, or just after a backtick, ;, &, |, (, { or !;
+// then an optional list or quote marker (-, *, +, >, 1.), a "$ " prompt, and command prefixes (VAR=val, env,
+// exec, time, command, nohup, sudo, an option word such as -E, and sh/bash -c "…"). So prose that names the
+// tool mid-sentence ("access to npx", "Install: npx x") is quiet: a tripwire, not a boundary, like rm-rf-root.
+// Prose that starts a line or a table cell with the tool name is read as a command (a known false positive).
+// Linear: a word (T) cannot hold a blank, backslash or any command-start character, and a line that follows a
+// backslash-newline is not a command start, so no run of words can contain a later command start. Every
+// repeated part has one parse: npx options exclude -p; pip's skip kinds are told apart by their first
+// character or a lookahead, and a pip flag that takes an argument is never read as a plain option. The
+// command-start anchor is what keeps this linear: without it, an earlier form took 350 s on 1 MB of "npx<TAB>-".
+const SP = String.raw`(?:[ \t]|\\\r?\n)`;
+const T = String.raw`[^\s\x60;&|(){}!\\]`;
+const PIP_ARG_FLAG = String.raw`-[rctCif]|--(?:requirement|constraint|target|platform|python-version|implementation|abi|root|` +
+  String.raw`prefix|src|upgrade-strategy|config-settings|global-option|no-binary|only-binary|progress-bar|root-user-action|` +
+  String.raw`report|index-url|extra-index-url|find-links|log|proxy|retries|timeout|exists-action|trusted-host|cert|` +
+  String.raw`client-cert|cache-dir|use-feature|use-deprecated|keyring-provider|python|resume-retries|group)`;
+const OPT_TOKEN = String.raw`-${T}*${SP}+`;
+const SH_C = String.raw`(?:ba|z|da|k)?sh${SP}+-[A-Za-z]*c${SP}+["']`;
+const PREFIX = String.raw`(?:(?:[A-Za-z_]\w*=${T}*|env|exec|time|command|nohup|sudo|-[A-Za-z][\w-]*)${SP}+|${SH_C})*`;
+const CMD_AT = String.raw`(?:(?<![^\n])(?<!\\\n)(?<!\\\r\n)|(?<=[\x60;&|({!]))[ \t]*(?:(?:[-*+>]|\d+[.)])[ \t]+)?` +
+  String.raw`(?:\$[ \t]+)?${PREFIX}`;
+// The exact version may be quoted and followed by sentence punctuation (".", ",", ":") before the word ends.
+const EXACT_NPM = String.raw`["']?(?:@[\w.-]+\/)?[\w.-]+@\d+\.\d+\.\d+(?:[-+][\w.+-]*)?["']?[.,:]?(?![^\s\x60'"();&|\\])`;
+const NPX_PKG = String.raw`(?!${EXACT_NPM})["']?(?:@[\w.-]+\/)?[A-Za-z0-9]`;
+const NPX_P = String.raw`(?:-p|--package)(?:=|${SP}+)`;
+const NPX_OPT = String.raw`(?!(?:-p|--package)(?:=|${SP}))${OPT_TOKEN}`;
+const NPX_UNPINNED = String.raw`[Nn][Pp][Xx]${SP}+(?:${NPX_OPT})*` +
+  String.raw`(?:${NPX_PKG}|(?:${NPX_P}(?=${EXACT_NPM})${T}+${SP}+(?:${NPX_OPT})*)*${NPX_P}${NPX_PKG})`;
+const PIP_SKIP = String.raw`(?:(?:${PIP_ARG_FLAG})${SP}+${T}+${SP}+|(?!(?:${PIP_ARG_FLAG})${SP})${OPT_TOKEN}|` +
+  String.raw`[./~]${T}*${SP}+|\d*[<>](?:${T}+|${SP}+${T}+)${SP}+|(?![-./~]|\d*[<>])(?=${T}*==)${T}+${SP}+)`;
+const PIP_UNPINNED = String.raw`(?:[Pp][Yy][Tt][Hh][Oo][Nn][\d.]*${SP}+-m${SP}+|[Uu][Vv]${SP}+)?` +
+  String.raw`[Pp][Ii][Pp][\d.]*${SP}+[Ii][Nn][Ss][Tt][Aa][Ll][Ll]${SP}+${PIP_SKIP}*` +
+  String.raw`(?!\d*[<>])["']?(?!${T}*==)[A-Za-z0-9]`;
 // A full stop ends it too ("…@latest."), but a name goes on after one ("user@latest.test").
 const AT_LATEST = String.raw`[\w.\/-]@latest(?![\w-]|\.[\w-])`;
 const UNPINNED_INSTALL = new RegExp(`${CMD_AT}(?:${NPX_UNPINNED}|${PIP_UNPINNED})|${AT_LATEST}`);

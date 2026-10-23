@@ -1883,5 +1883,111 @@ for (const [label, text] of [
   }
 }
 
+// ── unpinned-install, review round 1 (PR1-R-1 … R-3) ──────────────────────────────────────────────
+// R-1: a backslash-newline continuation separates words, every pip package is read (pinned ones, paths,
+// options and flag arguments are skipped), and every npx -p/--package value is read. R-2: a quoted npx package,
+// command prefixes (VAR=val, env, exec, time, command, nohup, sudo -X, sh -c "…"), (, {, !, list and quote
+// markers, upper-case tool names and uv before pip. R-3: -t/--target and the other pip flags that take an
+// argument do not hide the package after them.
+const UV = 'uv ' + PIPI;
+for (const cmd of [
+  // R-1
+  `${NPX} -y \\\n  evil-tool --help`, `${PIPI} \\\n  evil-lib`, `${PIPI} -q \\\n    good-lib==1.0.0 \\\n    evil-lib`,
+  `${NPX} -y \\\r\n  evil-tool`,
+  `${PIPI} good-lib==1.0.0 evil-lib`, `${PIPI} a==1 b==2 evil-lib`, `${PIPI} ./dist/x.whl evil-lib`,
+  `${PIPI} good==1.0 2>/dev/null evil-lib`,
+  `${NPX} -p good@1.2.3 -p evil-tool good`, `${NPX} --package=evil-tool cmd`, `${NPX} -y -p evil-tool cmd`,
+  `${NPX} -p "evil-tool" cmd`, `${NPX} --package evil-tool cmd`,
+  // R-2
+  `${NPX} "evil-tool" --help`, `${NPX} 'evil-tool'`,
+  `CI=1 ${NPX} evil-tool`, `env FOO=1 ${NPX} evil-tool`, `time ${NPX} evil-tool`, `( ${NPX} evil-tool )`,
+  `{ ${NPX} evil-tool; }`, `! ${NPX} evil-tool`, `sudo -E ${NPX} evil-tool`, `bash -c "${NPX} evil-tool"`,
+  `sh -c '${PIPI} evil-lib'`, `nohup ${NPX} evil-tool &`, `exec ${NPX} evil-tool`, `command ${NPX} evil-tool`,
+  `- ${NPX} evil-tool`, `* ${PIPI} evil-lib`, `1. ${NPX} evil-tool`, `> ${NPX} evil-tool`,
+  `NPX evil-tool`, `Npx evil-tool`, 'PIP INSTALL evil-lib', 'Pip3 install evil-lib', `${UV} evil-lib`,
+  `Python3 -m ${PIPI} evil-lib`,
+  // R-3
+  `${PIPI} -t lib evil-lib`, `${PIPI} --target lib evil-lib`, `${PIPI} --trusted-host h.test evil-lib`,
+  `${PIPI} --upgrade-strategy eager evil-lib`, `${PIPI} --prefix /opt evil-lib`, `${PIPI} -r -q evil-lib`,
+]) {
+  test(`unpinned-install (review R-1/R-2/R-3): ${JSON.stringify(cmd)} at a prose line start is a BLOCK`, () => {
+    const r = run([makeDir({ 'SKILL.md': `To set up, run:\n${cmd}\n` })]);
+    assert.strictEqual(sevOf(r.json, 'unpinned-install'), 'BLOCK', `got ${checks(r.json).join(', ') || 'none'}`);
+  });
+}
+
+for (const cmd of [
+  `${PIPI} -t lib x==1.0`, `${PIPI} --target lib x==1.0`, `${PIPI} --trusted-host h.test x==1.0`,
+  `${PIPI} --upgrade-strategy eager x==1.0`, `${PIPI} --prefix /opt x==1.0`, `${PIPI} --root /r x==1.0`,
+  `${PIPI} --src s x==1.0`, `${PIPI} a==1 b==2 c==3`, `${PIPI} -q \\\n  a==1.0.0 \\\n  b==2.0.0`,
+  `${PIPI} a==1 2>/dev/null`, `${PIPI} a==1 > log.txt`, `${PIPI} a==1 # pinned`, `${PIPI} a==1 && echo ok`,
+  `${PIPI} ./dist/pkg.whl`, `${PIPI} ~/src/pkg`, `${PIPI} -e ./src`,
+  `${NPX} --package=tool@1.2.3 tool-bin`, `${NPX} -p a@1.2.3 -p b@4.5.6 cmd`, `${NPX} -y \\\n  tool@1.2.3 --help`,
+  `${NPX} "tool@1.2.3"`, `CI=1 ${NPX} tool@1.2.3`, `sudo -E ${NPX} tool@1.2.3`, `bash -c "${NPX} tool@1.2.3"`,
+  `${UV} x==1.0`, `NPX tool@1.2.3`, `- ${NPX} tool@1.2.3`, `${NPX} -y tool@1.18.1 \\`,
+  'Requires npx (Repomix) and network access.', 'Node.js is required (for npx some-tool).',
+]) {
+  test(`unpinned-install (review): ${JSON.stringify(cmd)} is not flagged`, () => {
+    const r = run([makeDir({ 'SKILL.md': `Run:\n${cmd}\n`, 'x.sh': `${cmd}\n` })]);
+    assert.ok(!checks(r.json).includes('unpinned-install'), `got ${JSON.stringify(r.json.findings)}`);
+  });
+}
+
+// Known false positives (R-3), kept fail-closed and listed in REFERENCE.md: prose that starts a line, or a table
+// cell, with the tool name followed by a word reads as a command. Pinned here so a change is deliberate.
+for (const md of ['npx is the npm package runner.\n', 'pip install is slow on CI.\n', '| Requires | npx and network |\n']) {
+  test(`unpinned-install: known false positive stays flagged: ${JSON.stringify(md)}`, () => {
+    const r = run([makeDir({ 'SKILL.md': md })]);
+    assert.ok(checks(r.json).includes('unpinned-install'), `got ${JSON.stringify(r.json.findings)}`);
+  });
+}
+
+// A continuation line is part of the command above it, not a new command start (keeps the scan linear).
+test('unpinned-install: a line after a backslash continuation is not a new command start', () => {
+  const r = run([makeDir({ 'SKILL.md': '```bash\necho done \\\n' + `${NPX} evil-tool` + '\n```\n' })]);
+  assert.ok(!checks(r.json).includes('unpinned-install'), `got ${JSON.stringify(r.json.findings)}`);
+});
+
+// Hostile 1 MB inputs for the round-1 forms (the reviewer's and this author's), each under 2 s.
+for (const [label, text] of [
+  ['continuation runs after npx', `${NPX} ` + fill('\\\n')],
+  ['npx option lines joined by continuations', fill(`${NPX} -a \\\n`)],
+  ['option lines joined by continuations', `${NPX} ` + fill('-a \\\n')],
+  ['sudo -E lines joined by continuations', fill('sudo -E \\\n')],
+  ['VAR=val run', fill('A=1 ') + NPX],
+  ['VAR={ run (a start inside a value)', fill('A={')],
+  ['VAR=! run', fill('A=!')],
+  ['pip pinned run', `${PIPI} ` + fill('a==1 ')],
+  ['pip path run', `${PIPI} ` + fill('./a ')],
+  ['pip -r pinned pairs', `${PIPI} ` + fill('-r a==1 ')],
+  ['pip a==b==c run', `${PIPI} ` + fill('a==b==c ')],
+  ['pip redirect-like pinned run', `${PIPI} ` + fill('2>a==1 ')],
+  ['pip -t -t run', `${PIPI} ` + fill('-t ')],
+  ['npx -p pinned pairs', `${NPX} ` + fill('-p a@1.2.3 ')],
+  ['npx -p -p run', `${NPX} ` + fill('-p -p ')],
+  ['npx -p pinned lines joined by continuations', `${NPX} ` + fill('-p a@1.2.3 \\\n')],
+  ['sudo -E run', 'sudo' + fill(' -E')],
+  ['bash -c " run', fill('bash -c "')],
+  ['( run', fill('( ')],
+  ['list marker run', fill('- ')],
+  ['quote then npx run', fill(`"${NPX} -a`)],
+  ['uv pip run', fill('uv ')],
+  ['upper-case NPX option run', 'NPX ' + fill('-a ')],
+]) {
+  for (const [kind, file, wrap] of [
+    ['md', 'f.md', t => t + '\n'],
+    ['md, in code', 'f.md', t => '```\n' + t + '\n```\n'],
+    ['sh', 'f.sh', t => t + '\n'],
+  ]) {
+    test(`unpinned-install (review) stays fast on 1 MB of ${label} (${kind})`, () => {
+      const t = Date.now();
+      const r = run([makeDir({ [file]: wrap(text) })]);
+      const ms = Date.now() - t;
+      assert.ok(r.json, `no JSON output (status ${r.status}, ${(r.stderr || '').slice(0, 200)})`);
+      assert.ok(ms < 2000, `scan took ${ms} ms`);
+    });
+  }
+}
+
 if (!ok) process.exit(1);
 console.log('\nAll static-scan tests passed.');
