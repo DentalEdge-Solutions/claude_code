@@ -18,7 +18,7 @@ A self-contained pipeline for sourcing, vetting, adapting, measuring, and auto-i
 
 - `skills/` — source of truth for all pipeline skills; installed to target projects and `~/.claude/skills/`
 - `.claude/agents/` — runtime sub-agents; installed to target projects only (project-scoped)
-- `evals/` — generated artifacts (gitignored): `project-context.json`, eval runs, refine logs
+- `evals/` — generated eval artifacts (gitignored: eval runs, refine logs, reports) plus three tracked kinds: the scenario specs `evals/**/evals.json`, `evals/.gitignore` and `evals/project-context.json` (the toolkit's own context snapshot)
 - `docs/superpowers/specs/` — design specs for features under development
 
 ## Pipeline
@@ -80,7 +80,7 @@ project-setup → project-audit → skill-scout → skill-audit → skill-adapt 
 ### Never
 
 - Hardcode a skill count anywhere — the number of skills changes as the pipeline evolves
-- Commit anything under `evals/` — it is gitignored; all eval artifacts are generated, not versioned
+- Commit generated eval artifacts under `evals/` (eval runs, refine logs, reports) — they are gitignored and regenerated, not versioned. Only these are tracked: the scenario specs `evals/**/evals.json`, `evals/.gitignore` and `evals/project-context.json` (the toolkit's own context snapshot)
 - Run `npx ecc-agentshield --opus` automatically — it makes API calls and may incur cost; only on explicit user request
 - Edit `SKILL.md.baseline` once created — it is the immutable reference point for a refine session
 - Skip the analyst pass in skill-eval — non-discriminating and flaky scenarios are silent failures without it
