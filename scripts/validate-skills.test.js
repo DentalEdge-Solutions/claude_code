@@ -146,5 +146,121 @@ test('real repo: no unresolved skill references in skills/ or .claude/agents/', 
   assert.deepStrictEqual(refs, [], refs.map(r => `${r.name} @ ${r.location}`).join(', '));
 });
 
+// ─── Untrusted-content framing (S3 §2.3, P0-03, P0-06) ─────────────────────
+const {
+  findMissingUntrustedFraming, listUntrustedIntakeFiles,
+  UNTRUSTED_INTAKE_FILES, UNTRUSTED_FRAMING_CORES,
+} = require('./validate-skills');
+const { spawnSync } = require('child_process');
+
+// Copy every intake file of the real tree into a fresh temp root, same relative paths.
+function intakeCopy() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'validate-framing-'));
+  const { files } = listUntrustedIntakeFiles(REPO);
+  for (const rel of files) {
+    const dst = path.join(root, rel);
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(path.join(REPO, rel), dst);
+  }
+  return { root, files };
+}
+function withIntakeCopy(fn) {
+  const c = intakeCopy();
+  try { fn(c); } finally { fs.rmSync(c.root, { recursive: true, force: true }); }
+}
+
+test('framing: the analyst glob finds at least one repo-audit analyst', () => {
+  const { analysts } = listUntrustedIntakeFiles(REPO);
+  assert.ok(analysts.length >= 1, `analysts: ${analysts.length}`);
+  assert.ok(analysts.every(a => /^\.claude\/agents\/repo-audit-[^/]+\.md$/.test(a)), analysts.join(', '));
+});
+
+test('framing: the fixed list names the P0-06 readers and repo-audit', () => {
+  for (const f of ['skills/skill-scout/SKILL.md', 'skills/repo-audit/SKILL.md', '.claude/agents/skill-synthesizer-agent.md',
+    '.claude/skills/codex-eval/SKILL.md', 'skills/skill-audit/SKILL.md', 'skills/agent-audit/SKILL.md']) {
+    assert.ok(UNTRUSTED_INTAKE_FILES.includes(f), f);
+  }
+  assert.strictEqual(UNTRUSTED_FRAMING_CORES.length, 2);
+});
+
+test('framing: real repo — every intake file carries both cores in its body', () => {
+  const missing = findMissingUntrustedFraming(REPO);
+  assert.deepStrictEqual(missing, [], missing.map(m => `${m.file} (${m.reason})`).join(', '));
+});
+
+test('framing: a temp copy of the intake files passes', () => {
+  withIntakeCopy(({ root }) => assert.deepStrictEqual(findMissingUntrustedFraming(root), []));
+});
+
+test('framing: removing the paragraph from one listed file fails on that file', () => {
+  withIntakeCopy(({ root }) => {
+    const rel = 'skills/skill-adapt/SKILL.md';
+    const p = path.join(root, rel);
+    let text = fs.readFileSync(p, 'utf8');
+    for (const core of UNTRUSTED_FRAMING_CORES) text = text.split(core).join('');
+    fs.writeFileSync(p, text);
+    const missing = findMissingUntrustedFraming(root);
+    assert.deepStrictEqual(missing.map(m => [m.file, m.reason]), [[rel, 'missing-core'], [rel, 'missing-core']]);
+  });
+});
+
+test('framing: removing it from one analyst fails on that analyst', () => {
+  withIntakeCopy(({ root }) => {
+    const rel = listUntrustedIntakeFiles(root).analysts[0];
+    const p = path.join(root, rel);
+    fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split(UNTRUSTED_FRAMING_CORES[1]).join('report it'));
+    assert.deepStrictEqual(findMissingUntrustedFraming(root).map(m => [m.file, m.reason]), [[rel, 'missing-core']]);
+  });
+});
+
+test('framing: a listed file that is missing (renamed) fails', () => {
+  withIntakeCopy(({ root }) => {
+    const rel = '.claude/skills/codex-eval/SKILL.md';
+    fs.renameSync(path.join(root, rel), path.join(root, rel + '.old'));
+    assert.deepStrictEqual(findMissingUntrustedFraming(root).map(m => [m.file, m.reason]), [[rel, 'missing-file']]);
+  });
+});
+
+test('framing: no analyst matching the glob fails (a rename of all analysts is caught)', () => {
+  withIntakeCopy(({ root }) => {
+    for (const a of listUntrustedIntakeFiles(root).analysts) fs.rmSync(path.join(root, a));
+    assert.deepStrictEqual(findMissingUntrustedFraming(root).map(m => m.reason), ['no-analysts']);
+  });
+});
+
+test('framing: cores only in the frontmatter do not count (body only)', () => {
+  withIntakeCopy(({ root }) => {
+    const rel = 'skills/agent-scout/SKILL.md';
+    const p = path.join(root, rel);
+    let text = fs.readFileSync(p, 'utf8');
+    for (const core of UNTRUSTED_FRAMING_CORES) text = text.split(core).join('');
+    text = text.replace(/^---\n/, `---\nnote: ${UNTRUSTED_FRAMING_CORES.join(' ')}\n`);
+    fs.writeFileSync(p, text);
+    assert.deepStrictEqual(findMissingUntrustedFraming(root).map(m => m.file), [rel, rel]);
+  });
+});
+
+test('framing: a core wrapped across lines still counts', () => {
+  withIntakeCopy(({ root }) => {
+    const p = path.join(root, 'skills/skill-scout/SKILL.md');
+    const core = UNTRUSTED_FRAMING_CORES[0];
+    const wrapped = core.replace(' never', '\n  never');
+    fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split(core).join(wrapped));
+    assert.deepStrictEqual(findMissingUntrustedFraming(root), []);
+  });
+});
+
+test('framing: the CLI reports a missing paragraph and exits non-zero', () => {
+  withIntakeCopy(({ root }) => {
+    const rel = 'skills/gstack-pattern-audit/SKILL.md';
+    const p = path.join(root, rel);
+    fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split(UNTRUSTED_FRAMING_CORES[0]).join(''));
+    const r = spawnSync(process.execPath, [path.join(__dirname, 'validate-skills.js'), path.join(root, 'skills')], { encoding: 'utf8' });
+    assert.notStrictEqual(r.status, 0);
+    assert.match(r.stdout, new RegExp(`FAIL  untrusted-content framing missing in ${rel.replace(/[.\/]/g, '\\$&')}`));
+    assert.match(r.stdout, /untrusted-content framing: 1 missing/);
+  });
+});
+
 if (!ok) process.exit(1);
 console.log('\nvalidate-skills.test.js: all tests passed');
