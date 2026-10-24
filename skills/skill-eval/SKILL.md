@@ -52,7 +52,7 @@ User: evaluate the skill-adapt skill
 
 4. **Establish baseline** — the baseline is the same prompt with no skill loaded, recorded as `baseline_method` `none` for the whole iteration. This holds for a new skill and an existing one alike: a baseline of an earlier version is not run, because a copy taken now would be identical to the skill being measured.
 
-   **Resume check:** if `evals/<skill-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here. If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming.
+   **Resume check:** if `evals/<skill-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here. If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming. If `status` exits 2 (`STATUS: REFUSED`: an evaluator file changed since init, or the manifest predates the evaluator pin), the iteration is refused even when every scenario is graded: start a new iteration.
 
 5. **Create the iteration dir and initialize the run manifest** (once per iteration — skip on resume):
    ```bash
@@ -88,7 +88,7 @@ User: evaluate the skill-adapt skill
    ```bash
    node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-<N>
    ```
-   Must exit 0. If it fails, close the gap (harvest, dispatch, or grade what's missing) before proceeding.
+   Must exit 0. If it fails, close the gap (harvest, dispatch, or grade what's missing) before proceeding. Exit 2 is an evaluator refusal, not a gap: start a new iteration.
 
 10. **Compute 5 metrics**:
     - **Eval Pass Rate** = (scenarios correct) / (total) × 100%. Threshold: ≥ 80%

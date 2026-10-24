@@ -53,7 +53,7 @@ If it reports incomplete or ungraded scenarios, resume that iteration instead of
 starting a new one: dispatch only the scenarios not yet `graded`, using the
 **recorded** `baseline_method` from that manifest — never re-decide the baseline
 method mid-iteration.
-If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming.
+If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming. If `status` exits 2 (`STATUS: REFUSED`: an evaluator file changed since init, or the manifest predates the evaluator pin), the iteration is refused even when every scenario is graded: start a new iteration.
 
 1. Read `.claude/agents/<agent-name>.md` in full. Extract frontmatter: name, description,
    model, tools. Compute context footprint: total lines × 4 estimated tokens/line.
@@ -173,6 +173,7 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
    `evidence.json` in either side). If it fails, fix the gap first — re-run the
    harvester, dispatch the missing scenario, or grade what's outstanding — before
    proceeding to metrics.
+   Exit 2 is an evaluator refusal, not a gap: start a new iteration.
 
 10. Analyst pass — flag:
     - Non-discriminating: |baseline_delta| < 0.5 (agent adds no value here)

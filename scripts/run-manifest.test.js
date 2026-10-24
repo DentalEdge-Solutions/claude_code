@@ -442,6 +442,33 @@ test('P0-11: the flag value of --evaluator-ref is not mistaken for the iteration
   assert.ok(fs.existsSync(path.join(dir2, 'run-manifest.json')));
 });
 
+// The instruction layer: each refine definition forbids editing every pinned file (read from the script, so a
+// change to the list fails here until the definitions follow), passes --evaluator-ref, and refuses an evaluator
+// subject. RUN_MANIFEST_DEFS_ROOT may point at another checkout (used to show these fail on the pre-P0-11 ones).
+const DEFS_ROOT = process.env.RUN_MANIFEST_DEFS_ROOT || path.join(__dirname, '..');
+for (const def of ['skills/skill-refine/SKILL.md', 'skills/agent-refine/SKILL.md',
+  '.claude/agents/skill-refine-agent.md', '.claude/agents/agent-refine-agent.md']) {
+  test(`P0-11: ${def} forbids editing each evaluator file, passes --evaluator-ref, refuses an evaluator subject`, () => {
+    const text = fs.readFileSync(path.join(DEFS_ROOT, def), 'utf8');
+    const labels = run('evaluator').out.trim().split('\n').map(l => l.trim().split(/\s+/).pop());
+    for (const label of labels) assert.ok(text.includes(`\`${label}\``), `does not name ${label}`);
+    assert.match(text, /--evaluator-ref/);
+    const i = text.indexOf('frozen-copy procedure');
+    assert.ok(i !== -1, 'no refusal for an evaluator subject');
+    const refusal = text.slice(Math.max(0, i - 300), i);   // the refusal names the four subjects just before
+    for (const subject of ['skill-eval', 'agent-eval', 'skill-eval-agent', 'agent-eval-agent']) {
+      assert.match(refusal, new RegExp(`(^|[^-\\w])${subject}([^-\\w]|$)`), `the refusal does not name ${subject}`);
+    }
+  });
+}
+for (const def of ['skills/skill-eval/SKILL.md', 'skills/agent-eval/SKILL.md',
+  '.claude/agents/skill-eval-agent.md', '.claude/agents/agent-eval-agent.md']) {
+  test(`P0-11: ${def} says an evaluator refusal (status exit 2) means a new iteration`, () => {
+    const text = fs.readFileSync(path.join(DEFS_ROOT, def), 'utf8');
+    assert.ok((text.match(/exits? 2[^\n]*start a new iteration/gi) || []).length >= 2, 'resume check and integrity step must both say it');
+  });
+}
+
 test('P0-11: the usage text documents the exit codes, the evaluator refusal and --evaluator-ref', () => {
   const r = run('--help');
   assert.match(r.out, /--evaluator-ref/);

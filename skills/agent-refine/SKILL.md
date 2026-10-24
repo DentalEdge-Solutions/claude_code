@@ -12,6 +12,8 @@ Apply Karpathy's autoresearch loop to measurably improve an agent definition. Di
 
 `agent-eval` must have run first. You need a baseline and a `refine-input.json` at `evals/agents/<agent-name>/refine-input.json`. If neither exists, run `agent-eval` now.
 
+The subject must not be part of the evaluator. If it is `skill-eval-agent` or `agent-eval-agent` (or the skills `skill-eval` / `agent-eval`), refuse and stop: tell the user that refining the evaluator needs a frozen-copy procedure, which does not exist yet.
+
 ## The Loop
 
 ```
@@ -23,7 +25,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 ## Workflow
 
-1. **Gather inputs** — load `.claude/agents/<name>-EVAL.md` and `evals/agents/<name>/refine-input.json`. Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each).
+1. **Gather inputs** — load `.claude/agents/<name>-EVAL.md` and `evals/agents/<name>/refine-input.json`. Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each). Note `<B>`, the iteration that produced `refine-input.json` (the highest-numbered `evals/agents/<name>/iteration-<B>/` when the session starts): its `run-manifest.json` is this session's evaluator reference.
 
 2. **Back up and validate baseline** — copy the current agent before touching anything (once per refine session; never overwrite an existing `.md.baseline`):
    ```bash
@@ -58,6 +60,9 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
      A BLOCK verdict counts as a score of 0 for this iteration — revert immediately and log.
 
 7. **Re-eval (training set only)** — re-run the failing scenarios using agent-eval's exact methodology: parallel subagents (with-agent vs no-agent baseline), 3 reps each, programmatic dispatch detection first, then LLM judge scoring. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Dispatch × 0.4) + (Workflow × 0.3) + (Output × 0.3)`.
+   Initialise each re-eval iteration against the session's evaluator reference:
+   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<name>/iteration-<N> --baseline-method none --subject .claude/agents/<name>.md --commit <short SHA> --evaluator-ref evals/agents/<name>/iteration-<B>/run-manifest.json`
+   If `init` or `status` refuses (exit 2: the evaluator differs), stop the refine session and report it to the user — never work around it.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. No copy is needed: the agent is project-scoped, and Claude Code watches `.claude/agents/` and uses the edited file on the next delegation.
@@ -68,7 +73,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 9. **Repeat** steps 5–8 until any convergence criterion is met (see REFERENCE.md).
 
-10. **Final validation** — invoke `agent-eval` on the improved agent with `--context evals/project-context.json`. Do not implement a separate eval process — agent-eval IS the final validation. This produces a new `AGENT-EVAL.md` replacing the old one, giving a clean before/after comparison. The held-out `project-native`, `project-workflow`, and `multi-turn` scenarios run here for the first time during this refinement session. All 5 metrics must be reported.
+10. **Final validation** — invoke `agent-eval` on the improved agent with `--context evals/project-context.json`. Do not implement a separate eval process — agent-eval IS the final validation. This produces a new `AGENT-EVAL.md` replacing the old one, giving a clean before/after comparison. The held-out `project-native`, `project-workflow`, and `multi-turn` scenarios run here for the first time during this refinement session. All 5 metrics must be reported. Its `init` also takes `--evaluator-ref evals/agents/<name>/iteration-<B>/run-manifest.json`; a refusal stops the session as in step 7.
 
 11. **Write report** — save `.claude/agents/<name>-REFINE-LOG.md` using the template in REFERENCE.md.
 
@@ -81,5 +86,6 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 - **Log every iteration** — including failed hypotheses. They're data.
 - **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend writing a new agent definition from scratch.
 - **Never skip the baseline backup** — `.md.baseline` must exist before the first mutation.
+- **Never edit the evaluator** — no lever (A–E) may edit `skill-eval/scripts/harvest-evidence.js`, `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`, `agent-eval/scripts/generate-agent-evals.js` or `skill-eval/REFERENCE.md` (under `skills/`; `run-manifest.js evaluator` lists them). The run manifest pins their sha256 and refuses an iteration whose evaluator changed.
 
 See [REFERENCE.md](REFERENCE.md) for lever definitions, keep/revert thresholds, hypothesis guide, good/bad mutations, convergence criteria, and log template.

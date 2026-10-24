@@ -12,6 +12,8 @@ Apply Karpathy's autoresearch loop to measurably improve a skill. Diagnose → t
 
 `skill-eval` must have run first. You need a baseline and a `refine-input.json`. If neither exists, run `skill-eval` now.
 
+The subject must not be part of the evaluator. If it is `skill-eval` or `agent-eval` (or the agents `skill-eval-agent` / `agent-eval-agent`), refuse and stop: tell the user that refining the evaluator needs a frozen-copy procedure, which does not exist yet.
+
 ## The Loop
 
 ```
@@ -23,7 +25,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 ## Workflow
 
-1. **Gather inputs** — load `skills/<skill-name>/SKILL-EVAL.md` and `evals/<skill-name>/refine-input.json` (the structured handoff from skill-eval). Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each).
+1. **Gather inputs** — load `skills/<skill-name>/SKILL-EVAL.md` and `evals/<skill-name>/refine-input.json` (the structured handoff from skill-eval). Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each). Note `<B>`, the iteration that produced `refine-input.json` (the highest-numbered `evals/<skill-name>/iteration-<B>/` when the session starts): its `run-manifest.json` is this session's evaluator reference.
 
 2. **Back up and validate baseline** — copy the current skill before touching anything (once per refine session; never overwrite an existing `SKILL.md.baseline`):
    ```bash
@@ -55,6 +57,9 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
    Then make exactly the targeted edit, to one file, `<file>`, relative to the skill folder: `SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E. No other changes. A symlinked `<file>` is out of scope: a revert can't restore it, so pick another file. `wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit.
 
 7. **Re-eval (training set only)** — re-run the failing scenarios using skill-eval's exact methodology: parallel subagents (with-skill vs no-skill baseline), 3 reps each, programmatic trigger detection first, then LLM judge scoring using the rubric in skill-eval's REFERENCE.md. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Trigger × 0.4) + (Checklist × 0.3) + (Output × 0.3)`.
+   Initialise each re-eval iteration against the session's evaluator reference:
+   `node skills/skill-eval/scripts/run-manifest.js init evals/<skill-name>/iteration-<N> --baseline-method none --subject skills/<skill-name>/SKILL.md --commit <short SHA> --evaluator-ref evals/<skill-name>/iteration-<B>/run-manifest.json`
+   If `init` or `status` refuses (exit 2: the evaluator differs), stop the refine session and report it to the user — never work around it.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. Sync to runtime: `cp -r skills/<skill-name> ~/.claude/skills/`
@@ -69,7 +74,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 9. **Repeat** steps 5–8 until any convergence criterion is met (see REFERENCE.md).
 
-10. **Final validation** — invoke `skill-eval` on the improved skill with `--context evals/project-context.json`. Do not implement a separate eval process — skill-eval IS the final validation. This produces a new `SKILL-EVAL.md` replacing the old one, giving a clean before/after comparison on identical methodology. The held-out `project-native`, `project-workflow`, and `multi-turn` scenarios run here for the first time during this refinement session. All 5 metrics (including resilience_score) must be reported.
+10. **Final validation** — invoke `skill-eval` on the improved skill with `--context evals/project-context.json`. Do not implement a separate eval process — skill-eval IS the final validation. This produces a new `SKILL-EVAL.md` replacing the old one, giving a clean before/after comparison on identical methodology. The held-out `project-native`, `project-workflow`, and `multi-turn` scenarios run here for the first time during this refinement session. All 5 metrics (including resilience_score) must be reported. Its `init` also takes `--evaluator-ref evals/<skill-name>/iteration-<B>/run-manifest.json`; a refusal stops the session as in step 7.
 
 11. **Write report** — save `skills/<skill-name>/SKILL-REFINE-LOG.md` using the template in REFERENCE.md. If claude-mem is installed, persist a summary there too.
 
@@ -81,5 +86,6 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 - **Log every iteration** — including failed hypotheses. They're data.
 - **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend a rebuild instead: `superpowers:writing-skills` if installed, otherwise by hand per skill-scout's no-results step; then `skill-audit` → `skill-eval`.
 - **Never skip the baseline backup** — `SKILL.md.baseline` must exist before the first mutation.
+- **Never edit the evaluator** — no lever (A–E) may edit `skill-eval/scripts/harvest-evidence.js`, `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`, `agent-eval/scripts/generate-agent-evals.js` or `skill-eval/REFERENCE.md` (under `skills/`; `run-manifest.js evaluator` lists them). The run manifest pins their sha256 and refuses an iteration whose evaluator changed.
 
 See [REFERENCE.md](REFERENCE.md) for lever definitions, keep/revert thresholds, hypothesis guide, good/bad mutations, convergence criteria, and log template.

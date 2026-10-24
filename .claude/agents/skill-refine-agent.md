@@ -49,9 +49,14 @@ own eval logic.
 1. Receive skill name. Verify `evals/<skill-name>/refine-input.json` exists.
    If not: "No refine-input.json for <skill-name>. Run skill-eval-agent first."
    Exit.
+   If the subject is part of the evaluator (skill-eval, agent-eval, skill-eval-agent,
+   agent-eval-agent): "Refining the evaluator needs a frozen-copy procedure, which
+   does not exist yet." Exit.
 
 2. Load: `evals/<skill-name>/refine-input.json`, `skills/<skill-name>/SKILL-EVAL.md`,
-   `skills/<skill-name>/SKILL.md`.
+   `skills/<skill-name>/SKILL.md`. Note <B>, the iteration that produced refine-input.json
+   (the highest-numbered `evals/<skill-name>/iteration-<B>/` now); its
+   `run-manifest.json` is the session's evaluator reference, <REF>.
 
 3. Route by failing metric (from refine-input.json):
    - project_fit_score < 7 → check which scenarios drove the failure:
@@ -116,8 +121,11 @@ own eval logic.
    7c. Invoke skill-eval-agent as a subagent on training set only:
    "Evaluate skill <name>. Run scenario IDs: [training set IDs]. This is a
    mid-loop re-eval — do NOT run project-native or project-workflow scenarios.
+   Add `--evaluator-ref <REF>` to your run-manifest.js init. If init or status
+   exits 2, stop and print EVALUATOR_REFUSED with its output.
    Print EVAL_COMPLETE on its own line when done."
    Wait for EVAL_COMPLETE. Read updated `skills/<skill-name>/SKILL-EVAL.md`.
+   On EVALUATOR_REFUSED: stop the session, log it, and report it to the user — never work around it.
    Also run 1 regression rep on each previously-passing scenario.
 
    7d. Keep or revert (`score` is the training-set pass rate from 7c; the bands are in percentage points of it):
@@ -145,8 +153,9 @@ own eval logic.
 9. Final validation — invoke skill-eval-agent as subagent (full 9-scenario run):
    "Run full evaluation of skill <name> with --context evals/project-context.json,
    including project-native, project-workflow, and multi-turn scenarios.
-   Print EVAL_COMPLETE when done."
-   Wait for EVAL_COMPLETE. Read final SKILL-EVAL.md.
+   Add `--evaluator-ref <REF>` to your run-manifest.js init; on exit 2, print
+   EVALUATOR_REFUSED. Print EVAL_COMPLETE when done."
+   Wait for EVAL_COMPLETE. Read final SKILL-EVAL.md. EVALUATOR_REFUSED stops the session as in 7c.
 
 10. Append final log entry (baseline→final delta, iterations used, effective levers,
     convergence reason).
@@ -166,3 +175,6 @@ own eval logic.
 - Never exit without writing the final log entry.
 - Never continue past 10 iterations.
 - Never skip the per-iteration safety snapshot before mutating.
+- Never edit an evaluator file with any lever (A–E): `skill-eval/scripts/harvest-evidence.js`,
+  `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`,
+  `agent-eval/scripts/generate-agent-evals.js`, `skill-eval/REFERENCE.md` (under `skills/`).
