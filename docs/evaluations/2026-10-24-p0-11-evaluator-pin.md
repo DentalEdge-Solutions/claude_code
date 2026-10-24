@@ -1,7 +1,7 @@
 # Evaluator pin in the run manifest (P0-11)
 
 > Date: 2026-10-24 · Item: P0-11 (S5 roadmap), batch B1 PR-2 · Trace: OPP-14 · GAP-05 (refine part), GAP-11 ·
-> Review round 1: PR2-R-1…R-10 applied · Review round 2: PR2-R-11, R-12, R-14 applied (R-13 kept as a note)
+> Review round 1: PR2-R-1…R-10 applied · Review round 2: PR2-R-11, R-12, R-14 applied (R-13 kept as a note) · Review round 3: PR2-R-15 applied, R-16 recorded
 
 ## What is pinned and why
 
@@ -54,7 +54,11 @@ one iteration, and the next `init` would simply record the edited files. The ref
    or the hash differs, the refine stops and asks for a fresh eval; the subject is unchanged. Every re-eval is told:
    do not regenerate `evals.json`, and dispatch only the scenarios in `refine/evals.json` (the training set, as
    before). So what a re-eval dispatches and what the harvester scores against are the same file, and it is the file
-   the baseline eval used (PR2-R-11). The harvester looks for the scenarios two levels above each scenario folder,
+   the baseline eval used (PR2-R-11). The eval definitions back this up: their generation step and their
+   caller clause say to skip generation in a mid-loop re-eval and to dispatch only the caller's
+   `refine/evals.json`. After each 7c re-eval, the refine agents check that `shasum -a 256 evals/<x>/evals.json`
+   still equals `eval_scenarios_sha256`. If it changed, they revert the pending edit and stop (PR2-R-15). The skill
+   flows run their re-evals themselves, without generating scenarios, so they have no such check. The harvester looks for the scenarios two levels above each scenario folder,
    which is why the copy sits in `refine/` (`harvest-evidence.js` is pinned, so it is not changed).
 4. **Its own folder.** Each mid-loop re-eval runs in `evals/<x>/refine/re-eval-N`. That folder is cleared at the start
    of each session, like the `pre-iter-N` copies, and is never an eval `iteration-<N>` folder (PR2-R-1). Every `init`
@@ -85,7 +89,8 @@ new iteration after a `status` refusal. They also say what an `init` exit 2 mean
   `.claude/agents/skill-eval-agent.md` and `.claude/agents/agent-eval-agent.md` changed in three places:
   - the resume check;
   - the `init` step (a caller's reference and the meaning of `init` exit 2);
-  - the integrity step (exit 2 means a new iteration when the eval runs alone, and a stop under a reference).
+  - the integrity step (exit 2 means a new iteration when the eval runs alone, and a stop under a reference);
+  - the scenario-generation step: skip it in a mid-loop re-eval (PR2-R-15).
 - **`refine-input.json` writers:** they add `eval_manifest` and `eval_scenarios_sha256` (`shasum -a 256` of the
   `evals.json` that iteration used). These are the four eval definitions above and the
   handoff format in `skills/agent-eval/REFERENCE.md`. No schema or writer script exists for `refine-input.json`;
@@ -176,6 +181,8 @@ modified, and each new test removes its temp dirs when it ends (PR2-R-9).
   - copy `evals.json` to `refine/` and check its `shasum -a 256` against `eval_scenarios_sha256`, both before the
     first `pre-iter-N` step;
   - tell every re-eval not to regenerate `evals.json` and to dispatch from `refine/evals.json`;
+  - (refine agents only) re-check the `evals.json` hash after each 7c re-eval, between 7c and 7d, then revert from
+    `pre-iter-N` and stop on a change, and state that the final validation regenerates its scenarios by design;
   - not claim that `--evaluator-ref` compares `refine/evals.json`;
   - say "(none for re-eval-0)" wherever `re-eval-0` appears.
 
@@ -183,7 +190,8 @@ modified, and each new test removes its temp dirs when it ends (PR2-R-9).
   has no evaluator-reference check and point to skill-refine-agent.
 
   Each of the four eval definitions must state the stand-alone and the under-reference meaning of exit 2, the meaning
-  of `init` exit 2, `eval_manifest` and `eval_scenarios_sha256` (with the `evals.json` it hashes). The agent-eval
+  of `init` exit 2, `eval_manifest` and `eval_scenarios_sha256` (with the `evals.json` it hashes). Each must also skip
+  scenario generation in a mid-loop re-eval, both in its generation step and in its caller clause. The agent-eval
   handoff format must carry both fields. The round-1 checks
   failed 8 times on main's definitions.
 - `scripts/refine-copy-paths.test.js` counted every `cp` from `evals/` as a restore, so the new `evals.json` copy
@@ -233,6 +241,14 @@ modified, and each new test removes its temp dirs when it ends (PR2-R-9).
 - **Installs are compared file by file.** A manifest made by one install (the repo's `skills/`) and checked by
   another (`~/.claude/skills/`) is refused if the two copies differ. This is intended: run
   `node scripts/check-skill-deploy.js` before an eval campaign.
+- **The scenario hash is taken at handoff, not at init (PR2-R-16).** An eval writes `eval_scenarios_sha256` in
+  step 13. Suppose `project-context.json` changed between the first run and the resume of an interrupted
+  iteration, and the resume regenerated the scenarios. That iteration can then hold scenarios from two prompt sets,
+  and the recorded hash describes only the later one. This predates P0-11. A follow-up could record the `evals.json`
+  hash at `init` and re-check it at `status`. That changes `run-manifest.js`, and with it its pinned hash.
+- **The final validation regenerates its scenarios by design.** It is a full eval. When it still fails, it writes a
+  new `refine-input.json` whose `eval_manifest` and `eval_scenarios_sha256` agree with each other. When it passes,
+  the old `refine-input.json` stays behind, and a later refine fails closed on the hash.
 - **skill-guardian (PR2-R-12).** Its Phase 4 loop has the instruction-layer rules only: the never-edit list and the
   evaluator-subject refusal. It has no code check: no `check-ref`, no `--evaluator-ref`, and no manifest for its
   re-scores. Its re-scores are therefore not comparable under V-S5-5. This closes when skill-guardian is retired

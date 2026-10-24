@@ -655,6 +655,18 @@ for (const def of REFINE_DEFS) {
     if (text.includes('re-eval-0')) assert.ok(text.includes('(none for re-eval-0)'), 'no "(none for re-eval-0)" on the refusal clause');
   });
 }
+// PR2-R-15: a refine agent cannot make the eval agent obey; it checks after each re-eval that evals.json was not regenerated.
+for (const def of ['.claude/agents/skill-refine-agent.md', '.claude/agents/agent-refine-agent.md']) {
+  test(`P0-11 review 3: ${def} re-checks the evals.json hash after each mid-loop re-eval, reverting and stopping on a change`, () => {
+    const text = defText(def);
+    const after = text.indexOf('Wait for EVAL_COMPLETE');
+    const keep = text.indexOf('7d.');
+    const check = text.search(/shasum -a 256 evals\/(?:<skill-name>|agents\/<agent-name>)\/evals\.json[^\n]*eval_scenarios_sha256/);
+    assert.ok(check > after && check < keep, 'no evals.json hash check between the 7c re-eval and 7d');
+    assert.match(text.slice(check, keep), /pre-iter-N[^\n]*stop|stop[^\n]*pre-iter-N/i, 'a changed hash does not revert the pending edit and stop');
+    assert.match(text, /final validation[^\n]*regenerates? (?:its )?scenarios by design|regenerates? (?:its )?scenarios by design/i, 'the final validation path is not stated');
+  });
+}
 for (const def of ['skills/skill-eval/SKILL.md', 'skills/agent-eval/SKILL.md',
   '.claude/agents/skill-eval-agent.md', '.claude/agents/agent-eval-agent.md']) {
   test(`P0-11: ${def} says an evaluator refusal (status exit 2) means a new iteration`, () => {
@@ -669,6 +681,16 @@ for (const def of ['skills/skill-eval/SKILL.md', 'skills/agent-eval/SKILL.md',
     assert.match(text, /never start another iteration/i);
     assert.match(text, /`init` exits 2/);
     assert.ok(text.includes('eval_manifest'), 'refine-input.json handoff does not name eval_manifest');
+  });
+
+  test(`P0-11 review 3: ${def} skips scenario generation in a mid-loop re-eval, in its generation step and its caller clause`, () => {
+    const text = defText(def);
+    const skip = /mid-loop re-eval[^\n]*skip this step[^\n]*do not regenerate evals\.json[^\n]*caller's refine\/evals\.json/i;
+    const at = text.search(skip);
+    assert.ok(at !== -1, 'the generation step does not say to skip it in a mid-loop re-eval');
+    assert.ok(at < text.search(/Establish baseline/), 'the skip is not in the generation step (before "Establish baseline")');
+    assert.ok((text.match(/do not regenerate evals\.json[^\n]*refine\/evals\.json/gi) || []).length >= 2,
+      'the caller clause (named iteration dir) does not say to skip generation too');
   });
 
   test(`P0-11 review 2: ${def} writes eval_scenarios_sha256 (shasum -a 256 of the evals.json it used) beside eval_manifest`, () => {

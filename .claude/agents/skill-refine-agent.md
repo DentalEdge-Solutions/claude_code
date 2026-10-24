@@ -135,6 +135,8 @@ own eval logic.
    Do not regenerate evals.json (skip your scenario-generation step): dispatch only the scenarios in evals/<skill-name>/refine/evals.json.
    Print EVAL_COMPLETE on its own line when done."
    Wait for EVAL_COMPLETE. Read updated `skills/<skill-name>/SKILL-EVAL.md`.
+   Then check that `shasum -a 256 evals/<skill-name>/evals.json` still equals refine-input.json's `eval_scenarios_sha256` (the eval agent must not have regenerated it).
+   If it changed: revert the pending edit from `evals/<skill-name>/refine/pre-iter-N` as in 7d's REVERT, then stop the session and report it to the user.
    On EVALUATOR_REFUSED or any non-zero init/status: revert the pending edit from `evals/<skill-name>/refine/pre-iter-N` as in 7d's REVERT, then stop the session, log it, and report it to the user — never work around it.
    Also run 1 regression rep on each previously-passing scenario.
 
@@ -167,6 +169,7 @@ own eval logic.
    EVALUATOR_REFUSED. Print EVAL_COMPLETE when done."
    Wait for EVAL_COMPLETE. Read final SKILL-EVAL.md. EVALUATOR_REFUSED, or any non-zero
    init/status, stops the session and is reported (every kept edit was measured).
+   The final validation regenerates its scenarios by design (it is a full eval), so the 7c hash check does not apply here.
 
 10. Append final log entry (baseline→final delta, iterations used, effective levers,
     convergence reason).

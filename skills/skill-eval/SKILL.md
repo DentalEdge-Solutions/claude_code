@@ -32,6 +32,7 @@ User: evaluate the skill-adapt skill
      --context evals/project-context.json
    ```
    This produces 9 scenarios: 6 generic + 3 project-specific. Without `--context` you get 6.
+   In a mid-loop re-eval (the caller names a refine/re-eval-N folder), skip this step: do not regenerate evals.json; dispatch only the scenarios in the caller's refine/evals.json.
 
    | # | Type | Triggers? | What it tests |
    |---|------|-----------|---------------|
@@ -63,7 +64,7 @@ User: evaluate the skill-adapt skill
    ```
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    Re-running `init` on an existing manifest is refused by design — that's the guard against re-deciding the baseline method mid-run.
-   When the caller gives an evaluator reference `<REF>` (a refine), add `--evaluator-ref <REF>` to every `init`, including a restarted iteration; if it also names the iteration dir (a mid-loop re-eval), use that dir, skip the resume check and write no `refine-input.json`. `init` exits 2 when an evaluator file is missing or not a regular file, or the reference is unusable or differs: stop and report EVALUATOR_REFUSED; never start another iteration and never `init` without the flag.
+   When the caller gives an evaluator reference `<REF>` (a refine), add `--evaluator-ref <REF>` to every `init`, including a restarted iteration; if it also names the iteration dir (a mid-loop re-eval), use that dir, skip the resume check, do not regenerate evals.json (dispatch only the scenarios in the caller's refine/evals.json) and write no `refine-input.json`. `init` exits 2 when an evaluator file is missing or not a regular file, or the reference is unusable or differs: stop and report EVALUATOR_REFUSED; never start another iteration and never `init` without the flag.
 
 6. **Run parallel evaluations** — for each not-yet-`graded` scenario, spawn two subagents **in the same turn**.
    Canonical scenario-directory naming: `s<id>-<type>-r<rep>` (e.g. `s1-direct-r1`,

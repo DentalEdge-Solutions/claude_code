@@ -65,6 +65,7 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
    `node skills/skill-eval/scripts/generate-seed-evals.js skills/<skill-name>/SKILL.md --context evals/project-context.json`
    Confirm 9 scenarios in `evals/<skill-name>/evals.json` (6 generic + 3 project-specific).
    Without --context: 6 scenarios. Never skip --context when project-context.json exists.
+   In a mid-loop re-eval (the caller names a refine/re-eval-N folder), skip this step: do not regenerate evals.json; dispatch only the scenarios in the caller's refine/evals.json.
 
 4. Establish baseline:
    - The baseline is the same prompt with no skill loaded: baseline_method = `none`,
@@ -80,7 +81,7 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    On resume, skip this call entirely — the manifest already exists and re-init is
    refused by design. Every scenario in this iteration uses the recorded method.
-   When the caller gives an evaluator reference `<REF>` (a refine), add `--evaluator-ref <REF>` to every `init`, including a restarted iteration; if it also names the iteration dir (a mid-loop re-eval), use that dir, skip the resume check and write no `refine-input.json`. `init` exits 2 when an evaluator file is missing or not a regular file, or the reference is unusable or differs: stop and report EVALUATOR_REFUSED; never start another iteration and never `init` without the flag.
+   When the caller gives an evaluator reference `<REF>` (a refine), add `--evaluator-ref <REF>` to every `init`, including a restarted iteration; if it also names the iteration dir (a mid-loop re-eval), use that dir, skip the resume check, do not regenerate evals.json (dispatch only the scenarios in the caller's refine/evals.json) and write no `refine-input.json`. `init` exits 2 when an evaluator file is missing or not a regular file, or the reference is unusable or differs: stop and report EVALUATOR_REFUSED; never start another iteration and never `init` without the flag.
 
 6. Dispatch ALL pairs simultaneously — spawn up to 42 subagents in ONE Agent call.
    For each not-yet-graded scenario, create 2 subagent instructions:
