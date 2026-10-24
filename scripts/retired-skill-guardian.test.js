@@ -37,6 +37,10 @@ const EXCLUDED_PREFIXES = [
 ];
 // Dated eval reports (SKILL-EVAL.md, <agent>-EVAL.md, SKILL-REFINE-LOG.md): each records one past run.
 const EXCLUDED_BASENAME = /-EVAL\.md$|-REFINE-LOG\.md$/;
+// One allowed line, not a file: the README's manual cleanup for targets that already have the agent installed
+// (uninstall.sh discovers agents from this repo, so it cannot remove a file the repo no longer has). It must name the
+// file to delete. The test below requires it to match exactly one line, so it cannot widen or go stale silently.
+const ALLOWED_LINE = { file: 'README.md', text: 'delete `<target>/.claude/agents/skill-guardian.md` by hand' };
 
 function excluded(rel) {
   if (rel === SELF) return true;
@@ -74,6 +78,7 @@ test('the retired agent definition, its report and its eval scenarios are gone',
 
 test('no tracked file outside the exclusions names skill-guardian or PROJECT-SKILL-HEALTH', () => {
   const hits = [];
+  let allowed = 0;
   for (const rel of files) {
     if (excluded(rel)) continue;
     const abs = path.join(REPO, rel);
@@ -81,9 +86,14 @@ test('no tracked file outside the exclusions names skill-guardian or PROJECT-SKI
     try { st = fs.lstatSync(abs); } catch { continue; }   // tracked but deleted in the working tree
     if (!st.isFile()) continue;
     const lines = fs.readFileSync(abs, 'utf8').split('\n');
-    lines.forEach((line, i) => { if (RETIRED.test(line)) hits.push(`${rel}:${i + 1}`); });
+    lines.forEach((line, i) => {
+      if (!RETIRED.test(line)) return;
+      if (rel === ALLOWED_LINE.file && line.includes(ALLOWED_LINE.text)) { allowed++; return; }
+      hits.push(`${rel}:${i + 1}`);
+    });
   }
   assert.ok(hits.length === 0, `${hits.length} stale references:\n  ${hits.join('\n  ')}`);
+  assert.strictEqual(allowed, 1, `the README cleanup line must appear exactly once (found ${allowed})`);
 });
 
 test('the exclusions are narrow: they do not cover live definitions, docs or install scripts', () => {

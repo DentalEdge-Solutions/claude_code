@@ -67,5 +67,5 @@ See `docs/codex-external-eval-architecture.md` for the full boundary table and a
 
 ### What Codex is not
 
-Codex does not replay the Claude Code runtime — it is an independent second model reading skill/agent definitions and judging scenarios. Codex does not own any lifecycle step and does not call skill-refine, agent-refine, or skill-guardian.
+Codex does not replay the Claude Code runtime — it is an independent second model reading skill/agent definitions and judging scenarios. Codex does not own any lifecycle step and does not call skill-refine or agent-refine.
 

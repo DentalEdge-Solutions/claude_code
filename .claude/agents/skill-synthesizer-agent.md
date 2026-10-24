@@ -19,15 +19,6 @@ description: |
   </commentary>
   </example>
 
-  <example>
-  Context: skill-guardian detects 2+ PASS candidates after skill-audit phase.
-  user: "[internal invocation from skill-guardian]"
-  assistant: "Comparing candidates and producing synthesis-decision.md."
-  <commentary>
-  Programmatic invocation — synthesizes before skill-adapt runs.
-  </commentary>
-  </example>
-
 model: opus
 color: magenta
 tools: ["Read", "Write"]

@@ -98,7 +98,7 @@ Show ALL critical and high findings. For medium/low/info: show the first 3 and s
 
 ### Step 4b — Persist security posture to project-context.json
 
-After displaying the report, update `evals/project-context.json` with the scan result so `skill-guardian` and downstream agents can read the current security posture without re-running AgentShield.
+After displaying the report, update `evals/project-context.json` with the scan result so the current security posture travels with the project context and can be read without re-running AgentShield (`extract-project-context.js` keeps these three fields when it regenerates the file).
 
 If `evals/project-context.json` exists and Node.js is available, run:
 
@@ -120,7 +120,7 @@ Replace `<GRADE>` with the letter grade (A/B/C/D/F) and `<SCORE>` with the numer
 
 ### Step 4c — Write full audit artifact
 
-Write a dated JSON artifact so `skill-guardian` can trend security posture across runs:
+Write a dated JSON artifact so security posture can be compared across runs:
 
 ```bash
 node -e "
@@ -154,7 +154,7 @@ console.log('Audit artifact written to evals/project-audit-' + date + '.json');
 "
 ```
 
-If `evals/` does not exist or Node.js is unavailable, skip silently. The artifact is informational — `skill-guardian` reads the most recent one (by filename date) to compare against previous runs and report security trends.
+If `evals/` does not exist or Node.js is unavailable, skip silently. The artifact is informational — no script or agent reads it automatically; it is for the owner and later runs to compare the most recent one (by filename date) against previous runs and see security trends.
 
 ### Step 5 — Offer auto-fix
 

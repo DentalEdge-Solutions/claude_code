@@ -256,23 +256,13 @@ Train/test split: `adversarial` scenarios always stay in the training set (direc
 
 ## Periodic Health Checks
 
-```
-skill-guardian
-```
+There is no one-command health check. Run the pipeline's own measurement steps:
 
-Runs the full pipeline orchestration cycle:
+1. Refresh the project context first: `make context` (or `node skills/skill-eval/scripts/extract-project-context.js`). Stale context degrades every eval.
+2. Run `skill-eval` (or `skill-eval-agent`) for each skill and `agent-eval` for each agent you rely on. Each writes its 5-metric report (`SKILL-EVAL.md`, `.claude/agents/<name>-EVAL.md`).
+3. Run `skill-refine` / `agent-refine` only for the skills and agents that miss a threshold.
 
-**Phase 0:** Refresh `project-context.json` if stale (>7 days). Run AgentShield scan; compare against prior audit artifact for grade trend.
-
-**Phase 1:** Inventory skills → classify as ACTIVE / CANDIDATE / INSTALLED.
-
-**Phase 2:** Static-scan any skill without a `SKILL-AUDIT.md`.
-
-**Phase 3:** For each ACTIVE skill, generate 9 scenarios, run parallel eval, compute all 5 metrics.
-
-**Phase 4:** For any skill below threshold, run up to 3 refinement iterations.
-
-**Phase 5:** Write `PROJECT-SKILL-HEALTH.md` with per-skill status table, security trend, and recommendations.
+For the security posture, run `project-audit`; it records the grade in `evals/project-context.json` and writes a dated `evals/project-audit-<date>.json` you can compare across runs.
 
 ---
 
@@ -348,7 +338,7 @@ If you're running `skill-refine` and resilience score is failing, the `adversari
 
 ### 5. AgentShield is pinned to `1.4.0` — update deliberately
 
-All references use `ecc-agentshield@1.4.0`, not `@latest`. When you want to pick up a new AgentShield version, update all three locations: `skills/project-audit/SKILL.md`, `.claude/agents/skill-guardian.md`, and `.github/workflows/ci.yml`.
+All references use `ecc-agentshield@1.4.0`, not `@latest`. When you want to pick up a new AgentShield version, update both places that run it: `skills/project-audit/SKILL.md` and `.github/workflows/ci.yml`. This guide names the version too ("Step 2: Audit project security", the CI/CD section and this tip).
 
 ### 6. The static scanner also accepts `settings.json`
 
@@ -362,11 +352,7 @@ Your project-level permission allowlist (`.claude/settings.local.json`) is corre
 
 `anthropics/claude-code-skills` and `ComposioHQ/awesome-claude-skills` both returned 404. skill-scout now uses only the three live ones. Check the comment in `skill-scout-agent.md` for the re-add date if they come back online.
 
-### 9. The `skill-guardian` model must be `sonnet`, not `haiku`
-
-`skill-guardian` is a heavy orchestrator (context gathering, parallel evals, refinement loops). It's been set to `sonnet` — never change it to `haiku` to save cost; the context window requirements will cause failures.
-
-### 10. Agent eval baselines are pending full subagent runs
+### 9. Agent eval baselines are pending full subagent runs
 
 `agent-scout`, `agent-audit`, and `agent-adapt` have `evals.json` (9 scenarios each) and initial `SKILL-EVAL.md` assessments, but the measured metrics (eval pass rate, trigger accuracy, resilience score, project fit score) require a full `skill-eval-agent` run to populate. The SKILL-EVAL.md files currently contain observable baselines only.
 

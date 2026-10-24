@@ -26,7 +26,7 @@ Claude Code remains the methodology owner, lifecycle owner, and final decision-m
 Claude Code
 ├── Scenario generation     (generate-seed-evals.js)
 ├── Eval specification      (evals.json)
-├── Lifecycle management    (skill-guardian, refine cycles)
+├── Lifecycle management    (eval and refine cycles)
 ├── Final decisions         (HEALTHY / REFINE / BLOCK)
 └── Summary review          (CODEX-EVAL-SUMMARY.md → read by Claude Code)
 

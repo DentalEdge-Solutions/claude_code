@@ -199,7 +199,7 @@ skill-scout → skill-audit → skill-adapt → skill-eval → skill-refine
 agent-scout → agent-audit → agent-adapt → agent-eval → agent-refine
 ```
 
-Periodic health check: `skill-guardian` — audits all skills, measures 5 metrics, refines any below-threshold skills.
+Periodic health check: run `skill-eval` (or `skill-eval-agent`) for each skill and `agent-eval` for each agent, then `skill-refine` / `agent-refine` only for what fails.
 # <<< skill-builder <<<
 PIPELINE_SECTION
         ok "added pipeline section to ${CLAUDE_MD}"
