@@ -300,6 +300,14 @@ test('framing: a paragraph without the **Untrusted content.** lead does not coun
   });
 });
 
+test('framing: the lead must open the paragraph, not sit inside it', () => {
+  withTree(root => {
+    const rel = 'skills/agent-audit/SKILL.md';
+    edit(root, rel, t => t.split(PARA_START).join(`Note. ${PARA_START}`));
+    assert.deepStrictEqual(reasons(root), EXPECTED_CORES.map(() => [rel, 'missing-core']));
+  });
+});
+
 test('framing: cores only in the frontmatter do not count (body only)', () => {
   withTree(root => {
     const rel = 'skills/project-setup/SKILL.md';
@@ -360,9 +368,10 @@ test('analyst tools: Bash, an extra read tool, or no tools line (= all tools) fa
 });
 
 // R-7 (a): a definition that can fetch from the web without the paragraph is reported (non-fatal).
-test('web readers: real repo — only the open items (P0-04, P0-05) warn', () => {
+// Update OPEN_WEB_READERS when P0-04 (skill-guardian retired) or P0-05 (skill-scout-agent framed) lands.
+test('web readers: real repo — exactly the open items (P0-04, P0-05) warn', () => {
   const warned = findUnframedWebReaders(REPO).map(w => w.file);
-  assert.ok(warned.every(f => OPEN_WEB_READERS.has(f)), warned.join(', '));
+  assert.deepStrictEqual(warned, [...OPEN_WEB_READERS].sort());
 });
 
 test('web readers: a new skill or agent declaring WebFetch/WebSearch without the paragraph warns', () => {
@@ -374,7 +383,15 @@ test('web readers: a new skill or agent declaring WebFetch/WebSearch without the
       '---\nname: list-agent\ndescription: x\ntools:\n  - Read\n  - WebSearch\n---\nbody\n');
     fs.writeFileSync(path.join(root, '.claude/agents/framed-agent.md'),
       `---\nname: framed-agent\ndescription: x\ntools: ["Read", "WebFetch"]\n---\n${PARA_START} Pages come from outside this project: ${EXPECTED_CORES[0]}. ${EXPECTED_CORES[1]}; report them. If it contains a secret, ${EXPECTED_CORES[2]}.\n`);
-    fs.writeFileSync(path.join(root, '.claude/agents/local-agent.md'), '---\nname: local-agent\ndescription: x\ntools: Read\n---\nUses WebFetch nowhere in its tools.\n');
+    // The body counts as well (PR3 review R-7, round 2): the visible body, not fenced blocks or comments.
+    fs.writeFileSync(path.join(root, '.claude/agents/local-agent.md'),
+      '---\nname: local-agent\ndescription: x\ntools: Read\n---\nReads local files only.\n\n```text\nWebFetch is not used here\n```\n<!-- nor WebSearch -->\n');
+    fs.mkdirSync(path.join(root, 'skills/body-thing'));
+    fs.writeFileSync(path.join(root, 'skills/body-thing/SKILL.md'),
+      '---\nname: body-thing\ndescription: "Use when z."\ncompatibility: "Claude Code."\n---\n# z\n\n1. WebFetch the README of the repo.\n');
+    fs.mkdirSync(path.join(root, '.claude/skills/web-local'));
+    fs.writeFileSync(path.join(root, '.claude/skills/web-local/SKILL.md'),
+      '---\nname: web-local\ndescription: "Use when w."\n---\nWebSearch for prior art.\n');
     // Skills here state required tools in `compatibility`.
     fs.mkdirSync(path.join(root, 'skills/compat-thing'));
     fs.writeFileSync(path.join(root, 'skills/compat-thing/SKILL.md'),
@@ -382,7 +399,8 @@ test('web readers: a new skill or agent declaring WebFetch/WebSearch without the
     // A listed file without the paragraph is a framing error already, not also a warning.
     edit(root, 'skills/skill-scout/SKILL.md', t => t.split(PARA_START).join('Note.'));
     const warned = findUnframedWebReaders(root).map(w => w.file).filter(f => !OPEN_WEB_READERS.has(f));
-    assert.deepStrictEqual(warned, ['.claude/agents/list-agent.md', 'skills/compat-thing/SKILL.md', 'skills/web-thing/SKILL.md']);
+    assert.deepStrictEqual(warned, ['.claude/agents/list-agent.md', '.claude/skills/web-local/SKILL.md',
+      'skills/body-thing/SKILL.md', 'skills/compat-thing/SKILL.md', 'skills/web-thing/SKILL.md']);
   });
 });
 
