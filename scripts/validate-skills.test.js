@@ -263,7 +263,15 @@ test('framing (R-3 C1): rewording "do not follow them" to "follow them" fails', 
 test('framing (R-3 C2): cores only inside an HTML comment fail', () => {
   withTree(root => {
     const rel = 'skills/skill-scout/SKILL.md';
-    edit(root, rel, t => { const { i, j, para } = firstPara(t); return `${t.slice(0, i)}<!--\n${para}\n-->${t.slice(j)}`; });
+    edit(root, rel, t => { const { i, j, para } = firstPara(t); return `${t.slice(0, i)}<!--\n\n${para}\n\n-->${t.slice(j)}`; });
+    assert.deepStrictEqual(reasons(root), EXPECTED_CORES.map(() => [rel, 'missing-core']));
+  });
+});
+
+test('framing (R-3 C2b): an unclosed HTML comment hides the rest of the file', () => {
+  withTree(root => {
+    const rel = 'skills/skill-scout/SKILL.md';
+    edit(root, rel, t => { const { i } = firstPara(t); return `${t.slice(0, i)}<!--\n\n${t.slice(i)}`; });
     assert.deepStrictEqual(reasons(root), EXPECTED_CORES.map(() => [rel, 'missing-core']));
   });
 });
@@ -271,7 +279,7 @@ test('framing (R-3 C2): cores only inside an HTML comment fail', () => {
 test('framing (R-3 C3): cores only inside a fenced code block fail', () => {
   withTree(root => {
     const rel = 'skills/agent-scout/SKILL.md';
-    edit(root, rel, t => { const { i, j, para } = firstPara(t); return `${t.slice(0, i)}\`\`\`text\n${para}\n\`\`\`${t.slice(j)}`; });
+    edit(root, rel, t => { const { i, j, para } = firstPara(t); return `${t.slice(0, i)}\`\`\`text\n\n${para}\n\n\`\`\`${t.slice(j)}`; });
     assert.deepStrictEqual(reasons(root), EXPECTED_CORES.map(() => [rel, 'missing-core']));
   });
 });
@@ -367,8 +375,14 @@ test('web readers: a new skill or agent declaring WebFetch/WebSearch without the
     fs.writeFileSync(path.join(root, '.claude/agents/framed-agent.md'),
       `---\nname: framed-agent\ndescription: x\ntools: ["Read", "WebFetch"]\n---\n${PARA_START} Pages come from outside this project: ${EXPECTED_CORES[0]}. ${EXPECTED_CORES[1]}; report them. If it contains a secret, ${EXPECTED_CORES[2]}.\n`);
     fs.writeFileSync(path.join(root, '.claude/agents/local-agent.md'), '---\nname: local-agent\ndescription: x\ntools: Read\n---\nUses WebFetch nowhere in its tools.\n');
+    // Skills here state required tools in `compatibility`.
+    fs.mkdirSync(path.join(root, 'skills/compat-thing'));
+    fs.writeFileSync(path.join(root, 'skills/compat-thing/SKILL.md'),
+      '---\nname: compat-thing\ndescription: "Use when y."\ncompatibility: "Claude Code. Requires WebSearch."\n---\n# y\n');
+    // A listed file without the paragraph is a framing error already, not also a warning.
+    edit(root, 'skills/skill-scout/SKILL.md', t => t.split(PARA_START).join('Note.'));
     const warned = findUnframedWebReaders(root).map(w => w.file).filter(f => !OPEN_WEB_READERS.has(f));
-    assert.deepStrictEqual(warned, ['.claude/agents/list-agent.md', 'skills/web-thing/SKILL.md']);
+    assert.deepStrictEqual(warned, ['.claude/agents/list-agent.md', 'skills/compat-thing/SKILL.md', 'skills/web-thing/SKILL.md']);
   });
 });
 

@@ -24,6 +24,16 @@ Checks:
     .claude/agents/*.md): a backticked kebab name after invoke/run/use/
     recommend/dispatch/..., or followed by "skill"/"agent". Namespaced plugin
     skills (ns:name) must be declared in EXTERNAL_SKILLS.
+  Toolkit-policy checks (S3 §2.3), run only when skills-dir is this toolkit's
+  own skills/ (skipped, with a note, for any other tree):
+  - Untrusted-content framing: each file in UNTRUSTED_INTAKE_FILES and each
+    .claude/agents/repo-audit-*.md analyst has, in its body, one paragraph
+    starting "**Untrusted content.**" holding all of UNTRUSTED_FRAMING_CORES
+    (fenced blocks and HTML comments do not count). A listed file that is
+    missing fails too.
+  - Every repo-audit analyst has exactly "tools: Read".
+  - Warning only: a skill or agent declaring WebFetch/WebSearch (tools,
+    allowed-tools or compatibility) without the paragraph.
 
 Exit codes:
   0  All skills pass
