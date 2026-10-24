@@ -39,13 +39,18 @@ const EXCLUDED_PREFIXES = [
 const EXCLUDED_BASENAME = /-EVAL\.md$|-REFINE-LOG\.md$/;
 // One allowed line, not a file: the README's manual cleanup for targets that already have the agent installed
 // (uninstall.sh discovers agents from this repo, so it cannot remove a file the repo no longer has). It must name the
-// file to delete. The test below requires it to match exactly one line, so it cannot widen or go stale silently.
-const ALLOWED_LINE = { file: 'README.md', text: 'delete `<target>/.claude/agents/skill-guardian.md` by hand' };
+// file to delete. The whole line must be equal (PR4-R-1: a substring match let a second reference ride on it), and
+// the test below requires it exactly once, so the allowance cannot widen or go stale silently.
+const ALLOWED_LINE = {
+  file: 'README.md',
+  line: 'Retired agent: `uninstall.sh` removes only the agents this repo still has, so if an earlier install copied ' +
+    'the retired health-check agent into a target, delete `<target>/.claude/agents/skill-guardian.md` by hand.',
+};
 
 // null: the line names nothing retired; 'allowed': the one allowed cleanup line; 'hit': a stale reference.
 function classify(rel, line) {
   if (!RETIRED.test(line)) return null;
-  if (rel === ALLOWED_LINE.file && line.includes(ALLOWED_LINE.text)) return 'allowed';
+  if (rel === ALLOWED_LINE.file && line === ALLOWED_LINE.line) return 'allowed';
   return 'hit';
 }
 
@@ -115,7 +120,7 @@ test('the exclusions are narrow: they do not cover live definitions, docs or ins
 // line in another file, is a stale reference.
 test('the allowance is the exact README line: anything added to it, or the line elsewhere, is a hit', () => {
   const readme = fs.readFileSync(path.join(REPO, ALLOWED_LINE.file), 'utf8').split('\n');
-  const line = readme.find(l => l.includes(ALLOWED_LINE.text));
+  const line = readme.find(l => l === ALLOWED_LINE.line);
   assert.ok(line, 'the README cleanup line is missing');
   assert.strictEqual(classify(ALLOWED_LINE.file, line), 'allowed');
   assert.strictEqual(classify(ALLOWED_LINE.file, `${line} Or run skill-guardian.`), 'hit', 'a second reference appended');
