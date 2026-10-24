@@ -1,7 +1,7 @@
 # Evaluator pin in the run manifest (P0-11)
 
 > Date: 2026-10-24 · Item: P0-11 (S5 roadmap), batch B1 PR-2 · Trace: OPP-14 · GAP-05 (refine part), GAP-11 ·
-> Review round 1: PR2-R-1…R-10 applied
+> Review round 1: PR2-R-1…R-10 applied · Review round 2: PR2-R-11, R-12, R-14 applied (R-13 kept as a note)
 
 ## What is pinned and why
 
@@ -48,17 +48,28 @@ one iteration, and the next `init` would simply record the edited files. The ref
 2. **Check before any edit.** Before any backup or edit, the refine runs `run-manifest.js check-ref <REF>`. On any
    non-zero exit it stops, having changed nothing, and tells the user that a fresh eval made after P0-11 is needed
    first (PR2-R-2).
-3. **Its own folder.** Each mid-loop re-eval runs in `evals/<x>/refine/re-eval-N`. That folder is cleared at the start
-   of each session, like the `pre-iter-N` copies, and is never an eval `iteration-<N>` folder (PR2-R-1). The refine
-   copies `evals.json` to `evals/<x>/refine/evals.json` at session start, because the harvester looks for the
-   scenarios two levels above each scenario folder (`harvest-evidence.js` is pinned, so it is not changed). Every
-   `init` passes `--evaluator-ref <REF>`, and so does the final validation, which is a normal eval iteration.
-4. **Refusal mid-loop.** If `init` or `status` exits non-zero mid-loop, the refine first reverts the pending edit from
-   `pre-iter-N`, exactly as its REVERT branch does, and then stops and reports. It never works around a refusal and
-   never runs `init` without the flag (PR2-R-2, R-3).
-5. **What it may not edit.** No lever (A–E) may edit the five files. No step may edit an eval `run-manifest.json`, the
-   `eval_manifest` file or field, or the `refine/evals.json` copy (PR2-R-7).
-6. **Evaluator subjects.** The refine refuses a subject that is part of the evaluator.
+3. **Pinned scenario set.** In the same start step, the refine copies `evals/<x>/evals.json` to
+   `evals/<x>/refine/evals.json` and checks `shasum -a 256` of the copy against `refine-input.json`'s
+   `eval_scenarios_sha256`, which skill-eval and agent-eval now write next to `eval_manifest`. If the field is absent
+   or the hash differs, the refine stops and asks for a fresh eval; the subject is unchanged. Every re-eval is told:
+   do not regenerate `evals.json`, and dispatch only the scenarios in `refine/evals.json` (the training set, as
+   before). So what a re-eval dispatches and what the harvester scores against are the same file, and it is the file
+   the baseline eval used (PR2-R-11). The harvester looks for the scenarios two levels above each scenario folder,
+   which is why the copy sits in `refine/` (`harvest-evidence.js` is pinned, so it is not changed).
+4. **Its own folder.** Each mid-loop re-eval runs in `evals/<x>/refine/re-eval-N`. That folder is cleared at the start
+   of each session, like the `pre-iter-N` copies, and is never an eval `iteration-<N>` folder (PR2-R-1). Every `init`
+   passes `--evaluator-ref <REF>`, and so does the final validation, which is a normal eval iteration (it regenerates
+   its scenarios as any eval does).
+5. **Refusal mid-loop.** If `init` or `status` exits non-zero mid-loop, the refine first reverts the pending edit from
+   `pre-iter-N`, exactly as its REVERT branch does, and then stops and reports. The staleness re-run `re-eval-0` has no
+   pending edit ("none for re-eval-0", PR2-R-14). It never works around a refusal and never runs `init` without the
+   flag (PR2-R-2, R-3).
+6. **What it may not edit.** No lever (A–E) may edit the five files. No step may edit:
+   - an eval `run-manifest.json` or the `eval_manifest` file (they anchor `--evaluator-ref`);
+   - the `eval_manifest` and `eval_scenarios_sha256` fields;
+   - the `refine/evals.json` copy (the scenario set checked against `eval_scenarios_sha256`). `--evaluator-ref` does
+     not compare this file; round 1's wording said it did, and that is corrected (PR2-R-7, R-11).
+7. **Evaluator subjects.** The refine refuses a subject that is part of the evaluator.
 
 The eval definitions mirror this (PR2-R-4). When a caller gives an evaluator reference, the eval adds
 `--evaluator-ref` to every `init`, including a restarted iteration. If the caller also names the iteration folder (a
@@ -75,14 +86,23 @@ new iteration after a `status` refusal. They also say what an `init` exit 2 mean
   - the resume check;
   - the `init` step (a caller's reference and the meaning of `init` exit 2);
   - the integrity step (exit 2 means a new iteration when the eval runs alone, and a stop under a reference).
-- **`refine-input.json` writers:** they add `eval_manifest`. These are the four eval definitions above and the
+- **`refine-input.json` writers:** they add `eval_manifest` and `eval_scenarios_sha256` (`shasum -a 256` of the
+  `evals.json` that iteration used). These are the four eval definitions above and the
   handoff format in `skills/agent-eval/REFERENCE.md`. No schema or writer script exists for `refine-input.json`;
   `scripts/telemetry/aggregate-usage.js` merges into it and keeps existing fields. The handoff example in
   `skills/skill-eval/REFERENCE.md` is **not** updated, because it is the pinned rubric file. `skills/skill-eval/SKILL.md`
-  step 13 and `skill-eval-agent.md` state the field.
+  step 13 and `skill-eval-agent.md` state both fields (PR2-R-13, a note: a writer that copies the pinned example
+  leaves the fields out, and the refine then fails closed).
 - **Calibration runbook:** `fixtures/GATE-RUNBOOK.md` step 2 and the help text in `scripts/run-calibration.js` now
   use the next free `iteration-<N>`, never a resumed pre-P0-11 `iteration-1` (PR2-R-8). No test or calibration
   script hashes or reads the runbook. `run-native-audit.js` already takes the highest iteration.
+- **skill-guardian** (`.claude/agents/skill-guardian.md` Phase 4, its own refine loop; PR2-R-12): this is a minimal
+  change, because the agent is due for retirement (OPP-30).
+  - It refuses the four evaluator subjects.
+  - No lever may edit the five files.
+  - One line says its loop has no evaluator-reference check, so use skill-refine-agent for any refine whose numbers
+    will be relied on.
+  - Its loop is otherwise unchanged.
 - **Frontmatter:** `description:` is unchanged in every changed definition.
 
 **A stricter choice than the roadmap.** S5 P0-11 says to "require a frozen copy when the subject is the evaluator".
@@ -152,10 +172,19 @@ modified, and each new test removes its temp dirs when it ends (PR2-R-9).
   - read `eval_manifest`;
   - run `check-ref` before the first `pre-iter-N` step;
   - revert from `pre-iter-N`, then stop on any non-zero exit;
-  - forbid editing run manifests.
+  - forbid editing run manifests;
+  - copy `evals.json` to `refine/` and check its `shasum -a 256` against `eval_scenarios_sha256`, both before the
+    first `pre-iter-N` step;
+  - tell every re-eval not to regenerate `evals.json` and to dispatch from `refine/evals.json`;
+  - not claim that `--evaluator-ref` compares `refine/evals.json`;
+  - say "(none for re-eval-0)" wherever `re-eval-0` appears.
+
+  skill-guardian must name every listed file and refuse the four evaluator subjects. It must also say that its loop
+  has no evaluator-reference check and point to skill-refine-agent.
 
   Each of the four eval definitions must state the stand-alone and the under-reference meaning of exit 2, the meaning
-  of `init` exit 2, and `eval_manifest`. The agent-eval handoff format must carry `eval_manifest`. The round-1 checks
+  of `init` exit 2, `eval_manifest` and `eval_scenarios_sha256` (with the `evals.json` it hashes). The agent-eval
+  handoff format must carry both fields. The round-1 checks
   failed 8 times on main's definitions.
 - `scripts/refine-copy-paths.test.js` counted every `cp` from `evals/` as a restore, so the new `evals.json` copy
   into `refine/` failed it. A restore is now a copy that writes back outside `evals/`. A copy within `evals/` is
@@ -204,5 +233,9 @@ modified, and each new test removes its temp dirs when it ends (PR2-R-9).
 - **Installs are compared file by file.** A manifest made by one install (the repo's `skills/`) and checked by
   another (`~/.claude/skills/`) is refused if the two copies differ. This is intended: run
   `node scripts/check-skill-deploy.js` before an eval campaign.
+- **skill-guardian (PR2-R-12).** Its Phase 4 loop has the instruction-layer rules only: the never-edit list and the
+  evaluator-subject refusal. It has no code check: no `check-ref`, no `--evaluator-ref`, and no manifest for its
+  re-scores. Its re-scores are therefore not comparable under V-S5-5. This closes when skill-guardian is retired
+  (OPP-30). Until then, use skill-refine-agent for any refine whose numbers will be relied on.
 - **Deploy.** The changed skills (skill-eval, agent-eval, skill-refine, agent-refine) take effect in Claude Code only
   after they are deployed to `~/.claude/skills/` and `check-skill-deploy.js` passes. The owner does this after merge.

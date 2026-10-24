@@ -229,6 +229,7 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
     {
       "skill_name": "...", "eval_date": "YYYY-MM-DD", "iteration": N,
       "eval_manifest": "evals/<skill-name>/iteration-N/run-manifest.json",
+      "eval_scenarios_sha256": "<shasum -a 256 of evals/<skill-name>/evals.json as this iteration used it>",
       "failing_metrics": {
         "eval_pass_rate": {"value": XX, "threshold": 80, "failing": true},
         "trigger_accuracy": {"value": XX, "threshold": 85, "failing": true},

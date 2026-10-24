@@ -104,7 +104,7 @@ User: check how well skill-refine-agent is working
 
 12. **Write AGENT-EVAL.md** — save to `.claude/agents/<agent-name>-EVAL.md` using the template in REFERENCE.md.
 
-13. **Agent-refine handoff** — if Eval Pass Rate < 80%, Dispatch Accuracy < 85%, Project Fit Score < 7, or Resilience Score < 8, write `evals/agents/<agent-name>/refine-input.json` with failing scenario names, root causes, and analyst observations, plus `eval_manifest`: this iteration's `evals/agents/<agent-name>/iteration-<N>/run-manifest.json`, the refine's evaluator reference. Then invoke `agent-refine`.
+13. **Agent-refine handoff** — if Eval Pass Rate < 80%, Dispatch Accuracy < 85%, Project Fit Score < 7, or Resilience Score < 8, write `evals/agents/<agent-name>/refine-input.json` with failing scenario names, root causes, and analyst observations, plus `eval_manifest`: this iteration's `evals/agents/<agent-name>/iteration-<N>/run-manifest.json`, the refine's evaluator reference, and `eval_scenarios_sha256`: `shasum -a 256 evals/agents/<agent-name>/evals.json` as this iteration used it. Then invoke `agent-refine`.
 
 ## Scoring rubric (per scenario, 0–10)
 

@@ -25,15 +25,13 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 ## Workflow
 
-1. **Gather inputs** — load `skills/<skill-name>/SKILL-EVAL.md` and `evals/<skill-name>/refine-input.json` (the structured handoff from skill-eval). Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each). Take the evaluator reference `<REF>` from `refine-input.json`'s `eval_manifest` (the eval iteration's `run-manifest.json`); if the field is absent, stop and ask the user for a fresh eval — never guess it from folder names. Before any backup or edit, run `node skills/skill-eval/scripts/run-manifest.js check-ref <REF>`: on any non-zero exit, stop and tell the user a fresh eval (made after P0-11) is needed first — nothing has been changed.
+1. **Gather inputs** — load `skills/<skill-name>/SKILL-EVAL.md` and `evals/<skill-name>/refine-input.json` (the structured handoff from skill-eval). Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each). Take the evaluator reference `<REF>` from `refine-input.json`'s `eval_manifest` (the eval iteration's `run-manifest.json`); if the field is absent, stop and ask the user for a fresh eval — never guess it from folder names. Before any backup or edit, run `node skills/skill-eval/scripts/run-manifest.js check-ref <REF>`: on any non-zero exit, stop and tell the user a fresh eval (made after P0-11) is needed first — nothing has been changed. Pin the scenario set the same way: `mkdir -p evals/<skill-name>/refine && cp evals/<skill-name>/evals.json evals/<skill-name>/refine/evals.json`, then `shasum -a 256 evals/<skill-name>/refine/evals.json` must equal `refine-input.json`'s `eval_scenarios_sha256`; if the field is absent or the hash differs, stop and ask for a fresh eval — the subject is unchanged. `refine/evals.json` is where the harvester looks for a re-eval's scenarios (two levels above each scenario folder), and every re-eval dispatches from it.
 
 2. **Back up and validate baseline** — copy the current skill before touching anything (once per refine session; never overwrite an existing `SKILL.md.baseline`):
    ```bash
    mkdir -p evals/<skill-name>/refine
    [ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline
-   cp evals/<skill-name>/evals.json evals/<skill-name>/refine/evals.json
    ```
-   The `evals.json` copy is where the harvester looks for a re-eval's scenarios (two levels above each scenario folder).
    Refine copies live under `evals/<skill-name>/refine/` (gitignored), never in the skill folder: the keep step syncs that folder into `~/.claude/skills/`.
    Then check staleness: if `refine-input.json` was written today **and** `SKILL.md` has not been modified since — trust the baseline scores directly, no re-run needed. If the skill was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as skill-eval) as a re-eval in `refine/re-eval-0` (step 7) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.
 
@@ -62,7 +60,8 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
    Run each re-eval in its own folder under the refine area, fresh per session like step 6's copy — never in an eval `iteration-<N>` folder, which belongs to skill-eval:
    `rm -rf "evals/<skill-name>/refine/re-eval-N" && node skills/skill-eval/scripts/run-manifest.js init "evals/<skill-name>/refine/re-eval-N" --baseline-method none --subject skills/<skill-name>/SKILL.md --commit <short SHA> --evaluator-ref <REF>`
    Its scenario folders, `harvest-evidence.js` and `status` use that folder.
-   If `init` or `status` exits non-zero, first revert the pending edit from `pre-iter-N` exactly as step 8's REVERT does, then stop the refine session and report it to the user — never work around it, and never `init` without `--evaluator-ref`.
+   Do not regenerate `evals.json` (no scenario-generation run): dispatch only the scenarios in `evals/<skill-name>/refine/evals.json`, the training set as before.
+   If `init` or `status` exits non-zero, first revert the pending edit (none for re-eval-0) from `pre-iter-N` exactly as step 8's REVERT does, then stop the refine session and report it to the user — never work around it, and never `init` without `--evaluator-ref`.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. Sync to runtime: `cp -r skills/<skill-name> ~/.claude/skills/`
@@ -90,6 +89,6 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 - **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend a rebuild instead: `superpowers:writing-skills` if installed, otherwise by hand per skill-scout's no-results step; then `skill-audit` → `skill-eval`.
 - **Never skip the baseline backup** — `SKILL.md.baseline` must exist before the first mutation.
 - **Never edit the evaluator** — no lever (A–E) may edit `skill-eval/scripts/harvest-evidence.js`, `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`, `agent-eval/scripts/generate-agent-evals.js` or `skill-eval/REFERENCE.md` (under `skills/`; `run-manifest.js evaluator` lists them). The run manifest pins their sha256 and refuses an iteration whose evaluator changed.
-- **Never edit a run manifest** — no step may edit an `evals/<skill-name>/iteration-*/run-manifest.json`, the `eval_manifest` that `refine-input.json` names, that field, or the `refine/evals.json` copy: they are what `--evaluator-ref` compares against.
+- **Never edit a run manifest** — no step may edit an `evals/<skill-name>/iteration-*/run-manifest.json`, the `eval_manifest` that `refine-input.json` names, its `eval_manifest` and `eval_scenarios_sha256` fields, or the `refine/evals.json` copy: the manifests anchor `--evaluator-ref`, and the copy is the scenario set checked against `eval_scenarios_sha256`.
 
 See [REFERENCE.md](REFERENCE.md) for lever definitions, keep/revert thresholds, hypothesis guide, good/bad mutations, convergence criteria, and log template.

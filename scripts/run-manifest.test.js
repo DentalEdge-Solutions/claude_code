@@ -581,19 +581,29 @@ ptest('P0-11: check-ref exits 2 for every unusable reference, and with no argume
 // RUN_MANIFEST_DEFS_ROOT may point at another checkout (used to show these fail on earlier definitions).
 const DEFS_ROOT = process.env.RUN_MANIFEST_DEFS_ROOT || path.join(__dirname, '..');
 const defText = def => fs.readFileSync(path.join(DEFS_ROOT, def), 'utf8');
-for (const def of ['skills/skill-refine/SKILL.md', 'skills/agent-refine/SKILL.md',
-  '.claude/agents/skill-refine-agent.md', '.claude/agents/agent-refine-agent.md']) {
-  test(`P0-11: ${def} forbids editing each evaluator file, passes --evaluator-ref, refuses an evaluator subject`, () => {
+const REFINE_DEFS = ['skills/skill-refine/SKILL.md', 'skills/agent-refine/SKILL.md',
+  '.claude/agents/skill-refine-agent.md', '.claude/agents/agent-refine-agent.md'];
+// skill-guardian runs its own refine loop (Phase 4): it gets the never-edit list and the evaluator-subject refusal,
+// not the reference handshake (PR2-R-12; the agent is due for retirement, OPP-30).
+for (const def of [...REFINE_DEFS, '.claude/agents/skill-guardian.md']) {
+  test(`P0-11: ${def} forbids editing each evaluator file and refuses an evaluator subject`, () => {
     const text = defText(def);
     const labels = run('evaluator').out.trim().split('\n').map(l => l.trim().split(/\s+/).pop());
     for (const label of labels) assert.ok(text.includes(`\`${label}\``), `does not name ${label}`);
-    assert.match(text, /--evaluator-ref/);
     const i = text.indexOf('frozen-copy procedure');
     assert.ok(i !== -1, 'no refusal for an evaluator subject');
     const refusal = text.slice(Math.max(0, i - 300), i);   // the refusal names the four subjects just before
     for (const subject of ['skill-eval', 'agent-eval', 'skill-eval-agent', 'agent-eval-agent']) {
       assert.match(refusal, new RegExp(`(^|[^-\\w])${subject}([^-\\w]|$)`), `the refusal does not name ${subject}`);
     }
+  });
+}
+test('P0-11 review: skill-guardian says its loop has no evaluator-reference check and points to skill-refine-agent', () => {
+  assert.match(defText('.claude/agents/skill-guardian.md'), /no evaluator-reference check[^\n]*skill-refine-agent/);
+});
+for (const def of REFINE_DEFS) {
+  test(`P0-11: ${def} passes --evaluator-ref`, () => {
+    assert.match(defText(def), /--evaluator-ref/);
   });
 
   test(`P0-11 review: ${def} runs re-evals in refine/re-eval-N, never in an eval iteration-<N> dir`, () => {
@@ -623,6 +633,27 @@ for (const def of ['skills/skill-refine/SKILL.md', 'skills/agent-refine/SKILL.md
     assert.match(text, /non-zero[^\n]*pre-iter-N/, 'no revert-then-stop on a non-zero init/status');
     assert.match(text, /never edit[^\n]*run-manifest\.json/i, 'no rule against editing run manifests');
   });
+
+  // PR2-R-11: the scenarios a re-eval dispatches and the ones the harvester scores against are the same file, and
+  // that file is the one the baseline eval used.
+  test(`P0-11 review 2: ${def} pins the scenario set before any edit and never regenerates it mid-loop`, () => {
+    const text = defText(def);
+    const firstEdit = text.indexOf('pre-iter-N');
+    const copy = text.search(/cp [^\n]*evals\.json[^\n]*refine\/evals\.json/);
+    assert.ok(copy !== -1 && copy < firstEdit, 'evals.json is not copied to refine/ before the first mutation step');
+    const check = text.search(/shasum -a 256[^\n]*refine\/evals\.json/);
+    assert.ok(check !== -1 && check < firstEdit, 'the copy is not hashed before the first mutation step');
+    const field = text.indexOf('eval_scenarios_sha256');
+    assert.ok(field !== -1 && field < firstEdit, 'the copy is not checked against eval_scenarios_sha256 before the first edit');
+    assert.match(text, /do not regenerate[^\n]*refine\/evals\.json/i, 'the mid-loop re-eval may regenerate the scenarios');
+    assert.doesNotMatch(text, /refine\/evals\.json[^\n]*`--evaluator-ref` compares against/, '--evaluator-ref does not compare evals.json');
+  });
+
+  // PR2-R-14: re-eval-0 (the staleness re-run) has no pending edit to revert.
+  test(`P0-11 review 2: ${def} says re-eval-0 has no pending edit wherever it names re-eval-0`, () => {
+    const text = defText(def);
+    if (text.includes('re-eval-0')) assert.ok(text.includes('(none for re-eval-0)'), 'no "(none for re-eval-0)" on the refusal clause');
+  });
 }
 for (const def of ['skills/skill-eval/SKILL.md', 'skills/agent-eval/SKILL.md',
   '.claude/agents/skill-eval-agent.md', '.claude/agents/agent-eval-agent.md']) {
@@ -639,9 +670,17 @@ for (const def of ['skills/skill-eval/SKILL.md', 'skills/agent-eval/SKILL.md',
     assert.match(text, /`init` exits 2/);
     assert.ok(text.includes('eval_manifest'), 'refine-input.json handoff does not name eval_manifest');
   });
+
+  test(`P0-11 review 2: ${def} writes eval_scenarios_sha256 (shasum -a 256 of the evals.json it used) beside eval_manifest`, () => {
+    const text = defText(def);
+    assert.ok(text.includes('eval_scenarios_sha256'), 'refine-input.json handoff does not name eval_scenarios_sha256');
+    assert.match(text, /eval_scenarios_sha256[^\n]*evals\.json|evals\.json[^\n]*eval_scenarios_sha256/, 'does not say which file it hashes');
+  });
 }
-test('P0-11 review: the agent-eval handoff format in REFERENCE.md has eval_manifest', () => {
-  assert.match(defText('skills/agent-eval/REFERENCE.md'), /"eval_manifest": "evals\/agents\/[^"]*\/iteration-\d+\/run-manifest\.json"/);
+test('P0-11 review: the agent-eval handoff format in REFERENCE.md has eval_manifest and eval_scenarios_sha256', () => {
+  const text = defText('skills/agent-eval/REFERENCE.md');
+  assert.match(text, /"eval_manifest": "evals\/agents\/[^"]*\/iteration-\d+\/run-manifest\.json"/);
+  assert.match(text, /"eval_scenarios_sha256": "[^"]*evals\/agents\/[^"]*\/evals\.json[^"]*"/);
 });
 
 ptest('P0-11: the usage text documents the exit codes, the evaluator refusal, --evaluator-ref and check-ref', () => {

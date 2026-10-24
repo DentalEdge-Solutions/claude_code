@@ -59,6 +59,10 @@ own eval logic.
    If absent: "refine-input.json has no eval_manifest — run a fresh skill-eval-agent eval first." Exit.
    Before any backup or edit, run `node skills/skill-eval/scripts/run-manifest.js check-ref <REF>`. On any non-zero exit:
    "The evaluator reference does not match the evaluator now — run a fresh eval (made after P0-11) first." Exit; nothing has been changed.
+   Pin the scenario set: `mkdir -p evals/<skill-name>/refine && cp evals/<skill-name>/evals.json evals/<skill-name>/refine/evals.json`, then
+   `shasum -a 256 evals/<skill-name>/refine/evals.json` must equal refine-input.json's `eval_scenarios_sha256`.
+   If absent or different: "The scenario set changed since the eval — run a fresh eval first." Exit; the subject is unchanged.
+   Every re-eval dispatches from that copy, which is also where the harvester looks for its scenarios.
 
 3. Route by failing metric (from refine-input.json):
    - project_fit_score < 7 → check which scenarios drove the failure:
@@ -79,7 +83,6 @@ own eval logic.
    syncs that folder into ~/.claude/skills/):
    `mkdir -p evals/<skill-name>/refine`
    `[ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline`
-   `cp evals/<skill-name>/evals.json evals/<skill-name>/refine/evals.json` (where the harvester looks for a re-eval's scenarios)
    If .baseline already exists (prior session), do NOT overwrite.
 
 5. Train/test split from refine-input.json:
@@ -129,6 +132,7 @@ own eval logic.
    Use the iteration dir evals/<skill-name>/refine/re-eval-N (skip the resume check;
    write no refine-input.json). Add `--evaluator-ref <REF>` to every `init`. If init
    or status exits 2, stop and print EVALUATOR_REFUSED with its output.
+   Do not regenerate evals.json (skip your scenario-generation step): dispatch only the scenarios in evals/<skill-name>/refine/evals.json.
    Print EVAL_COMPLETE on its own line when done."
    Wait for EVAL_COMPLETE. Read updated `skills/<skill-name>/SKILL-EVAL.md`.
    On EVALUATOR_REFUSED or any non-zero init/status: revert the pending edit from `evals/<skill-name>/refine/pre-iter-N` as in 7d's REVERT, then stop the session, log it, and report it to the user — never work around it.
@@ -186,4 +190,5 @@ own eval logic.
   `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`,
   `agent-eval/scripts/generate-agent-evals.js`, `skill-eval/REFERENCE.md` (under `skills/`).
 - Never edit a `run-manifest.json` under `evals/<skill-name>/` (any `iteration-*`, or the `eval_manifest` that refine-input.json names),
-  that field, or the `refine/evals.json` copy: they are what `--evaluator-ref` compares against.
+  refine-input.json's `eval_manifest` and `eval_scenarios_sha256` fields, or the `refine/evals.json` copy: the manifests anchor `--evaluator-ref`, and the copy is the
+  scenario set checked against `eval_scenarios_sha256`.

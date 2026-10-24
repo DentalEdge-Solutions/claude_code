@@ -222,6 +222,7 @@ Written when any metric falls below threshold.
   "eval_date": "YYYY-MM-DD",
   "iteration": 1,
   "eval_manifest": "evals/agents/skill-eval-agent/iteration-1/run-manifest.json",
+  "eval_scenarios_sha256": "<shasum -a 256 of evals/agents/skill-eval-agent/evals.json as this iteration used it>",
   "failing_metrics": {
     "eval_pass_rate":    { "value": 65, "threshold": 80, "failing": true },
     "dispatch_accuracy": { "value": 78, "threshold": 85, "failing": true },

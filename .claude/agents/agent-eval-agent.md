@@ -230,6 +230,7 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
       "agent_name": "...", "agent_file": ".claude/agents/....md",
       "eval_date": "YYYY-MM-DD", "iteration": N,
       "eval_manifest": "evals/agents/<agent-name>/iteration-N/run-manifest.json",
+      "eval_scenarios_sha256": "<shasum -a 256 of evals/agents/<agent-name>/evals.json as this iteration used it>",
       "failing_metrics": {
         "eval_pass_rate":    {"value": XX, "threshold": 80, "failing": true},
         "dispatch_accuracy": {"value": XX, "threshold": 85, "failing": true},

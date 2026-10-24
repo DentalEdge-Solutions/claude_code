@@ -107,7 +107,7 @@ User: evaluate the skill-adapt skill
 
 12. **Write SKILL-EVAL.md** — save to `skills/<skill-name>/SKILL-EVAL.md` using the template in REFERENCE.md.
 
-13. **Skill-refine handoff** — if Eval Pass Rate < 80% or Trigger Accuracy < 85%, write `evals/<skill-name>/refine-input.json` with failing scenario names, root causes, and analyst observations, plus `eval_manifest`: this iteration's `evals/<skill-name>/iteration-<N>/run-manifest.json`, the refine's evaluator reference. Then invoke `skill-refine`.
+13. **Skill-refine handoff** — if Eval Pass Rate < 80% or Trigger Accuracy < 85%, write `evals/<skill-name>/refine-input.json` with failing scenario names, root causes, and analyst observations, plus `eval_manifest`: this iteration's `evals/<skill-name>/iteration-<N>/run-manifest.json`, the refine's evaluator reference, and `eval_scenarios_sha256`: `shasum -a 256 evals/<skill-name>/evals.json` as this iteration used it. Then invoke `skill-refine`.
 
 ## Scoring rubric (per scenario, 0–10)
 
