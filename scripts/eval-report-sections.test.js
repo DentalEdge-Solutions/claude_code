@@ -4,7 +4,7 @@
 // lacked it entirely, so agent-written reports carried no subject revision or E6 disclosure).
 //
 //   skills/<track>-eval/assets/<TRACK>-EVAL.template.md   the skill's report template
-//   skills/<track>-eval/REFERENCE.md                      the copy skill-guardian builds reports from
+//   skills/<track>-eval/REFERENCE.md                      the copy <track>-eval SKILL.md step 12 builds reports from
 //   .claude/agents/<track>-eval-agent.md                  the agent's inline step-12 template (indented)
 'use strict';
 const assert = require('assert');

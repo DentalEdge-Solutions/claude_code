@@ -27,7 +27,6 @@ function test(label, fn) {
 const DOCS = [
   { file: 'skills/skill-refine/SKILL.md', restoreTo: 'skills/<skill-name>/<file>' },
   { file: '.claude/agents/skill-refine-agent.md', restoreTo: 'skills/<skill-name>/<file>' },
-  { file: '.claude/agents/skill-guardian.md', restoreTo: 'skills/<skill-name>/<file>' },
   { file: 'skills/agent-refine/SKILL.md', restoreTo: '.claude/agents/<name>.md' },
   { file: '.claude/agents/agent-refine-agent.md', restoreTo: '.claude/agents/<agent-name>.md' },
   { file: 'skills/skill-adapt/SKILL.md' },
