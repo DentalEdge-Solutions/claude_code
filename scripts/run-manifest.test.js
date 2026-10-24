@@ -243,5 +243,211 @@ test('E10: no subject, no check line', () => {
   assert.doesNotMatch(r.out, /subject unchanged|WARNING: the subject/);
 });
 
+// P0-11: init also pins the evaluator (harvester, this script, both scenario generators, the rubric), and status
+// refuses resumption when it changed, so a refine loop cannot edit its own judge. These tests mutate evaluator
+// files, so they run a copy of skill-eval/ and agent-eval/ in a fresh temp dir, never the repo's own files.
+const REPO_SKILLS = path.join(__dirname, '..', 'skills');
+const EVALUATOR_LABELS = [
+  'skill-eval/scripts/harvest-evidence.js',
+  'skill-eval/scripts/run-manifest.js',
+  'skill-eval/scripts/generate-seed-evals.js',
+  'agent-eval/scripts/generate-agent-evals.js',
+  'skill-eval/REFERENCE.md',
+];
+const EVALUATOR_REFUSED = 2;
+const NO_RESUME = /Do not resume this iteration: start a new iteration/;
+
+// A copied skills tree; returns its root, the copied CLI, and a runner for it (cwd = the temp root).
+function evaluatorCopy() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'run-manifest-evaluator-'));
+  const skills = path.join(root, 'skills');
+  for (const s of ['skill-eval', 'agent-eval']) fs.cpSync(path.join(REPO_SKILLS, s), path.join(skills, s), { recursive: true });
+  const cli = path.join(skills, 'skill-eval', 'scripts', 'run-manifest.js');
+  const runCopy = (...args) => {
+    const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root });
+    return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  };
+  return { root, skills, runCopy };
+}
+// Like gradedIteration, against a copied evaluator: one scenario, graded, every artifact present.
+function gradedCopy() {
+  const c = evaluatorCopy();
+  const dir = path.join(c.root, 'iteration-1');
+  const r = c.runCopy('init', dir, '--baseline-method', 'none');
+  assert.strictEqual(r.status, 0, r.out);
+  for (const side of ['with_skill', 'without_skill']) {
+    const d = path.join(dir, 's1-x-r1', side);
+    fs.mkdirSync(d, { recursive: true });
+    for (const f of ['output.md', 'timing.json', 'evidence.json']) fs.writeFileSync(path.join(d, f), '{}');
+  }
+  c.runCopy('mark', dir, 's1-x-r1', 'graded');
+  return { ...c, dir };
+}
+const sha = p => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+
+test('P0-11: init records an evaluator block, label -> sha256, for exactly the five evaluator files', () => {
+  const { skills, dir } = gradedCopy();
+  const m = manifest(dir);
+  assert.ok(m.evaluator && typeof m.evaluator === 'object', 'no evaluator block');
+  assert.deepStrictEqual(Object.keys(m.evaluator).sort(), [...EVALUATOR_LABELS].sort());
+  for (const label of EVALUATOR_LABELS) assert.strictEqual(m.evaluator[label], sha(path.join(skills, label)), label);
+});
+
+test('P0-11 acceptance: a harvester edited between init and status is refused, even with every scenario graded', () => {
+  const { skills, dir, runCopy } = gradedCopy();
+  fs.appendFileSync(path.join(skills, 'skill-eval/scripts/harvest-evidence.js'), '\n// edited by a refine lever\n');
+  const r = runCopy('status', dir);
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /skill-eval\/scripts\/harvest-evidence\.js/);
+  assert.match(r.out, NO_RESUME);
+  assert.doesNotMatch(r.out, /STATUS: OK/);
+  assert.ok(r.out.includes(sha(path.join(skills, 'skill-eval/scripts/harvest-evidence.js')).slice(0, 12)), 'the current short hash is not printed');
+});
+
+test('P0-11: the grading rubric REFERENCE.md edited between init and status is refused', () => {
+  const { skills, dir, runCopy } = gradedCopy();
+  fs.appendFileSync(path.join(skills, 'skill-eval/REFERENCE.md'), '\nA lenient new rubric line.\n');
+  const r = runCopy('status', dir);
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /skill-eval\/REFERENCE\.md/);
+  assert.doesNotMatch(r.out, /harvest-evidence\.js/, 'only the changed file is named');
+  assert.match(r.out, NO_RESUME);
+});
+
+test('P0-11: an evaluator file deleted between init and status is refused', () => {
+  const { skills, dir, runCopy } = gradedCopy();
+  fs.rmSync(path.join(skills, 'agent-eval/scripts/generate-agent-evals.js'));
+  const r = runCopy('status', dir);
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /agent-eval\/scripts\/generate-agent-evals\.js[^\n]*missing/);
+});
+
+test('P0-11: an unchanged evaluator with every scenario graded still passes (exit 0)', () => {
+  const { dir, runCopy } = gradedCopy();
+  const r = runCopy('status', dir);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.match(r.out, /evaluator unchanged since init/);
+  assert.match(r.out, /STATUS: OK/);
+});
+
+test('P0-11: the evaluator refusal wins over an ordinary failing status (exit 2, never "Resume")', () => {
+  const { skills, dir, runCopy } = gradedCopy();
+  runCopy('mark', dir, 's2-x-r1', 'pending');
+  fs.appendFileSync(path.join(skills, 'skill-eval/scripts/generate-seed-evals.js'), '\n');
+  const r = runCopy('status', dir);
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  const last = r.out.trim().split('\n').pop();
+  assert.match(last, NO_RESUME);
+  assert.doesNotMatch(last, RESUME_LINE);
+});
+
+test('P0-11: a manifest with no evaluator record (made before P0-11) is refused', () => {
+  const { dir, runCopy } = gradedCopy();
+  const m = manifest(dir);
+  delete m.evaluator;
+  fs.writeFileSync(path.join(dir, 'run-manifest.json'), JSON.stringify(m, null, 2));
+  const r = runCopy('status', dir);
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /evaluator not recorded/i);
+  assert.match(r.out, NO_RESUME);
+});
+
+test('P0-11: init refuses, writing no manifest, when a listed evaluator file is missing', () => {
+  const { root, skills, runCopy } = evaluatorCopy();
+  fs.rmSync(path.join(skills, 'skill-eval/scripts/generate-seed-evals.js'));
+  const dir = path.join(root, 'iteration-1');
+  const r = runCopy('init', dir, '--baseline-method', 'none');
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /skill-eval\/scripts\/generate-seed-evals\.js/);
+  assert.ok(!fs.existsSync(path.join(dir, 'run-manifest.json')), 'no manifest written');
+});
+
+test('P0-11: init refuses when a listed evaluator path is not a regular file', () => {
+  const { root, skills, runCopy } = evaluatorCopy();
+  fs.rmSync(path.join(skills, 'skill-eval/REFERENCE.md'));
+  fs.mkdirSync(path.join(skills, 'skill-eval/REFERENCE.md'));
+  const dir = path.join(root, 'iteration-1');
+  const r = runCopy('init', dir, '--baseline-method', 'none');
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /skill-eval\/REFERENCE\.md/);
+  assert.doesNotMatch(r.out, /EISDIR|at Object\./);
+  assert.ok(!fs.existsSync(path.join(dir, 'run-manifest.json')), 'no manifest written');
+});
+
+test('P0-11 acceptance: every listed evaluator file exists in the repo tree (the list cannot drift on a rename)', () => {
+  const r = run('evaluator');
+  assert.strictEqual(r.status, 0, r.out);
+  const labels = r.out.trim().split('\n').map(l => l.trim().split(/\s+/).pop());
+  assert.deepStrictEqual(labels, EVALUATOR_LABELS, 'the pinned list changed: update this test and the P0-11 record together');
+  for (const label of labels) {
+    const p = path.join(REPO_SKILLS, label);
+    assert.ok(fs.existsSync(p) && fs.statSync(p).isFile(), `${label} is not a file under skills/`);
+    assert.ok(r.out.includes(`${sha(p)}  ${label}`), `${label}: sha256 not printed`);
+  }
+});
+
+test('P0-11: init --evaluator-ref with the same evaluator succeeds and records the reference', () => {
+  const { root, dir, runCopy } = gradedCopy();
+  const ref = path.join(dir, 'run-manifest.json');
+  const dir2 = path.join(root, 'iteration-2');
+  const r = runCopy('init', dir2, '--baseline-method', 'none', '--evaluator-ref', ref);
+  assert.strictEqual(r.status, 0, r.out);
+  const m = manifest(dir2);
+  assert.strictEqual(m.evaluator_ref, ref);
+  assert.deepStrictEqual(m.evaluator, manifest(dir).evaluator);
+});
+
+test('P0-11: init --evaluator-ref refuses, writing no manifest, when the evaluator changed since the referenced run', () => {
+  const { root, skills, dir, runCopy } = gradedCopy();
+  fs.appendFileSync(path.join(skills, 'skill-eval/scripts/harvest-evidence.js'), '\n// edited between iterations\n');
+  const dir2 = path.join(root, 'iteration-2');
+  const r = runCopy('init', dir2, '--baseline-method', 'none', '--evaluator-ref', path.join(dir, 'run-manifest.json'));
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /skill-eval\/scripts\/harvest-evidence\.js/);
+  assert.ok(!fs.existsSync(path.join(dir2, 'run-manifest.json')), 'no manifest written');
+});
+
+test('P0-11: init --evaluator-ref refuses a referenced manifest with no evaluator record', () => {
+  const { root, dir, runCopy } = gradedCopy();
+  const ref = path.join(dir, 'run-manifest.json');
+  const m = manifest(dir);
+  delete m.evaluator;
+  fs.writeFileSync(ref, JSON.stringify(m, null, 2));
+  const dir2 = path.join(root, 'iteration-2');
+  const r = runCopy('init', dir2, '--baseline-method', 'none', '--evaluator-ref', ref);
+  assert.strictEqual(r.status, EVALUATOR_REFUSED, r.out);
+  assert.match(r.out, /no evaluator record/i);
+  assert.ok(!fs.existsSync(path.join(dir2, 'run-manifest.json')), 'no manifest written');
+});
+
+test('P0-11: init --evaluator-ref with no value, a flag as its value, or an unreadable file is an error', () => {
+  const root = tmp();
+  let r = run('init', path.join(root, 'a'), '--baseline-method', 'none', '--evaluator-ref');
+  assert.strictEqual(r.status, 1, r.out);
+  assert.match(r.out, /--evaluator-ref needs a value/);
+  r = run('init', path.join(root, 'b'), '--evaluator-ref', '--baseline-method', 'none');
+  assert.strictEqual(r.status, 1, r.out);
+  assert.match(r.out, /--evaluator-ref needs a value/);
+  r = run('init', path.join(root, 'c'), '--baseline-method', 'none', '--evaluator-ref', path.join(root, 'nope.json'));
+  assert.notStrictEqual(r.status, 0, r.out);
+  assert.match(r.out, /--evaluator-ref/);
+  for (const d of ['a', 'b', 'c']) assert.ok(!fs.existsSync(path.join(root, d, 'run-manifest.json')), `manifest written in ${d}`);
+});
+
+test('P0-11: the flag value of --evaluator-ref is not mistaken for the iteration dir', () => {
+  const { root, dir, runCopy } = gradedCopy();
+  const dir2 = path.join(root, 'iteration-2');
+  const r = runCopy('init', dir2, '--baseline-method', 'none', '--evaluator-ref', path.join(dir, 'run-manifest.json'));
+  assert.strictEqual(r.status, 0, r.out);
+  assert.ok(fs.existsSync(path.join(dir2, 'run-manifest.json')));
+});
+
+test('P0-11: the usage text documents the exit codes, the evaluator refusal and --evaluator-ref', () => {
+  const r = run('--help');
+  assert.match(r.out, /--evaluator-ref/);
+  assert.match(r.out, /Exit codes/i);
+  assert.match(r.out, /2\b[^\n]*evaluator/);
+});
+
 if (!ok) process.exit(1);
 console.log('\nrun-manifest.test.js: all tests passed');
