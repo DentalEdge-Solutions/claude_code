@@ -25,15 +25,17 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 ## Workflow
 
-1. **Gather inputs** — load `.claude/agents/<name>-EVAL.md` and `evals/agents/<name>/refine-input.json`. Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each). Note `<B>`, the iteration that produced `refine-input.json` (the highest-numbered `evals/agents/<name>/iteration-<B>/` when the session starts): its `run-manifest.json` is this session's evaluator reference.
+1. **Gather inputs** — load `.claude/agents/<name>-EVAL.md` and `evals/agents/<name>/refine-input.json`. Confirm budget and runs-per-experiment with the user (default: 10 iterations, 3 reps each). Take the evaluator reference `<REF>` from `refine-input.json`'s `eval_manifest` (the eval iteration's `run-manifest.json`); if the field is absent, stop and ask the user for a fresh eval — never guess it from folder names. Before any backup or edit, run `node skills/skill-eval/scripts/run-manifest.js check-ref <REF>`: on any non-zero exit, stop and tell the user a fresh eval (made after P0-11) is needed first — nothing has been changed.
 
 2. **Back up and validate baseline** — copy the current agent before touching anything (once per refine session; never overwrite an existing `.md.baseline`):
    ```bash
    mkdir -p evals/agents/<name>/refine
    [ -e evals/agents/<name>/refine/<name>.md.baseline ] || cp .claude/agents/<name>.md evals/agents/<name>/refine/<name>.md.baseline
+   cp evals/agents/<name>/evals.json evals/agents/<name>/refine/evals.json
    ```
+   The `evals.json` copy is where the harvester looks for a re-eval's scenarios (two levels above each scenario folder).
    Refine copies live under `evals/agents/<name>/refine/` (gitignored), never in `.claude/agents/`.
-   Then check staleness: if `refine-input.json` was written today **and** the agent file has not been modified since — trust the baseline scores directly, no re-run needed. If the agent was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as agent-eval) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.
+   Then check staleness: if `refine-input.json` was written today **and** the agent file has not been modified since — trust the baseline scores directly, no re-run needed. If the agent was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as agent-eval) as a re-eval in `refine/re-eval-0` (step 7) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.
 
 3. **Route by failing metric** — the correct lever depends on *which* metric is failing:
    - **Project Fit Score < 7** → check which scenarios drove it down:
@@ -60,9 +62,10 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
      A BLOCK verdict counts as a score of 0 for this iteration — revert immediately and log.
 
 7. **Re-eval (training set only)** — re-run the failing scenarios using agent-eval's exact methodology: parallel subagents (with-agent vs no-agent baseline), 3 reps each, programmatic dispatch detection first, then LLM judge scoring. Also run 1 rep of each previously-passing scenario as a regression check. Use the same scoring formula: `(Dispatch × 0.4) + (Workflow × 0.3) + (Output × 0.3)`.
-   Initialise each re-eval iteration against the session's evaluator reference:
-   `node skills/skill-eval/scripts/run-manifest.js init evals/agents/<name>/iteration-<N> --baseline-method none --subject .claude/agents/<name>.md --commit <short SHA> --evaluator-ref evals/agents/<name>/iteration-<B>/run-manifest.json`
-   If `init` or `status` refuses (exit 2: the evaluator differs), stop the refine session and report it to the user — never work around it.
+   Run each re-eval in its own folder under the refine area, fresh per session like step 6's copy — never in an eval `iteration-<N>` folder, which belongs to agent-eval:
+   `rm -rf "evals/agents/<name>/refine/re-eval-N" && node skills/skill-eval/scripts/run-manifest.js init "evals/agents/<name>/refine/re-eval-N" --baseline-method none --subject .claude/agents/<name>.md --commit <short SHA> --evaluator-ref <REF>`
+   Its scenario folders, `harvest-evidence.js` and `status` use that folder.
+   If `init` or `status` exits non-zero, first revert the pending edit from `<name>.md.pre-iter-N` exactly as step 8's REVERT does, then stop the refine session and report it to the user — never work around it, and never `init` without `--evaluator-ref`.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
    - score > baseline + 2% → **KEEP**. No copy is needed: the agent is project-scoped, and Claude Code watches `.claude/agents/` and uses the edited file on the next delegation.
@@ -73,7 +76,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 9. **Repeat** steps 5–8 until any convergence criterion is met (see REFERENCE.md).
 
-10. **Final validation** — invoke `agent-eval` on the improved agent with `--context evals/project-context.json`. Do not implement a separate eval process — agent-eval IS the final validation. This produces a new `AGENT-EVAL.md` replacing the old one, giving a clean before/after comparison. The held-out `project-native`, `project-workflow`, and `multi-turn` scenarios run here for the first time during this refinement session. All 5 metrics must be reported. Its `init` also takes `--evaluator-ref evals/agents/<name>/iteration-<B>/run-manifest.json`; a refusal stops the session as in step 7.
+10. **Final validation** — invoke `agent-eval` on the improved agent with `--context evals/project-context.json`. Do not implement a separate eval process — agent-eval IS the final validation. This produces a new `AGENT-EVAL.md` replacing the old one, giving a clean before/after comparison. The held-out `project-native`, `project-workflow`, and `multi-turn` scenarios run here for the first time during this refinement session. All 5 metrics must be reported. Its `init` also takes `--evaluator-ref <REF>`; any non-zero `init` or `status` exit stops the session and is reported (every kept edit was measured, so nothing is pending).
 
 11. **Write report** — save `.claude/agents/<name>-REFINE-LOG.md` using the template in REFERENCE.md.
 
@@ -87,5 +90,6 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 - **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend writing a new agent definition from scratch.
 - **Never skip the baseline backup** — `.md.baseline` must exist before the first mutation.
 - **Never edit the evaluator** — no lever (A–E) may edit `skill-eval/scripts/harvest-evidence.js`, `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`, `agent-eval/scripts/generate-agent-evals.js` or `skill-eval/REFERENCE.md` (under `skills/`; `run-manifest.js evaluator` lists them). The run manifest pins their sha256 and refuses an iteration whose evaluator changed.
+- **Never edit a run manifest** — no step may edit an `evals/agents/<name>/iteration-*/run-manifest.json`, the `eval_manifest` that `refine-input.json` names, that field, or the `refine/evals.json` copy: they are what `--evaluator-ref` compares against.
 
 See [REFERENCE.md](REFERENCE.md) for lever definitions, keep/revert thresholds, hypothesis guide, good/bad mutations, convergence criteria, and log template.

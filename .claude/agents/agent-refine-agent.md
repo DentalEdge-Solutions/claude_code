@@ -57,9 +57,10 @@ your own eval logic.
 2. Load: `evals/agents/<agent-name>/refine-input.json`,
          `.claude/agents/<agent-name>-EVAL.md`,
          `.claude/agents/<agent-name>.md`.
-   Note <B>, the iteration that produced refine-input.json (the highest-numbered
-   `evals/agents/<agent-name>/iteration-<B>/` now); its `run-manifest.json` is the
-   session's evaluator reference, <REF>.
+   <REF> = refine-input.json's `eval_manifest` (the eval iteration's run-manifest.json).
+   If absent: "refine-input.json has no eval_manifest — run a fresh agent-eval-agent eval first." Exit.
+   Before any backup or edit, run `node skills/skill-eval/scripts/run-manifest.js check-ref <REF>`. On any non-zero exit:
+   "The evaluator reference does not match the evaluator now — run a fresh eval (made after P0-11) first." Exit; nothing has been changed.
 
 3. Route by failing metric (from refine-input.json):
    - project_fit_score < 7 → check which scenarios drove the failure:
@@ -79,6 +80,7 @@ your own eval logic.
 4. Create baseline backup (once, before first mutation), outside `.claude/agents/`:
    `mkdir -p evals/agents/<agent-name>/refine`
    `[ -e evals/agents/<agent-name>/refine/<agent-name>.md.baseline ] || cp .claude/agents/<agent-name>.md evals/agents/<agent-name>/refine/<agent-name>.md.baseline`
+   `cp evals/agents/<agent-name>/evals.json evals/agents/<agent-name>/refine/evals.json` (where the harvester looks for a re-eval's scenarios)
    If .baseline already exists (prior session), do NOT overwrite.
 
 5. Train/test split from refine-input.json:
@@ -120,14 +122,17 @@ your own eval logic.
    If verdict is BLOCK → score this iteration as 0 → revert immediately → log and try a different hypothesis.
    If verdict is PASS or FLAG → proceed to 7c.
 
-   7c. Invoke agent-eval-agent as a subagent on training set only:
+   7c. First clear this iteration's re-eval dir, fresh per session like the snapshot (never an eval `iteration-<N>` dir):
+   `rm -rf "evals/agents/<agent-name>/refine/re-eval-N"`
+   Then invoke agent-eval-agent as a subagent on training set only:
    "Evaluate agent <name> at .claude/agents/<name>.md. Run scenario IDs: [training set IDs].
    This is a mid-loop re-eval — do NOT run project-native or project-workflow scenarios.
-   Add `--evaluator-ref <REF>` to your run-manifest.js init. If init or status
-   exits 2, stop and print EVALUATOR_REFUSED with its output.
+   Use the iteration dir evals/agents/<agent-name>/refine/re-eval-N (skip the resume check;
+   write no refine-input.json). Add `--evaluator-ref <REF>` to every `init`. If init
+   or status exits 2, stop and print EVALUATOR_REFUSED with its output.
    Print EVAL_COMPLETE on its own line when done."
    Wait for EVAL_COMPLETE. Read updated `.claude/agents/<agent-name>-EVAL.md`.
-   On EVALUATOR_REFUSED: stop the session, log it, and report it to the user — never work around it.
+   On EVALUATOR_REFUSED or any non-zero init/status: revert the pending edit from `<agent-name>.md.pre-iter-N` as in 7d's REVERT, then stop the session, log it, and report it to the user — never work around it.
    Also run 1 regression rep on each previously-passing scenario.
 
    7d. Keep or revert (`score` is the training-set pass rate from 7c; the bands are in percentage points of it):
@@ -150,10 +155,10 @@ your own eval logic.
 9. Final validation — invoke agent-eval-agent as subagent (full 9-scenario run):
    "Run full evaluation of agent <name> at .claude/agents/<name>.md with
    --context evals/project-context.json, including project-native, project-workflow,
-   and multi-turn scenarios. Add `--evaluator-ref <REF>` to your run-manifest.js
-   init; on exit 2, print EVALUATOR_REFUSED. Print EVAL_COMPLETE when done."
+   and multi-turn scenarios. Add `--evaluator-ref <REF>` to every `init`; on exit 2,
+   print EVALUATOR_REFUSED. Print EVAL_COMPLETE when done."
    Wait for EVAL_COMPLETE. Read final `.claude/agents/<agent-name>-EVAL.md`.
-   EVALUATOR_REFUSED stops the session as in 7c.
+   EVALUATOR_REFUSED, or any non-zero init/status, stops the session and is reported.
 
 10. Append final log entry (baseline→final delta, iterations used, effective levers,
     convergence reason).
@@ -177,3 +182,5 @@ your own eval logic.
 - Never edit an evaluator file with any lever (A–E): `skill-eval/scripts/harvest-evidence.js`,
   `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`,
   `agent-eval/scripts/generate-agent-evals.js`, `skill-eval/REFERENCE.md` (under `skills/`).
+- Never edit a `run-manifest.json` under `evals/agents/<agent-name>/` (any `iteration-*`, or the `eval_manifest` that refine-input.json names),
+  that field, or the `refine/evals.json` copy: they are what `--evaluator-ref` compares against.

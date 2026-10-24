@@ -49,7 +49,7 @@ User: check how well skill-refine-agent is working
 
 4. **Establish baseline** — the baseline is the same prompt with no agent dispatched (general capabilities only, no Agent tool call), recorded as `baseline_method` `none` for the whole iteration. This holds for a new agent and an existing one alike: a baseline of an earlier version is not run, because a copy taken now would be identical to the agent being measured.
 
-   **Resume check:** if `evals/agents/<agent-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/agents/<agent-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here. If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming. If `status` exits 2 (`STATUS: REFUSED`: an evaluator file changed since init, or the manifest predates the evaluator pin), the iteration is refused even when every scenario is graded: start a new iteration.
+   **Resume check:** if `evals/agents/<agent-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/agents/<agent-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here. If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming. If `status` exits 2 (`STATUS: REFUSED`: an evaluator file changed since init, or the manifest predates the evaluator pin), the iteration is refused even when every scenario is graded: start a new iteration. Under a caller's evaluator reference (a refine), any exit 2 instead means stop and report EVALUATOR_REFUSED.
 
 5. **Create the iteration dir and initialize the run manifest** (once per iteration — skip on resume):
    ```bash
@@ -60,6 +60,7 @@ User: check how well skill-refine-agent is working
    ```
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    Re-running `init` on an existing manifest is refused by design — that's the guard against re-deciding the baseline method mid-run.
+   When the caller gives an evaluator reference `<REF>` (a refine), add `--evaluator-ref <REF>` to every `init`, including a restarted iteration; if it also names the iteration dir (a mid-loop re-eval), use that dir, skip the resume check and write no `refine-input.json`. `init` exits 2 when an evaluator file is missing or not a regular file, or the reference is unusable or differs: stop and report EVALUATOR_REFUSED; never start another iteration and never `init` without the flag.
 
 6. **Run parallel evaluations** — for each not-yet-`graded` scenario, spawn two subagents **in the same turn** via `agent-eval-agent`.
    Canonical scenario-directory naming: `s<id>-<type>-r<rep>` (e.g. `s1-direct-r1`,
@@ -84,7 +85,7 @@ User: check how well skill-refine-agent is working
    ```bash
    node skills/skill-eval/scripts/run-manifest.js status evals/agents/<agent-name>/iteration-<N>
    ```
-   Must exit 0. If it fails, close the gap (harvest, dispatch, or grade what's missing) before proceeding. Exit 2 is an evaluator refusal, not a gap: start a new iteration.
+   Must exit 0. If it fails, close the gap (harvest, dispatch, or grade what's missing) before proceeding. Exit 2 is an evaluator refusal, not a gap: a stand-alone eval must start a new iteration; under a caller's evaluator reference, stop and report EVALUATOR_REFUSED.
 
 10. **Compute 5 metrics**:
     - **Eval Pass Rate** = (scenarios scoring ≥ 7) / total × 100%. Threshold: ≥ 80%
@@ -103,7 +104,7 @@ User: check how well skill-refine-agent is working
 
 12. **Write AGENT-EVAL.md** — save to `.claude/agents/<agent-name>-EVAL.md` using the template in REFERENCE.md.
 
-13. **Agent-refine handoff** — if Eval Pass Rate < 80%, Dispatch Accuracy < 85%, Project Fit Score < 7, or Resilience Score < 8, write `evals/agents/<agent-name>/refine-input.json` with failing scenario names, root causes, and analyst observations. Then invoke `agent-refine`.
+13. **Agent-refine handoff** — if Eval Pass Rate < 80%, Dispatch Accuracy < 85%, Project Fit Score < 7, or Resilience Score < 8, write `evals/agents/<agent-name>/refine-input.json` with failing scenario names, root causes, and analyst observations, plus `eval_manifest`: this iteration's `evals/agents/<agent-name>/iteration-<N>/run-manifest.json`, the refine's evaluator reference. Then invoke `agent-refine`.
 
 ## Scoring rubric (per scenario, 0–10)
 

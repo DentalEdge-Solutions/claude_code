@@ -83,7 +83,11 @@ for (const { file, restoreTo } of DOCS) {
   test(`${file}: every restore reads a copy this document creates`, () => {
     // a file copy, or a file inside a folder copy (a dst ending in /)
     const created = r => made.some(c => c.dst === r || (c.dst.endsWith('/') && r.startsWith(c.dst)));
-    for (const r of all.filter(c => c.src.startsWith('evals/'))) assert.ok(created(r.src), `restores from ${r.src}, never created`);
+    // A restore writes back outside evals/. A copy within evals/ (P0-11: evals.json into refine/ for the harvester)
+    // is not a restore; it is checked with the other copies into evals/ above.
+    const restores = all.filter(c => c.src.startsWith('evals/') && !c.dst.startsWith('evals/'));
+    assert.ok(restores.length > 0 || !restoreTo, 'no restore found');
+    for (const r of restores) assert.ok(created(r.src), `restores from ${r.src}, never created`);
   });
 
   if (restoreTo) {
