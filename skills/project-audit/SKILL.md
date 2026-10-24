@@ -154,7 +154,7 @@ console.log('Audit artifact written to evals/project-audit-' + date + '.json');
 "
 ```
 
-If `evals/` does not exist or Node.js is unavailable, skip silently. The artifact is informational — no script or agent reads it automatically; it is for the owner and later runs to compare the most recent one (by filename date) against previous runs and see security trends.
+If `evals/` does not exist or Node.js is unavailable, skip silently. The artifact is informational — no script or agent reads it automatically; it is for the owner to compare by hand: the most recent one (by filename date) against previous runs, to see security trends.
 
 ### Step 5 — Offer auto-fix
 

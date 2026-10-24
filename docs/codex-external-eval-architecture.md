@@ -13,7 +13,7 @@ Codex CLI is the **independent second-model evaluator** for this project. It:
 - Executes them as a second model, producing structured per-scenario evidence
 - Writes `result.json` (source of truth) and `trace.jsonl` (evidence only) per scenario
 - Does NOT replay the Claude Code runtime
-- Does NOT own any lifecycle step (no refine, adapt, scout, guardian)
+- Does NOT own any lifecycle step (no refine, adapt or scout)
 - Does NOT enable any review gate
 
 Claude Code remains the methodology owner, lifecycle owner, and final decision-maker.

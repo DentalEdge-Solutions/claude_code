@@ -2,7 +2,7 @@
 
 > Date: 2026-10-24 · Item: P0-04 (S5 roadmap, V-S5-4) · Trace: OPP-30 · GAP-01, GAP-14 · breach (b) ·
 > DECISION-S1-3 (c), DECISION-S3-5 (a) · S6 D-06, D-07, CN-13 · Branch `fix/p0-04-retire-skill-guardian` from `main` at
-> `fabaad9`
+> `fabaad9` · Review round 1: PR4-R-1, R-2, R-4, R-7 applied; R-3, R-5 recorded here; R-6, R-8, R-9 no change
 
 ## What was removed and why
 
@@ -60,13 +60,15 @@ numbers are at `fabaad9`.
 | `scripts/validate-skills.test.js:180,371` | `OPEN_WEB_READERS` is now only `.claude/agents/skill-scout-agent.md`. The comment and test label name P0-05 only |
 | `scripts/validate-skills.js:127` | The comment no longer mentions skill-guardian. It now reads "Not listed yet, by design: skill-scout-agent (P0-05), Hermes (P1-16)" |
 | `skills/project-audit/SKILL.md:101` | Step 4b now gives its real purpose: the security posture travels with the project context and can be read without re-running AgentShield. `extract-project-context.js:195-197` keeps the three security fields when it regenerates the file. A grep found no skill or agent that reads `security_grade` |
-| `skills/project-audit/SKILL.md:123,157` | Step 4c writes the artifact "so security posture can be compared across runs". No script or agent reads `evals/project-audit-*.json` automatically (grep), so the text says it is for the owner and later runs to compare |
-| `install.sh:202` | The CLAUDE.md line written into targets is now a recipe: run `skill-eval` (or `skill-eval-agent`) for each skill and `agent-eval` for each agent, then `skill-refine` / `agent-refine` only for what fails. Agents are copied by glob (`install.sh:100`), so no list needed editing. `uninstall.sh:126-133` removes the section between the `skill-builder` markers, so the new text is removed in the same way (`scripts/uninstall.test.js` passes) |
-| `README.md:181` | Agent table row removed. Under the table, a **Periodic health check** paragraph gives the same recipe. Under **Removal**, a line gives the manual cleanup for targets (see below) |
+| `skills/project-audit/SKILL.md:123,157` | Step 4c writes the artifact "so security posture can be compared across runs". No script or agent reads `evals/project-audit-*.json` automatically (grep), so the text says it is for the owner to compare by hand. Round 1 (PR4-R-4) dropped "and later runs": no project-audit step compares artifacts either |
+| `install.sh:202` | The CLAUDE.md line written into targets is now a recipe: refresh the project context (`node skills/skill-eval/scripts/extract-project-context.js`; targets get `skills/` but no Makefile), then run `skill-eval` (or `skill-eval-agent`) for each skill and `agent-eval` for each agent, then `skill-refine` / `agent-refine` only for what fails. The refresh step was added in round 1 (PR4-R-2): the eval flows skip the script when the context file exists (`skills/skill-eval/SKILL.md:23`, `skills/agent-eval/SKILL.md:25`), so without it a late health check runs on a stale context. Agents are copied by glob (`install.sh:100`), so no list needed editing. `uninstall.sh:126-133` removes the section between the `skill-builder` markers, so the new text is removed in the same way (`scripts/uninstall.test.js` passes) |
+| `README.md:181` | Agent table row removed. Under the table, a **Periodic health check** paragraph gives the same recipe, starting with the context refresh (`make context` or the script; PR4-R-2). Under **Removal**, a line gives the manual cleanup for targets (see below) |
 | `docs/USER-GUIDE.md:257-276` | "Periodic Health Checks" is now the recipe: refresh the context (`make context`), run skill-eval / agent-eval, refine only what misses a threshold. `project-audit` is named for the security posture |
 | `docs/USER-GUIDE.md:351` | Tip 5 said to update "all three locations". Grep shows the pin now runs in two places: `skills/project-audit/SKILL.md` and `.github/workflows/ci.yml`. The tip says "both places that run it" and notes that the guide itself names the version too. `scripts/ci-scan-skills.test.js:329` is a self-contained fixture and does not need updating |
 | `docs/USER-GUIDE.md:365-367` | Tip 9 (the guardian's model) removed. Old tip 10 is now tip 9. A grep found no cross-reference to the tip numbers |
 | `docs/codex-external-eval-architecture.md:29` | "Lifecycle management (eval and refine cycles)" |
+| `docs/codex-external-eval-architecture.md:16` | Round 1 (PR4-R-5): "(no refine, adapt or scout)". The line lists lifecycle steps, and "guardian" there named the retired agent's step |
+| `scripts/codex/test-runners.js:28` | Round 1 (PR4-R-7): the comment no longer says "41 evals.json files" (41 was the total tracked under `evals/`, and the `evals.json` count is now 38). It says the scenario specs are tracked |
 | `.claude/skills/codex-eval/SKILL.md:70` | "does not call skill-refine or agent-refine". This is a project-scoped skill, so no deploy is needed |
 | `.claude/agents/skill-scout-agent.md:22-23` | The "[internal invocation from skill-guardian]" example is replaced. A grep found no skill or agent that dispatches skill-scout-agent by name. Its one verified upstream is `skill-needs-analysis-agent`, which returns "ready-to-use search terms for skill-scout-agent" (`skill-needs-analysis-agent.md:8-9`). So the new example is a user who asks to search for the needs analysis's top recommendation. The rest of the description is unchanged (P0-05 rewrites this agent) |
 | `.claude/agents/skill-synthesizer-agent.md:23-24` | Example dropped. No automated caller exists: `skill-adapt/SKILL.md` describes synthesis itself, and the USER-GUIDE tells the user to run the agent. So no caller was invented. The first example is kept |
@@ -82,6 +84,12 @@ Hardcoded agent counts: a grep of the tracked docs, skills, agents and scripts f
   changes only through `brain-promote --approve`. Nothing under `.project-brain/` was written.
 - **Dated records.** `docs/evaluations/`, `docs/superpowers/` and the `*-EVAL.md` / `*-REFINE-LOG.md` reports record
   past states and runs, so they were not edited.
+- **Plain "guardian" in the Codex judge prompts** (PR4-R-5). `scripts/codex/run-external-agent-eval.js:171` and
+  `scripts/codex/run-external-skill-eval.js:181` list "scout, adapt, refine, install, or guardian cycles" as a hard
+  failure. They are not changed, because editing them changes the Codex evaluator. For the same reason
+  `docs/codex-external-eval-architecture.md:175`, which documents that same judge rule, is kept as it is, in step with
+  the prompts. `skills/skill-eval/SKILL-AUDIT.md:41` ("guardian-driven") is a dated audit record. None of these
+  matches `skill-guardian`, so the acceptance test does not see them.
 - **Pinned evaluator files** are unchanged: `skills/skill-eval/scripts/*`, `skills/skill-eval/REFERENCE.md` and
   `skills/agent-eval/scripts/generate-agent-evals.js`. So the P0-11 evaluator hashes are unchanged.
 
@@ -101,15 +109,19 @@ How the test works:
   - basenames ending `-EVAL.md` or `-REFINE-LOG.md` (dated run reports);
   - the test file itself.
 - One line is allowed, not a file: the README cleanup line. It must name the file to delete, so it cannot avoid the
-  name. The test requires the allowed text to match exactly one line, so the allowance cannot widen or go stale
-  silently.
+  name. The whole line is stored and must be equal, and it must appear exactly once, so the allowance cannot widen or
+  go stale silently. The allowance was added in `22f9a6f`, after the red commit, when the cleanup line was written
+  (disclosed in that commit message). Round 1 (PR4-R-1) found that the first version was a substring match: a second
+  reference appended to the line still passed. The fix is red at `f231516` and green at `21ddfcc`. A test case proves
+  that text appended or prepended to the line, or the same line in another file, is a hit. Measured: with
+  " Or run skill-guardian." appended to the README line, the acceptance test fails.
 - A further check fails if the exclusions would cover README, the USER-GUIDE, `install.sh`, `CLAUDE.md`, a live agent
   or `evals/.gitignore`.
 
 | Check | Result |
 |---|---|
-| `git grep -n -i "skill-guardian\|PROJECT-SKILL-HEALTH"` with the exclusions above | 1 line: `README.md:318`, the cleanup line the spec requires. The S5 acceptance asks for 0 and also requires this line (see deviation 1). Every other hit is gone |
-| `node scripts/retired-skill-guardian.test.js` | red at `827356d` (58 references); green at the final commit |
+| `git grep -n -i "skill-guardian\|PROJECT-SKILL-HEALTH"` with the canon, dated-record and report exclusions | 2 kinds of hit remain. (1) `README.md:320`, the cleanup line the spec requires (deviation 1). (2) The acceptance test's own lines, which must name what they forbid and are excluded as the test file itself. Every other hit is gone |
+| `node scripts/retired-skill-guardian.test.js` | red at `827356d` (58 references); green at `22f9a6f` and after. The R-1 case is red at `f231516` and green at `21ddfcc`. At the final head all 5 tests pass |
 | `node scripts/run-all-tests.js` | 44/44 suites passed |
 | `node scripts/validate-skills.js` | exit 0, with 30 skills passed and 0 unresolved references. The only WARN is `.claude/agents/skill-scout-agent.md` (P0-05) |
 | `node scripts/ci-scan-skills.js` | exit 0, with 0 unmatched and 0 stale findings |
@@ -118,9 +130,10 @@ How the test works:
 | Agent definitions, `ls .claude/agents/*.md` without `*-EVAL.md` | 16 at `fabaad9` → 15. Raw `ls .claude/agents/*.md \| wc -l` gives 17 → 16, because it also counts the report `skill-eval-agent-EVAL.md` |
 | Write-capable readers of untrusted text | **S3 §2.4 baseline:** 10 (the 8 analysts, skill-scout-agent and skill-guardian). This item removes 1, so 10 → 9. **Measured on frontmatter:** P0-03 had already made the analysts `tools: Read`, so before this PR (`fabaad9`) 2 remained: skill-guardian and skill-scout-agent. After it, 1 remains: skill-scout-agent, which P0-05 addresses |
 
-**Deviation 1: the acceptance grep returns 1 line, not 0.** S5 asks both for "grep returns 0" and for a documented
+**Deviation 1: the acceptance grep does not return 0.** S5 asks both for "grep returns 0" and for a documented
 manual cleanup of copies already installed in targets. The cleanup has to name the file, so the two cannot both
-hold. The test resolves this with one explicit, exactly-once line allowance, as described above.
+hold. The test resolves this with one explicit, whole-line, exactly-once allowance, as described above. The test
+file's own lines are the second exception, and it cannot be avoided: a test that forbids a name has to contain it.
 
 ## Not measured
 
@@ -128,9 +141,12 @@ hold. The test resolves this with one explicit, exactly-once line allowance, as 
   skipped by owner decision. S5's check that skill-scout-agent and skill-synthesizer-agent score no lower than B0
   after the description change is therefore **not measured**. Both descriptions changed, which can affect dispatch.
   This is an open follow-up for P1-10 (re-measure dispatch accuracy for both).
-- **The test's fs-walk fallback** was not run. Running it needs a copy of the tree without git, and this session's
-  worktree guard refused a command whose script runs git outside the worktree. CI checks out with git, so CI uses the
-  `git ls-files` path.
+- **The test's fs-walk fallback** was not run by the author: this session's worktree guard refused a command whose
+  script runs git outside the worktree. The round 1 reviewer ran it on `git archive` exports without `.git`:
+  - `827356d` failed with 58 references;
+  - `8adc9d2` passed 4/4, on 835 files, the same count as `git ls-files`.
+
+  CI checks out with git, so CI uses the `git ls-files` path.
 
 ## Targets and deploy
 

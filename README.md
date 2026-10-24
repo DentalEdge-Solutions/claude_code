@@ -180,8 +180,10 @@ Runtime sub-agents that implement parallelizable or autonomous parts of the pipe
 | `skill-needs-analysis-agent` | haiku | Gap analysis: maps stack + workflow_terms + mcp_servers to skill categories | user (after project-setup) |
 | `repo-audit-*` (8 analysts) | inherit | One per codebase layer — runtime, framework, database, auth, testing, CI/CD, AI/LLM, Claude Code config; each reads an XML slice and returns a JSON layer object | `repo-audit` |
 
-**Periodic health check.** There is no one-command health check. Run `skill-eval` (or `skill-eval-agent`) for each
-skill and `agent-eval` for each agent, then `skill-refine` / `agent-refine` only for the ones that miss a threshold.
+**Periodic health check.** There is no one-command health check. First refresh the project context (`make context`, or
+`node skills/skill-eval/scripts/extract-project-context.js`); the evals reuse an existing `evals/project-context.json`
+as it is. Then run `skill-eval` (or `skill-eval-agent`) for each skill and `agent-eval` for each agent, and
+`skill-refine` / `agent-refine` only for the ones that miss a threshold.
 
 ---
 

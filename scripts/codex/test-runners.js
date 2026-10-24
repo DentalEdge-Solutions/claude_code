@@ -25,7 +25,7 @@ process.on('exit', () => rmSync(WORK, { recursive: true, force: true }));
 const fixture = (name) => path.join(WORK, 'runs', name);
 
 // A native-audit fixture is an ACTUAL `iteration-N` directory, not merely the presence of
-// evals/<target>/. evals/ is gitignored, but 41 evals.json files are force-added, so
+// evals/<target>/. evals/ is gitignored, but the evals.json scenario specs are tracked, so
 // evals/agent-eval/ DOES exist in a clean checkout while the generated iteration-N dirs
 // never do. Guarding on the parent therefore passed on CI and then failed inside the test.
 function hasNativeRun(dir) {
