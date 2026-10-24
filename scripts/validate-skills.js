@@ -32,8 +32,9 @@ Checks:
     (fenced blocks and HTML comments do not count). A listed file that is
     missing fails too.
   - Every repo-audit analyst has exactly "tools: Read".
-  - Warning only: a skill or agent declaring WebFetch/WebSearch (tools,
-    allowed-tools or compatibility) without the paragraph.
+  - Warning only: a skill or agent not on the list that names WebFetch or
+    WebSearch (tools, allowed-tools, compatibility or visible body) without
+    the paragraph.
 
 Exit codes:
   0  All skills pass
@@ -234,10 +235,12 @@ function findAnalystToolViolations(repoRoot) {
   });
 }
 
-// PR3 review R-7: a definition that declares web tools but carries no paragraph (warning only).
-// Skills here state the tools they need in `compatibility` ("Requires WebSearch, WebFetch"), and
-// a few in `tools`/`allowed-tools`; agents use `tools`. Listed intake files are already
-// required by findMissingUntrustedFraming, so they are not repeated here. Returns [{ file }].
+// PR3 review R-7: a definition that can read web content but carries no paragraph (warning only).
+// "Can read" = WebFetch or WebSearch named in `tools`, `allowed-tools` or `compatibility` (skills
+// here state the tools they need there: "Requires WebSearch, WebFetch"), or in the visible body
+// (most skills here name WebFetch only in a workflow step; fenced blocks and comments do not
+// count). A file that names WebFetch only to forbid it costs one WARN line. Listed intake files
+// are already required by findMissingUntrustedFraming, so they are not repeated. Returns [{ file }].
 function findUnframedWebReaders(repoRoot) {
   const listed = new Set(UNTRUSTED_INTAKE_FILES);
   const defs = [
@@ -248,7 +251,8 @@ function findUnframedWebReaders(repoRoot) {
   ];
   return defs.filter(rel => !listed.has(rel) && fs.existsSync(path.join(repoRoot, rel))).sort().flatMap(rel => {
     const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
-    const declared = ['tools', 'allowed-tools', 'compatibility'].map(k => frontmatterField(text, k) || '').join('\n');
+    const declared = ['tools', 'allowed-tools', 'compatibility'].map(k => frontmatterField(text, k) || '')
+      .concat(visibleParagraphs(text)).join('\n');
     return /\bWeb(?:Fetch|Search)\b/.test(declared) && missingFramingCores(text).length > 0 ? [{ file: rel }] : [];
   });
 }
