@@ -49,9 +49,20 @@ own eval logic.
 1. Receive skill name. Verify `evals/<skill-name>/refine-input.json` exists.
    If not: "No refine-input.json for <skill-name>. Run skill-eval-agent first."
    Exit.
+   If the subject is part of the evaluator (skill-eval, agent-eval, skill-eval-agent,
+   agent-eval-agent): "Refining the evaluator needs a frozen-copy procedure, which
+   does not exist yet." Exit.
 
 2. Load: `evals/<skill-name>/refine-input.json`, `skills/<skill-name>/SKILL-EVAL.md`,
    `skills/<skill-name>/SKILL.md`.
+   <REF> = refine-input.json's `eval_manifest` (the eval iteration's run-manifest.json).
+   If absent: "refine-input.json has no eval_manifest — run a fresh skill-eval-agent eval first." Exit.
+   Before any backup or edit, run `node skills/skill-eval/scripts/run-manifest.js check-ref <REF>`. On any non-zero exit:
+   "The evaluator reference does not match the evaluator now — run a fresh eval (made after P0-11) first." Exit; nothing has been changed.
+   Pin the scenario set: `mkdir -p evals/<skill-name>/refine && cp evals/<skill-name>/evals.json evals/<skill-name>/refine/evals.json`, then
+   `shasum -a 256 evals/<skill-name>/refine/evals.json` must equal refine-input.json's `eval_scenarios_sha256`.
+   If absent or different: "The scenario set changed since the eval — run a fresh eval first." Exit; the subject is unchanged.
+   Every re-eval dispatches from that copy, which is also where the harvester looks for its scenarios.
 
 3. Route by failing metric (from refine-input.json):
    - project_fit_score < 7 → check which scenarios drove the failure:
@@ -113,11 +124,20 @@ own eval logic.
    A symlinked `<file>` is out of scope: a revert can't restore it, so pick another file.
    `wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit.
 
-   7c. Invoke skill-eval-agent as a subagent on training set only:
+   7c. First clear this iteration's re-eval dir, fresh per session like the snapshot (never an eval `iteration-<N>` dir):
+   `rm -rf "evals/<skill-name>/refine/re-eval-N"`
+   Then invoke skill-eval-agent as a subagent on training set only:
    "Evaluate skill <name>. Run scenario IDs: [training set IDs]. This is a
    mid-loop re-eval — do NOT run project-native or project-workflow scenarios.
+   Use the iteration dir evals/<skill-name>/refine/re-eval-N (skip the resume check;
+   write no refine-input.json). Add `--evaluator-ref <REF>` to every `init`. If init
+   or status exits 2, stop and print EVALUATOR_REFUSED with its output.
+   Do not regenerate evals.json (skip your scenario-generation step): dispatch only the scenarios in evals/<skill-name>/refine/evals.json.
    Print EVAL_COMPLETE on its own line when done."
    Wait for EVAL_COMPLETE. Read updated `skills/<skill-name>/SKILL-EVAL.md`.
+   Then check that `shasum -a 256 evals/<skill-name>/evals.json` still equals refine-input.json's `eval_scenarios_sha256` (the eval agent must not have regenerated it).
+   If it changed: revert the pending edit from `evals/<skill-name>/refine/pre-iter-N` as in 7d's REVERT, then stop the session and report it to the user.
+   On EVALUATOR_REFUSED or any non-zero init/status: revert the pending edit from `evals/<skill-name>/refine/pre-iter-N` as in 7d's REVERT, then stop the session, log it, and report it to the user — never work around it.
    Also run 1 regression rep on each previously-passing scenario.
 
    7d. Keep or revert (`score` is the training-set pass rate from 7c; the bands are in percentage points of it):
@@ -145,8 +165,11 @@ own eval logic.
 9. Final validation — invoke skill-eval-agent as subagent (full 9-scenario run):
    "Run full evaluation of skill <name> with --context evals/project-context.json,
    including project-native, project-workflow, and multi-turn scenarios.
-   Print EVAL_COMPLETE when done."
-   Wait for EVAL_COMPLETE. Read final SKILL-EVAL.md.
+   Add `--evaluator-ref <REF>` to every `init`; on exit 2, print
+   EVALUATOR_REFUSED. Print EVAL_COMPLETE when done."
+   Wait for EVAL_COMPLETE. Read final SKILL-EVAL.md. EVALUATOR_REFUSED, or any non-zero
+   init/status, stops the session and is reported (every kept edit was measured).
+   The final validation regenerates its scenarios by design (it is a full eval), so the 7c hash check does not apply here.
 
 10. Append final log entry (baseline→final delta, iterations used, effective levers,
     convergence reason).
@@ -166,3 +189,9 @@ own eval logic.
 - Never exit without writing the final log entry.
 - Never continue past 10 iterations.
 - Never skip the per-iteration safety snapshot before mutating.
+- Never edit an evaluator file with any lever (A–E): `skill-eval/scripts/harvest-evidence.js`,
+  `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`,
+  `agent-eval/scripts/generate-agent-evals.js`, `skill-eval/REFERENCE.md` (under `skills/`).
+- Never edit a `run-manifest.json` under `evals/<skill-name>/` (any `iteration-*`, or the `eval_manifest` that refine-input.json names),
+  refine-input.json's `eval_manifest` and `eval_scenarios_sha256` fields, or the `refine/evals.json` copy: the manifests anchor `--evaluator-ref`, and the copy is the
+  scenario set checked against `eval_scenarios_sha256`.

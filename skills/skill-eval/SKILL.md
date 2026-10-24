@@ -32,6 +32,7 @@ User: evaluate the skill-adapt skill
      --context evals/project-context.json
    ```
    This produces 9 scenarios: 6 generic + 3 project-specific. Without `--context` you get 6.
+   In a mid-loop re-eval (the caller names a refine/re-eval-N folder), skip this step: do not regenerate evals.json; dispatch only the scenarios in the caller's refine/evals.json.
 
    | # | Type | Triggers? | What it tests |
    |---|------|-----------|---------------|
@@ -52,7 +53,7 @@ User: evaluate the skill-adapt skill
 
 4. **Establish baseline** — the baseline is the same prompt with no skill loaded, recorded as `baseline_method` `none` for the whole iteration. This holds for a new skill and an existing one alike: a baseline of an earlier version is not run, because a copy taken now would be identical to the skill being measured.
 
-   **Resume check:** if `evals/<skill-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here. If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming.
+   **Resume check:** if `evals/<skill-name>/iteration-N/run-manifest.json` already exists for the highest N, run `node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-N` first. If it reports incomplete scenarios, resume that iteration using its **recorded** `baseline_method` instead of re-deciding it here. If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming. If `status` exits 2 (`STATUS: REFUSED`: an evaluator file changed since init, or the manifest predates the evaluator pin), the iteration is refused even when every scenario is graded: start a new iteration. Under a caller's evaluator reference (a refine), any exit 2 instead means stop and report EVALUATOR_REFUSED.
 
 5. **Create the iteration dir and initialize the run manifest** (once per iteration — skip on resume):
    ```bash
@@ -63,6 +64,7 @@ User: evaluate the skill-adapt skill
    ```
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    Re-running `init` on an existing manifest is refused by design — that's the guard against re-deciding the baseline method mid-run.
+   When the caller gives an evaluator reference `<REF>` (a refine), add `--evaluator-ref <REF>` to every `init`, including a restarted iteration; if it also names the iteration dir (a mid-loop re-eval), use that dir, skip the resume check, do not regenerate evals.json (dispatch only the scenarios in the caller's refine/evals.json) and write no `refine-input.json`. `init` exits 2 when an evaluator file is missing or not a regular file, or the reference is unusable or differs: stop and report EVALUATOR_REFUSED; never start another iteration and never `init` without the flag.
 
 6. **Run parallel evaluations** — for each not-yet-`graded` scenario, spawn two subagents **in the same turn**.
    Canonical scenario-directory naming: `s<id>-<type>-r<rep>` (e.g. `s1-direct-r1`,
@@ -88,7 +90,7 @@ User: evaluate the skill-adapt skill
    ```bash
    node skills/skill-eval/scripts/run-manifest.js status evals/<skill-name>/iteration-<N>
    ```
-   Must exit 0. If it fails, close the gap (harvest, dispatch, or grade what's missing) before proceeding.
+   Must exit 0. If it fails, close the gap (harvest, dispatch, or grade what's missing) before proceeding. Exit 2 is an evaluator refusal, not a gap: a stand-alone eval must start a new iteration; under a caller's evaluator reference, stop and report EVALUATOR_REFUSED.
 
 10. **Compute 5 metrics**:
     - **Eval Pass Rate** = (scenarios correct) / (total) × 100%. Threshold: ≥ 80%
@@ -106,7 +108,7 @@ User: evaluate the skill-adapt skill
 
 12. **Write SKILL-EVAL.md** — save to `skills/<skill-name>/SKILL-EVAL.md` using the template in REFERENCE.md.
 
-13. **Skill-refine handoff** — if Eval Pass Rate < 80% or Trigger Accuracy < 85%, write `evals/<skill-name>/refine-input.json` with failing scenario names, root causes, and analyst observations. Then invoke `skill-refine`.
+13. **Skill-refine handoff** — if Eval Pass Rate < 80% or Trigger Accuracy < 85%, write `evals/<skill-name>/refine-input.json` with failing scenario names, root causes, and analyst observations, plus `eval_manifest`: this iteration's `evals/<skill-name>/iteration-<N>/run-manifest.json`, the refine's evaluator reference, and `eval_scenarios_sha256`: `shasum -a 256 evals/<skill-name>/evals.json` as this iteration used it. Then invoke `skill-refine`.
 
 ## Scoring rubric (per scenario, 0–10)
 

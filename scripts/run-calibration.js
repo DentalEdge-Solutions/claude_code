@@ -110,7 +110,7 @@ Full human workflow (see fixtures/GATE-RUNBOOK.md for the copy-paste version):
        paths (never copy the mutant into skills/):
        definition:  fixtures/mutant-brief-writer/SKILL.md
        evals.json:  evals/fixtures/mutant-brief-writer/evals.json
-       artifacts:   evals/fixtures/mutant-brief-writer/iteration-1/
+       artifacts:   evals/fixtures/mutant-brief-writer/iteration-<N>/ (a new iteration)
        report out:  fixtures/mutant-brief-writer/SKILL-EVAL.md (gitignored)
 
   3. HUMAN-INVOKED, spends API credits:

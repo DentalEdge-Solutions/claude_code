@@ -234,6 +234,12 @@ For every ACTIVE skill where any threshold is missed:
 - `project_fit_score < 7` (when reported)
 - `resilience_score < 8` (when adversarial scenarios ran)
 
+**Evaluator rules (P0-11).** Never refine `skill-eval` or `agent-eval` (nor the agents `skill-eval-agent` / `agent-eval-agent`):
+refining the evaluator needs a frozen-copy procedure, which does not exist yet — skip them and say so. No lever (A–E) may
+edit `skill-eval/scripts/harvest-evidence.js`, `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`,
+`agent-eval/scripts/generate-agent-evals.js` or `skill-eval/REFERENCE.md` (under `skills/`).
+This loop has no evaluator-reference check (`check-ref` / `--evaluator-ref`): use skill-refine-agent for any refine whose numbers will be relied on.
+
 ### 4.1 Load baseline
 Read `./skills/<skill-name>/SKILL-EVAL.md` for baseline scores and worst-performing scenarios.
 

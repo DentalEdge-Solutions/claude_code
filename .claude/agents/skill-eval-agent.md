@@ -53,7 +53,7 @@ If it reports incomplete or ungraded scenarios, resume that iteration instead of
 starting a new one: dispatch only the scenarios not yet `graded`, using the
 **recorded** `baseline_method` from that manifest — never re-decide the baseline
 method mid-iteration.
-If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming.
+If `status` prints a WARNING that the subject changed or is not found, or the manifest records `baseline_method=snapshot` (written before 2026-10-20), start a new iteration instead of resuming. If `status` exits 2 (`STATUS: REFUSED`: an evaluator file changed since init, or the manifest predates the evaluator pin), the iteration is refused even when every scenario is graded: start a new iteration. Under a caller's evaluator reference (a refine), any exit 2 instead means stop and report EVALUATOR_REFUSED.
 
 1. Read `skills/<skill-name>/SKILL.md` and all bundled files. Compute context
    footprint: total lines across all files × 4 estimated tokens/line.
@@ -65,6 +65,7 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
    `node skills/skill-eval/scripts/generate-seed-evals.js skills/<skill-name>/SKILL.md --context evals/project-context.json`
    Confirm 9 scenarios in `evals/<skill-name>/evals.json` (6 generic + 3 project-specific).
    Without --context: 6 scenarios. Never skip --context when project-context.json exists.
+   In a mid-loop re-eval (the caller names a refine/re-eval-N folder), skip this step: do not regenerate evals.json; dispatch only the scenarios in the caller's refine/evals.json.
 
 4. Establish baseline:
    - The baseline is the same prompt with no skill loaded: baseline_method = `none`,
@@ -80,6 +81,7 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
    `--subject` pins the exact definition measured (sha256); the report's Evidence and Limits section cites it.
    On resume, skip this call entirely — the manifest already exists and re-init is
    refused by design. Every scenario in this iteration uses the recorded method.
+   When the caller gives an evaluator reference `<REF>` (a refine), add `--evaluator-ref <REF>` to every `init`, including a restarted iteration; if it also names the iteration dir (a mid-loop re-eval), use that dir, skip the resume check, do not regenerate evals.json (dispatch only the scenarios in the caller's refine/evals.json) and write no `refine-input.json`. `init` exits 2 when an evaluator file is missing or not a regular file, or the reference is unusable or differs: stop and report EVALUATOR_REFUSED; never start another iteration and never `init` without the flag.
 
 6. Dispatch ALL pairs simultaneously — spawn up to 42 subagents in ONE Agent call.
    For each not-yet-graded scenario, create 2 subagent instructions:
@@ -175,6 +177,8 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
    `evidence.json` in either side). If it fails, fix the gap first — re-run the
    harvester, dispatch the missing scenario, or grade what's outstanding — before
    proceeding to metrics.
+   Exit 2 is an evaluator refusal, not a gap: a stand-alone eval must start a new iteration; under a
+   caller's evaluator reference, stop and report EVALUATOR_REFUSED.
 
 10. Analyst pass — flag:
     - Non-discriminating: |baseline_delta| < 0.5 (skill adds no value here)
@@ -225,6 +229,8 @@ If `status` prints a WARNING that the subject changed or is not found, or the ma
     ```json
     {
       "skill_name": "...", "eval_date": "YYYY-MM-DD", "iteration": N,
+      "eval_manifest": "evals/<skill-name>/iteration-N/run-manifest.json",
+      "eval_scenarios_sha256": "<shasum -a 256 of evals/<skill-name>/evals.json as this iteration used it>",
       "failing_metrics": {
         "eval_pass_rate": {"value": XX, "threshold": 80, "failing": true},
         "trigger_accuracy": {"value": XX, "threshold": 85, "failing": true},
