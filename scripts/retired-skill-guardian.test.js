@@ -42,6 +42,13 @@ const EXCLUDED_BASENAME = /-EVAL\.md$|-REFINE-LOG\.md$/;
 // file to delete. The test below requires it to match exactly one line, so it cannot widen or go stale silently.
 const ALLOWED_LINE = { file: 'README.md', text: 'delete `<target>/.claude/agents/skill-guardian.md` by hand' };
 
+// null: the line names nothing retired; 'allowed': the one allowed cleanup line; 'hit': a stale reference.
+function classify(rel, line) {
+  if (!RETIRED.test(line)) return null;
+  if (rel === ALLOWED_LINE.file && line.includes(ALLOWED_LINE.text)) return 'allowed';
+  return 'hit';
+}
+
 function excluded(rel) {
   if (rel === SELF) return true;
   if (EXCLUDED_PREFIXES.some(p => rel.startsWith(p))) return true;
@@ -87,9 +94,9 @@ test('no tracked file outside the exclusions names skill-guardian or PROJECT-SKI
     if (!st.isFile()) continue;
     const lines = fs.readFileSync(abs, 'utf8').split('\n');
     lines.forEach((line, i) => {
-      if (!RETIRED.test(line)) return;
-      if (rel === ALLOWED_LINE.file && line.includes(ALLOWED_LINE.text)) { allowed++; return; }
-      hits.push(`${rel}:${i + 1}`);
+      const c = classify(rel, line);
+      if (c === 'allowed') allowed++;
+      else if (c === 'hit') hits.push(`${rel}:${i + 1}`);
     });
   }
   assert.ok(hits.length === 0, `${hits.length} stale references:\n  ${hits.join('\n  ')}`);
@@ -102,6 +109,18 @@ test('the exclusions are narrow: they do not cover live definitions, docs or ins
     assert.ok(!excluded(f), `${f} must be checked`);
   }
   assert.ok(excluded('skills/agent-refine/SKILL-EVAL.md') && excluded('skills/skill-adapt/SKILL-REFINE-LOG.md'));
+});
+
+// PR4-R-1: the allowance covers that one README line exactly. Extra text on it that names the agent, or the same
+// line in another file, is a stale reference.
+test('the allowance is the exact README line: anything added to it, or the line elsewhere, is a hit', () => {
+  const readme = fs.readFileSync(path.join(REPO, ALLOWED_LINE.file), 'utf8').split('\n');
+  const line = readme.find(l => l.includes(ALLOWED_LINE.text));
+  assert.ok(line, 'the README cleanup line is missing');
+  assert.strictEqual(classify(ALLOWED_LINE.file, line), 'allowed');
+  assert.strictEqual(classify(ALLOWED_LINE.file, `${line} Or run skill-guardian.`), 'hit', 'a second reference appended');
+  assert.strictEqual(classify(ALLOWED_LINE.file, `Run skill-guardian first. ${line}`), 'hit', 'a reference prepended');
+  assert.strictEqual(classify('docs/USER-GUIDE.md', line), 'hit', 'the same line in another file');
 });
 
 if (!ok) process.exit(1);
