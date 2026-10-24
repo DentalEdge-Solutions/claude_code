@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // categorize-files.js <packed-file> <output-dir>
-// Reads Repomix XML (or Gitingest plain text), routes each file to 1+ layer
+// Reads Repomix XML (the only input since P0-01 removed the Gitingest fallback), routes each file to 1+ layer
 // slices, writes layer-<name>.xml + manifest.json to output-dir.
 // Stdout: JSON summary { total_files, layers: { [name]: count } }
 
@@ -83,22 +83,13 @@ function matchLayers(filePath) {
   );
 }
 
-// Handles Repomix XML and Gitingest plain text
+// Repomix XML only: any other input yields no blocks, and run() stops with an error.
 function extractFileBlocks(content) {
   const blocks = [];
-  if (content.trimStart().startsWith('<?xml') || content.includes('<file ')) {
-    const regex = /<file\s+path="([^"]+)"[^>]*>([\s\S]*?)<\/file>/g;
-    let m;
-    while ((m = regex.exec(content)) !== null) {
-      blocks.push({ path: m[1], rawBlock: m[0] });
-    }
-    return blocks;
-  }
-  // Gitingest plain text: sections separated by ==== lines
-  const sections = content.split(/={10,}/);
-  for (const section of sections) {
-    const fileMatch = section.match(/^File:\s+(.+)$/m);
-    if (fileMatch) blocks.push({ path: fileMatch[1].trim(), rawBlock: section });
+  const regex = /<file\s+path="([^"]+)"[^>]*>([\s\S]*?)<\/file>/g;
+  let m;
+  while ((m = regex.exec(content)) !== null) {
+    blocks.push({ path: m[1], rawBlock: m[0] });
   }
   return blocks;
 }
@@ -116,7 +107,6 @@ function run(packedPath, outputDir) {
     throw new Error('No file blocks found. Check Repomix output format.');
   }
 
-  const isXml      = content.trimStart().startsWith('<?xml') || content.includes('<file ');
   const layerBlocks = {};
   const manifest    = { total_files: fileBlocks.length, layers: {} };
   LAYER_NAMES.forEach(layer => {
@@ -134,9 +124,7 @@ function run(packedPath, outputDir) {
 
   fs.mkdirSync(outputDir, { recursive: true });
   for (const layer of LAYER_NAMES) {
-    const sliceContent = isXml
-      ? `<?xml version="1.0" encoding="UTF-8"?>\n<layer name="${layer}">\n${layerBlocks[layer].join('\n')}\n</layer>`
-      : `=== Layer: ${layer} ===\n\n${layerBlocks[layer].join('\n' + '='.repeat(50) + '\n')}`;
+    const sliceContent = `<?xml version="1.0" encoding="UTF-8"?>\n<layer name="${layer}">\n${layerBlocks[layer].join('\n')}\n</layer>`;
     fs.writeFileSync(path.join(outputDir, `layer-${layer}.xml`), sliceContent);
   }
   fs.writeFileSync(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest, null, 2));

@@ -3,7 +3,7 @@
 // Deterministic security scanner for Claude Code skill directories, agent files,
 // and configuration files. Pattern categories:
 //   - Prompt injection / persona override (MD_INJECTION)
-//   - Dangerous Bash in instructions (MD_BASH)
+//   - Dangerous Bash in instructions (MD_BASH), unpinned installs included (unpinned-install, P0-02)
 //   - Hardcoded secrets in markdown/config (MD_SECRETS)
 //   - Overly permissive settings.json rules (CONFIG_PATTERNS)
 //   - Malicious JS/Python/Shell in scripts (JS/PY/SH_PATTERNS); a file with no known extension is
@@ -112,6 +112,81 @@ const MD_INJECTION = [
   { re: /system\s*prompt/i,                                           name: 'system-prompt-ref',     sev: 'FLAG'  },
 ];
 
+// ─── Unpinned installs (P0-02) ─────────────────────────────────────────────
+// One check, unpinned-install, for code fetched at run time without an exact version:
+//   - npx <pkg> unless <pkg> ends in @x.y.z (a prerelease or build suffix is allowed): a range (@^1, @~1),
+//     a partial version (@1.2) or none is a hit. A scope (@scope/pkg) and quotes are allowed. A path (./x) is
+//     not a package. With -p/--package, every -p value is read and the positional is a command, not a package.
+//     The argument of an npx flag that takes one (NPX_ARG_FLAG: --cache, --registry, -w …) is skipped.
+//   - pip install (pip, pip3, pip3.12, python -m pip, uv pip): every word after install is read. A word with ==
+//     and no * (==1.* is a wildcard), a path (. / ~), an option, a redirect-shaped word (2>x, > x) and the
+//     argument of a pip flag that takes one (-r, -c, -t, -i, -f, -C and the long forms in PIP_ARG_FLAG) are
+//     skipped; the first other word is the package, a hit. A word the read cannot place ($VAR, 2>&1) ends the read.
+//   - The tool may be given by a path (/usr/bin/npx) or with a leading backslash (\npx).
+//   - <pkg>@latest anywhere.
+// Curl or wget piped to a shell is curl-pipe-shell / wget-pipe-shell below, not repeated here.
+// Words may be separated by blanks or a backslash-newline continuation. npx, pip and uv may be written in any
+// case (a case-insensitive file system runs NPX as npx).
+// npx and pip count only in command position: a line start, or just after a backtick, ;, &, |, (, { or ! (then
+// blanks or continuations); then an optional list, task-list or quote marker (-, *, +, >, 1., - [ ]), a "$ "
+// prompt, and command prefixes (VAR=val, env, exec, time, command, nohup, sudo, the shell keywords if, then, do,
+// else, elif, while, until, an option word such as -E, and sh/bash -c "…"). So prose that names the
+// tool mid-sentence ("access to npx", "Install: npx x") is quiet: a tripwire, not a boundary, like rm-rf-root.
+// Prose that starts a line or a table cell with the tool name is read as a command (a known false positive).
+// Linear: a word (T) cannot hold a blank, backslash or any command-start character, and a line that continues
+// the one above is not a command start (CONT_LINE). A line after a comment line or an escaped backslash is a
+// start, but no run of words can cross such a line, so no run can contain a later command start. Every
+// repeated part has one parse: npx options exclude -p; pip's skip kinds are told apart by their first
+// character or a lookahead, and a pip flag that takes an argument is never read as a plain option. The
+// command-start anchor is what keeps this linear: without it, an earlier form took 350 s on 1 MB of "npx<TAB>-".
+//
+// SP, SPS, SPP: blanks or backslash-newline continuations. Blanks are one character-class loop and only a continuation repeats
+// the group: a group repeated per blank pushed one backtrack entry per character, and 11 MB of blanks overflowed
+// V8's regex stack ("Maximum call stack size exceeded", no JSON). SPP (one or more) is a lookahead plus SPS, so
+// a blank run has a single split.
+const SP = String.raw`(?:[ \t]|\\\r?\n)`;
+const SPS = String.raw`[ \t]*(?:\\\r?\n[ \t]*)*`;
+const SPP = String.raw`(?=[ \t]|\\\r?\n)${SPS}`;
+const T = String.raw`[^\s\x60;&|(){}!\\]`;
+const PIP_ARG_FLAG = String.raw`-[rctCif]|--(?:requirement|constraint|target|platform|python-version|implementation|abi|root|` +
+  String.raw`prefix|src|upgrade-strategy|config-settings|global-option|no-binary|only-binary|progress-bar|root-user-action|` +
+  String.raw`report|index-url|extra-index-url|find-links|log|proxy|retries|timeout|exists-action|trusted-host|cert|` +
+  String.raw`client-cert|cache-dir|use-feature|use-deprecated|keyring-provider|python|resume-retries|group)`;
+const OPT_TOKEN = String.raw`-${T}*${SPP}`;
+const SH_C = String.raw`(?:ba|z|da|k)?sh${SPP}-[A-Za-z]*c${SPP}["']`;
+const PREFIX = String.raw`(?:(?:[A-Za-z_]\w*=${T}*|env|exec|time|command|nohup|sudo|if|then|do|else|elif|while|until|` +
+  String.raw`-[A-Za-z][\w-]*)${SPP}|${SH_C})*`;
+// A line that continues into the next: it ends in a backslash that is not itself escaped (\\), and it is not a
+// comment line (first non-blank character #). In bash neither an escaped backslash nor a comment continues a
+// line, so the line after them is a new command. A # later in a line is not read as a comment (a known limit).
+// No run of words can cross a comment line or an escaped-backslash line, so this keeps the scan linear.
+const CONT_LINE = String.raw`(?:^|\n)[ \t]*(?:[^#\s][^\n]*)?(?<!\\)\\\r?\n`;
+const CMD_AT = String.raw`(?:(?<![^\n])(?<!${CONT_LINE})|(?<=[\x60;&|({!]))${SPS}` +
+  String.raw`(?:(?:[-*+>]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?(?:\$[ \t]+)?${PREFIX}`;
+// The tool may be given by a path (/usr/bin/npx, ./node_modules/.bin/npx) or with a leading backslash (\npx).
+const TOOL_PATH = String.raw`(?:\\|(?:[\w.~-]*\/)+)?`;
+// The exact version may be quoted and followed by sentence punctuation (".", ",", ":") before the word ends.
+const EXACT_NPM = String.raw`["']?(?:@[\w.-]+\/)?[\w.-]+@\d+\.\d+\.\d+(?:[-+][\w.+-]*)?["']?[.,:]?(?![^\s\x60'"();&|\\])`;
+const NPX_PKG = String.raw`(?!${EXACT_NPM})["']?(?:@[\w.-]+\/)?[A-Za-z0-9]`;
+const NPX_P = String.raw`(?:-p|--package)(?:=|${SPP})`;
+// npx (npm exec) flags that take an argument: the argument is skipped, never read as the package.
+const NPX_ARG_FLAG = String.raw`--cache|--prefix|--userconfig|--registry|-w|--workspace|--node-options|--loglevel`;
+const NPX_OPT = String.raw`(?!(?:-p|--package)(?:=|${SP})|(?:${NPX_ARG_FLAG})${SP})${OPT_TOKEN}`;
+const NPX_SKIP = String.raw`(?:(?:${NPX_ARG_FLAG})${SPP}${T}+${SPP}|${NPX_OPT})`;
+const NPX_UNPINNED = String.raw`[Nn][Pp][Xx]${SPP}${NPX_SKIP}*` +
+  String.raw`(?:${NPX_PKG}|(?:${NPX_P}(?=${EXACT_NPM})${T}+${SPP}${NPX_SKIP}*)*${NPX_P}${NPX_PKG})`;
+// A word with == is a pin only when it holds no *: "==1.*" is a wildcard, not a pin.
+const T_NO_STAR = String.raw`[^\s\x60;&|(){}!\\*]`;
+const PIP_SKIP = String.raw`(?:(?:${PIP_ARG_FLAG})${SPP}${T}+${SPP}|(?!(?:${PIP_ARG_FLAG})${SP})${OPT_TOKEN}|` +
+  String.raw`[./~]${T}*${SPP}|\d*[<>](?:${T}+|${SPP}${T}+)${SPP}|` +
+  String.raw`(?![-./~]|\d*[<>])(?=${T}*==)(?!${T_NO_STAR}*\*)${T}+${SPP})`;
+const PIP_UNPINNED = String.raw`(?:[Pp][Yy][Tt][Hh][Oo][Nn][\d.]*${SPP}-m${SPP}|[Uu][Vv]${SPP})?` +
+  String.raw`[Pp][Ii][Pp][\d.]*${SPP}[Ii][Nn][Ss][Tt][Aa][Ll][Ll]${SPP}${PIP_SKIP}*` +
+  String.raw`(?!\d*[<>])["']?(?:(?=${T_NO_STAR}*\*)|(?!${T}*==))[A-Za-z0-9]`;
+// A full stop ends it too ("…@latest."), but a name goes on after one ("user@latest.test").
+const AT_LATEST = String.raw`[\w.\/-]@latest(?![\w-]|\.[\w-])`;
+const UNPINNED_INSTALL = new RegExp(`${CMD_AT}${TOOL_PATH}(?:${NPX_UNPINNED}|${PIP_UNPINNED})|${AT_LATEST}`);
+
 // ─── Markdown: Dangerous Bash in instructions ──────────────────────────────
 const MD_BASH = [
   // rm with a recursive/force option (any spelling: -rf, -r -f, -Rf, -rfv, --recursive, --force, --)
@@ -133,6 +208,7 @@ const MD_BASH = [
   // every curl on the line and took seconds on a long line of repeated "curl |".
   { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'curl-pipe-shell',  sev: 'BLOCK' },
   { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh|zsh)\b/, name: 'wget-pipe-shell',  sev: 'BLOCK' },
+  { re: UNPINNED_INSTALL,                 name: 'unpinned-install', sev: 'BLOCK' },
   { re: /\bsudo\s+/,                      name: 'sudo',             sev: 'FLAG'  },
   { re: /chmod\s+[0-7]{3}\s/,            name: 'chmod',            sev: 'FLAG'  },
   { re: /~\/.ssh\//,                      name: 'ssh-dir-access',   sev: 'BLOCK' },
@@ -374,6 +450,7 @@ const SH_PATTERNS = [
   { re: /(?<![^\n])(?=([^\n]*?curl\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'curl-pipe-shell', sev: 'BLOCK' },
   { re: /(?<![^\n])(?=([^\n]*?wget\s+))\1[^\n]*\|\s*(bash|sh)\b/, name: 'wget-pipe-shell', sev: 'BLOCK' },
   { re: /--break-system-packages/,        name: 'pip-break-system',  sev: 'FLAG'  },
+  { re: UNPINNED_INSTALL,                 name: 'unpinned-install',  sev: 'BLOCK' },
 ];
 
 // Which text each markdown table reads (S2, and the owner's decision R2 of 2026-10-15):
@@ -382,14 +459,24 @@ const SH_PATTERNS = [
 //     A documented example then asks for confirmation instead of refusing the skill, and a fence-pairing
 //     trick can only lower a BLOCK to a FLAG, never hide the command (final review F7)
 //   - secrets: the whole file at full severity; a real key leaks wherever it sits
+// A pattern that cannot finish (V8 throws RangeError when a repeated group runs past its backtrack stack, on input of
+// millions of repetitions) counts as found, fail-closed: before, the throw ended the scan with no JSON at all.
+function matchOrUnfinished(re, text) {
+  try { return text.match(re); }
+  catch (e) {
+    if (!(e instanceof RangeError)) throw e;
+    return ['could not finish (RangeError); treated as found'];
+  }
+}
+
 function scanMarkdown(filePath, content) {
   const prose = stripCodeBlocks(content);
   const quote = (m, note = '') => `"${note}${m[0].slice(0, 80).replace(/\n/g, '\\n')}"`;
   for (const { re, name, sev } of [...MD_INJECTION, ...MD_BASH]) {
-    const m = prose.match(re);
+    const m = matchOrUnfinished(re, prose);
     if (m) { flag(filePath, name, sev, quote(m)); continue; }
     if (sev !== 'BLOCK' || !MD_BASH.some(p => p.name === name)) continue;
-    const c = content.match(re);
+    const c = matchOrUnfinished(re, content);
     if (c) flag(filePath, name, 'FLAG', quote(c, '(in code) '));
   }
   for (const { re, name, sev } of MD_SECRETS) {
@@ -544,7 +631,7 @@ function scanScript(filePath, content, ext) {
   if (PY_EXTS.has(ext)) patterns = PY_PATTERNS;
   if (SH_EXTS.has(ext)) patterns = SH_PATTERNS;
   for (const { re, find, name, sev } of patterns) {
-    const m = find ? find(scanContent) : scanContent.match(re);
+    const m = find ? find(scanContent) : matchOrUnfinished(re, scanContent);
     if (m) flag(filePath, name, sev, `"${m[0].slice(0, 80)}"`);
   }
   // Secrets in scripts and in files of no known type (S12, review P1), read in the raw text: a key

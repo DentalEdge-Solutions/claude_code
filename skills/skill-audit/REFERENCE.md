@@ -68,7 +68,7 @@ Content the scanner cannot fully check is a finding, never a silent PASS. Conten
 | `symlink-outside-tree` | BLOCK | a symlink that leaves the tree: absolute (even to a file inside), or one whose resolution goes above the tree's top (even to come back in by name), or a dangling or looping link. It is resolved as the OS does, one component at a time, following every link on the way: `..` after a directory link goes to the parent of that link's target | a file target is still scanned, under the link's name, and its matches are not quoted; a directory target is not walked. Install copies the link as is, so what Claude Code loads after install would not be what was audited (owner decision 2026-10-20) |
 | `file-too-large` | FLAG | a file too large to read whole (past about 536 MB, node's string limit), up to 2 GiB | scanned in 64 MB chunks that overlap by 1 MB, keeping the most severe finding per check; a match longer than the overlap, or a code fence that spans chunks, can be misread, and the quoted line can be a basic-auth or npm placeholder from an earlier chunk while a password line in a later chunk is not shown (a known limit, owner decision 2026-10-21) |
 
-For a symlink target outside the tree, only quoted content is hidden; a size or error detail is kept. A finding for the scanned directory itself (an unreadable root) has `file: "."`. CI's `ci-scan-skills.js` reads only BLOCK findings, so `file-too-large` does not show in CI.
+For a symlink target outside the tree, only quoted content is hidden; a size or error detail is kept. A finding for the scanned directory itself (an unreadable root) has `file: "."`. CI's `ci-scan-skills.js` reads BLOCK findings, and the conformance checks (`unpinned-install`, `curl-pipe-shell`, `wget-pipe-shell`) at any severity, so `file-too-large` does not show in CI.
 
 A relative symlink that stays inside the tree (`docs/b.md` → `../a.md`) is not a finding; a symlink to a file inside the tree is scanned under the link's name, since that is the name Claude Code loads it by (`SKILL.md` → `payload.png` is read as markdown). A symlink to a directory is never walked; the tree's own directories are walked in place. The path you name is followed if it is a symlink; if it is not a directory, it is scanned as a single file.
 
@@ -158,20 +158,72 @@ BLOCK rows are BLOCK in prose. When the command appears only in what the scanner
 | Pattern | Severity |
 |---------|----------|
 | `rm` with a recursive or force option (`-rf`, `-r -f`, `-Rf`, `-rfv`, `--recursive`, `--force`), whose first target is an absolute or home path (`/…`, `~…`, `$HOME…`), quoted or not, `/tmp` included; an option run holding `--cached` before any `--` (`git rm --cached`; plain `rm` refuses that option) is not matched. Only the first target is read (S11, a known limit by owner decision 2026-10-21): a later target (`rm -rf ./build ~/`), options after a target, or a target the shell builds (`"$DIR"`) passes. The check is a tripwire, not a boundary; a skill is cleared by reading it | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
+| `curl` or `wget` output piped into a shell (`bash`, `sh`, `zsh`) on one line | BLOCK |
+| Unpinned install (`unpinned-install`, P0-02): `npx <pkg>` without an exact `@x.y.z` version, `pip install <pkg>` without `==`, and `<pkg>@` + `latest` anywhere. What it reads and its known limits are listed below the table | BLOCK |
 | `~/.ssh/` access | BLOCK |
 | `~/.claude/settings` write | FLAG |
 | `sudo` | FLAG |
 | `chmod <mode>` | FLAG |
 | WebFetch to unknown domains | FLAG |
 
+**`unpinned-install`: what it reads.** It reads `npx` (any case), and `pip install` (also `pip3`, `pip3.12`, `python -m pip` and `uv pip`, any case). The tool may be given by a path (`/usr/bin/…`, `./node_modules/.bin/…`) or with a leading backslash. Only a command in command position counts: at a line start, or just after a backtick, `;`, `&`, `\|`, `(`, `{` or `!` (blanks and backslash-newline continuations may follow these). Before the command it allows:
+
+- a list, task-list or quote marker (`-`, `*`, `+`, `>`, `1.`, `1)`, `- [ ]`, `- [x]`);
+- a `$ ` prompt;
+- the prefixes `VAR=val`, `env`, `exec`, `time`, `command`, `nohup`, `sudo`, and the shell keywords `if`, `then`, `do`, `else`, `elif`, `while`, `until`;
+- an option word such as `-E` or `-i`;
+- `sh -c "` / `bash -c '`.
+
+Words may be split by a backslash-newline continuation. A line that continues the one above is not a new command. A line is a continuation only when the line above ends in a backslash that is not itself escaped (`\\`) and is not a comment line (first non-blank character `#`).
+
+- npx: the first word that is not an option is the package; it may be quoted or scoped. The argument of an npx flag that takes one (`--cache`, `--prefix`, `--userconfig`, `--registry`, `-w`, `--workspace`, `--node-options`, `--loglevel`) is skipped. With `-p` / `--package`, every `-p` value is read instead, and the word after them is the command.
+- pip: every word after `install` is read. It skips:
+  - a word with `==` and no `*` (`==1.*` is a wildcard, not a pin);
+  - a path (`.`, `/`, `~`);
+  - an option;
+  - a redirect-shaped word (`2>x`, `> x`, `<x>`);
+  - the argument of a pip flag that takes one (`-r`, `-c`, `-t`, `-C`, `-i`, `-f`, `--target`, `--trusted-host`, `--upgrade-strategy`, `--prefix`, `--root`, `--src` and the other long forms in `PIP_ARG_FLAG`).
+
+  The first other word is a hit.
+- A pattern that cannot finish on huge input (millions of repeated words, past V8's regex backtrack stack) counts as found: the finding says "could not finish (RangeError); treated as found". Before, the scan crashed with no output.
+  - On Node 26 this happens at about 11 MB, for input of millions of repeated words in one command. Examples: a line of `A=1 ` pairs; runs of `a/`, `./` or `~/`; `-E` or `sh -c '` runs; pip flag-argument, pinned, redirect or path words after `install`; `A=# \` lines repeated; continuations after a command start. None of these throws at 4 MB.
+  - Such input is reported as a could-not-finish BLOCK (fail-closed). A single-line `key=value` dump of that size is the realistic false BLOCK.
+  - The threshold depends on V8's stack and may differ on other Node versions, such as CI's Node 24. The tests therefore assert only that a finding, if any, says "could not finish".
+
+**Known limits** (a tripwire, not a boundary; a skill is cleared by reading it). Each was measured on the shipped pattern:
+
+- A command that is not in command position is not read:
+  - mid-sentence prose (`Install: npx <pkg>`);
+  - `xargs`, `watch` or other wrappers;
+  - a tool found at run time (`"$(which npx)" <pkg>`), a tool path through a variable or in quotes (`$HOME/bin/npx <pkg>`, `"$NODE_BIN/npx" <pkg>`, `"/usr/bin/npx" <pkg>`), `env` given by a path (`/usr/bin/env npx <pkg>`), and `npx.cmd <pkg>`;
+  - a tool name split by a continuation (`n\` then `px` on the next line);
+  - a command in a `case` branch (`case x in a) npx <pkg>;; esac`): `)` is not a command start;
+  - a command on the line after a markdown hard line break in prose (a line `Run this:\` followed by `npx <pkg>`): the backslash is read as a continuation, so the next line is not a new start.
+- Not read either:
+  - `sudo -u <user>` and other prefix options that take an argument;
+  - a `VAR="a b"` value with blanks;
+  - `bash -e -c "…"` (only one option before `-c` is read);
+  - an unlisted task-list marker such as `- [-]`.
+- npx: a package given by a variable (`npx $PKG`) is not read.
+- pip stops reading at a word it cannot place (`$VAR`, `${VAR}`, `2>&1`), so a package after such a word is not read. A word that starts with `{`, `}` or `!` ends the read. A word that only contains them is read up to that character: `pip install` followed by the word `a{b` and a package is a hit on `a`.
+- `-r`/`-c` files are not read, so pins inside a requirements file are not checked.
+- Other runners are not read: `npm exec`, `npm install`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx`, `py -m pip`, and a command inside a JSON or YAML string. `npm install <pkg>` is caught only with `@` + `latest`.
+- A `#` later in a line is not read as a comment. So `pip install <pkg>==1 # note \` continues into the next line, and a command there is not a new start, although bash would start one.
+- Known false positives (fail-closed), when the tool name is followed by another word:
+  - prose that starts a line, a table cell, or follows `(`, `!`, a list marker or a shell keyword. Examples: a line "npx is the package runner"; a parenthesis that opens on "npx is required"; "Note!" followed by "npx caches packages"; a numbered item "1. npx is used for Repomix"; lines "do npx checks first" and "if npx fails, retry";
+  - `npx -c '<command>'`, where the command's first word is read as the package;
+  - a line after one that ends in three backslashes (bash continues it; the scan reads it as a new command);
+  - `pip install -e <vcs-url>`, which is read as an unpinned package.
+- One finding per file and check: a file is reported once, at its first hit.
+
 ### Dangerous Shell Script Operations
 
 | Pattern | Severity |
 |---------|----------|
 | `eval "..."` | BLOCK |
-| `curl ... \| bash` / `wget ... \| sh` (on one line) | BLOCK |
+| `curl` or `wget` output piped into `bash` or `sh` on one line | BLOCK |
 | `pip install --break-system-packages` | FLAG |
+| Unpinned install (`unpinned-install`), read as in markdown above | BLOCK |
 
 ---
 

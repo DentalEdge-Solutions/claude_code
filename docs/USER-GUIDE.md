@@ -68,6 +68,7 @@ Run at any time to refresh: `node skills/skill-eval/scripts/extract-project-cont
 
 - Claude Code (any version)
 - Node.js ≥ 18 (required for scanner scripts and eval generation; pipeline degrades gracefully without it but loses eval capabilities)
+- Node.js ≥ 22 for `repo-audit` and `project-setup --deep`, which runs it: required by Repomix 1.18.1, which repo-audit pins
 
 ### Install to a target project
 
@@ -171,7 +172,7 @@ Source reputation rewards 15 trusted organisations across 3 tiers (Anthropic, Ve
 The `static-scan.js` scanner checks (the full tables are in `skills/skill-audit/REFERENCE.md`):
 
 - **Prompt injection** — `ignore previous instructions`, persona overrides, hidden unicode
-- **Dangerous Bash** — `rm -rf /`, curl-pipe-shell, SSH directory access
+- **Dangerous Bash** — `rm -rf /`, curl-pipe-shell, SSH directory access, unpinned installs (`npx` without an exact version, `pip install` without `==`, `@latest`)
 - **Hardcoded secrets**, in every file it reads (markdown, scripts, data and config files) — Anthropic API keys (`sk-ant-api03-`), GitHub PATs (`ghp_`, `github_pat_`), AWS keys (`AKIA`), Slack tokens (`xoxb-`), npm tokens (`npm_`), private keys, Bearer tokens, and generic `password`/`token`/`api_key` values
 - **Permissions** (for `settings.json`) — `Bash(*)` wildcards, `bypassPermissions`, hook shell substitution
 - **Script malware** — `eval()`, `child_process`, `pickle.loads`, `os.system`, unsafe YAML
@@ -283,7 +284,7 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs five jobs on every
 2. **Security gate.** Runs `ecc-agentshield@1.4.0` on `.claude/` and fails below grade C. If AgentShield is unavailable, it falls back to `static-scan.js` on the agent and settings files.
 3. **Test suites.** Node (`scripts/run-all-tests.js`) and Hermes `bin/` (`run-bin-tests.sh`), plus the deploy suites.
 4. **Bind agreement.** Linux, as root, against the real proxy.
-5. **Static scan all skills.** `static-scan.js` on every `skills/*/` directory. A BLOCK not covered by the reviewed baseline (`.github/skill-scan-baseline.json`) fails the build.
+5. **Static scan all skills.** `scripts/ci-scan-skills.js` runs `static-scan.js` in two passes: a general pass on every `skills/*/` directory, and a conformance pass for unpinned installs and pipe-to-shell only on `.claude/agents/*.md`, `packs/*/skills/`, `packs/*/tools/` and `infra/hermes-agent/skills/` (markdown and scripts; strings inside JSON or YAML files are not read, so the JSON tool specs in `packs/*/tools/` are checked for secrets only). A BLOCK, or a conformance finding at any severity, not covered by the reviewed baseline (`.github/skill-scan-baseline.json`) fails the build. Job 3 holds the same check: `scripts/ci-scan-skills.test.js` asserts both passes against the tree.
 
 **Merge gate.** The `main-protection` ruleset requires a pull request and checks 1–4, and requires the branch to be up to date with `main`. It also forbids force-pushes and deletion. Job 5 runs but is not a required check. Reviews follow `docs/REVIEW_PROTOCOL.md`.
 
