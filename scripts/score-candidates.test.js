@@ -10,6 +10,7 @@ const path = require('path');
 const assert = require('assert');
 
 const SCRIPT = path.join(__dirname, '..', 'skills', 'skill-scout', 'scripts', 'score-candidates.js');
+const scorer = require(SCRIPT); // the module exports its contract; the CLI runs only as main
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'score-candidates-test-'));
 
 function score(candidates) {
@@ -355,6 +356,57 @@ try {
   assert.ok(/byte-order mark/.test(r.stderr), r.stderr);
   //     Deep nesting is refused with a message, not a crash.
   rejects(addKey(okText, `"deep":${'['.repeat(10000)}${']'.repeat(10000)}`), ['deep'], 'deep nesting');
+  // 8k. Hidden text (second background review of 41e1000): every invisible carrier is rejected in every
+  //     string, astral code points included, whether written literally or as \u escapes.
+  const HIDDEN_CPS = [
+    0xE0000, 0xE0001, 0xE0020, 0xE0041, 0xE007F,       // tag characters (ASCII smuggling)
+    0xFE00, 0xFE0F, 0xE0100, 0xE01EF,                  // variation selectors
+    0x034F, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x17B4, 0x17B5, 0x180B, 0x180E, 0x180F,
+    0x1D173, 0x1D17A,                                  // musical-symbol format characters
+    0x200B, 0x200C, 0x200D, 0x200E, 0x2060, 0x2064, 0xFEFF, 0x00AD, 0x061C,
+    0x202A, 0x202E, 0x2066, 0x2069,                    // bidi controls
+    0x2028, 0x2029, 0xFFF9, 0xFFFB,
+    0xE000, 0xF8FF, 0xF0000, 0x10FFFD,                 // private use
+    0xFDD0, 0xFDEF, 0xFFFE, 0xFFFF, 0x1FFFE, 0x10FFFF, // noncharacters
+    0x0000, 0x0007, 0x001B, 0x007F, 0x0085, 0x009F,    // C0 / DEL / C1 controls
+  ];
+  const hex = cp => cp.toString(16).toUpperCase().padStart(4, '0');
+  for (const cp of HIDDEN_CPS) {
+    const ch = String.fromCodePoint(cp);
+    const label = `U+${hex(cp)}`;
+    rejects(wrap([{ ...agentStrong, description: `Use when x${ch}${SENTINEL}` }]), ['candidates[0].description'], `description with ${label}`);
+    rejects(wrap([{ ...agentStrong, flags: [{ location: 'SKILL.md:1', kind: 'instruction', excerpt: `a${ch}${SENTINEL}` }] }]),
+      ['candidates[0].flags[0].excerpt'], `excerpt with ${label}`);
+    rejects(wrap([{ ...agentStrong, flags: [{ location: `SKILL.md${ch}:1`, kind: 'instruction', excerpt: SENTINEL }] }]),
+      ['candidates[0].flags[0].location'], `location with ${label}`);
+    rejects(wrap([{ ...agentStrong, license: `MIT${ch}${SENTINEL}` }]), ['candidates[0].license'], `license with ${label}`);
+    rejects(wrap([{ ...agentStrong, source_url: `https://github.com/a/b${ch}${SENTINEL}` }]), ['candidates[0].source_url'], `url with ${label}`);
+    rejects(wrap([agentStrong], { installed_skill_descriptions: [`x${ch}${SENTINEL}`] }), ['installed_skill_descriptions[0]'], `caller field with ${label}`);
+  }
+  //     The same carriers as JSON escapes (a tag "A" as a surrogate pair, a private-use character).
+  rejects(withCand(candText.replace(`"description":"${agentStrong.description}"`, `"description":"x\\udb40\\udc41${SENTINEL}"`)),
+    ['candidates[0].description'], 'tag character written as escapes');
+  rejects(withCand(candText.replace(`"description":"${agentStrong.description}"`, `"description":"x\\ue000${SENTINEL}"`)),
+    ['candidates[0].description'], 'private-use character written as an escape');
+  //     No exception for emoji sequences: a ZWJ or a variation selector could carry text, so the agent
+  //     removes them (and flags kind hidden-text). Plain emoji, accents and CJK stay valid; so do tab and newline.
+  rejects(wrap([{ ...agentStrong, description: 'family \u{1F468}\u200D\u{1F469}' }]), ['candidates[0].description'], 'ZWJ emoji sequence');
+  scoreAgent(wrap([{ ...agentStrong, description: 'Use when x: caf\u00E9, \u65E5\u672C, \u{1F600}.\n\tok' }]));
+  //     The agent reports what it removed with kind "hidden-text".
+  out = scoreAgent(wrap([{ ...agentStrong, flags: [{ location: 'SKILL.md:3 (description)', kind: 'hidden-text', excerpt: '4 invisible characters removed' }] }]));
+  assert.strictEqual(out[0].flags[0].kind, 'hidden-text');
+  //     Linear time on 1 MB: the filter is a single character class (no nested quantifiers).
+  const MB = 'a'.repeat(1024 * 1024);
+  let t0 = process.hrtime.bigint();
+  assert.strictEqual(scorer.hiddenTextProblem(MB), null);
+  assert.ok(scorer.hiddenTextProblem(MB + '\u{E0041}'));
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(ms < 500, `1 MB scan took ${ms.toFixed(1)} ms`);
+  console.log(`  hidden-text scan, 2 x 1 MB: ${ms.toFixed(1)} ms`);
+  t0 = process.hrtime.bigint();
+  rejects(wrap([{ ...agentStrong, description: MB + '\u{E0041}' }]), ['candidates[0].description'], '1 MB description with a tag at the end');
+  console.log(`  CLI on a 1 MB description: ${(Number(process.hrtime.bigint() - t0) / 1e6).toFixed(1)} ms`);
+
   //     The accepted case still scores identically after the strict reader.
   assert.deepStrictEqual(scoreAgent(okText)[0].breakdown, scoreAgent(wrap([agentStrong]))[0].breakdown);
 
