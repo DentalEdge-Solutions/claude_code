@@ -157,5 +157,24 @@ test('skill-scout: the no-JSON stop names both causes', () => {
   assert.ok(/without `trigger_keywords`[^.]*skill-scout bug/i.test(text), 'missing-keywords cause');
 });
 
+// ─── Review round 3 (PR5-R-20) ────────────────────────────────────────────────────────────────
+
+// PR5-R-20: every candidate is pinned to a full 40-hex commit and its URL's ref is that commit; no date-only or
+// default-branch path remains in the agent or in skill-scout.
+test('agent and skill-scout: full 40-hex pin required; no date-only or default-branch rule', () => {
+  const agent = body(read(AGENT));
+  const row = k => (agent.match(new RegExp(`^\\| \`${k}\` \\|.*$`, 'm')) || [''])[0];
+  assert.ok(/40/.test(row('commit_hash')) && /lower-?case/i.test(row('commit_hash')), 'commit_hash row states 40 lowercase hex');
+  assert.ok(/drop the candidate/i.test(row('commit_hash')), 'no full sha → dropped');
+  assert.ok(/optional/i.test(row('commit_date')) && /informational/i.test(row('commit_date')), 'commit_date is informational');
+  assert.ok(row('source_url').includes('/tree/<commit_hash>'), 'the URL ref is the commit_hash');
+  for (const [name, text] of [['agent', agent], ['skill-scout', body(read(SKILL))]]) {
+    const flat = text.replace(/\s+/g, ' ');
+    assert.ok(!/default branch/i.test(flat), `${name}: no default-branch rule`);
+    assert.ok(!/only a (?:commit )?date|commit-date \(no hash\)|no hash was resolvable/i.test(flat), `${name}: no date-only path`);
+  }
+  assert.ok(/Source: github\.com\/<org>\/<repo>@<commit_hash>/.test(body(read(SKILL))), 'shortlist Source line uses the full sha');
+});
+
 if (!ok) process.exit(1);
 console.log('\nscout-read-only-fetcher.test.js: all tests passed');

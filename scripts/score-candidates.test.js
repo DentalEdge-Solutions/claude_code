@@ -164,10 +164,13 @@ try {
     assert.strictEqual(res.status, 0, res.stderr);
     return JSON.parse(res.stdout);
   };
+  // PR5-R-20: every candidate is pinned to a full 40-hex commit, and source_url's ref is that commit.
+  const PIN = '0123456789abcdef0123456789abcdef01234567';
+  const PIN2 = 'fedcba9876543210fedcba9876543210fedcba98';
   const agentStrong = {
     name: 'code-review',
-    source_url: 'https://github.com/Anthropics/skills/tree/main/code-review',
-    commit_hash: 'abc1234',
+    source_url: `https://github.com/Anthropics/skills/tree/${PIN}/code-review`,
+    commit_hash: PIN,
     repo_stars: 2000,
     repo_age_days: 400,
     license: 'Apache-2.0',
@@ -200,7 +203,7 @@ try {
   });
   assert.strictEqual(out[0].total_score, 10);
   //     Validated fields the shortlist needs pass through; commit_date only when given.
-  assert.strictEqual(out[0].commit_hash, 'abc1234');
+  assert.strictEqual(out[0].commit_hash, PIN);
   assert.strictEqual(out[0].license, 'Apache-2.0');
   assert.strictEqual(out[0].repo_stars, 2000);
   assert.deepStrictEqual(out[0].flags, []);
@@ -220,16 +223,32 @@ try {
   assert.strictEqual(scoreAgent(wrap([agentStrong], {
     installed_skill_descriptions: ['Helps when reviewing pull requests'] }))[0].breakdown.conflict_risk, 8);
 
-  // 8c. A commit date instead of a hash (never a branch name).
-  const dated = { ...agentStrong }; delete dated.commit_hash; dated.commit_date = '2026-10-01';
+  // 8c. PR5-R-20: commit_hash is required, a full lowercase 40-hex sha; commit_date is optional and informational.
+  const dated = { ...agentStrong, commit_date: '2026-10-01' };
   out = scoreAgent(wrap([dated]));
   assert.strictEqual(out[0].commit_date, '2026-10-01');
-  assert.ok(!('commit_hash' in out[0]) || out[0].commit_hash === undefined);
+  assert.strictEqual(out[0].commit_hash, PIN);
   const noCommit = { ...agentStrong }; delete noCommit.commit_hash;
-  rejects(wrap([noCommit]), ['candidates[0].commit_hash'], 'neither a hash nor a date');
+  rejects(wrap([noCommit]), ['candidates[0].commit_hash', 'missing'], 'no hash');
+  const dateOnly = { ...noCommit, commit_date: '2026-10-01', source_url: 'https://github.com/Anthropics/skills/tree/main/code-review' };
+  rejects(wrap([dateOnly]), ['candidates[0].commit_hash'], 'a date alone (with tree/main) is not a pin');
   rejects(wrap([{ ...agentStrong, commit_hash: 'main' }]), ['candidates[0].commit_hash'], 'a branch name is not a hash');
   rejects(wrap([{ ...agentStrong, commit_hash: SENTINEL }]), ['candidates[0].commit_hash'], 'free text as a hash');
+  rejects(wrap([{ ...agentStrong, commit_hash: 'abc1234', source_url: 'https://github.com/Anthropics/skills/tree/abc1234/code-review' }]),
+    ['candidates[0].commit_hash', '40'], 'a 7-character hash');
+  rejects(wrap([{ ...agentStrong, commit_hash: PIN.toUpperCase(), source_url: `https://github.com/Anthropics/skills/tree/${PIN.toUpperCase()}/code-review` }]),
+    ['candidates[0].commit_hash'], 'an upper-case hash');
   rejects(wrap([{ ...dated, commit_date: `yesterday ${SENTINEL}` }]), ['candidates[0].commit_date'], 'a date that is not YYYY-MM-DD');
+  //     The URL's ref must be the pin: the reviewer's three measured cases, a blob URL, no ref at all.
+  rejects(wrap([{ ...agentStrong, source_url: 'https://github.com/Anthropics/skills/tree/main/skills/x' }]),
+    ['candidates[0].source_url', 'commit_hash'], 'hash with tree/main');
+  rejects(wrap([{ ...agentStrong, source_url: `https://github.com/Anthropics/skills/tree/${PIN2}/skills/x` }]),
+    ['candidates[0].source_url', 'commit_hash'], 'hash with another sha in the URL');
+  rejects(wrap([{ ...agentStrong, source_url: `https://github.com/Anthropics/skills/blob/${PIN}/SKILL.md` }]),
+    ['candidates[0].source_url'], 'blob form (tree only)');
+  rejects(wrap([{ ...agentStrong, source_url: 'https://github.com/Anthropics/skills' }]), ['candidates[0].source_url'], 'no ref');
+  rejects(wrap([{ ...agentStrong, source_url: `https://github.com/Anthropics/skills/tree/${PIN.slice(0, 7)}/code-review` }]),
+    ['candidates[0].source_url'], 'abbreviated ref');
 
   // 8d. The closed key set: an unknown key, a body field, a missing key.
   rejects(wrap([{ ...agentStrong, extra: SENTINEL }]), [`candidates[0].${unknownKey('extra')}`, 'not in the schema'], 'unknown key', ['extra']);
@@ -309,15 +328,14 @@ try {
     rejects(wrap([{ ...agentStrong, source_url: url }]), ['candidates[0].source_url'], `source_url ${url.slice(0, 60)}`, ['evil']);
   }
   for (const url of [
-    'https://github.com/anthropics/skills',
-    'https://github.com/Anthropics/skills/tree/main/code-review',
-    'https://github.com/a-b1/my.repo_name-2/tree/0a1b2c3/skills/x.y',
-    'https://github.com/anthropics/skills/tree/abc1234',  // PR5-R-16: a skill at the repository root
+    `https://github.com/Anthropics/skills/tree/${PIN}/code-review`,
+    `https://github.com/a-b1/my.repo_name-2/tree/${PIN}/skills/x.y`,
+    `https://github.com/anthropics/skills/tree/${PIN}`,  // PR5-R-16: a skill at the repository root
   ]) scoreAgent(wrap([{ ...agentStrong, source_url: url }]));
   //      Reputation reads the org from the validated URL.
-  assert.strictEqual(scoreAgent(wrap([{ ...agentStrong, source_url: 'https://github.com/anthropics/skills' }]))[0].breakdown.source_reputation, 10);
+  assert.strictEqual(scoreAgent(wrap([{ ...agentStrong, source_url: `https://github.com/anthropics/skills/tree/${PIN}` }]))[0].breakdown.source_reputation, 10);
   assert.strictEqual(scoreAgent(wrap([{ ...agentStrong, repo_stars: 0, repo_age_days: 3,
-    source_url: 'https://github.com/evil-org/anthropics/tree/abc1234/x' }]))[0].breakdown.source_reputation, 1, 'org is the first segment');
+    source_url: `https://github.com/evil-org/anthropics/tree/${PIN}/x` }]))[0].breakdown.source_reputation, 1, 'org is the first segment');
   assert.strictEqual(scorer.githubOrg('https://github.com/Anthropics/skills/tree/x'), 'anthropics');
   assert.strictEqual(scorer.githubOrg('https://github.com/anthropics/../evil-org/x'), null, 'not a validated URL');
 
@@ -482,15 +500,21 @@ try {
   // 8m. Review round 2. PR5-R-18: at most 6 candidates (the agent's fetch limit).
   scoreAgent(wrap(Array.from({ length: 6 }, (_, i) => ({ ...agentStrong, name: `c${i}` }))));
   rejects(wrap(Array.from({ length: 7 }, (_, i) => ({ ...agentStrong, name: `c${i}` }))), ['candidates', 'more than 6'], '7 candidates');
-  //     PR5-R-17: the size rule also holds when stat cannot see the size (a pipe as /dev/stdin) or the file
-  //     grows after stat: the bytes read are checked too.
+  //     PR5-R-21: only a regular file is read (a pipe could busy-spin on EAGAIN); PR5-R-17: the read is
+  //     bounded and the bytes read are checked, for a regular file that grows after stat.
   if (fs.existsSync('/dev/stdin')) {
-    let res = spawnSync('node', [SCRIPT, '--agent-output', '/dev/stdin'], { input: Buffer.alloc(scorer.INPUT_MAX_BYTES + 1, 0x61), encoding: 'utf8' });
-    assert.strictEqual(res.status, 2, `piped oversize input: ${res.status} ${res.stderr}`);
-    assert.ok(res.stderr.includes('larger than'), res.stderr);
-    res = spawnSync('node', [SCRIPT, '--agent-output', '/dev/stdin'], { input: JSON.stringify(wrap([agentStrong])), encoding: 'utf8' });
-    assert.strictEqual(res.status, 0, `piped valid input: ${res.stderr}`);
+    for (const input of [Buffer.alloc(scorer.INPUT_MAX_BYTES + 1, 0x61), JSON.stringify(wrap([agentStrong]))]) {
+      const res = spawnSync('node', [SCRIPT, '--agent-output', '/dev/stdin'], { input, encoding: 'utf8' });
+      assert.strictEqual(res.status, 2, `piped input: ${res.status} ${res.stderr}`);
+      assert.ok(res.stderr.includes('must be a regular file'), res.stderr);
+    }
   }
+  r = spawnSync('node', [SCRIPT, '--agent-output', TMP], { encoding: 'utf8' });
+  assert.strictEqual(r.status, 2, `a directory: ${r.stderr}`);
+  assert.ok(r.stderr.includes('must be a regular file'), r.stderr);
+  const grown = path.join(TMP, 'grown.json');
+  fs.writeFileSync(grown, Buffer.alloc(scorer.INPUT_MAX_BYTES + 10, 0x61));
+  assert.strictEqual(scorer.readBounded(grown, scorer.INPUT_MAX_BYTES + 1).length, scorer.INPUT_MAX_BYTES + 1, 'the read stops at the cap + 1');
   assert.strictEqual(scorer.oversize(Buffer.alloc(scorer.INPUT_MAX_BYTES)), false);
   assert.strictEqual(scorer.oversize(Buffer.alloc(scorer.INPUT_MAX_BYTES + 1)), true);
 
