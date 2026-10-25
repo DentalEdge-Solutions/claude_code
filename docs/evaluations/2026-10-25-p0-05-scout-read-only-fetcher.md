@@ -2,7 +2,7 @@
 
 > Date: 2026-10-25 · Item: P0-05 (S5 roadmap, V-S5-7) · Trace: OPP-02 (b) · GAP-01 · breach (b) · DECISION-S3-2 (a) ·
 > V-S3-6 · Branch `fix/p0-05-scout-read-only-fetcher` from `main` at `d3184d5` · Background security reviews: three ·
-> Review round 1: PR5-R-1 … R-15 · Review round 2: PR5-R-16 … R-19 · Review round 3: PR5-R-20, R-21 (see the last sections)
+> Review round 1: PR5-R-1 … R-15 · Review round 2: PR5-R-16 … R-19 · Review round 3: PR5-R-20, R-21 · Review round 4: PR5-R-22 … R-25 (see the last sections)
 
 ## What changed and why
 
@@ -102,7 +102,7 @@ rejected before it is decoded (exit 2). Unreadable or invalid input exits 1 and 
 | Project fit = description ∪ body hits; caller fields reach the conflict score | 8b |
 | Security reviews: duplicates, prototype names, numbers, hidden text, bytes, depth | 8j, 8k |
 | Size cap and long strings (9 MB rejected by size, invalid bytes too; a string just under the cap scores; the reader handles a 9 MB string without a RangeError) | 8l |
-| At most 6 candidates; a pipe (`/dev/stdin`, oversize or valid) and a directory rejected as not a regular file (PR5-R-21); `readBounded` stops at the cap + 1 on a larger regular file; `oversize()` on the bytes read; root-level URL `…/tree/abc1234` accepted, `…/tree/abc1234/`, `%20` and space forms rejected | 8m, 8f2 |
+| At most 6 candidates; a pipe (`/dev/stdin`, oversize or valid) and a directory rejected as not a regular file (PR5-R-21); `readBounded` stops at the cap + 1 on a larger regular file; `oversize()` on the bytes read; root-level URL `…/tree/<40-hex pin>` accepted; `…/tree/abc1234/`, `%20` and space forms rejected (and, since PR5-R-20, any 7-character ref) | 8m, 8f2 |
 
 `scripts/scout-read-only-fetcher.test.js` checks that the agent's tools are exactly `Read, WebFetch, WebSearch`; that
 it has no `/tmp` and no scorer call; that its Output contract table rows equal `AGENT_CANDIDATE_KEYS` exactly; that it
@@ -134,7 +134,7 @@ the ranking, every total, every dimension and every band are equal.
 
 ## Static scan (`skills/skill-audit/scripts/static-scan.js`, local, no network)
 
-| Target | Before (`d3184d5`) | After (`0c631fe`) |
+| Target | Before (`d3184d5`) | After (`e9e0622`) |
 |---|---|---|
 | `.claude/agents/skill-scout-agent.md` | PASS, 0 findings | PASS, 0 findings |
 | `skills/skill-scout/` | PASS, 0 findings | PASS, 0 findings |
@@ -258,7 +258,7 @@ piped 4 MiB + 1 input exited 1 "not valid JSON"; the agent row and step 4 lacked
 
 | ID | Resolution |
 |---|---|
-| PR5-R-16 | The agent's `source_url` row now states the scorer's rule: org as on GitHub, repo `[A-Za-z0-9._-]`, segments `[A-Za-z0-9._~+-]`, no `.` or `..` segment, no trailing slash, no `%`, `?`, `#`, `@`, `\`, space; a root-level skill ends at `https://github.com/<org>/<repo>/tree/<commit hash>`; a candidate whose location cannot be written so is dropped (its path is never encoded or changed) and counted. The closing line is now "… Findings not tied to a returned candidate: <N>. Candidates dropped: <D>." (two numbers only). One odd path now drops one candidate instead of stopping the run. Tests: the fetcher test checks the row (charset, no trailing slash, no dot segments, the root form, the drop rule) and the closing line; the scorer accepts `…/tree/abc1234` and rejects `…/tree/abc1234/`, `…/my%20skill` and `…/my skill` |
+| PR5-R-16 | The agent's `source_url` row now states the scorer's rule: org as on GitHub, repo `[A-Za-z0-9._-]`, segments `[A-Za-z0-9._~+-]`, no `.` or `..` segment, no trailing slash, no `%`, `?`, `#`, `@`, `\`, space; a root-level skill ends at `https://github.com/<org>/<repo>/tree/<commit hash>`; a candidate whose location cannot be written so is dropped (its path is never encoded or changed) and counted. The closing line is now "… Findings not tied to a returned candidate: <N>. Candidates dropped: <D>." (two numbers only). One odd path now drops one candidate instead of stopping the run. Tests: the fetcher test checks the row (charset, no trailing slash, no dot segments, the root form, the drop rule) and the closing line; the scorer accepts the root form (since PR5-R-20 with a full 40-hex pin, `…/tree/<40-hex pin>`) and rejects `…/tree/abc1234/`, `…/my%20skill` and `…/my skill` |
 | PR5-R-17 | The read is bounded (`readBounded`: at most `INPUT_MAX_BYTES + 1` bytes in 64 KiB chunks; works for pipes and FIFOs) and `oversize()` checks the bytes read (exit 2). A pipe or `/dev/stdin`, which stat reports as 0 bytes, or a file that grows after stat, can neither pass the size rule nor load more than the cap. Test: a 4 MiB + 1 input piped through `/dev/stdin` exits 2 "larger than"; a valid piped input scores; `oversize()` at the boundary. No FIFO test (`mkfifo` is not portable to every runner); the `/dev/stdin` pipe takes the same path |
 | PR5-R-18 | At most 6 candidates (`CANDIDATES_MAX`, the agent's fetch limit): exit 2 "candidates: more than 6 entries"; stated in `--help` and in the agent's contract. The cap derivation now marks the 200 × 1024 figure for `installed_skill_descriptions` as an **assumption** (not enforced per item: the caller reads them from local SKILL.md files); the 4 MiB hard cap bounds the whole input whatever the assumption |
 | PR5-R-19 | Step 4's no-JSON stop names both causes without guessing: an agent installed before P0-05 in this project (re-run `./install.sh` here), or a dispatch without `trigger_keywords` (the agent then runs no search; a skill-scout bug to report) |
@@ -272,6 +272,19 @@ agent's `commit_hash` row lacked the 40-hex rule), green `f828d25` (scorer) and 
 |---|---|
 | PR5-R-20 | **Design narrowed (coordinator decision):** the brief's "`commit_hash` or `commit_date`" becomes "`commit_hash` required". Why: a date without a sha means the authoritative source (the commits API, which returns sha and date in one object) did not answer, which is exactly the case that must not be recommended; the toolkit's pinning rule ("never just a branch name") and skill-adapt's 40-character `source_commit` (`skills/skill-adapt/SKILL.md:64`) need a full sha anyway. Now: `commit_hash` must be 40 lowercase hex; `commit_date` is optional and informational; `source_url` must be `https://github.com/<org>/<repo>/tree/<commit_hash>[/<path>]` with the ref equal to `commit_hash` (tree only; blob is not accepted, because the agent's row allows only tree), otherwise exit 2 "the ref must equal commit_hash". The agent pins first (commits API), then fetches SKILL.md and the contents listing **at that commit**, so the body it describes is the pinned body; a candidate without a full sha is dropped and counted. The date-only/default-branch rule is removed from the agent; skill-scout's Source line is `github.com/<org>/<repo>@<commit_hash>` and its Rules say skill-audit and skill-adapt use that exact commit. The ranking fixture now carries invented 40-hex pins (sha1 of `fixture-<name>`) with matching URLs; its scores and ranking are unchanged. Tests: the reviewer's three cases (hash with `tree/main`, hash with another sha, date-only with `tree/main`), a 7-character and an upper-case hash, `blob`, no ref and an abbreviated ref all exit 2; a matching 40-hex case passes; the fetcher test asserts the 40-hex row, the drop rule, the informational date, `/tree/<commit_hash>` and that no default-branch or date-only text remains in the agent or skill-scout. **Pinning residual: none now** (every shortlisted candidate carries a full sha and a URL at that sha) |
 | PR5-R-21 | Only a regular file is read: `statSync(path).isFile()` before opening and `fstatSync(fd).isFile()` on the descriptor, else exit 2 "input: must be a regular file". The EAGAIN retry is removed (on a regular file it cannot occur, so any read error is exit 1). The bounded read stays for a file that grows after stat. This supersedes the pipe support of PR5-R-17: a pipe, FIFO or device is now refused before it is opened. Test 8m: a piped `/dev/stdin` input (oversize or valid) and a directory exit 2; `readBounded` stops at the cap + 1 on a larger regular file; `oversize()` at the boundary. `--help` says the input is a regular file; skill-scout step 5 always writes one with the Write tool |
+
+## Review round 4 (PR5-R-22 … R-25)
+
+The reviewer found R-20 and R-21 fixed. Red `66f682a` (skill-scout had no closing-line pattern; the agent had one raw
+and one contents URL and no copy rule), green `e9e0622`.
+
+| ID | Resolution |
+|---|---|
+| PR5-R-22 | Coordinator decision: the reviewer's first fix (the scorer schema stays). skill-scout step 4 may read the agent's closing line only if it matches `^The calling session validates and scores this per skill-scout step 5\. Findings not tied to a returned candidate: (\d{1,2})\. Candidates dropped: (\d{1,2})\.$` (the agent's exact wording); nothing else in the line is used. Empty array and D > 0: "D candidates were found but could not be pinned or fetched (for example a GitHub API rate limit); retry later", and step 9 is not run. Non-empty and D > 0: one line under the shortlist, "D further candidates could not be pinned or fetched". No match: the counts could not be read, and no "no suitable skill" from an empty array alone. Step 9 runs only for an empty array with D = 0, or when no candidate scores > 5. Tests: the pattern is in skill-scout verbatim; the three branches and the step 9 condition; the agent's closing line, filled with numbers, matches the pattern. Residual 8 (rate limit, cited) |
+| Upper-case sha (round 4 b) | Accepted as is (the scorer rejects it). The agent now copies the sha "exactly as the API returns it (never abbreviate or change its case)"; test |
+| PR5-R-23 | Root-skill forms in the agent: `https://raw.githubusercontent.com/<org>/<repo>/<commit_hash>/SKILL.md` and `https://api.github.com/repos/<org>/<repo>/contents?ref=<commit_hash>`, "never a double slash" |
+| PR5-R-24 | The fetcher test collects every candidate URL template in the agent (`raw.githubusercontent.com/<org>…`, `api.github.com/repos/<org>…`): raw URLs must contain `/<commit_hash>/`, contents URLs `ref=<commit_hash>`, both root forms must be present, and none may contain `/main/`, `/master/`, `/HEAD/` or `//SKILL.md` (the registry READMEs, with real org names, are exempt). Mutants on a scratch copy at `e9e0622`: m15 (raw SKILL.md on `main`) **caught**; m16 (contents without `ref`), m17 (empty array goes to step 9 again) and m18 (the D pattern loosened to `(.*)`) **caught**; the unmutated copy passes |
+| PR5-R-25 | The 8m/8f2 row and the PR5-R-16 entry now give the root-level example with a full 40-hex pin |
 
 ## Not measured
 
@@ -316,6 +329,15 @@ Evals were not run: B0 pre-edit evals were skipped by owner decision, and accept
 7. **Direct dispatch (PR5-R-3).** A session can still dispatch the agent directly; it then runs no search and
    returns only the pointer line. If a dispatcher invents keywords, the unvalidated JSON reaches a session that has
    not loaded skill-scout; the only pointer to validation is the agent's closing line.
+8. **GitHub API rate limit (PR5-R-22).** GitHub's REST API docs (<https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api>,
+   accessed 2026-10-25, Tier A for GitHub): "The primary rate limit for unauthenticated requests is 60 requests per
+   hour" and "Unauthenticated requests are associated with the originating IP address." One run makes up to 18
+   `api.github.com` calls (commits, repository and contents for 6 candidates; `raw.githubusercontent.com` is a
+   separate host the page does not mention). From which IP WebFetch's requests leave, and so whose budget they use,
+   is **unknown**. Under a limit or an outage every candidate is dropped; skill-scout now says so and asks for a
+   retry instead of concluding "no suitable skill". The counts reach the session only through the agent's closing
+   line, read through one fixed two-integer pattern: a small extra read of the unvalidated reply, accepted instead of
+   a schema change (the reviewer's alternative, a validated `dropped` field, was not taken).
 
 ## Deploy and rollback
 
@@ -328,7 +350,7 @@ Evals were not run: B0 pre-edit evals were skipped by owner decision, and accept
 
 ## Checks
 
-At `0c631fe` (the code head after review round 3; the record commit changes only this file), Node v26.9.0:
+At `e9e0622` (the code head after review round 4; the record commit changes only this file), Node v26.9.0:
 
 | Command | Result |
 |---|---|
@@ -338,6 +360,6 @@ At `0c631fe` (the code head after review round 3; the record commit changes only
 | `node scripts/ci-static-fallback.js` | exit 0; "Static fallback: PASSED" |
 | `node --check skills/skill-scout/scripts/score-candidates.js` | OK |
 | `static-scan.js` on the agent and on `skills/skill-scout/` | PASS, 0 findings each |
-| 1 MB timing (in `score-candidates.test.js`) | 2 × 1 MB hidden-text scan 10.5 ms; CLI on a 1 MB description 40.6 ms |
+| 1 MB timing (in `score-candidates.test.js`) | 2 × 1 MB hidden-text scan 9.9 ms; CLI on a 1 MB description 41.5 ms |
 | Diff of `d3184d5...HEAD` on `evals/`, `.project-brain/`, the pinned evaluator files, `scripts/codex/` | empty |
 | Working tree status, untracked files included | empty |
