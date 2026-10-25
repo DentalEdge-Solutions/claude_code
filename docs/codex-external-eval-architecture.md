@@ -13,7 +13,7 @@ Codex CLI is the **independent second-model evaluator** for this project. It:
 - Executes them as a second model, producing structured per-scenario evidence
 - Writes `result.json` (source of truth) and `trace.jsonl` (evidence only) per scenario
 - Does NOT replay the Claude Code runtime
-- Does NOT own any lifecycle step (no refine, adapt, scout, guardian)
+- Does NOT own any lifecycle step (no refine, adapt or scout)
 - Does NOT enable any review gate
 
 Claude Code remains the methodology owner, lifecycle owner, and final decision-maker.
@@ -26,7 +26,7 @@ Claude Code remains the methodology owner, lifecycle owner, and final decision-m
 Claude Code
 ├── Scenario generation     (generate-seed-evals.js)
 ├── Eval specification      (evals.json)
-├── Lifecycle management    (skill-guardian, refine cycles)
+├── Lifecycle management    (eval and refine cycles)
 ├── Final decisions         (HEALTHY / REFINE / BLOCK)
 └── Summary review          (CODEX-EVAL-SUMMARY.md → read by Claude Code)
 

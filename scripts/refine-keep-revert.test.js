@@ -7,7 +7,7 @@
 // document now states the same three bands, one per line, and this test reads each line it states them on.
 // The definition is SKILL.md for a skill (a neutral Lever D or E edit, to REFERENCE.md or scripts/, is always
 // reverted) and the agent file for an agent; size is bytes; a neutral KEEP leaves the baseline where it was
-// (review R2, R5). skill-guardian's own refine loop states the same rule (review R4).
+// (review R2, R5).
 //
 // E15: agent-refine's keep step copied the agent into the root of ~/.claude/ ("cp .claude/agents/<name>.md
 // ~/.claude/"). Agents are project-scoped here, and Claude Code watches .claude/agents/ and uses an edited file on
@@ -31,7 +31,6 @@ const RULE_DOCS = [
   { file: 'skills/skill-refine/SKILL.md', track: 'skill', sync: true },
   { file: 'skills/skill-refine/REFERENCE.md', track: 'skill' },
   { file: '.claude/agents/skill-refine-agent.md', track: 'skill', sync: true },
-  { file: '.claude/agents/skill-guardian.md', track: 'skill' },
   { file: 'skills/agent-refine/SKILL.md', track: 'agent' },
   { file: 'skills/agent-refine/REFERENCE.md', track: 'agent' },
   { file: '.claude/agents/agent-refine-agent.md', track: 'agent' },

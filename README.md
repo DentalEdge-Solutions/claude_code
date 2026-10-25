@@ -178,8 +178,12 @@ Runtime sub-agents that implement parallelizable or autonomous parts of the pipe
 | `agent-refine-agent` | sonnet | Autoresearch loop for agents; Lever E (frontmatter config) triggers an `agent-audit` re-run | user / autoresearch loop |
 | `skill-synthesizer-agent` | opus | Multi-candidate synthesis before adaptation | user (2+ PASS candidates) |
 | `skill-needs-analysis-agent` | haiku | Gap analysis: maps stack + workflow_terms + mcp_servers to skill categories | user (after project-setup) |
-| `skill-guardian` | sonnet | Full pipeline orchestration: context refresh → project-audit → 5-metric eval cycle → refinement | user (periodic health check) |
 | `repo-audit-*` (8 analysts) | inherit | One per codebase layer — runtime, framework, database, auth, testing, CI/CD, AI/LLM, Claude Code config; each reads an XML slice and returns a JSON layer object | `repo-audit` |
+
+**Periodic health check.** There is no one-command health check. First refresh the project context (`make context`, or
+`node skills/skill-eval/scripts/extract-project-context.js`); the evals reuse an existing `evals/project-context.json`
+as it is. Then run `skill-eval` (or `skill-eval-agent`) for each skill and `agent-eval` for each agent, and
+`skill-refine` / `agent-refine` only for the ones that miss a threshold.
 
 ---
 
@@ -312,6 +316,9 @@ Hermes: [`infra/hermes-agent/README.md`](infra/hermes-agent/README.md).
 ```bash
 ./uninstall.sh /path/to/target-project
 ```
+
+Retired agent: `uninstall.sh` removes only the agents this repo still has, so if an earlier install copied the retired health-check agent into a target, delete `<target>/.claude/agents/skill-guardian.md` by hand.
+A target's existing `skill-builder` section in `CLAUDE.md` keeps its old health-check line until you run `uninstall.sh` and then `install.sh` (install skips a section that is already there).
 
 `install.sh` and `uninstall.sh` merge or remove only their own hooks in the target's
 `.claude/settings.json` and `.claude/settings.local.json`; uninstall keeps the other hooks in an

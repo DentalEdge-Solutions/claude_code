@@ -2,7 +2,7 @@
 // scripts/refine-snapshot.test.js — every refine flow can restore the prior content of whatever one file an
 // iteration edited (E16, PR #4 triage). skill-refine-agent copied only SKILL.md, so a reverted Lever D or E edit
 // (REFERENCE.md, scripts/) stayed; the two refine skills made no per-iteration copy at all, so after the first
-// KEEP a revert had no source; skill-guardian had no copy step either.
+// KEEP a revert had no source.
 //
 // The skill flows copy the whole skill folder before each edit, into a fresh evals/<skill>/refine/pre-iter-N/
 // (outside the folder the keep step syncs; fresh, because N repeats across sessions and a stale copy would turn
@@ -43,7 +43,7 @@ function tree(dir, base = dir, out = {}) {
   return out;
 }
 
-const SKILL_FLOWS = ['skills/skill-refine/SKILL.md', '.claude/agents/skill-refine-agent.md', '.claude/agents/skill-guardian.md'];
+const SKILL_FLOWS = ['skills/skill-refine/SKILL.md', '.claude/agents/skill-refine-agent.md'];
 const SNAPSHOT = 'rm -rf "evals/<skill-name>/refine/pre-iter-N" && mkdir -p "evals/<skill-name>/refine/pre-iter-N" && cp -R "skills/<skill-name>/." "evals/<skill-name>/refine/pre-iter-N/"';
 const RESTORE = 'if [ -e "evals/<skill-name>/refine/pre-iter-N/<file>" ]; then cp "evals/<skill-name>/refine/pre-iter-N/<file>" "skills/<skill-name>/<file>"; else rm "skills/<skill-name>/<file>"; fi';
 const CHECK = 'diff -rq -x SKILL-EVAL.md -x SKILL-REFINE-LOG.md "evals/<skill-name>/refine/pre-iter-N" "skills/<skill-name>"';
@@ -198,12 +198,6 @@ test('skills/agent-refine/SKILL.md: a per-iteration copy before the edit, and th
   }
 });
 }
-
-// skill-guardian's edit step names every lever's file, Lever E included (it named SKILL.md or REFERENCE.md only).
-test('.claude/agents/skill-guardian.md: the edit step covers Lever E', () => {
-  const text = read('.claude/agents/skill-guardian.md');
-  assert.ok(!/Make ONE surgical edit to `\.\/skills\/<skill-name>\/SKILL\.md` \(or REFERENCE\.md for Lever D\)/.test(text), 'the old edit step');
-});
 
 if (!ok) process.exit(1);
 console.log('\nAll refine-snapshot tests passed.');

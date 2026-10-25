@@ -583,9 +583,7 @@ const DEFS_ROOT = process.env.RUN_MANIFEST_DEFS_ROOT || path.join(__dirname, '..
 const defText = def => fs.readFileSync(path.join(DEFS_ROOT, def), 'utf8');
 const REFINE_DEFS = ['skills/skill-refine/SKILL.md', 'skills/agent-refine/SKILL.md',
   '.claude/agents/skill-refine-agent.md', '.claude/agents/agent-refine-agent.md'];
-// skill-guardian runs its own refine loop (Phase 4): it gets the never-edit list and the evaluator-subject refusal,
-// not the reference handshake (PR2-R-12; the agent is due for retirement, OPP-30).
-for (const def of [...REFINE_DEFS, '.claude/agents/skill-guardian.md']) {
+for (const def of REFINE_DEFS) {
   test(`P0-11: ${def} forbids editing each evaluator file and refuses an evaluator subject`, () => {
     const text = defText(def);
     const labels = run('evaluator').out.trim().split('\n').map(l => l.trim().split(/\s+/).pop());
@@ -598,9 +596,6 @@ for (const def of [...REFINE_DEFS, '.claude/agents/skill-guardian.md']) {
     }
   });
 }
-test('P0-11 review: skill-guardian says its loop has no evaluator-reference check and points to skill-refine-agent', () => {
-  assert.match(defText('.claude/agents/skill-guardian.md'), /no evaluator-reference check[^\n]*skill-refine-agent/);
-});
 for (const def of REFINE_DEFS) {
   test(`P0-11: ${def} passes --evaluator-ref`, () => {
     assert.match(defText(def), /--evaluator-ref/);

@@ -177,7 +177,7 @@ const EXPECTED_CORES = [
   'report only where it is and what kind it is, never its value',
 ];
 // Readers of external text that are open items elsewhere: they may warn (R-7), nothing else may.
-const OPEN_WEB_READERS = new Set(['.claude/agents/skill-scout-agent.md', '.claude/agents/skill-guardian.md']);
+const OPEN_WEB_READERS = new Set(['.claude/agents/skill-scout-agent.md']);
 
 // A full copy of the parts the validator reads (skills/, .claude/agents/, .claude/skills/), plus the
 // validator itself in scripts/, so a run of the copy validates the copy as its own toolkit tree.
@@ -368,8 +368,8 @@ test('analyst tools: Bash, an extra read tool, or no tools line (= all tools) fa
 });
 
 // R-7 (a): a definition that can fetch from the web without the paragraph is reported (non-fatal).
-// Update OPEN_WEB_READERS when P0-04 (skill-guardian retired) or P0-05 (skill-scout-agent framed) lands.
-test('web readers: real repo — exactly the open items (P0-04, P0-05) warn', () => {
+// Update OPEN_WEB_READERS when P0-05 (skill-scout-agent framed) lands.
+test('web readers: real repo — exactly the open item (P0-05) warns', () => {
   const warned = findUnframedWebReaders(REPO).map(w => w.file);
   assert.deepStrictEqual(warned, [...OPEN_WEB_READERS].sort());
 });

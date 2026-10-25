@@ -19,11 +19,11 @@ description: |
   </example>
 
   <example>
-  Context: skill-guardian is sourcing new skills for the project inventory.
-  user: "[internal invocation from skill-guardian]"
+  Context: skill-needs-analysis-agent returned a ranked shortlist with search terms.
+  user: "Search for the top recommendation from the needs analysis"
   assistant: "Searching for <capability> skills across all registries."
   <commentary>
-  Programmatic discovery invocation — agent returns ranked candidates.
+  Discovery from a needs-analysis search brief — agent returns ranked candidates.
   </commentary>
   </example>
 
