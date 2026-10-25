@@ -294,6 +294,9 @@ try {
     'https://github.com/anthropics',
     'https://github.com/anthropics/',
     'https://github.com/anthropics/skills/',
+    'https://github.com/anthropics/skills/tree/abc1234/',
+    'https://github.com/anthropics/skills/tree/abc1234/my%20skill',
+    'https://github.com/anthropics/skills/tree/abc1234/my skill',
     'https://github.com/anthropics//skills',
     'https://github.com/-anthropics/skills',
     'https://github.com/anth--ropics/skills',
@@ -309,6 +312,7 @@ try {
     'https://github.com/anthropics/skills',
     'https://github.com/Anthropics/skills/tree/main/code-review',
     'https://github.com/a-b1/my.repo_name-2/tree/0a1b2c3/skills/x.y',
+    'https://github.com/anthropics/skills/tree/abc1234',  // PR5-R-16: a skill at the repository root
   ]) scoreAgent(wrap([{ ...agentStrong, source_url: url }]));
   //      Reputation reads the org from the validated URL.
   assert.strictEqual(scoreAgent(wrap([{ ...agentStrong, source_url: 'https://github.com/anthropics/skills' }]))[0].breakdown.source_reputation, 10);
@@ -474,6 +478,21 @@ try {
   assert.strictEqual(big.value.s.length, nineMB.length);
   assert.throws(() => scorer.strictRead('{"s":"abc'), SyntaxError, 'an unterminated string is a syntax error');
   assert.throws(() => scorer.strictRead('{"s":"a\u0001"}'), SyntaxError, 'a raw control character is a syntax error');
+
+  // 8m. Review round 2. PR5-R-18: at most 6 candidates (the agent's fetch limit).
+  scoreAgent(wrap(Array.from({ length: 6 }, (_, i) => ({ ...agentStrong, name: `c${i}` }))));
+  rejects(wrap(Array.from({ length: 7 }, (_, i) => ({ ...agentStrong, name: `c${i}` }))), ['candidates', 'more than 6'], '7 candidates');
+  //     PR5-R-17: the size rule also holds when stat cannot see the size (a pipe as /dev/stdin) or the file
+  //     grows after stat: the bytes read are checked too.
+  if (fs.existsSync('/dev/stdin')) {
+    let res = spawnSync('node', [SCRIPT, '--agent-output', '/dev/stdin'], { input: Buffer.alloc(scorer.INPUT_MAX_BYTES + 1, 0x61), encoding: 'utf8' });
+    assert.strictEqual(res.status, 2, `piped oversize input: ${res.status} ${res.stderr}`);
+    assert.ok(res.stderr.includes('larger than'), res.stderr);
+    res = spawnSync('node', [SCRIPT, '--agent-output', '/dev/stdin'], { input: JSON.stringify(wrap([agentStrong])), encoding: 'utf8' });
+    assert.strictEqual(res.status, 0, `piped valid input: ${res.stderr}`);
+  }
+  assert.strictEqual(scorer.oversize(Buffer.alloc(scorer.INPUT_MAX_BYTES)), false);
+  assert.strictEqual(scorer.oversize(Buffer.alloc(scorer.INPUT_MAX_BYTES + 1)), true);
 
   // ─── 9. Ranking tolerance (P0-05 acceptance) ───────────────────────────────────────────────
   // Committed fixtures with full bodies. The agent form is derived deterministically: the body is

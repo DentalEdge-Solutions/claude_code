@@ -136,5 +136,26 @@ test('skill-scout: step 9 without the registry clause; a reply without a JSON bl
   assert.ok(/Agent, Write and Bash tools/.test(frontmatter(raw)), 'compatibility names Bash');
 });
 
+// ─── Review round 2 (PR5-R-16, R-19) ─────────────────────────────────────────────────────────
+
+// PR5-R-16: the agent is given the scorer's source_url rule, the root-skill form and the drop rule.
+test('agent: the source_url row states the exact rule, the root-skill form and the drop rule', () => {
+  const text = body(read(AGENT));
+  const row = (text.match(/^\| `source_url` \|.*$/m) || [''])[0];
+  assert.ok(row.includes('[A-Za-z0-9._~+-]'), 'segment charset');
+  assert.ok(/no trailing slash/i.test(row), 'no trailing slash');
+  assert.ok(/no `\.` or `\.\.` segment/i.test(row), 'no dot segments');
+  assert.ok(row.includes('/tree/<commit hash>`') && /repository root/i.test(row), 'root-level skill form');
+  assert.ok(/drop the candidate/i.test(row), 'drop rule');
+  assert.ok(/Candidates dropped: <D>/.test(text), 'dropped candidates are counted in the closing line');
+});
+
+// PR5-R-19: step 4's no-JSON stop names both causes without guessing.
+test('skill-scout: the no-JSON stop names both causes', () => {
+  const text = body(read(SKILL)).replace(/\s+/g, ' ');
+  assert.ok(/installed before P0-05/.test(text) && /re-run `\.\/install\.sh`/.test(text), 'stale agent cause');
+  assert.ok(/without `trigger_keywords`[^.]*skill-scout bug/i.test(text), 'missing-keywords cause');
+});
+
 if (!ok) process.exit(1);
 console.log('\nscout-read-only-fetcher.test.js: all tests passed');
