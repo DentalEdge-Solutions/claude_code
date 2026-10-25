@@ -47,6 +47,11 @@ These fixtures are inert reference data. Nothing here is a real, usable skill.
      Judge prompts are blind by construction (no bands, no notes, fixture preamble stripped);
      `check` writes `GRADER-CALIBRATION-REPORT.md` with per-dimension mean/spread and fails on
      any out-of-band score or spread > 2.
+- **`score-candidates/body-candidates.json`** — invented, inert skill candidates with full SKILL.md bodies
+  (P0-05). `scripts/score-candidates.test.js` scores them in the legacy body form and in the
+  agent-output form derived from them (body removed, `body_keyword_hits` computed by the scorer's
+  substring rule) and asserts an identical ranking and identical scores. Record:
+  `docs/evaluations/2026-10-25-p0-05-scout-read-only-fetcher.md`.
 - **`GATE-RUNBOOK.md`** — the exact human-invoked command sequence for the Phase 3 live gate
   (generate → native eval → native audit `--live` → check). See that file before running the gate.
 

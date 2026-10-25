@@ -83,7 +83,7 @@ Deep multi-layer audit of any public GitHub repository, using 8 parallel layer a
 ### Skill Pipeline
 
 #### `skill-scout`
-Searches GitHub and known registries for existing skills that match a capability. Reads `evals/project-context.json` as a pre-flight check — if rich context is present (non-empty `stack` and `key_phrases`), it pre-fills search parameters without asking redundant questions. Returns a ranked shortlist scored on trigger precision, instruction clarity, context footprint, project fit, provenance, and conflict risk.
+Searches GitHub and known registries for existing skills that match a capability. Reads `evals/project-context.json` as a pre-flight check — if rich context is present (non-empty `stack` and `key_phrases`), it pre-fills search parameters without asking redundant questions. Returns a ranked shortlist scored on trigger precision, instruction clarity, context footprint, project fit, provenance, and conflict risk. The search runs in `skill-scout-agent`, a read-only fetcher that returns candidate fields (never a SKILL.md body); skill-scout validates that JSON and scores it with `score-candidates.js --agent-output`.
 
 **Triggers:** "find a skill for X", "is there a skill that can Y", "source a skill"
 
@@ -171,7 +171,7 @@ Runtime sub-agents that implement parallelizable or autonomous parts of the pipe
 
 | Agent | Model | Role | Invoked by |
 |---|---|---|---|
-| `skill-scout-agent` | sonnet | Parallel registry + GitHub search | `skill-scout` |
+| `skill-scout-agent` | sonnet | Read-only fetcher (Read, WebFetch, WebSearch): parallel registry + GitHub search, returns candidate fields as JSON; writes and scores nothing | `skill-scout` |
 | `skill-eval-agent` | sonnet | Parallel scenario execution with evidence-first grading (up to 42 subagents); resumes interrupted runs from the run manifest | `skill-eval`, `skill-refine` |
 | `skill-refine-agent` | sonnet | Autoresearch loop orchestration for skills | user / autoresearch loop |
 | `agent-eval-agent` | sonnet | Mirror of `skill-eval-agent` for agent definitions; measures Dispatch Accuracy instead of Trigger Accuracy | `agent-eval`, `agent-refine` |
