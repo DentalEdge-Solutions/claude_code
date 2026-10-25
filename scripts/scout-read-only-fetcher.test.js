@@ -176,5 +176,46 @@ test('agent and skill-scout: full 40-hex pin required; no date-only or default-b
   assert.ok(/Source: github\.com\/<org>\/<repo>@<commit_hash>/.test(body(read(SKILL))), 'shortlist Source line uses the full sha');
 });
 
+// ─── Review round 4 (PR5-R-22, R-23, R-24, sha copy) ─────────────────────────────────────────
+
+// PR5-R-22: skill-scout reads the agent's closing line only through one fixed two-integer pattern, and an empty
+// array with dropped candidates is not "no suitable skill".
+const CLOSING_RE_SRC = String.raw`^The calling session validates and scores this per skill-scout step 5\. Findings not tied to a returned candidate: (\d{1,2})\. Candidates dropped: (\d{1,2})\.$`;
+test('skill-scout: the closing line is read only through the fixed pattern, with the three branches', () => {
+  const text = body(read(SKILL));
+  const flat = text.replace(/\s+/g, ' ');
+  assert.ok(text.includes(CLOSING_RE_SRC), 'states the exact pattern');
+  assert.ok(/empty and D > 0[^.]*could not be pinned or fetched[^.]*retry later/i.test(flat) && /do not go to step 9/i.test(flat), 'empty + dropped → retry, no step 9');
+  assert.ok(/non-empty and D > 0[^.]*further candidates could not be pinned or fetched/i.test(flat), 'non-empty + dropped → one line');
+  assert.ok(/does not match[^.]*counts could not be read[^.]*not conclude/i.test(flat), 'no match → counts unreadable, no conclusion');
+  assert.ok(/step 4 received an empty array with D = 0/i.test(flat), 'step 9 only for an empty array with D = 0');
+});
+
+test('agent: its closing line, filled with numbers, matches skill-scout\'s pattern exactly', () => {
+  const m = body(read(AGENT)).match(/one line: "(The calling session[^"]*)"/);
+  assert.ok(m, 'closing line found');
+  const filled = m[1].replace(/\s+/g, ' ').replace('<N>', '3').replace('<D>', '12');
+  assert.ok(new RegExp(CLOSING_RE_SRC).test(filled), `filled line: ${filled}`);
+});
+
+// PR5-R-23, R-24: every candidate fetch is at <commit_hash> (root-skill forms included); none at main/HEAD.
+test('agent: candidate fetch URLs carry <commit_hash>, with root-skill forms; none on main or HEAD', () => {
+  const text = body(read(AGENT));
+  const urls = [...text.matchAll(/`(https:\/\/(?:raw\.githubusercontent\.com|api\.github\.com\/repos)\/<org>[^`]*)`/g)].map(m => m[1]);
+  const raw = urls.filter(u => u.startsWith('https://raw.githubusercontent.com/'));
+  const contents = urls.filter(u => u.includes('/contents'));
+  assert.ok(raw.length >= 2 && contents.length >= 2, `raw ${raw.length}, contents ${contents.length}`);
+  for (const u of raw) assert.ok(u.includes('/<commit_hash>/'), `raw at the pin: ${u}`);
+  for (const u of contents) assert.ok(u.includes('ref=<commit_hash>'), `contents at the pin: ${u}`);
+  assert.ok(raw.includes('https://raw.githubusercontent.com/<org>/<repo>/<commit_hash>/SKILL.md'), 'root-skill raw form');
+  assert.ok(contents.includes('https://api.github.com/repos/<org>/<repo>/contents?ref=<commit_hash>'), 'root-skill contents form');
+  for (const u of urls) assert.ok(!/\/(?:main|master|HEAD)\//.test(u) && !u.includes('//SKILL.md'), `no branch or double slash: ${u}`);
+});
+
+// Round 4 (b): the sha is copied exactly as the API returns it (lowercase), since the scorer rejects upper case.
+test('agent: the sha is copied exactly as the commits API returns it', () => {
+  assert.ok(/exactly as the API returns it/i.test(body(read(AGENT)).replace(/\s+/g, ' ')));
+});
+
 if (!ok) process.exit(1);
 console.log('\nscout-read-only-fetcher.test.js: all tests passed');
