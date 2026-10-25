@@ -77,12 +77,15 @@ const URL_CAP = 500;
 // case, every character written as JSON escapes: 6 bytes per BMP code point, 12 per astral one):
 //   per candidate: description 1024 x 12 = 12,288; flags 20 x (100 + 100 code points x 12 + ~60 syntax)
 //   = 49,200; license 100 x 12 = 1,200; name, URL, commit, numbers, booleans, keys, hits ~3,000: ~66 KB;
-//   x 6 candidates (the agent's maximum) = ~400 KB;
-//   caller fields: installed_skill_descriptions 200 skills x 1024 x 12 = ~2.5 MB; keywords and plugins ~0.1 MB.
+//   x 6 candidates (CANDIDATES_MAX, enforced) = ~400 KB;
+//   caller fields: installed_skill_descriptions, ASSUMED 200 skills x 1024 x 12 = ~2.5 MB (not enforced per item:
+//   the caller reads them from local SKILL.md files); keywords and plugins ~0.1 MB.
+//   The 4 MiB cap bounds the whole input whatever the assumption; it is checked on stat and on the bytes read.
 // Total ~3 MB in a pathological case (real output is plain text, ~0.1-0.3 MB), so 4 MiB. It also stays
 // below the ~8 MB single-string size at which a backtracking regex used to overflow V8's stack.
 const INPUT_MAX_BYTES = 4 * 1024 * 1024;
 const FLAGS_MAX = 20;
+const CANDIDATES_MAX = 6;    // PR5-R-18: the agent fetches at most 6 candidates
 const AGENT_CANDIDATE_KEYS = [
   'name', 'source_url', 'commit_hash', 'commit_date', 'repo_stars', 'repo_age_days', 'license',
   'skill_md_lines', 'has_scripts', 'has_reference', 'flags', 'description', 'body_keyword_hits',
@@ -124,6 +127,7 @@ Legacy candidate schema:
 --agent-output input (exactly these keys):
   { "trigger_keywords": [string], "installed_skill_descriptions": [string],
     "plugin_names": [string], "candidates": [candidate] }
+  candidates: at most ${CANDIDATES_MAX} (the agent's fetch limit)
   candidate (closed key set, all required except one of commit_hash/commit_date):
     name               string, 1-${NAME_CAP} chars of letters, digits, . _ -
     source_url         string, https://github.com/<org>/<repo>[/<segment>...],
@@ -516,6 +520,7 @@ function validateAgentInput(input) {
   const keywords = Array.isArray(input.trigger_keywords) ? input.trigger_keywords : [];
   if (Object.hasOwn(input, 'candidates') && !Array.isArray(input.candidates)) errors.push('candidates: must be an array');
   const candidates = Array.isArray(input.candidates) ? input.candidates : [];
+  if (candidates.length > CANDIDATES_MAX) errors.push(`candidates: more than ${CANDIDATES_MAX} entries (${candidates.length})`);
 
   candidates.forEach((c, i) => {
     const at = `candidates[${i}]`;
@@ -597,6 +602,28 @@ function scoreAgentInput(input) {
   });
 }
 
+// Reads at most `limit` bytes (works for regular files, pipes and FIFOs; never loads more than the limit).
+function readBounded(filePath, limit) {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const chunks = [];
+    let total = 0;
+    while (total < limit) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, limit - total));
+      let n;
+      try { n = fs.readSync(fd, chunk, 0, chunk.length, null); }
+      catch (e) { if (e.code === 'EAGAIN') continue; throw e; }
+      if (n === 0) break;
+      chunks.push(chunk.subarray(0, n));
+      total += n;
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+const oversize = buf => buf.length > INPUT_MAX_BYTES;
+
 function main(argv) {
   const agentMode = argv[0] === '--agent-output';
   const filePath = agentMode ? argv[1] : argv[0];
@@ -632,9 +659,14 @@ function main(argv) {
   let size;
   try { size = fs.statSync(filePath).size; } catch (e) { fail(`cannot read the file (${e.code || 'error'})`); }
   if (size > INPUT_MAX_BYTES) reject(`input: larger than ${INPUT_MAX_BYTES} bytes (${size} bytes); the size rule is checked before decoding`);
+  // PR5-R-17: stat sees 0 for a pipe or FIFO and cannot see a file that grows after it, so the read itself is
+  // bounded (at most INPUT_MAX_BYTES + 1 bytes) and the bytes read are checked again.
+  let buf;
+  try { buf = readBounded(filePath, INPUT_MAX_BYTES + 1); } catch (e) { fail(`cannot read the file (${e.code || 'error'})`); }
+  if (oversize(buf)) reject(`input: larger than ${INPUT_MAX_BYTES} bytes (read more than the cap); the size rule is checked before decoding`);
   let text;
   try {
-    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(filePath));
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf);
   } catch (e) {
     fail(e instanceof TypeError ? 'not valid UTF-8' : `cannot read the file (${e.code || 'error'})`);
   }
@@ -664,7 +696,7 @@ function main(argv) {
 
 module.exports = {
   DESCRIPTION_CAP, EXCERPT_CAP, AGENT_CANDIDATE_KEYS, AGENT_TOP_KEYS, FLAG_KINDS, INPUT_MAX_BYTES,
-  hiddenTextProblem, githubOrg, strictRead,
+  hiddenTextProblem, githubOrg, strictRead, oversize, CANDIDATES_MAX,
   validateAgentInput, scoreAll, scoreAgentInput,
 };
 if (require.main === module) main(process.argv.slice(2));
