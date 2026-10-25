@@ -1,0 +1,97 @@
+{
+  "_comment": "P0-05 ranking-tolerance fixture for skills/skill-scout/scripts/score-candidates.js. Invented, inert candidates with full SKILL.md bodies (skill_md_content). scripts/score-candidates.test.js scores them in the legacy (body) form and in the agent-output form derived from them (body removed, body_keyword_hits computed by the scorer's substring rule) and asserts the same ranking and scores. Nothing here is a real skill or a real repository. Record: docs/evaluations/2026-10-25-p0-05-scout-read-only-fetcher.md.",
+  "trigger_keywords": ["review", "diff", "pull request", "security", "typescript"],
+  "installed_skill_descriptions": [
+    "Use when auditing a skill sourced from GitHub for prompt injection and malicious scripts before installation.",
+    "Use when evaluating a skill's effectiveness with structured test scenarios."
+  ],
+  "plugin_names": ["superpowers", "code-simplifier"],
+  "candidates": [
+    {
+      "name": "pr-reviewer",
+      "source_url": "https://github.com/anthropics/example-skills/tree/main/pr-reviewer",
+      "commit_hash": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "repo_stars": 2400,
+      "repo_age_days": 420,
+      "license": "Apache-2.0",
+      "skill_md_lines": 48,
+      "has_scripts": false,
+      "has_reference": true,
+      "flags": [],
+      "description": "Use when the user asks for a code review of a pull request; checks style, tests and risky changes.",
+      "skill_md_content": "# PR Reviewer\n\nReview a pull request end to end.\n\n1. Read the diff file by file.\n2. Note risky changes and missing tests.\n3. Write the findings as a short list.\n"
+    },
+    {
+      "name": "ts-diff-check",
+      "source_url": "https://github.com/someone-small/ts-tools/tree/main/skills/ts-diff-check",
+      "commit_hash": "89abcdef0123",
+      "repo_stars": 35,
+      "repo_age_days": 95,
+      "license": "MIT",
+      "skill_md_lines": 72,
+      "has_scripts": true,
+      "has_reference": false,
+      "flags": [],
+      "description": "Use when changing TypeScript code, when asked to compare two versions; lists type errors.",
+      "skill_md_content": "# TS diff check\n\nCompare the staged diff with the previous commit.\n\nRun the type checker on the changed files and report each new error with its line.\nFor a security-sensitive file, add a note.\n"
+    },
+    {
+      "name": "secure-review",
+      "source_url": "https://github.com/vercel-labs/skills/tree/main/skills/secure-review",
+      "commit_date": "2026-09-30",
+      "repo_stars": 610,
+      "repo_age_days": 200,
+      "license": null,
+      "skill_md_lines": 130,
+      "has_scripts": true,
+      "has_reference": true,
+      "flags": [],
+      "description": "Checks code for secrets and unsafe calls.",
+      "skill_md_content": "# Secure review\n\nUse during a security review of TypeScript or JavaScript projects.\n\n1. Scan every changed file in the diff.\n2. Flag hardcoded secrets by location and kind only.\n3. Flag unsafe eval-like calls.\n"
+    },
+    {
+      "name": "lint-helper",
+      "source_url": "https://github.com/new-org/lint-helper/tree/main",
+      "commit_hash": "fedcba9876543210",
+      "repo_stars": 0,
+      "repo_age_days": 12,
+      "license": "MIT",
+      "skill_md_lines": 260,
+      "has_scripts": false,
+      "has_reference": false,
+      "flags": [
+        { "location": "SKILL.md:40", "kind": "instruction", "excerpt": "an instruction addressed to the reading AI (fixture placeholder text, not a real payload)" }
+      ],
+      "description": "Runs linters.",
+      "skill_md_content": "# Lint helper\n\nRun the project's linters and summarise the output.\n"
+    },
+    {
+      "name": "changelog-writer",
+      "source_url": "https://github.com/multica-ai/andrej-karpathy-skills/tree/main/changelog-writer",
+      "commit_hash": "1234567",
+      "repo_stars": 150,
+      "repo_age_days": 60,
+      "license": "MIT",
+      "skill_md_lines": 30,
+      "has_scripts": false,
+      "has_reference": false,
+      "flags": [],
+      "description": "Use when writing a changelog entry, release notes; when user asks to summarise merged work.",
+      "skill_md_content": "# Changelog writer\n\nRead the merged pull request titles and write a changelog entry.\n"
+    },
+    {
+      "name": "review-diff-lite",
+      "source_url": "https://github.com/some-dev/skills/tree/main/review-diff-lite",
+      "commit_hash": "abcdef1234567890abcdef1234567890abcdef12",
+      "repo_stars": 12,
+      "repo_age_days": 40,
+      "license": "BSD-3-Clause",
+      "skill_md_lines": 18,
+      "has_scripts": false,
+      "has_reference": false,
+      "flags": [],
+      "description": "Use when asked to review a diff; short comments only.",
+      "skill_md_content": "# Review diff lite\n\nGive three comments at most.\n"
+    }
+  ]
+}
