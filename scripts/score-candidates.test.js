@@ -376,9 +376,9 @@ try {
   //     Prototype names are keys like any other: own properties only, all outside the schema.
   for (const k of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
     rejects(addKey(okText, `"${k}":{"x":"${SENTINEL}"}`), [unknownKey(k), 'not in the schema'], `top-level ${k}`, [k]);
-    rejects(withCand(addKey(candText, `"${k}":"${SENTINEL}"`)), [`candidates[0].${k}`, 'not in the schema'], `candidate ${k}`);
+    rejects(withCand(addKey(candText, `"${k}":"${SENTINEL}"`)), [`candidates[0].${unknownKey(k)}`, 'not in the schema'], `candidate ${k}`, [k]);
     rejects(okText.replace(candText, flagCand.replace('{"location"', `{"${k}":"${SENTINEL}","location"`)),
-      [`candidates[0].flags[0].${k}`, 'not in the schema'], `flag ${k}`);
+      [`candidates[0].flags[0].${unknownKey(k)}`, 'not in the schema'], `flag ${k}`, [k]);
   }
   //     A missing required key is not satisfied by the prototype chain.
   const noName = { ...agentStrong }; delete noName.name;
@@ -404,7 +404,7 @@ try {
   assert.strictEqual(r.status, 1, `leading BOM: ${r.stderr}`);
   assert.ok(/byte-order mark/.test(r.stderr), r.stderr);
   //     Deep nesting is refused with a message, not a crash.
-  rejects(addKey(okText, `"deep":${'['.repeat(10000)}${']'.repeat(10000)}`), ['nested deeper'], 'deep nesting', ['deep']);
+  rejects(addKey(okText, `"deep":${'['.repeat(10000)}${']'.repeat(10000)}`), ['nested deeper'], 'deep nesting', ['deep[']);
   // 8k. Hidden text (second background review of 41e1000): every invisible carrier is rejected in every
   //     string, astral code points included, whether written literally or as \u escapes.
   const HIDDEN_CPS = [

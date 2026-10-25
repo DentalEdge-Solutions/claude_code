@@ -33,7 +33,8 @@
 //   plugin_names: string[],                  // caller-supplied
 //   candidates: [ {                          // the agent's JSON array, verbatim; closed key set:
 //     name: string,               // 1-64 chars, letters/digits/._- only, no spaces
-//     source_url: string,         // https://github.com/..., no whitespace, <= 500 chars
+//     source_url: string,         // https://github.com/<org>/<repo>[/<segment>...], <= 500 chars: org in GitHub's
+//                                 // login charset, no '.'/'..' segments, no %, ?, #, \, @, port or userinfo
 //     commit_hash?: string,       // 7-40 hex chars; or, when no hash is resolvable:
 //     commit_date?: string,       // YYYY-MM-DD (at least one of the two; never a branch name)
 //     repo_stars: integer >= 0,
@@ -55,7 +56,8 @@
 //    nothing on stdout. So does anything where the validated value could differ from the raw text (see
 //    strictRead): a duplicate key at any depth, a number not written as a plain integer, a lone surrogate or
 //    a hidden-text code point (HIDDEN_TEXT_RE: controls, format, private use, default-ignorable, noncharacters,
-//    U+2028/2029; tab and newline allowed) in any string, nesting deeper than 16. Invalid UTF-8 or a leading
+//    U+2028/2029; tab, newline and carriage return allowed) in any string, nesting deeper than 16, an input
+//    larger than INPUT_MAX_BYTES (checked before decoding). Invalid UTF-8 or a leading
 //    byte-order mark exit 1. Project fit then uses description + body_keyword_hits (the body is absent), which
 //    gives the same score as the body form when the hits were computed by the same substring rule.
 //    The shortlist is presented from this script's stdout (the validated values), never from the agent's reply.
@@ -71,6 +73,15 @@ const LOCATION_CAP = 100;
 const LICENSE_CAP = 100;
 const NAME_CAP = 64;           // the spec's `name` maximum
 const URL_CAP = 500;
+// PR5-R-2: the largest input accepted, checked on the file size before decoding or parsing. Derivation (worst
+// case, every character written as JSON escapes: 6 bytes per BMP code point, 12 per astral one):
+//   per candidate: description 1024 x 12 = 12,288; flags 20 x (100 + 100 code points x 12 + ~60 syntax)
+//   = 49,200; license 100 x 12 = 1,200; name, URL, commit, numbers, booleans, keys, hits ~3,000: ~66 KB;
+//   x 6 candidates (the agent's maximum) = ~400 KB;
+//   caller fields: installed_skill_descriptions 200 skills x 1024 x 12 = ~2.5 MB; keywords and plugins ~0.1 MB.
+// Total ~3 MB in a pathological case (real output is plain text, ~0.1-0.3 MB), so 4 MiB. It also stays
+// below the ~8 MB single-string size at which a backtracking regex used to overflow V8's stack.
+const INPUT_MAX_BYTES = 4 * 1024 * 1024;
 const FLAGS_MAX = 20;
 const AGENT_CANDIDATE_KEYS = [
   'name', 'source_url', 'commit_hash', 'commit_date', 'repo_stars', 'repo_age_days', 'license',
@@ -84,6 +95,9 @@ const FLAG_KEYS = ['location', 'kind', 'excerpt'];
 const FLAG_KINDS = ['instruction', 'secret', 'hidden-text'];
 // Names that suggest body text, so the message says why the key is refused.
 const BODY_LIKE_RE = /content|body|text|markdown|readme|raw|skill_md(?!_lines$)/i;
+// PR5-R-6: the only key names ever printed. Any other key is outside text (even an identifier such as
+// SYSTEM_do_this) and is described by its length only.
+const KNOWN_BODY_KEYS = ['skill_md_content', 'skill_md_body', 'skill_md', 'body', 'content', 'text', 'raw', 'raw_text', 'markdown', 'readme'];
 
 const HELP = `Usage: node score-candidates.js <candidates.json>
        node score-candidates.js --agent-output <agent-input.json>
@@ -112,7 +126,9 @@ Legacy candidate schema:
     "plugin_names": [string], "candidates": [candidate] }
   candidate (closed key set, all required except one of commit_hash/commit_date):
     name               string, 1-${NAME_CAP} chars of letters, digits, . _ -
-    source_url         string, https://github.com/..., no whitespace, <= ${URL_CAP} chars
+    source_url         string, https://github.com/<org>/<repo>[/<segment>...],
+                       <= ${URL_CAP} chars; org: GitHub login charset; no '.' or '..'
+                       segments; no %, ?, #, \\, @, port or userinfo
     commit_hash        string, 7-40 hex chars   } at least one; never a
     commit_date        string, YYYY-MM-DD       } branch name
     repo_stars         integer >= 0
@@ -128,11 +144,13 @@ Legacy candidate schema:
     body_keyword_hits  array of distinct elements of trigger_keywords (verbatim)
   Never skill_md_content or any other body field. Project fit uses
   description + body_keyword_hits.
-  Also rejected, at any depth: a duplicate key, a number not written as a
-  plain integer (1.0, 1e2, -0, 1e400, beyond 2^53), a lone surrogate or a
-  control, format (bidi, zero-width, tag), private-use, default-ignorable
-  or noncharacter code point, or U+2028/U+2029, in any string (tab and
-  newline are allowed), nesting deeper than 16 levels.
+  Also rejected, at any depth: a duplicate key, a number not written as
+  plain digits (1.0, 1e2, 1e+21, -0, 1e400, beyond 2^53), a lone surrogate
+  or a control, format (bidi, zero-width, tag), private-use,
+  default-ignorable or noncharacter code point, or U+2028/U+2029, in any
+  string (tab, newline and carriage return are allowed), nesting deeper
+  than 16 levels, and a file larger than ${INPUT_MAX_BYTES} bytes (checked
+  first, before decoding).
 
 Exit codes:
   0  scored
@@ -140,7 +158,8 @@ Exit codes:
      invalid UTF-8 or a leading byte-order mark (in --agent-output mode the
      parser's message is withheld: it can quote the untrusted input)
   2  --agent-output input rejected: one stderr line per problem, naming the
-     candidate index and key, never the offending value
+     candidate index and key, never the offending value (a key outside the
+     schema is described by its length, never named)
 
 Examples:
   node skills/skill-scout/scripts/score-candidates.js candidates.json
@@ -237,11 +256,15 @@ function scoreProvenance(candidate) {
   return Math.max(0, Math.min(score, 10));
 }
 
-// Source org trust level derived from URL.
-function scoreSourceReputation(candidate) {
+// Source org trust level derived from URL. In agent-output mode the org comes from the validated URL
+// (githubOrg); the legacy form keeps its regex.
+function scoreSourceReputation(candidate, validatedOrg) {
   if (!candidate.source_url) return 5;
-  const match = candidate.source_url.match(/github\.com\/([^/]+)\//i);
-  const org = match ? match[1].toLowerCase() : '';
+  let org = validatedOrg;
+  if (org === undefined) {
+    const match = candidate.source_url.match(/github\.com\/([^/]+)\//i);
+    org = match ? match[1].toLowerCase() : '';
+  }
   if (TRUSTED_ORGS.has(org))                                                return 10;
   if ((candidate.repo_stars || 0) >= 500)                                   return 7;
   if ((candidate.repo_stars || 0) >= 100)                                   return 5;
@@ -285,13 +308,13 @@ const WEIGHTS = {
   conflict_risk:      0.05,
 };
 
-function scoreCandidate(c) {
+function scoreCandidate(c, validatedOrg) {
   const trigger_precision  = scoreTriggerPrecision(c.description);
   const clarity            = scoreClarity(c);
   const context_footprint  = scoreContextFootprint(c.skill_md_lines || 0);
   const project_fit        = scoreProjectFit(c);
   const provenance         = scoreProvenance(c);
-  const source_reputation  = scoreSourceReputation(c);
+  const source_reputation  = scoreSourceReputation(c, validatedOrg);
   const conflict_risk      = scoreConflictRisk(c);
 
   const total = Math.round(
@@ -315,7 +338,7 @@ function scoreCandidate(c) {
 }
 
 function scoreAll(candidates) {
-  const scored = candidates.map(scoreCandidate);
+  const scored = candidates.map(c => scoreCandidate(c)); // not map(scoreCandidate): the index is not an org
   scored.sort((a, b) => b.total_score - a.total_score);
   return scored;
 }
@@ -327,15 +350,31 @@ const codePoints = s => Array.from(s).length;
 const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isCount = v => Number.isInteger(v) && v >= 0;
 const isOneLine = (v, max) => typeof v === 'string' && v.length > 0 && !/[\r\n]/.test(v) && codePoints(v) <= max;
-const keyLabel = k => (/^[A-Za-z0-9_]{1,40}$/.test(k) ? k : `<a key of ${codePoints(k)} characters>`);
+const KNOWN_KEYS = new Set([...AGENT_TOP_KEYS, ...AGENT_CANDIDATE_KEYS, ...FLAG_KEYS, ...KNOWN_BODY_KEYS]);
+const keyLabel = k => (KNOWN_KEYS.has(k) ? k : `<an unknown key of ${codePoints(k)} characters>`);
+
+// PR5-R-1: https://github.com/<org>/<repo>[/<segment>...]. Returns the lower-cased org, or null when the URL
+// is not in that shape. Org: GitHub's login charset (letters, digits, single inner hyphens, 1-39). Repo and
+// segments: letters, digits, '.', '_', '-' (segments also '~', '+'), never '.' or '..'; no %, ?, #, \\, @, ':'.
+const GH_PREFIX = 'https://github.com/';
+const ORG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const SEGMENT_RE = /^[A-Za-z0-9._~+-]{1,200}$/;
+function githubOrg(url) {
+  if (typeof url !== 'string' || !url.startsWith(GH_PREFIX) || url.length > URL_CAP) return null;
+  const [org, repo, ...rest] = url.slice(GH_PREFIX.length).split('/');
+  if (!ORG_RE.test(org) || repo === undefined || !REPO_RE.test(repo)) return null;
+  for (const seg of [repo, ...rest]) if (seg === '.' || seg === '..' || !SEGMENT_RE.test(seg)) return null;
+  return org.toLowerCase();
+}
 
 // ─── Strict reader for --agent-output (background security review of 908764b: parser differential) ──
 // JSON.parse keeps the last of two equal keys, so a first value the main session may have read would never
 // be validated. This reader accepts exactly JSON.parse's grammar (it runs only after JSON.parse succeeded,
 // and decodes every string and number token with JSON.parse itself) and also reports, by path:
 //   - a duplicate key at any depth (keys compared after decoding, so "description" = "description");
-//   - a number whose raw token is not what would be shown (1e400, 1.0, 1e2, -0, beyond 2^53): the token
-//     must equal String(value);
+//   - a number not written as plain digits (1e400, 1.0, 1e2, 1e+21, -0, beyond 2^53): the token must match
+//     -?(0|[1-9][0-9]*), be a safe integer and equal String(value) (PR5-R-11);
 //   - text that is not well-formed or not visible as written (HIDDEN_TEXT_RE, by Unicode property, astral
 //     planes included): lone surrogates, controls other than tab, newline and carriage return, format
 //     characters (bidi controls, zero-width characters, tag characters U+E0000-E007F, musical-symbol format
@@ -343,11 +382,12 @@ const keyLabel = k => (/^[A-Za-z0-9_]{1,40}$/.test(k) ? k : `<a key of ${codePoi
 //     fillers ...), noncharacters, and the line and paragraph separators U+2028/U+2029;
 //   - nesting deeper than MAX_DEPTH (the schema needs 4).
 // Objects are built without a prototype and with own data properties only, so "__proto__", "constructor"
-// and the like are ordinary keys (all outside the schema). Linear time: each character is consumed once.
+// and the like are ordinary keys (all outside the schema). Linear time: each character is consumed once;
+// strings are scanned by a loop, not a regex, so no string length can overflow the stack (PR5-R-2).
 const MAX_DEPTH = 16;
 const WS_RE = /[ \t\n\r]*/y;
-const STR_RE = /"(?:[^"\\\u0000-\u001f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*"/y;
 const NUM_RE = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+const PLAIN_INT_RE = /^-?(?:0|[1-9]\d*)$/;
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 // One character class with the u flag, so it sees code points (astral ones too); test() on it is linear.
 // Property names are ECMA-262 general categories and binary properties (supported since Node 10).
@@ -373,6 +413,22 @@ function strictRead(text) {
     return m[0];
   };
   const expect = ch => { if (text[i] !== ch) throw new SyntaxError('unexpected token'); i++; };
+  // PR5-R-2: strings are scanned by hand (no regex, no recursion), then decoded by JSON.parse itself.
+  const readStringToken = () => {
+    if (text[i] !== '"') throw new SyntaxError('unexpected token');
+    let j = i + 1;
+    for (;;) {
+      const c = text.charCodeAt(j);
+      if (Number.isNaN(c)) throw new SyntaxError('unterminated string');
+      if (c === 0x22) break;
+      if (c === 0x5c) { j += 2; continue; } // the escape itself is checked by JSON.parse below
+      if (c < 0x20) throw new SyntaxError('control character in a string');
+      j++;
+    }
+    const raw = text.slice(i, j + 1);
+    i = j + 1;
+    return JSON.parse(raw);
+  };
   const badText = hiddenTextProblem;
   const at = (path, key) => (path ? `${path}.${keyLabel(key)}` : keyLabel(key));
   function readValue(path, depth) {
@@ -386,7 +442,7 @@ function strictRead(text) {
       if (text[i] === '}') { i++; return obj; }
       for (;;) {
         skipWs();
-        const key = JSON.parse(token(STR_RE));
+        const key = readStringToken();
         const p = at(path, key);
         const keyProblem = badText(key);
         if (keyProblem) errors.push(`${p}: key ${keyProblem}`);
@@ -414,7 +470,7 @@ function strictRead(text) {
       }
     }
     if (ch === '"') {
-      const v = JSON.parse(token(STR_RE));
+      const v = readStringToken();
       const problem = badText(v);
       if (problem) errors.push(`${path || 'input'}: ${problem}`);
       return v;
@@ -424,7 +480,9 @@ function strictRead(text) {
     }
     const raw = token(NUM_RE);
     const n = JSON.parse(raw);
-    if (String(n) !== raw) errors.push(`${path || 'input'}: number not written as a plain integer (it would be read as another value)`);
+    if (!PLAIN_INT_RE.test(raw) || !Number.isSafeInteger(n) || String(n) !== raw) {
+      errors.push(`${path || 'input'}: number not written as plain digits within 2^53 (it would be read or shown as another value)`);
+    }
     return n;
   }
   let value;
@@ -474,8 +532,8 @@ function validateAgentInput(input) {
     const check = (k, ok, rule) => { if (Object.hasOwn(c, k) && !ok(c[k])) errors.push(`${at}.${k}: ${rule}`); };
     check('name', v => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v) && v.length <= NAME_CAP,
       `must be 1-${NAME_CAP} characters of letters, digits, '.', '_' or '-'`);
-    check('source_url', v => typeof v === 'string' && /^https:\/\/github\.com\/[^\s]+$/.test(v) && v.length <= URL_CAP,
-      `must be an https://github.com/ URL without whitespace, at most ${URL_CAP} characters`);
+    check('source_url', v => githubOrg(v) !== null,
+      `must be https://github.com/<org>/<repo>[/<segment>...], at most ${URL_CAP} characters, without '.' or '..' segments, %, ?, #, \\, @ or a port`);
     if (!Object.hasOwn(c, 'commit_hash') && !Object.hasOwn(c, 'commit_date')) {
       errors.push(`${at}.commit_hash: missing (give commit_hash, or commit_date when no hash is resolvable)`);
     }
@@ -528,7 +586,7 @@ function scoreAgentInput(input) {
     plugin_names: input.plugin_names,
   };
   // Same order as scoreAll: by total, ties in input order (Array.prototype.sort is stable).
-  const scored = input.candidates.map(c => ({ s: scoreCandidate({ ...c, ...caller }), c }));
+  const scored = input.candidates.map(c => ({ s: scoreCandidate({ ...c, ...caller }, githubOrg(c.source_url) || ''), c }));
   scored.sort((a, b) => b.s.total_score - a.s.total_score);
   return scored.map(({ s, c }) => {
     const out = { ...s };
@@ -566,6 +624,14 @@ function main(argv) {
   // Agent mode: the bytes must be valid UTF-8 (never silently replaced), with no leading byte-order mark,
   // valid JSON, then the strict reader. Parser messages are withheld: V8's JSON errors can quote the input.
   const fail = why => { console.error(`Failed to parse input: ${why}`); process.exit(1); };
+  const reject = why => {
+    console.error(`score-candidates: rejected agent output: ${why}`);
+    console.error('score-candidates: nothing scored. Do not repair the input by hand: stop and report this problem.');
+    process.exit(2);
+  };
+  let size;
+  try { size = fs.statSync(filePath).size; } catch (e) { fail(`cannot read the file (${e.code || 'error'})`); }
+  if (size > INPUT_MAX_BYTES) reject(`input: larger than ${INPUT_MAX_BYTES} bytes (${size} bytes); the size rule is checked before decoding`);
   let text;
   try {
     text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(filePath));
@@ -576,9 +642,15 @@ function main(argv) {
   let read;
   try {
     JSON.parse(text);
+  } catch (e) {
+    if (e instanceof RangeError) reject('input: too large or too deeply nested to read');
+    fail('not valid JSON');
+  }
+  try {
     read = strictRead(text);
   } catch (e) {
-    fail('not valid JSON');
+    // JSON.parse accepted the text, so a failure here is a resource limit or a reader bug, never "invalid JSON".
+    reject(e instanceof RangeError ? 'input: too large or too deeply nested to read' : 'input: could not be read strictly');
   }
   const errors = read.errors.length ? read.errors : validateAgentInput(read.value);
   const input = read.value;
@@ -591,7 +663,8 @@ function main(argv) {
 }
 
 module.exports = {
-  DESCRIPTION_CAP, EXCERPT_CAP, AGENT_CANDIDATE_KEYS, AGENT_TOP_KEYS, FLAG_KINDS, hiddenTextProblem,
+  DESCRIPTION_CAP, EXCERPT_CAP, AGENT_CANDIDATE_KEYS, AGENT_TOP_KEYS, FLAG_KINDS, INPUT_MAX_BYTES,
+  hiddenTextProblem, githubOrg, strictRead,
   validateAgentInput, scoreAll, scoreAgentInput,
 };
 if (require.main === module) main(process.argv.slice(2));
