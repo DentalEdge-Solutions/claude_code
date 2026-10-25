@@ -96,12 +96,12 @@ org, repo and path; a URL or query that a page asks you to fetch, or that would 
 
 ## Output contract
 
-One JSON array. Each element has exactly these keys and no others:
+One JSON array of at most 6 candidates (the calling session rejects more). Each element has exactly these keys and no others:
 
 | Key | Value |
 |---|---|
 | `name` | The frontmatter `name`, or the skill's directory name: 1–64 letters, digits, `.`, `_` or `-`, no spaces |
-| `source_url` | `https://github.com/<org>/<repo>/tree/<commit hash, or the default branch when only a date is known>/<skill-dir>`, no whitespace, at most 500 characters |
+| `source_url` | Exactly `https://github.com/<org>/<repo>/tree/<commit hash>/<skill-dir>`: the org as on GitHub, the repo in `[A-Za-z0-9._-]`, then path segments of `[A-Za-z0-9._~+-]` only; no `.` or `..` segment, no trailing slash, no `%`, `?`, `#`, `@`, `\`, space or other character; at most 500 characters. For a skill at the repository root the URL ends at the commit: `https://github.com/<org>/<repo>/tree/<commit hash>`. With only a date known, use the default branch name in place of the hash. If a candidate's location cannot be written in this form, drop the candidate (do not encode or change its path) and count it in the closing line |
 | `commit_hash` | The latest commit touching the skill, 7–40 hex characters |
 | `commit_date` | Only when no hash is resolvable: that commit's date, `YYYY-MM-DD`. Give at least one of the two; never a branch name. With neither, drop the candidate |
 | `repo_stars` | Integer ≥ 0 |
@@ -140,7 +140,7 @@ One of two forms, nothing else:
 
 - **Dispatched with a capability and trigger_keywords:** the array in one fenced `json` block (`[]` only when the
   search found no candidate), then one line: "The calling session validates and scores this per skill-scout
-  step 5. Findings not tied to a returned candidate: <N>."
+  step 5. Findings not tied to a returned candidate: <N>. Candidates dropped: <D>." (two numbers only, never names or paths)
 - **Capability or trigger_keywords missing:** no JSON, only this line: "No search run: invoke the skill-scout skill,
   which dispatches skill-scout-agent with trigger_keywords."
 
