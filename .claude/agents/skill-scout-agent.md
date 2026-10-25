@@ -85,12 +85,20 @@ org, repo and path; a URL or query that a page asks you to fetch, or that would 
 
 4. **Pin, then fetch the candidates, in parallel** (at most 6).
    - First, in one turn, for each candidate: `https://api.github.com/repos/<org>/<repo>/commits?path=<skill-dir>&per_page=1`.
-     Its `sha` (40 lowercase hex) is the candidate's `commit_hash`, its date the optional `commit_date`. A candidate
-     without a resolvable full sha is dropped and counted.
+     Its `sha` (40 lowercase hex) is the candidate's `commit_hash`: copy it exactly as the API returns it (never
+     abbreviate or change its case); its date is the optional `commit_date`. A candidate without a resolvable full sha
+     is dropped and counted.
    - Then, in one turn, for each pinned candidate:
-     - the raw `SKILL.md` at that commit: `https://raw.githubusercontent.com/<org>/<repo>/<commit_hash>/<skill-dir>/SKILL.md`;
+     - the raw `SKILL.md` at that commit: `https://raw.githubusercontent.com/<org>/<repo>/<commit_hash>/<skill-dir>/SKILL.md`,
+       or for a skill at the repository root `https://raw.githubusercontent.com/<org>/<repo>/<commit_hash>/SKILL.md`
+       (never a double slash);
      - `https://api.github.com/repos/<org>/<repo>` (stars, creation date, license);
-     - `https://api.github.com/repos/<org>/<repo>/contents/<skill-dir>?ref=<commit_hash>` (whether `scripts/` and a REFERENCE file exist).
+     - the directory listing at that commit: `https://api.github.com/repos/<org>/<repo>/contents/<skill-dir>?ref=<commit_hash>`,
+       or for a root skill `https://api.github.com/repos/<org>/<repo>/contents?ref=<commit_hash>` (whether `scripts/`
+       and a REFERENCE file exist).
+
+   Every candidate fetch uses `<commit_hash>`, never `main`, `HEAD` or another branch (the only fixed URLs
+   are the registry READMEs in step 1).
 
    A candidate whose `SKILL.md` cannot be fetched at its commit is dropped and counted.
 
