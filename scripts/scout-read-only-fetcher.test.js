@@ -78,5 +78,63 @@ test('agent: hidden characters are removed and reported with the hidden-text fla
   assert.ok(scorer.FLAG_KINDS.includes('hidden-text'), 'the scorer accepts it');
 });
 
+// ─── Review round 1 (PR5-R-3, R-4, R-5, R-7, R-14) ─────────────────────────────────────────────
+
+// PR5-R-5 (mutant m3): the contract is the table, row for row: its keys equal the scorer's closed set exactly
+// (a deleted row, or an extra row such as skill_md_content, fails), not mentions anywhere in the body.
+test('agent: the Output contract table rows equal AGENT_CANDIDATE_KEYS exactly', () => {
+  const text = body(read(AGENT));
+  const start = text.indexOf('## Output contract');
+  assert.ok(start >= 0, 'has an Output contract section');
+  const end = text.indexOf('\n## ', start + 1);
+  const section = text.slice(start, end < 0 ? undefined : end);
+  const rows = [...section.matchAll(/^\| `(\w+)` \|/gm)].map(m => m[1]);
+  assert.strictEqual(new Set(rows).size, rows.length, `no duplicate rows: ${rows}`);
+  assert.deepStrictEqual([...rows].sort(), [...scorer.AGENT_CANDIDATE_KEYS].sort());
+});
+
+// PR5-R-5 (mutant m6): the session never fetches; the only WebFetch/WebSearch mentions in skill-scout's body are
+// the agent's tool list and the prohibition.
+test('skill-scout: no WebFetch/WebSearch instruction besides the tool list and the prohibition', () => {
+  const allowed = [/\(Read, WebFetch, WebSearch\)/, /Do not WebFetch registries or candidate SKILL\.md files in this session/];
+  const lines = body(read(SKILL)).split('\n').filter(l => /Web(?:Fetch|Search)/.test(l));
+  assert.ok(lines.length >= 1, 'the prohibition is present');
+  for (const l of lines) {
+    const rest = allowed.reduce((s, re) => s.replace(re, ''), l);
+    assert.ok(!/Web(?:Fetch|Search)/.test(rest), `unexpected web instruction: ${l.trim().slice(0, 120)}`);
+  }
+});
+
+// PR5-R-3: the agent is not a user-facing entry point; without trigger_keywords it returns no JSON.
+test('agent: description routes users to the skill-scout skill; no registry count', () => {
+  const desc = (frontmatter(read(AGENT)).match(/^description: \|\n([\s\S]*?)\n(?=\S)/m) || [, ''])[1];
+  assert.ok(/dispatched by the skill-scout skill/i.test(desc.replace(/\s+/g, ' ')), 'says who dispatches it');
+  assert.ok(/use the skill-scout skill/i.test(desc.replace(/\s+/g, ' ')), 'routes users to the skill');
+  assert.ok(!/\d+\s+(?:known\s+)?registries/i.test(desc), 'no registry count');
+});
+
+test('agent: missing trigger_keywords gives no JSON and a pointer to the skill-scout skill (one closing rule)', () => {
+  const text = body(read(AGENT));
+  assert.ok(!/empty array/i.test(text.split('## Output contract')[0]), 'does not return [] for missing input');
+  assert.ok(/no JSON/i.test(text) && /invoke the skill-scout skill/i.test(text), 'pointer instead of JSON');
+  assert.strictEqual((text.match(/^## Final message/gm) || []).length, 1, 'one Final message section');
+});
+
+// PR5-R-4: Read is not used by the workflow; nothing local or from a page goes into a URL or query.
+test('agent: no local reads, no page or local text in fetch URLs or search queries', () => {
+  const text = body(read(AGENT)).replace(/\s+/g, ' ');
+  assert.ok(/Do not read local files/i.test(text), 'no local reads');
+  assert.ok(/never put local content or anything from a page into a fetch URL or search query/i.test(text), 'no exfiltration channel');
+});
+
+// PR5-R-7, R-8, R-14: step 9 is decidable from what the session sees; a reply without JSON stops; Bash is required.
+test('skill-scout: step 9 without the registry clause; a reply without a JSON block stops; compatibility names Bash', () => {
+  const raw = read(SKILL);
+  const text = body(raw);
+  assert.ok(!/registry match/i.test(text), 'no registry-match condition');
+  assert.ok(/no fenced `json` block/i.test(text), 'handles a reply without a JSON block');
+  assert.ok(/Agent, Write and Bash tools/.test(frontmatter(raw)), 'compatibility names Bash');
+});
+
 if (!ok) process.exit(1);
 console.log('\nscout-read-only-fetcher.test.js: all tests passed');
