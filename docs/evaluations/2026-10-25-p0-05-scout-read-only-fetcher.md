@@ -2,7 +2,7 @@
 
 > Date: 2026-10-25 · Item: P0-05 (S5 roadmap, V-S5-7) · Trace: OPP-02 (b) · GAP-01 · breach (b) · DECISION-S3-2 (a) ·
 > V-S3-6 · Branch `fix/p0-05-scout-read-only-fetcher` from `main` at `d3184d5` · Background security reviews: three ·
-> Review round 1: PR5-R-1 … R-15 · Review round 2: PR5-R-16 … R-19 (see the last sections)
+> Review round 1: PR5-R-1 … R-15 · Review round 2: PR5-R-16 … R-19 · Review round 3: PR5-R-20, R-21 (see the last sections)
 
 ## What changed and why
 
@@ -41,9 +41,9 @@ Names follow the scorer's existing schema where a field existed.
 | Key | Type and limit |
 |---|---|
 | `name` | 1–64 characters of letters, digits, `.`, `_`, `-` (no spaces, so no sentences) |
-| `source_url` | `https://github.com/<org>/<repo>[/<segment>…]`, ≤ 500 characters; org in GitHub's login charset; repo and segments `[A-Za-z0-9._-]` (segments also `~`, `+`), never `.` or `..`, no trailing slash; no `%`, `?`, `#`, `\`, `@`, port or userinfo. A skill at the repository root ends at `…/tree/<commit hash>`; the agent drops a candidate whose location cannot be written this way and counts it (PR5-R-16) |
-| `commit_hash` | 7–40 hex characters. Or, when no hash is resolvable: |
-| `commit_date` | `YYYY-MM-DD`. At least one of the two; a branch name fails the hash pattern |
+| `source_url` | `https://github.com/<org>/<repo>/tree/<commit_hash>[/<path>]`, the ref equal to `commit_hash` (tree only, never blob; PR5-R-20), ≤ 500 characters; org in GitHub's login charset; repo and segments `[A-Za-z0-9._-]` (segments also `~`, `+`), never `.` or `..`, no trailing slash; no `%`, `?`, `#`, `\`, `@`, port or userinfo. A skill at the repository root ends at `…/tree/<commit hash>`; the agent drops a candidate whose location cannot be written this way and counts it (PR5-R-16) |
+| `commit_hash` | **required**: the full commit sha, 40 lowercase hex characters (PR5-R-20); a branch name or an abbreviated sha fails |
+| `commit_date` | optional, informational: `YYYY-MM-DD` |
 | `repo_stars`, `repo_age_days`, `skill_md_lines` | integer ≥ 0, written as plain digits |
 | `license` | one line ≤ 100 characters, or `null` |
 | `has_scripts`, `has_reference` | boolean |
@@ -97,12 +97,12 @@ rejected before it is decoded (exit 2). Unreadable or invalid input exits 1 and 
 | `source_url` shape: 22 rejected forms (dot segments, `%2e%2e`, `%2F`, `?`, `#`, `\`, `@`, port, userinfo, no repo, empty or trailing segments, bad org, `http:`, a look-alike host), 3 accepted; reputation reads the org from the validated URL | 8f2 |
 | `body_keyword_hits` element not in `trigger_keywords`, wrong case, duplicate, not a string | 8g |
 | `flags`: excerpt or location over 100, unknown kind, extra key, non-object, over 20 entries | 8h |
-| Commit: neither hash nor date, a branch name, free text, a malformed date; a date alone passes | 8c |
+| Commit (PR5-R-20): no hash, a date alone (with `tree/main`), a branch name, free text, a 7-character or upper-case hash, a malformed date; the URL's ref must equal `commit_hash` (`tree/main`, another sha, `blob`, no ref and an abbreviated ref fail); a full pin with a date passes | 8c |
 | Every rejection: stderr names the path and does not contain the sentinel value (nor, where given, the key) | `rejects()` helper |
 | Project fit = description ∪ body hits; caller fields reach the conflict score | 8b |
 | Security reviews: duplicates, prototype names, numbers, hidden text, bytes, depth | 8j, 8k |
 | Size cap and long strings (9 MB rejected by size, invalid bytes too; a string just under the cap scores; the reader handles a 9 MB string without a RangeError) | 8l |
-| At most 6 candidates; a piped 4 MiB + 1 input through `/dev/stdin` (stat sees 0 bytes) rejected by size, a piped valid input scored; `oversize()` on the bytes read; root-level URL `…/tree/abc1234` accepted, `…/tree/abc1234/`, `%20` and space forms rejected | 8m, 8f2 |
+| At most 6 candidates; a pipe (`/dev/stdin`, oversize or valid) and a directory rejected as not a regular file (PR5-R-21); `readBounded` stops at the cap + 1 on a larger regular file; `oversize()` on the bytes read; root-level URL `…/tree/abc1234` accepted, `…/tree/abc1234/`, `%20` and space forms rejected | 8m, 8f2 |
 
 `scripts/scout-read-only-fetcher.test.js` checks that the agent's tools are exactly `Read, WebFetch, WebSearch`; that
 it has no `/tmp` and no scorer call; that its Output contract table rows equal `AGENT_CANDIDATE_KEYS` exactly; that it
@@ -134,7 +134,7 @@ the ranking, every total, every dimension and every band are equal.
 
 ## Static scan (`skills/skill-audit/scripts/static-scan.js`, local, no network)
 
-| Target | Before (`d3184d5`) | After (`137d140`) |
+| Target | Before (`d3184d5`) | After (`0c631fe`) |
 |---|---|---|
 | `.claude/agents/skill-scout-agent.md` | PASS, 0 findings | PASS, 0 findings |
 | `skills/skill-scout/` | PASS, 0 findings | PASS, 0 findings |
@@ -263,6 +263,16 @@ piped 4 MiB + 1 input exited 1 "not valid JSON"; the agent row and step 4 lacked
 | PR5-R-18 | At most 6 candidates (`CANDIDATES_MAX`, the agent's fetch limit): exit 2 "candidates: more than 6 entries"; stated in `--help` and in the agent's contract. The cap derivation now marks the 200 × 1024 figure for `installed_skill_descriptions` as an **assumption** (not enforced per item: the caller reads them from local SKILL.md files); the 4 MiB hard cap bounds the whole input whatever the assumption |
 | PR5-R-19 | Step 4's no-JSON stop names both causes without guessing: an agent installed before P0-05 in this project (re-run `./install.sh` here), or a dispatch without `trigger_keywords` (the agent then runs no search; a skill-scout bug to report) |
 
+## Review round 3 (PR5-R-20, R-21)
+
+The reviewer found R-16 … R-19 fixed. Red `0e574f1` (a date-only candidate with `tree/main` accepted, exit 0; the
+agent's `commit_hash` row lacked the 40-hex rule), green `f828d25` (scorer) and `0c631fe` (definitions).
+
+| ID | Resolution |
+|---|---|
+| PR5-R-20 | **Design narrowed (coordinator decision):** the brief's "`commit_hash` or `commit_date`" becomes "`commit_hash` required". Why: a date without a sha means the authoritative source (the commits API, which returns sha and date in one object) did not answer, which is exactly the case that must not be recommended; the toolkit's pinning rule ("never just a branch name") and skill-adapt's 40-character `source_commit` (`skills/skill-adapt/SKILL.md:64`) need a full sha anyway. Now: `commit_hash` must be 40 lowercase hex; `commit_date` is optional and informational; `source_url` must be `https://github.com/<org>/<repo>/tree/<commit_hash>[/<path>]` with the ref equal to `commit_hash` (tree only; blob is not accepted, because the agent's row allows only tree), otherwise exit 2 "the ref must equal commit_hash". The agent pins first (commits API), then fetches SKILL.md and the contents listing **at that commit**, so the body it describes is the pinned body; a candidate without a full sha is dropped and counted. The date-only/default-branch rule is removed from the agent; skill-scout's Source line is `github.com/<org>/<repo>@<commit_hash>` and its Rules say skill-audit and skill-adapt use that exact commit. The ranking fixture now carries invented 40-hex pins (sha1 of `fixture-<name>`) with matching URLs; its scores and ranking are unchanged. Tests: the reviewer's three cases (hash with `tree/main`, hash with another sha, date-only with `tree/main`), a 7-character and an upper-case hash, `blob`, no ref and an abbreviated ref all exit 2; a matching 40-hex case passes; the fetcher test asserts the 40-hex row, the drop rule, the informational date, `/tree/<commit_hash>` and that no default-branch or date-only text remains in the agent or skill-scout. **Pinning residual: none now** (every shortlisted candidate carries a full sha and a URL at that sha) |
+| PR5-R-21 | Only a regular file is read: `statSync(path).isFile()` before opening and `fstatSync(fd).isFile()` on the descriptor, else exit 2 "input: must be a regular file". The EAGAIN retry is removed (on a regular file it cannot occur, so any read error is exit 1). The bounded read stays for a file that grows after stat. This supersedes the pipe support of PR5-R-17: a pipe, FIFO or device is now refused before it is opened. Test 8m: a piped `/dev/stdin` input (oversize or valid) and a directory exit 2; `readBounded` stops at the cap + 1 on a larger regular file; `oversize()` at the boundary. `--help` says the input is a regular file; skill-scout step 5 always writes one with the Write tool |
+
 ## Not measured
 
 Evals were not run: B0 pre-edit evals were skipped by owner decision, and acceptance evals land in P1-10/B6.
@@ -318,7 +328,7 @@ Evals were not run: B0 pre-edit evals were skipped by owner decision, and accept
 
 ## Checks
 
-At `137d140` (the code head after review round 2; the record commit changes only this file), Node v26.9.0:
+At `0c631fe` (the code head after review round 3; the record commit changes only this file), Node v26.9.0:
 
 | Command | Result |
 |---|---|
@@ -328,6 +338,6 @@ At `137d140` (the code head after review round 2; the record commit changes only
 | `node scripts/ci-static-fallback.js` | exit 0; "Static fallback: PASSED" |
 | `node --check skills/skill-scout/scripts/score-candidates.js` | OK |
 | `static-scan.js` on the agent and on `skills/skill-scout/` | PASS, 0 findings each |
-| 1 MB timing (in `score-candidates.test.js`) | 2 × 1 MB hidden-text scan 10.2 ms; CLI on a 1 MB description 39.4 ms |
+| 1 MB timing (in `score-candidates.test.js`) | 2 × 1 MB hidden-text scan 10.5 ms; CLI on a 1 MB description 40.6 ms |
 | Diff of `d3184d5...HEAD` on `evals/`, `.project-brain/`, the pinned evaluator files, `scripts/codex/` | empty |
 | Working tree status, untracked files included | empty |
