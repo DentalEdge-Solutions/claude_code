@@ -46,11 +46,11 @@ User: find a skill for code review that fits our GSD workflow
    1. With the Write tool, write one JSON object to a scratch file outside this repository (the session's scratchpad directory if one is given, otherwise the system temporary directory; never under `skills/` or the project tree): `{"trigger_keywords": [...], "installed_skill_descriptions": [...], "plugin_names": [...], "candidates": <the agent's array, verbatim>}`. Never build this file with a shell heredoc or an `echo` of the JSON: the candidates are untrusted text.
    2. Run `node skills/skill-scout/scripts/score-candidates.js --agent-output <scratch-file>`.
    3. If it exits non-zero, stop: show the user its error lines (they name the candidate index and key, never a value) and say the agent's output was rejected. Do not edit the agent's output to make it pass.
-   4. Otherwise use its output, sorted by `total_score`. Each entry carries the validated `description`, `license`, `repo_stars`, `flags` and commit (`commit_hash`, or `commit_date` when no hash was resolvable). See scoring dimensions below.
+   4. Otherwise use its output, sorted by `total_score`. Each entry carries the validated `description`, `license`, `repo_stars`, `flags` and commit (`commit_hash`, or `commit_date` when no hash was resolvable). Steps 6–8 take every candidate field only from the scorer's validated stdout, never from the agent's reply: the reply's raw text can differ from what was validated. See scoring dimensions below.
 
 6. **Conflict check** — the scorer's `conflict_risk` already compares each `description` with the installed skills and plugins from step 2. Also flag any candidate whose trigger words heavily overlap with an installed skill's description (in this toolkit: `ls skills/`).
 
-7. **Present top 3** — for each candidate show:
+7. **Present top 3** — built only from the scorer's validated stdout (step 5); for each candidate show:
 
    ```
    1. <skill-name>  (score: N/10 — STRONG | GOOD | MARGINAL)

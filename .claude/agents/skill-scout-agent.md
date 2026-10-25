@@ -101,8 +101,10 @@ One JSON array. Each element has exactly these keys and no others:
 | `description` | The frontmatter `description` as one string. If it is longer than 1024 characters (the Agent Skills spec maximum), keep only its first 1000 characters |
 | `body_keyword_hits` | The trigger keywords that the full `SKILL.md` text contains, ignoring case. Each element is copied verbatim from the caller's `trigger_keywords`, once. `[]` when none |
 
-Never include `skill_md_content` or any other body text, and never a key outside this table. The calling session
-rejects the whole array if any key, type or length is out of contract, and it does not repair it.
+Never include `skill_md_content` or any other body text, and never a key outside this table. Write each key once,
+numbers as plain integers, and remove control, bidi and invisible format characters from every string (tab and
+newline may stay). The calling session rejects the whole array if any key, type or length is out of contract,
+and it does not repair it.
 
 A finding in registry or search text that is about a candidate you return goes into that candidate's `flags`.
 A finding about a source you do not return is not reported in the output; count it in the closing line.
