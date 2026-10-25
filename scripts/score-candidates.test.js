@@ -155,7 +155,7 @@ try {
   const SENTINEL = 'ZZ-SENTINEL-VALUE-ZZ';
   const runAgent = (input) => {
     const file = path.join(TMP, 'agent-input.json');
-    fs.writeFileSync(file, typeof input === 'string' ? input : JSON.stringify(input));
+    fs.writeFileSync(file, typeof input === 'string' || Buffer.isBuffer(input) ? input : JSON.stringify(input));
     return spawnSync('node', [SCRIPT, '--agent-output', file], { encoding: 'utf8' });
   };
   const scoreAgent = (input) => {
@@ -303,6 +303,60 @@ try {
   assert.strictEqual(r.status, 1, '--agent-output without a file');
   r = spawnSync('node', [SCRIPT, '--help'], { encoding: 'utf8' });
   assert.ok(r.stdout.includes('--agent-output'), 'help documents the agent-output mode');
+
+  // 8j. Parser differential (background security review of 908764b): what is validated must be what
+  //     is scored and shown. Raw JSON text is used where a JS object literal cannot express the input.
+  const okText = JSON.stringify(wrap([agentStrong]));
+  const candText = JSON.stringify(agentStrong);
+  const withCand = text => okText.replace(candText, text);
+  const addKey = (objText, raw) => objText.replace(/^\{/, `{${raw},`);
+  //     Duplicate keys: JSON.parse keeps the last one, so the first could carry anything. Rejected at
+  //     every depth, also when spelled with an escape; the path is named, never the value.
+  rejects(addKey(okText, `"candidates":[{"description":"${SENTINEL}"}]`), ['candidates', 'duplicate'], 'duplicate top-level candidates');
+  rejects(addKey(okText, `"trigger_keywords":["${SENTINEL}"]`), ['trigger_keywords', 'duplicate'], 'duplicate trigger_keywords');
+  rejects(withCand(addKey(candText, `"description":"${SENTINEL}${'x'.repeat(1100)}"`)), ['candidates[0].description', 'duplicate'],
+    'duplicate description (an over-cap first value)');
+  rejects(withCand(addKey(candText, `"\\u0064escription":"${SENTINEL}"`)), ['candidates[0].description', 'duplicate'],
+    'duplicate key spelled with a \\u escape');
+  rejects(withCand(addKey(candText, `"flags":[{"location":"a","kind":"instruction","excerpt":"${SENTINEL}"}]`)),
+    ['candidates[0].flags', 'duplicate'], 'duplicate flags');
+  const flagCand = JSON.stringify({ ...agentStrong, flags: [{ location: 'SKILL.md:1', kind: 'instruction', excerpt: 'short' }] });
+  rejects(okText.replace(candText, flagCand.replace('"excerpt":"short"', `"excerpt":"${SENTINEL}","excerpt":"short"`)),
+    ['candidates[0].flags[0].excerpt', 'duplicate'], 'duplicate excerpt inside a flag');
+  //     Prototype names are keys like any other: own properties only, all outside the schema.
+  for (const k of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+    rejects(addKey(okText, `"${k}":{"x":"${SENTINEL}"}`), [k, 'not in the schema'], `top-level ${k}`);
+    rejects(withCand(addKey(candText, `"${k}":"${SENTINEL}"`)), [`candidates[0].${k}`, 'not in the schema'], `candidate ${k}`);
+    rejects(okText.replace(candText, flagCand.replace('{"location"', `{"${k}":"${SENTINEL}","location"`)),
+      [`candidates[0].flags[0].${k}`, 'not in the schema'], `flag ${k}`);
+  }
+  //     A missing required key is not satisfied by the prototype chain.
+  const noName = { ...agentStrong }; delete noName.name;
+  rejects(withCand(addKey(JSON.stringify(noName), '"__proto__":{"name":"x"}')), ['candidates[0].name', 'missing'], 'name via __proto__');
+  //     Numbers: the raw token must be what is scored and shown (plain integers only).
+  for (const raw of ['1e400', '1.0', '1e2', '-0', '12345678901234567890']) {
+    rejects(withCand(candText.replace('"repo_stars":2000', `"repo_stars":${raw}`)), ['candidates[0].repo_stars'], `repo_stars ${raw}`);
+  }
+  //     Text: no lone surrogates, no control, bidi or invisible format characters (a newline or tab in
+  //     a description is fine).
+  for (const [esc, label] of [['\\ud800', 'lone surrogate'], ['\\u202e', 'bidi override'], ['\\u001b[31m', 'ANSI escape'],
+    ['\\u200b', 'zero-width space'], ['\\u2028', 'line separator'], ['\\u0000', 'NUL'], ['\\u0085', 'C1 control'], ['\\ufeff', 'BOM inside text']]) {
+    rejects(withCand(candText.replace(`"description":"${agentStrong.description}"`, `"description":"${SENTINEL}${esc}"`)),
+      ['candidates[0].description'], `description with ${label}`);
+  }
+  rejects(withCand(candText.replace('"license":"Apache-2.0"', `"license":"MIT\\u202e${SENTINEL}"`)), ['candidates[0].license'], 'license with bidi');
+  scoreAgent(wrap([{ ...agentStrong, description: 'Use when x.\n\tIndented line, and when user asks; fine' }]));
+  //     Bytes: invalid UTF-8 and a leading byte-order mark are unreadable input (exit 1), not silently decoded.
+  r = runAgent(Buffer.concat([Buffer.from(okText.slice(0, 20)), Buffer.from([0xff, 0xfe]), Buffer.from(okText.slice(20))]));
+  assert.strictEqual(r.status, 1, `invalid UTF-8: ${r.stderr}`);
+  assert.ok(/UTF-8/.test(r.stderr), r.stderr);
+  r = runAgent(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(okText)]));
+  assert.strictEqual(r.status, 1, `leading BOM: ${r.stderr}`);
+  assert.ok(/byte-order mark/.test(r.stderr), r.stderr);
+  //     Deep nesting is refused with a message, not a crash.
+  rejects(addKey(okText, `"deep":${'['.repeat(10000)}${']'.repeat(10000)}`), ['deep'], 'deep nesting');
+  //     The accepted case still scores identically after the strict reader.
+  assert.deepStrictEqual(scoreAgent(okText)[0].breakdown, scoreAgent(wrap([agentStrong]))[0].breakdown);
 
   // ─── 9. Ranking tolerance (P0-05 acceptance) ───────────────────────────────────────────────
   // Committed fixtures with full bodies. The agent form is derived deterministically: the body is

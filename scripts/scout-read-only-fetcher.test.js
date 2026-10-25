@@ -61,5 +61,13 @@ test('skill-scout: dispatches the agent and scores its output in agent-output mo
   assert.ok(!/WebFetch the raw `SKILL\.md`/.test(text), 'the session no longer fetches candidate bodies');
 });
 
+// Background security review of 908764b (parser differential): the shortlist is built from what the scorer
+// validated, never from the agent's raw reply (which may differ, e.g. a duplicate key's first value).
+test('skill-scout: the shortlist comes only from the scorer\'s validated stdout', () => {
+  const text = body(read(SKILL));
+  assert.ok(/only from the scorer's (?:validated )?(?:stdout|output)/i.test(text), 'states the source of the shortlist');
+  assert.ok(/never from the agent's (?:raw )?reply/i.test(text), 'forbids the raw reply as a source');
+});
+
 if (!ok) process.exit(1);
 console.log('\nscout-read-only-fetcher.test.js: all tests passed');
