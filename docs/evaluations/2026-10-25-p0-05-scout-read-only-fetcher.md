@@ -2,7 +2,7 @@
 
 > Date: 2026-10-25 · Item: P0-05 (S5 roadmap, V-S5-7) · Trace: OPP-02 (b) · GAP-01 · breach (b) · DECISION-S3-2 (a) ·
 > V-S3-6 · Branch `fix/p0-05-scout-read-only-fetcher` from `main` at `d3184d5` · Background security reviews: three ·
-> Review round 1: PR5-R-1 … R-15 (see the last sections)
+> Review round 1: PR5-R-1 … R-15 · Review round 2: PR5-R-16 … R-19 (see the last sections)
 
 ## What changed and why
 
@@ -41,7 +41,7 @@ Names follow the scorer's existing schema where a field existed.
 | Key | Type and limit |
 |---|---|
 | `name` | 1–64 characters of letters, digits, `.`, `_`, `-` (no spaces, so no sentences) |
-| `source_url` | `https://github.com/<org>/<repo>[/<segment>…]`, ≤ 500 characters; org in GitHub's login charset; repo and segments `[A-Za-z0-9._-]` (segments also `~`, `+`), never `.` or `..`; no `%`, `?`, `#`, `\`, `@`, port or userinfo |
+| `source_url` | `https://github.com/<org>/<repo>[/<segment>…]`, ≤ 500 characters; org in GitHub's login charset; repo and segments `[A-Za-z0-9._-]` (segments also `~`, `+`), never `.` or `..`, no trailing slash; no `%`, `?`, `#`, `\`, `@`, port or userinfo. A skill at the repository root ends at `…/tree/<commit hash>`; the agent drops a candidate whose location cannot be written this way and counts it (PR5-R-16) |
 | `commit_hash` | 7–40 hex characters. Or, when no hash is resolvable: |
 | `commit_date` | `YYYY-MM-DD`. At least one of the two; a branch name fails the hash pattern |
 | `repo_stars`, `repo_age_days`, `skill_md_lines` | integer ≥ 0, written as plain digits |
@@ -52,8 +52,8 @@ Names follow the scorer's existing schema where a field existed.
 | `body_keyword_hits` | distinct elements of the caller's `trigger_keywords`, verbatim |
 
 Never `skill_md_content` or any other body text. The strict input adds the caller fields: one object with exactly
-`trigger_keywords`, `installed_skill_descriptions`, `plugin_names` and `candidates`. The whole file is at most
-`INPUT_MAX_BYTES` = 4 MiB (derivation under review round 1, PR5-R-2).
+`trigger_keywords`, `installed_skill_descriptions`, `plugin_names` and `candidates` (at most 6, PR5-R-18). The whole
+file is at most `INPUT_MAX_BYTES` = 4 MiB, checked on stat and on the bytes read (PR5-R-2, R-17).
 
 ### The description cap and its source
 
@@ -102,6 +102,7 @@ rejected before it is decoded (exit 2). Unreadable or invalid input exits 1 and 
 | Project fit = description ∪ body hits; caller fields reach the conflict score | 8b |
 | Security reviews: duplicates, prototype names, numbers, hidden text, bytes, depth | 8j, 8k |
 | Size cap and long strings (9 MB rejected by size, invalid bytes too; a string just under the cap scores; the reader handles a 9 MB string without a RangeError) | 8l |
+| At most 6 candidates; a piped 4 MiB + 1 input through `/dev/stdin` (stat sees 0 bytes) rejected by size, a piped valid input scored; `oversize()` on the bytes read; root-level URL `…/tree/abc1234` accepted, `…/tree/abc1234/`, `%20` and space forms rejected | 8m, 8f2 |
 
 `scripts/scout-read-only-fetcher.test.js` checks that the agent's tools are exactly `Read, WebFetch, WebSearch`; that
 it has no `/tmp` and no scorer call; that its Output contract table rows equal `AGENT_CANDIDATE_KEYS` exactly; that it
@@ -133,7 +134,7 @@ the ranking, every total, every dimension and every band are equal.
 
 ## Static scan (`skills/skill-audit/scripts/static-scan.js`, local, no network)
 
-| Target | Before (`d3184d5`) | After (`89c240a`) |
+| Target | Before (`d3184d5`) | After (`137d140`) |
 |---|---|---|
 | `.claude/agents/skill-scout-agent.md` | PASS, 0 findings | PASS, 0 findings |
 | `skills/skill-scout/` | PASS, 0 findings | PASS, 0 findings |
@@ -249,6 +250,19 @@ characters>", and four definition tests failed); green `c49acdb` (scorer) and `8
 Also found while fixing PR5-R-1: `scoreAll` used `candidates.map(scoreCandidate)`, which would have passed the array
 index as the new org argument; it now calls `scoreCandidate(c)` (the legacy tests caught it).
 
+## Review round 2 (PR5-R-16 … R-19)
+
+The reviewer found R-1 … R-14 fixed and R-15 no longer applicable. Red `adaa6b5` (7 candidates accepted, exit 0; a
+piped 4 MiB + 1 input exited 1 "not valid JSON"; the agent row and step 4 lacked the rules), green `c4db02f`
+(scorer) and `137d140` (definitions).
+
+| ID | Resolution |
+|---|---|
+| PR5-R-16 | The agent's `source_url` row now states the scorer's rule: org as on GitHub, repo `[A-Za-z0-9._-]`, segments `[A-Za-z0-9._~+-]`, no `.` or `..` segment, no trailing slash, no `%`, `?`, `#`, `@`, `\`, space; a root-level skill ends at `https://github.com/<org>/<repo>/tree/<commit hash>`; a candidate whose location cannot be written so is dropped (its path is never encoded or changed) and counted. The closing line is now "… Findings not tied to a returned candidate: <N>. Candidates dropped: <D>." (two numbers only). One odd path now drops one candidate instead of stopping the run. Tests: the fetcher test checks the row (charset, no trailing slash, no dot segments, the root form, the drop rule) and the closing line; the scorer accepts `…/tree/abc1234` and rejects `…/tree/abc1234/`, `…/my%20skill` and `…/my skill` |
+| PR5-R-17 | The read is bounded (`readBounded`: at most `INPUT_MAX_BYTES + 1` bytes in 64 KiB chunks; works for pipes and FIFOs) and `oversize()` checks the bytes read (exit 2). A pipe or `/dev/stdin`, which stat reports as 0 bytes, or a file that grows after stat, can neither pass the size rule nor load more than the cap. Test: a 4 MiB + 1 input piped through `/dev/stdin` exits 2 "larger than"; a valid piped input scores; `oversize()` at the boundary. No FIFO test (`mkfifo` is not portable to every runner); the `/dev/stdin` pipe takes the same path |
+| PR5-R-18 | At most 6 candidates (`CANDIDATES_MAX`, the agent's fetch limit): exit 2 "candidates: more than 6 entries"; stated in `--help` and in the agent's contract. The cap derivation now marks the 200 × 1024 figure for `installed_skill_descriptions` as an **assumption** (not enforced per item: the caller reads them from local SKILL.md files); the 4 MiB hard cap bounds the whole input whatever the assumption |
+| PR5-R-19 | Step 4's no-JSON stop names both causes without guessing: an agent installed before P0-05 in this project (re-run `./install.sh` here), or a dispatch without `trigger_keywords` (the agent then runs no search; a skill-scout bug to report) |
+
 ## Not measured
 
 Evals were not run: B0 pre-edit evals were skipped by owner decision, and acceptance evals land in P1-10/B6.
@@ -304,7 +318,7 @@ Evals were not run: B0 pre-edit evals were skipped by owner decision, and accept
 
 ## Checks
 
-At `89c240a` (the code head; the record commit changes only this file), Node v26.9.0:
+At `137d140` (the code head after review round 2; the record commit changes only this file), Node v26.9.0:
 
 | Command | Result |
 |---|---|
@@ -314,5 +328,6 @@ At `89c240a` (the code head; the record commit changes only this file), Node v26
 | `node scripts/ci-static-fallback.js` | exit 0; "Static fallback: PASSED" |
 | `node --check skills/skill-scout/scripts/score-candidates.js` | OK |
 | `static-scan.js` on the agent and on `skills/skill-scout/` | PASS, 0 findings each |
-| 1 MB timing (in `score-candidates.test.js`) | 2 × 1 MB hidden-text scan 10.4 ms; CLI on a 1 MB description 41.7 ms |
-| `git diff --name-only d3184d5...HEAD` on `evals/`, `.project-brain/`, the pinned evaluator files, `scripts/codex/` | empty |
+| 1 MB timing (in `score-candidates.test.js`) | 2 × 1 MB hidden-text scan 10.2 ms; CLI on a 1 MB description 39.4 ms |
+| Diff of `d3184d5...HEAD` on `evals/`, `.project-brain/`, the pinned evaluator files, `scripts/codex/` | empty |
+| Working tree status, untracked files included | empty |
