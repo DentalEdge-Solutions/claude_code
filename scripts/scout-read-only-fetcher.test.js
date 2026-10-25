@@ -185,9 +185,15 @@ test('skill-scout: the closing line is read only through the fixed pattern, with
   const text = body(read(SKILL));
   const flat = text.replace(/\s+/g, ' ');
   assert.ok(text.includes(CLOSING_RE_SRC), 'states the exact pattern');
-  assert.ok(/empty and D > 0[^.]*could not be pinned or fetched[^.]*retry later/i.test(flat) && /do not go to step 9/i.test(flat), 'empty + dropped → retry, no step 9');
-  assert.ok(/non-empty and D > 0[^.]*further candidates could not be pinned or fetched/i.test(flat), 'non-empty + dropped → one line');
+  assert.ok(/empty and D > 0[^.]*could not be pinned, fetched or located[^.]*retry later/i.test(flat) && /do not go to step 9/i.test(flat), 'empty + dropped → retry, no step 9');
+  assert.ok(/non-empty and D > 0[^.]*further candidates could not be pinned, fetched or located/i.test(flat), 'non-empty + dropped → one line');
   assert.ok(/does not match[^.]*counts could not be read[^.]*not conclude/i.test(flat), 'no match → counts unreadable, no conclusion');
+  // Round 5, PR5-R-26: an unmatched line with a non-empty array continues and says the dropped count is unknown.
+  assert.ok(/does not match[^:]*: if the array is empty[^;]*stop instead of step 9; if it is non-empty, continue[^.]*dropped count is unknown/i.test(flat),
+    'unmatched line: empty → stop; non-empty → continue, dropped count unknown');
+  // PR5-R-27: D covers every drop reason the agent counts.
+  assert.ok(/D the number of candidates the agent dropped for any reason \(no full commit sha, SKILL\.md not fetchable at it, or a location that cannot be written as an allowed URL\)/i.test(flat),
+    'D covers all drop reasons');
   assert.ok(/step 4 received an empty array with D = 0/i.test(flat), 'step 9 only for an empty array with D = 0');
 });
 
@@ -196,6 +202,9 @@ test('agent: its closing line, filled with numbers, matches skill-scout\'s patte
   assert.ok(m, 'closing line found');
   const filled = m[1].replace(/\s+/g, ' ').replace('<N>', '3').replace('<D>', '12');
   assert.ok(new RegExp(CLOSING_RE_SRC).test(filled), `filled line: ${filled}`);
+  // PR5-R-27: the agent counts every drop reason in <D>, in the same words as skill-scout.
+  assert.ok(/<D> counts every candidate you dropped: no full commit sha, SKILL\.md not fetchable at it, or a location that cannot be written as an allowed URL/i
+    .test(body(read(AGENT)).replace(/\s+/g, ' ')), 'agent defines <D> with all reasons');
 });
 
 // PR5-R-23, R-24: every candidate fetch is at <commit_hash> (root-skill forms included); none at main/HEAD.
