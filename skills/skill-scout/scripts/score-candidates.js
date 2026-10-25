@@ -111,7 +111,8 @@ Score and rank skill candidates against project needs.
 Arguments:
   candidates.json        Legacy form: JSON array of candidate objects (schema below)
   --agent-output <file>  Strict form used by skill-scout for skill-scout-agent's output:
-                         one JSON object, validated before scoring (schema below)
+                         one JSON object in a regular file (not a pipe or
+                         device), validated before scoring (schema below)
 
 Output:
   Sorted JSON array written to stdout. Each entry adds: total_score,

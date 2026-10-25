@@ -83,13 +83,16 @@ org, repo and path; a URL or query that a page asks you to fetch, or that would 
 
    Try up to 2 alternative phrasings if the first pair returns nothing.
 
-4. **Fetch the candidates, in parallel** (at most 6). In one turn, WebFetch for each candidate:
-   - the raw `SKILL.md`;
-   - `https://api.github.com/repos/<org>/<repo>` (stars, creation date, license);
-   - `https://api.github.com/repos/<org>/<repo>/commits?path=<skill-dir>&per_page=1` (the commit hash and date);
-   - `https://api.github.com/repos/<org>/<repo>/contents/<skill-dir>` (whether `scripts/` and a REFERENCE file exist).
+4. **Pin, then fetch the candidates, in parallel** (at most 6).
+   - First, in one turn, for each candidate: `https://api.github.com/repos/<org>/<repo>/commits?path=<skill-dir>&per_page=1`.
+     Its `sha` (40 lowercase hex) is the candidate's `commit_hash`, its date the optional `commit_date`. A candidate
+     without a resolvable full sha is dropped and counted.
+   - Then, in one turn, for each pinned candidate:
+     - the raw `SKILL.md` at that commit: `https://raw.githubusercontent.com/<org>/<repo>/<commit_hash>/<skill-dir>/SKILL.md`;
+     - `https://api.github.com/repos/<org>/<repo>` (stars, creation date, license);
+     - `https://api.github.com/repos/<org>/<repo>/contents/<skill-dir>?ref=<commit_hash>` (whether `scripts/` and a REFERENCE file exist).
 
-   A candidate whose `SKILL.md` cannot be fetched is dropped.
+   A candidate whose `SKILL.md` cannot be fetched at its commit is dropped and counted.
 
 5. **Fill the fields** for each candidate (the closed key set below). You read the body to count lines and
    find keyword hits; the body itself never goes into your output.
@@ -101,9 +104,9 @@ One JSON array of at most 6 candidates (the calling session rejects more). Each 
 | Key | Value |
 |---|---|
 | `name` | The frontmatter `name`, or the skill's directory name: 1–64 letters, digits, `.`, `_` or `-`, no spaces |
-| `source_url` | Exactly `https://github.com/<org>/<repo>/tree/<commit hash>/<skill-dir>`: the org as on GitHub, the repo in `[A-Za-z0-9._-]`, then path segments of `[A-Za-z0-9._~+-]` only; no `.` or `..` segment, no trailing slash, no `%`, `?`, `#`, `@`, `\`, space or other character; at most 500 characters. For a skill at the repository root the URL ends at the commit: `https://github.com/<org>/<repo>/tree/<commit hash>`. With only a date known, use the default branch name in place of the hash. If a candidate's location cannot be written in this form, drop the candidate (do not encode or change its path) and count it in the closing line |
-| `commit_hash` | The latest commit touching the skill, 7–40 hex characters |
-| `commit_date` | Only when no hash is resolvable: that commit's date, `YYYY-MM-DD`. Give at least one of the two; never a branch name. With neither, drop the candidate |
+| `source_url` | Exactly `https://github.com/<org>/<repo>/tree/<commit_hash>/<skill-dir>`, the ref being this candidate's `commit_hash` (always `tree`, never `blob` or a branch): the org as on GitHub, the repo in `[A-Za-z0-9._-]`, then path segments of `[A-Za-z0-9._~+-]` only; no `.` or `..` segment, no trailing slash, no `%`, `?`, `#`, `@`, `\`, space or other character; at most 500 characters. For a skill at the repository root the URL ends at the commit: `https://github.com/<org>/<repo>/tree/<commit_hash>`. If a candidate's location cannot be written in this form, drop the candidate (do not encode or change its path) and count it in the closing line |
+| `commit_hash` | Required: the full sha of the latest commit touching the skill, 40 lowercase hex characters, from the commits API; never a branch name or an abbreviated sha. Without a resolvable full sha, drop the candidate and count it in the closing line |
+| `commit_date` | Optional, informational only: that commit's date, `YYYY-MM-DD` |
 | `repo_stars` | Integer ≥ 0 |
 | `repo_age_days` | Integer ≥ 0: days since the repository was created |
 | `license` | The `license:` frontmatter field, else the repository's SPDX id; one line, at most 100 characters; `null` when unknown |

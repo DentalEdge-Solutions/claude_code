@@ -145,7 +145,7 @@ test('agent: the source_url row states the exact rule, the root-skill form and t
   assert.ok(row.includes('[A-Za-z0-9._~+-]'), 'segment charset');
   assert.ok(/no trailing slash/i.test(row), 'no trailing slash');
   assert.ok(/no `\.` or `\.\.` segment/i.test(row), 'no dot segments');
-  assert.ok(row.includes('/tree/<commit hash>`') && /repository root/i.test(row), 'root-level skill form');
+  assert.ok(row.includes('/tree/<commit_hash>`') && /repository root/i.test(row), 'root-level skill form');
   assert.ok(/drop the candidate/i.test(row), 'drop rule');
   assert.ok(/Candidates dropped: <D>/.test(text), 'dropped candidates are counted in the closing line');
 });
