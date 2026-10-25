@@ -151,7 +151,9 @@ One of two forms, nothing else:
 
 - **Dispatched with a capability and trigger_keywords:** the array in one fenced `json` block (`[]` only when the
   search found no candidate), then one line: "The calling session validates and scores this per skill-scout
-  step 5. Findings not tied to a returned candidate: <N>. Candidates dropped: <D>." (two numbers only, never names or paths)
+  step 5. Findings not tied to a returned candidate: <N>. Candidates dropped: <D>." (two numbers only, never names or paths).
+  <D> counts every candidate you dropped: no full commit sha, SKILL.md not fetchable at it, or a location that
+  cannot be written as an allowed URL.
 - **Capability or trigger_keywords missing:** no JSON, only this line: "No search run: invoke the skill-scout skill,
   which dispatches skill-scout-agent with trigger_keywords."
 

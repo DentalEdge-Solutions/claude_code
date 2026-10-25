@@ -189,7 +189,7 @@ test('skill-scout: the closing line is read only through the fixed pattern, with
   assert.ok(/non-empty and D > 0[^.]*further candidates could not be pinned, fetched or located/i.test(flat), 'non-empty + dropped → one line');
   assert.ok(/does not match[^.]*counts could not be read[^.]*not conclude/i.test(flat), 'no match → counts unreadable, no conclusion');
   // Round 5, PR5-R-26: an unmatched line with a non-empty array continues and says the dropped count is unknown.
-  assert.ok(/does not match[^:]*: if the array is empty[^;]*stop instead of step 9; if it is non-empty, continue[^.]*dropped count is unknown/i.test(flat),
+  assert.ok(/does not match[^.]*: if the array is empty[^;]*stop instead of step 9; if it is non-empty, continue[^.]*dropped count is unknown/i.test(flat),
     'unmatched line: empty → stop; non-empty → continue, dropped count unknown');
   // PR5-R-27: D covers every drop reason the agent counts.
   assert.ok(/D the number of candidates the agent dropped for any reason \(no full commit sha, SKILL\.md not fetchable at it, or a location that cannot be written as an allowed URL\)/i.test(flat),
