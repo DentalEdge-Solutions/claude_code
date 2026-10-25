@@ -319,6 +319,7 @@ Hermes: [`infra/hermes-agent/README.md`](infra/hermes-agent/README.md).
 
 Retired agent: `uninstall.sh` removes only the agents this repo still has, so if an earlier install copied the retired health-check agent into a target, delete `<target>/.claude/agents/skill-guardian.md` by hand.
 A target's existing `skill-builder` section in `CLAUDE.md` keeps its old health-check line until you run `uninstall.sh` and then `install.sh` (install skips a section that is already there).
+Upgrade after P0-05: re-run `./install.sh` in every target installed earlier. Until then the target keeps the old `skill-scout-agent` (Write, Bash and Agent tools) and the updated global skill-scout dispatches it; skill-scout stops when the old agent returns no JSON block.
 
 `install.sh` and `uninstall.sh` merge or remove only their own hooks in the target's
 `.claude/settings.json` and `.claude/settings.local.json`; uninstall keeps the other hooks in an

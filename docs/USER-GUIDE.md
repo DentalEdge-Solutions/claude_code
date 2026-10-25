@@ -147,7 +147,7 @@ Reads `project-context.json` and maps your stack, workflow terms, and MCP server
 find a skill for <capability>
 ```
 
-skill-scout dispatches `skill-scout-agent`, a read-only fetcher (Read, WebFetch, WebSearch) that searches in parallel and returns candidate fields as JSON, never a SKILL.md body. Called directly, the agent returns that JSON unscored.
+skill-scout dispatches `skill-scout-agent`, a read-only fetcher (Read, WebFetch, WebSearch) that searches in parallel and returns candidate fields as JSON, never a SKILL.md body. It is not a user entry point: ask skill-scout ("find a skill for ..."). Dispatched without `trigger_keywords`, the agent runs no search and returns only a one-line pointer to skill-scout.
 
 **skill-scout** (through the agent) checks 3 live registries (multica-ai, vercel-labs, Evol-ai/SkillCompass) and falls back to GitHub search. It then writes the agent's JSON to a scratch file outside the repository, validates and scores it on 7 dimensions with `score-candidates.js --agent-output` (it stops if the output is out of contract), and presents the top 3:
 
