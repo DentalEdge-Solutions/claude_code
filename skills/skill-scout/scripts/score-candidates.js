@@ -33,10 +33,11 @@
 //   plugin_names: string[],                  // caller-supplied
 //   candidates: [ {                          // the agent's JSON array, verbatim; closed key set:
 //     name: string,               // 1-64 chars, letters/digits/._- only, no spaces
-//     source_url: string,         // https://github.com/<org>/<repo>[/<segment>...], <= 500 chars: org in GitHub's
-//                                 // login charset, no '.'/'..' segments, no %, ?, #, \, @, port or userinfo
-//     commit_hash?: string,       // 7-40 hex chars; or, when no hash is resolvable:
-//     commit_date?: string,       // YYYY-MM-DD (at least one of the two; never a branch name)
+//     source_url: string,         // https://github.com/<org>/<repo>/tree/<commit_hash>[/<path>], <= 500 chars:
+//                                 // the ref is exactly commit_hash (tree only, never blob); org in GitHub's login
+//                                 // charset, no '.'/'..' segments, no %, ?, #, \, @, port or userinfo
+//     commit_hash: string,        // the full commit sha: 40 lowercase hex (PR5-R-20; never a branch name)
+//     commit_date?: string,       // optional, informational: YYYY-MM-DD
 //     repo_stars: integer >= 0,
 //     repo_age_days: integer >= 0,
 //     license: string | null,     // <= 100 chars, one line; null when unknown
@@ -90,7 +91,7 @@ const AGENT_CANDIDATE_KEYS = [
   'name', 'source_url', 'commit_hash', 'commit_date', 'repo_stars', 'repo_age_days', 'license',
   'skill_md_lines', 'has_scripts', 'has_reference', 'flags', 'description', 'body_keyword_hits',
 ];
-const OPTIONAL_KEYS = new Set(['commit_hash', 'commit_date']); // at least one of the two is required
+const OPTIONAL_KEYS = new Set(['commit_date']); // informational; commit_hash is required (PR5-R-20)
 const AGENT_TOP_KEYS = ['trigger_keywords', 'installed_skill_descriptions', 'plugin_names', 'candidates'];
 const FLAG_KEYS = ['location', 'kind', 'excerpt'];
 // instruction: text aimed at an AI; secret: something that looks like a secret (excerpt = its kind, never its
@@ -128,13 +129,14 @@ Legacy candidate schema:
   { "trigger_keywords": [string], "installed_skill_descriptions": [string],
     "plugin_names": [string], "candidates": [candidate] }
   candidates: at most ${CANDIDATES_MAX} (the agent's fetch limit)
-  candidate (closed key set, all required except one of commit_hash/commit_date):
+  candidate (closed key set, all required except commit_date):
     name               string, 1-${NAME_CAP} chars of letters, digits, . _ -
-    source_url         string, https://github.com/<org>/<repo>[/<segment>...],
+    source_url         string, https://github.com/<org>/<repo>/tree/<commit_hash>[/<path>]
+                       (the ref equals commit_hash; tree only, never blob),
                        <= ${URL_CAP} chars; org: GitHub login charset; no '.' or '..'
                        segments; no %, ?, #, \\, @, port or userinfo
-    commit_hash        string, 7-40 hex chars   } at least one; never a
-    commit_date        string, YYYY-MM-DD       } branch name
+    commit_hash        string, the full commit sha: 40 lowercase hex
+    commit_date        optional, informational: YYYY-MM-DD
     repo_stars         integer >= 0
     repo_age_days      integer >= 0
     license            string (one line, <= ${LICENSE_CAP} chars) or null
@@ -364,6 +366,11 @@ const GH_PREFIX = 'https://github.com/';
 const ORG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
 const SEGMENT_RE = /^[A-Za-z0-9._~+-]{1,200}$/;
+// PR5-R-20: the third and fourth segments are "tree" and exactly the pinned commit.
+function refIsPin(url, pin) {
+  const segs = url.slice(GH_PREFIX.length).split('/');
+  return segs[2] === 'tree' && segs[3] === pin;
+}
 function githubOrg(url) {
   if (typeof url !== 'string' || !url.startsWith(GH_PREFIX) || url.length > URL_CAP) return null;
   const [org, repo, ...rest] = url.slice(GH_PREFIX.length).split('/');
@@ -539,10 +546,12 @@ function validateAgentInput(input) {
       `must be 1-${NAME_CAP} characters of letters, digits, '.', '_' or '-'`);
     check('source_url', v => githubOrg(v) !== null,
       `must be https://github.com/<org>/<repo>[/<segment>...], at most ${URL_CAP} characters, without '.' or '..' segments, %, ?, #, \\, @ or a port`);
-    if (!Object.hasOwn(c, 'commit_hash') && !Object.hasOwn(c, 'commit_date')) {
-      errors.push(`${at}.commit_hash: missing (give commit_hash, or commit_date when no hash is resolvable)`);
+    check('commit_hash', v => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v),
+      'must be the full commit sha: 40 lowercase hex characters (never a branch name or an abbreviated sha)');
+    // PR5-R-20: the URL must point at exactly the pinned commit, so what is audited and adapted is what is shown.
+    if (githubOrg(c.source_url) !== null && typeof c.commit_hash === 'string' && !refIsPin(c.source_url, c.commit_hash)) {
+      errors.push(`${at}.source_url: must be https://github.com/<org>/<repo>/tree/<commit_hash>[/<path>] (the ref must equal commit_hash)`);
     }
-    check('commit_hash', v => typeof v === 'string' && /^[0-9a-f]{7,40}$/i.test(v), 'must be 7-40 hex characters (a commit, never a branch name)');
     check('commit_date', v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v), 'must be a date in YYYY-MM-DD form');
     for (const k of ['repo_stars', 'repo_age_days', 'skill_md_lines']) check(k, isCount, 'must be an integer >= 0');
     for (const k of ['has_scripts', 'has_reference']) check(k, v => typeof v === 'boolean', 'must be true or false');
@@ -595,24 +604,24 @@ function scoreAgentInput(input) {
   scored.sort((a, b) => b.s.total_score - a.s.total_score);
   return scored.map(({ s, c }) => {
     const out = { ...s };
-    if (!Object.hasOwn(c, 'commit_hash')) delete out.commit_hash;
     if (Object.hasOwn(c, 'commit_date')) out.commit_date = c.commit_date;
     Object.assign(out, { repo_stars: c.repo_stars, license: c.license, description: c.description, flags: c.flags });
     return out;
   });
 }
 
-// Reads at most `limit` bytes (works for regular files, pipes and FIFOs; never loads more than the limit).
+// Reads at most `limit` bytes of a regular file (PR5-R-21: a pipe, FIFO or device is refused, so a read can never
+// wait or spin; PR5-R-17: the read stays bounded for a file that grows after stat).
+class NotRegularFile extends Error {}
 function readBounded(filePath, limit) {
   const fd = fs.openSync(filePath, 'r');
   try {
+    if (!fs.fstatSync(fd).isFile()) throw new NotRegularFile('not a regular file');
     const chunks = [];
     let total = 0;
     while (total < limit) {
       const chunk = Buffer.alloc(Math.min(64 * 1024, limit - total));
-      let n;
-      try { n = fs.readSync(fd, chunk, 0, chunk.length, null); }
-      catch (e) { if (e.code === 'EAGAIN') continue; throw e; }
+      const n = fs.readSync(fd, chunk, 0, chunk.length, null);
       if (n === 0) break;
       chunks.push(chunk.subarray(0, n));
       total += n;
@@ -656,13 +665,18 @@ function main(argv) {
     console.error('score-candidates: nothing scored. Do not repair the input by hand: stop and report this problem.');
     process.exit(2);
   };
-  let size;
-  try { size = fs.statSync(filePath).size; } catch (e) { fail(`cannot read the file (${e.code || 'error'})`); }
-  if (size > INPUT_MAX_BYTES) reject(`input: larger than ${INPUT_MAX_BYTES} bytes (${size} bytes); the size rule is checked before decoding`);
-  // PR5-R-17: stat sees 0 for a pipe or FIFO and cannot see a file that grows after it, so the read itself is
-  // bounded (at most INPUT_MAX_BYTES + 1 bytes) and the bytes read are checked again.
+  let st;
+  try { st = fs.statSync(filePath); } catch (e) { fail(`cannot read the file (${e.code || 'error'})`); }
+  // PR5-R-21: only a regular file (checked here before opening, and on the open descriptor in readBounded).
+  if (!st.isFile()) reject('input: must be a regular file');
+  if (st.size > INPUT_MAX_BYTES) reject(`input: larger than ${INPUT_MAX_BYTES} bytes (${st.size} bytes); the size rule is checked before decoding`);
+  // PR5-R-17: stat cannot see a file that grows after it, so the read itself is bounded (at most
+  // INPUT_MAX_BYTES + 1 bytes) and the bytes read are checked again.
   let buf;
-  try { buf = readBounded(filePath, INPUT_MAX_BYTES + 1); } catch (e) { fail(`cannot read the file (${e.code || 'error'})`); }
+  try { buf = readBounded(filePath, INPUT_MAX_BYTES + 1); } catch (e) {
+    if (e instanceof NotRegularFile) reject('input: must be a regular file');
+    fail(`cannot read the file (${e.code || 'error'})`);
+  }
   if (oversize(buf)) reject(`input: larger than ${INPUT_MAX_BYTES} bytes (read more than the cap); the size rule is checked before decoding`);
   let text;
   try {
@@ -696,7 +710,7 @@ function main(argv) {
 
 module.exports = {
   DESCRIPTION_CAP, EXCERPT_CAP, AGENT_CANDIDATE_KEYS, AGENT_TOP_KEYS, FLAG_KINDS, INPUT_MAX_BYTES,
-  hiddenTextProblem, githubOrg, strictRead, oversize, CANDIDATES_MAX,
+  hiddenTextProblem, githubOrg, strictRead, oversize, readBounded, CANDIDATES_MAX,
   validateAgentInput, scoreAll, scoreAgentInput,
 };
 if (require.main === module) main(process.argv.slice(2));
