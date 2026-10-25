@@ -42,7 +42,7 @@
 //     skill_md_lines: integer >= 0,
 //     has_scripts: boolean,
 //     has_reference: boolean,
-//     flags: [ { location, kind, excerpt } ], // <= 20; kind "instruction" | "secret";
+//     flags: [ { location, kind, excerpt } ], // <= 20; kind "instruction" | "secret" | "hidden-text";
 //                                 // location and excerpt one-line strings <= 100 chars
 //                                 // (for a secret the excerpt names its kind, never its value)
 //     description: string,        // <= 1024 characters (code points): the Agent Skills spec maximum
@@ -54,7 +54,8 @@
 //    input: exit 2, one stderr line per problem naming the candidate index and key, never the offending value,
 //    nothing on stdout. So does anything where the validated value could differ from the raw text (see
 //    strictRead): a duplicate key at any depth, a number not written as a plain integer, a lone surrogate or
-//    a control, bidi or invisible character in any string, nesting deeper than 16. Invalid UTF-8 or a leading
+//    a hidden-text code point (HIDDEN_TEXT_RE: controls, format, private use, default-ignorable, noncharacters,
+//    U+2028/2029; tab and newline allowed) in any string, nesting deeper than 16. Invalid UTF-8 or a leading
 //    byte-order mark exit 1. Project fit then uses description + body_keyword_hits (the body is absent), which
 //    gives the same score as the body form when the hits were computed by the same substring rule.
 //    The shortlist is presented from this script's stdout (the validated values), never from the agent's reply.
@@ -78,7 +79,9 @@ const AGENT_CANDIDATE_KEYS = [
 const OPTIONAL_KEYS = new Set(['commit_hash', 'commit_date']); // at least one of the two is required
 const AGENT_TOP_KEYS = ['trigger_keywords', 'installed_skill_descriptions', 'plugin_names', 'candidates'];
 const FLAG_KEYS = ['location', 'kind', 'excerpt'];
-const FLAG_KINDS = new Set(['instruction', 'secret']);
+// instruction: text aimed at an AI; secret: something that looks like a secret (excerpt = its kind, never its
+// value); hidden-text: invisible characters the agent removed from a field (excerpt = what and how many).
+const FLAG_KINDS = ['instruction', 'secret', 'hidden-text'];
 // Names that suggest body text, so the message says why the key is refused.
 const BODY_LIKE_RE = /content|body|text|markdown|readme|raw|skill_md(?!_lines$)/i;
 
@@ -119,7 +122,7 @@ Legacy candidate schema:
     has_scripts        boolean
     has_reference      boolean
     flags              array (<= ${FLAGS_MAX}) of { location, kind, excerpt }:
-                       kind "instruction" | "secret"; location and excerpt
+                       kind "instruction" | "secret" | "hidden-text"; location and excerpt
                        one-line strings, <= ${LOCATION_CAP} and <= ${EXCERPT_CAP} chars
     description        string, <= ${DESCRIPTION_CAP} characters (Agent Skills spec maximum)
     body_keyword_hits  array of distinct elements of trigger_keywords (verbatim)
@@ -127,7 +130,8 @@ Legacy candidate schema:
   description + body_keyword_hits.
   Also rejected, at any depth: a duplicate key, a number not written as a
   plain integer (1.0, 1e2, -0, 1e400, beyond 2^53), a lone surrogate or a
-  control, bidi or invisible format character in any string (tab and
+  control, format (bidi, zero-width, tag), private-use, default-ignorable
+  or noncharacter code point, or U+2028/U+2029, in any string (tab and
   newline are allowed), nesting deeper than 16 levels.
 
 Exit codes:
@@ -332,9 +336,11 @@ const keyLabel = k => (/^[A-Za-z0-9_]{1,40}$/.test(k) ? k : `<a key of ${codePoi
 //   - a duplicate key at any depth (keys compared after decoding, so "description" = "description");
 //   - a number whose raw token is not what would be shown (1e400, 1.0, 1e2, -0, beyond 2^53): the token
 //     must equal String(value);
-//   - text that is not well-formed or not visible as written: lone surrogates, C0 controls other than tab,
-//     newline and carriage return, DEL, C1 controls, bidi controls, zero-width and invisible format
-//     characters, U+2028/U+2029 and U+FEFF;
+//   - text that is not well-formed or not visible as written (HIDDEN_TEXT_RE, by Unicode property, astral
+//     planes included): lone surrogates, controls other than tab, newline and carriage return, format
+//     characters (bidi controls, zero-width characters, tag characters U+E0000-E007F, musical-symbol format
+//     characters, U+FEFF ...), private use, default-ignorable code points (variation selectors, CGJ, Hangul
+//     fillers ...), noncharacters, and the line and paragraph separators U+2028/U+2029;
 //   - nesting deeper than MAX_DEPTH (the schema needs 4).
 // Objects are built without a prototype and with own data properties only, so "__proto__", "constructor"
 // and the like are ordinary keys (all outside the schema). Linear time: each character is consumed once.
@@ -343,7 +349,16 @@ const WS_RE = /[ \t\n\r]*/y;
 const STR_RE = /"(?:[^"\\\u0000-\u001f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*"/y;
 const NUM_RE = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
-const HIDDEN_CHAR_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B\u200C\u200E\u200F\u2028-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/;
+// One character class with the u flag, so it sees code points (astral ones too); test() on it is linear.
+// Property names are ECMA-262 general categories and binary properties (supported since Node 10).
+// No exception, not even ZWJ or a variation selector inside an emoji: either can carry text.
+const HIDDEN_TEXT_RE = /(?![\t\n\r])[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Noncharacter_Code_Point}]/u;
+// The reason a string is refused, or null. Lone surrogates first, for a precise message.
+function hiddenTextProblem(str) {
+  if (LONE_SURROGATE_RE.test(str)) return 'text is not well-formed Unicode (lone surrogate)';
+  if (HIDDEN_TEXT_RE.test(str)) return 'text contains a control, format, private-use, invisible or noncharacter code point';
+  return null;
+}
 class DepthError extends Error {}
 
 function strictRead(text) {
@@ -358,8 +373,7 @@ function strictRead(text) {
     return m[0];
   };
   const expect = ch => { if (text[i] !== ch) throw new SyntaxError('unexpected token'); i++; };
-  const badText = s => LONE_SURROGATE_RE.test(s) ? 'text is not well-formed Unicode (lone surrogate)'
-    : HIDDEN_CHAR_RE.test(s) ? 'text contains a control, bidi or invisible format character' : null;
+  const badText = hiddenTextProblem;
   const at = (path, key) => (path ? `${path}.${keyLabel(key)}` : keyLabel(key));
   function readValue(path, depth) {
     if (depth > MAX_DEPTH) throw new DepthError(path || 'input');
@@ -497,7 +511,7 @@ function validateAgentInput(input) {
           if (!isObj(f)) { errors.push(`${p}: must be an object { location, kind, excerpt }`); return; }
           for (const k of Object.keys(f)) if (!FLAG_KEYS.includes(k)) errors.push(`${p}.${keyLabel(k)}: key not in the schema`);
           for (const k of FLAG_KEYS) if (!Object.hasOwn(f, k)) errors.push(`${p}.${k}: missing`);
-          if (Object.hasOwn(f, 'kind') && !FLAG_KINDS.has(f.kind)) errors.push(`${p}.kind: must be "instruction" or "secret"`);
+          if (Object.hasOwn(f, 'kind') && !FLAG_KINDS.includes(f.kind)) errors.push(`${p}.kind: must be one of ${FLAG_KINDS.join(', ')}`);
           if (Object.hasOwn(f, 'location') && !isOneLine(f.location, LOCATION_CAP)) errors.push(`${p}.location: must be one line of at most ${LOCATION_CAP} characters`);
           if (Object.hasOwn(f, 'excerpt') && !isOneLine(f.excerpt, EXCERPT_CAP)) errors.push(`${p}.excerpt: must be one line of at most ${EXCERPT_CAP} characters`);
         });
@@ -577,7 +591,7 @@ function main(argv) {
 }
 
 module.exports = {
-  DESCRIPTION_CAP, EXCERPT_CAP, AGENT_CANDIDATE_KEYS, AGENT_TOP_KEYS,
+  DESCRIPTION_CAP, EXCERPT_CAP, AGENT_CANDIDATE_KEYS, AGENT_TOP_KEYS, FLAG_KINDS, hiddenTextProblem,
   validateAgentInput, scoreAll, scoreAgentInput,
 };
 if (require.main === module) main(process.argv.slice(2));
