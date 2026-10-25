@@ -2,7 +2,7 @@
 
 > Date: 2026-10-25 · Item: P0-05 (S5 roadmap, V-S5-7) · Trace: OPP-02 (b) · GAP-01 · breach (b) · DECISION-S3-2 (a) ·
 > V-S3-6 · Branch `fix/p0-05-scout-read-only-fetcher` from `main` at `d3184d5` · Background security reviews: three ·
-> Review round 1: PR5-R-1 … R-15 · Review round 2: PR5-R-16 … R-19 · Review round 3: PR5-R-20, R-21 · Review round 4: PR5-R-22 … R-25 (see the last sections)
+> Review round 1: PR5-R-1 … R-15 · Review round 2: PR5-R-16 … R-19 · Review round 3: PR5-R-20, R-21 · Review round 4: PR5-R-22 … R-25 · Review round 5: approved, notes PR5-R-26, R-27 applied (see the last sections)
 
 ## What changed and why
 
@@ -134,7 +134,7 @@ the ranking, every total, every dimension and every band are equal.
 
 ## Static scan (`skills/skill-audit/scripts/static-scan.js`, local, no network)
 
-| Target | Before (`d3184d5`) | After (`e9e0622`) |
+| Target | Before (`d3184d5`) | After (`5b89478`) |
 |---|---|---|
 | `.claude/agents/skill-scout-agent.md` | PASS, 0 findings | PASS, 0 findings |
 | `skills/skill-scout/` | PASS, 0 findings | PASS, 0 findings |
@@ -286,6 +286,17 @@ and one contents URL and no copy rule), green `e9e0622`.
 | PR5-R-24 | The fetcher test collects every candidate URL template in the agent (`raw.githubusercontent.com/<org>…`, `api.github.com/repos/<org>…`): raw URLs must contain `/<commit_hash>/`, contents URLs `ref=<commit_hash>`, both root forms must be present, and none may contain `/main/`, `/master/`, `/HEAD/` or `//SKILL.md` (the registry READMEs, with real org names, are exempt). Mutants on a scratch copy at `e9e0622`: m15 (raw SKILL.md on `main`) **caught**; m16 (contents without `ref`), m17 (empty array goes to step 9 again) and m18 (the D pattern loosened to `(.*)`) **caught**; the unmutated copy passes |
 | PR5-R-25 | The 8m/8f2 row and the PR5-R-16 entry now give the root-level example with a full 40-hex pin |
 
+## Review round 5 (approved; notes PR5-R-26, R-27 applied)
+
+The reviewer approved at `144ddea` with two optional notes, which the coordinator asked to apply. Red `8e23066`
+(the step 4 messages and the agent's `<D>` definition used the old wording), green `5b89478`. The closing-line
+pattern is unchanged.
+
+| ID | Resolution |
+|---|---|
+| PR5-R-26 | Step 4's unmatched-line branch now says: if the array is empty, stop instead of step 9; if it is non-empty, continue to step 5 and add one line under the shortlist in step 7 saying the dropped count is unknown. A valid run is no longer stopped by an unreadable closing line (for example more than 99 unattached findings). Fetcher-test assertion for both cases. In `5b89478` the new assertion's regex was corrected (`[^:]*` stopped at the first colon of the line; now `[^.]*`); the asserted wording did not change |
+| PR5-R-27 | D is now "the number of candidates the agent dropped for any reason (no full commit sha, SKILL.md not fetchable at it, or a location that cannot be written as an allowed URL)", and both messages say "could not be pinned, fetched or located". The agent's Final message defines `<D>` in the same words ("`<D>` counts every candidate you dropped: …"); fetcher-test assertions on both sides |
+
 ## Not measured
 
 Evals were not run: B0 pre-edit evals were skipped by owner decision, and acceptance evals land in P1-10/B6.
@@ -350,7 +361,7 @@ Evals were not run: B0 pre-edit evals were skipped by owner decision, and accept
 
 ## Checks
 
-At `e9e0622` (the code head after review round 4; the record commit changes only this file), Node v26.9.0:
+At `5b89478` (the code head after review round 5; the record commit changes only this file), Node v26.9.0:
 
 | Command | Result |
 |---|---|
@@ -358,8 +369,8 @@ At `e9e0622` (the code head after review round 4; the record commit changes only
 | `node scripts/validate-skills.js` | exit 0; "30 skills checked — 30 passed, 0 failed", "skill references: 0 unresolved", "untrusted-content framing: 0 missing", "analyst tools: 0 not read-only", "web readers without the paragraph: 0"; **0 WARN lines** |
 | `node scripts/ci-scan-skills.js` | exit 0; "PASS: every finding of both passes is accounted for by the reviewed baseline; no stale entries." |
 | `node scripts/ci-static-fallback.js` | exit 0; "Static fallback: PASSED" |
-| `node --check skills/skill-scout/scripts/score-candidates.js` | OK |
+| `node --check skills/skill-scout/scripts/score-candidates.js` | OK (the scorer is unchanged since `f828d25`/`0c631fe`) |
 | `static-scan.js` on the agent and on `skills/skill-scout/` | PASS, 0 findings each |
-| 1 MB timing (in `score-candidates.test.js`) | 2 × 1 MB hidden-text scan 9.9 ms; CLI on a 1 MB description 41.5 ms |
+| 1 MB timing | unchanged scorer; last measured at `e9e0622`: 2 × 1 MB hidden-text scan 9.9 ms, CLI on a 1 MB description 41.5 ms |
 | Diff of `d3184d5...HEAD` on `evals/`, `.project-brain/`, the pinned evaluator files, `scripts/codex/` | empty |
 | Working tree status, untracked files included | empty |
