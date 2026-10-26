@@ -83,7 +83,7 @@ Deep multi-layer audit of any public GitHub repository, using 8 parallel layer a
 ### Skill Pipeline
 
 #### `skill-scout`
-Searches GitHub and known registries for existing skills that match a capability. Reads `evals/project-context.json` as a pre-flight check — if rich context is present (non-empty `stack` and `key_phrases`), it pre-fills search parameters without asking redundant questions. Returns a ranked shortlist scored on trigger precision, instruction clarity, context footprint, project fit, provenance, and conflict risk.
+Searches GitHub and known registries for existing skills that match a capability. Reads `evals/project-context.json` as a pre-flight check — if rich context is present (non-empty `stack` and `key_phrases`), it pre-fills search parameters without asking redundant questions. Returns a ranked shortlist scored on trigger precision, instruction clarity, context footprint, project fit, provenance, and conflict risk. The search runs in `skill-scout-agent`, a read-only fetcher that returns candidate fields (never a SKILL.md body); skill-scout validates that JSON and scores it with `score-candidates.js --agent-output`.
 
 **Triggers:** "find a skill for X", "is there a skill that can Y", "source a skill"
 
@@ -171,7 +171,7 @@ Runtime sub-agents that implement parallelizable or autonomous parts of the pipe
 
 | Agent | Model | Role | Invoked by |
 |---|---|---|---|
-| `skill-scout-agent` | sonnet | Parallel registry + GitHub search | `skill-scout` |
+| `skill-scout-agent` | sonnet | Read-only fetcher (Read, WebFetch, WebSearch): parallel registry + GitHub search, returns candidate fields as JSON; writes and scores nothing | `skill-scout` |
 | `skill-eval-agent` | sonnet | Parallel scenario execution with evidence-first grading (up to 42 subagents); resumes interrupted runs from the run manifest | `skill-eval`, `skill-refine` |
 | `skill-refine-agent` | sonnet | Autoresearch loop orchestration for skills | user / autoresearch loop |
 | `agent-eval-agent` | sonnet | Mirror of `skill-eval-agent` for agent definitions; measures Dispatch Accuracy instead of Trigger Accuracy | `agent-eval`, `agent-refine` |
@@ -319,6 +319,7 @@ Hermes: [`infra/hermes-agent/README.md`](infra/hermes-agent/README.md).
 
 Retired agent: `uninstall.sh` removes only the agents this repo still has, so if an earlier install copied the retired health-check agent into a target, delete `<target>/.claude/agents/skill-guardian.md` by hand.
 A target's existing `skill-builder` section in `CLAUDE.md` keeps its old health-check line until you run `uninstall.sh` and then `install.sh` (install skips a section that is already there).
+Upgrade after P0-05: re-run `./install.sh` in every target installed earlier. Until then the target keeps the old `skill-scout-agent` (Write, Bash and Agent tools) and the updated global skill-scout dispatches it; skill-scout stops when the old agent returns no JSON block.
 
 `install.sh` and `uninstall.sh` merge or remove only their own hooks in the target's
 `.claude/settings.json` and `.claude/settings.local.json`; uninstall keeps the other hooks in an

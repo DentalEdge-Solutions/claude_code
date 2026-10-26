@@ -123,9 +123,9 @@ function findUnresolvedSkillRefs({ skillsDir, agentDirs = [], knownSkillDirs = [
 // and reviewed, like EXTERNAL_SKILLS. Nothing iterates "all skills" from it. A listed file that
 // is missing (renamed) is an error, so the list cannot go stale silently. The repo-audit
 // analysts are found by glob (UNTRUSTED_ANALYST_RE in .claude/agents/); finding none is an error.
-// A reader that is not listed is caught by the web-reader warning (findUnframedWebReaders).
-// Not listed yet, by design: skill-scout-agent (P0-05), Hermes (P1-16). Add a file here when
-// its item lands.
+// A reader that is not listed is caught by the web-reader warning (findUnframedWebReaders); since
+// P0-05 listed skill-scout-agent, no definition in this tree warns. Not listed yet, by design:
+// Hermes (P1-16, outside this tree). Add a file here when its item lands.
 const UNTRUSTED_INTAKE_FILES = [
   'skills/repo-audit/SKILL.md',                        // P0-03
   'skills/skill-scout/SKILL.md',                       // P0-06 from here on
@@ -140,6 +140,7 @@ const UNTRUSTED_INTAKE_FILES = [
   'skills/reference-repo-add/SKILL.md',                // PR3 review R-5
   '.claude/agents/skill-synthesizer-agent.md',
   '.claude/skills/codex-eval/SKILL.md',
+  '.claude/agents/skill-scout-agent.md',               // P0-05: read-only fetcher
 ];
 const UNTRUSTED_ANALYST_DIR = '.claude/agents';
 const UNTRUSTED_ANALYST_RE = /^repo-audit-.+\.md$/;

@@ -147,9 +147,9 @@ Reads `project-context.json` and maps your stack, workflow terms, and MCP server
 find a skill for <capability>
 ```
 
-Or directly: `skill-scout-agent` for parallel registry search.
+skill-scout dispatches `skill-scout-agent`, a read-only fetcher (Read, WebFetch, WebSearch) that searches in parallel and returns candidate fields as JSON, never a SKILL.md body. It is not a user entry point: ask skill-scout ("find a skill for ..."). Dispatched without `trigger_keywords`, the agent runs no search and returns only a one-line pointer to skill-scout.
 
-**skill-scout** checks 3 live registries (multica-ai, vercel-labs, Evol-ai/SkillCompass), falls back to GitHub search, scores on 7 dimensions, and presents the top 3:
+**skill-scout** (through the agent) checks 3 live registries (multica-ai, vercel-labs, Evol-ai/SkillCompass) and falls back to GitHub search. It then writes the agent's JSON to a scratch file outside the repository, validates and scores it on 7 dimensions with `score-candidates.js --agent-output` (it stops if the output is out of contract), and presents the top 3:
 
 | Dimension | Weight |
 |---|---|
@@ -368,4 +368,4 @@ Your project-level permission allowlist (`.claude/settings.local.json`) is corre
 
 **Current security grade: C (73/100)** — Secrets 100, Hooks 100, MCP 100, Permissions 59, Agents 5.
 
-The remaining HIGH findings are intentional architectural decisions: Node.js interpreter access is required for a Node.js skill-builder; agent Bash access is required for all pipeline operations; skill-scout's web+write combination is required for registry fetching and skill installation.
+The remaining HIGH findings are intentional architectural decisions: Node.js interpreter access is required for a Node.js skill-builder; agent Bash access is required for all pipeline operations. The grade predates P0-05 (2026-10-25), which removed skill-scout-agent's web+write combination (it is now read-only); the grade has not been re-measured since.
