@@ -43,5 +43,26 @@
       "Bash(git -C * branch -D *)",
       "Bash(node */scripts/brain/brain-promote.js *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": [
+              "-c",
+              "for g in \"$1/hooks/brain/brain-security-guard.sh\" \"$1/../../hooks/brain/brain-security-guard.sh\"; do if [ -f \"$g\" ]; then exec bash \"$g\"; fi; done; echo '{\"systemMessage\":\"brain-security-guard not found from this session (CLAUDE_PROJECT_DIR); this tool call was not checked\"}'; exit 0",
+              "brain-guard-launcher",
+              "${CLAUDE_PROJECT_DIR}"
+            ],
+            "timeout": 30,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
   }
 }
