@@ -21,7 +21,7 @@ function run() {
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 const json = f => JSON.parse(fs.readFileSync(f, 'utf8'));
-const MATCHER = 'Write|Edit|NotebookEdit|Bash';
+const MATCHER = 'Write|Edit|NotebookEdit|Bash|Monitor|PowerShell';
 const GUARD = {
   type: 'command', command: 'bash', args: ['${CLAUDE_PROJECT_DIR}/hooks/brain/brain-security-guard.sh'],
   timeout: 30, onFailure: 'block',
@@ -141,6 +141,15 @@ try {
   assert.strictEqual(r.status, 0, r.stderr);
   assert.deepStrictEqual(guardHooks(json(SHARED).hooks.PreToolUse), [{ ...bare, timeout: 45, onFailure: 'continue' }],
     'owner-set timeout and onFailure kept');
+
+  // 6b. PR7-R-6: an entry registered before Monitor and PowerShell were guarded gets the full
+  //     matcher, with no second copy.
+  fs.writeFileSync(SHARED, JSON.stringify({ hooks: { PreToolUse: [
+    { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [{ ...GUARD }] }] } }, null, 2));
+  r = run();
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.stdout, /hook entries merged \(1 added or updated\)/);
+  assert.deepStrictEqual(json(SHARED).hooks.PreToolUse, [{ matcher: MATCHER, hooks: [GUARD] }], 'matcher widened in place');
 
   // 7. A null entry, or a null hook inside an entry, in any list the installer writes to is kept
   //    as found and does not stop the install (review G11), in both files.

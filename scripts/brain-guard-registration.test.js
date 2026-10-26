@@ -25,7 +25,7 @@ const REPO = path.join(__dirname, '..');
 const ROOT_SETTINGS = path.join(REPO, '.claude', 'settings.json');
 const HERMES_DIR = path.join(REPO, 'infra', 'hermes-agent');
 const HERMES_SETTINGS = path.join(HERMES_DIR, '.claude', 'settings.json');
-const MATCHER = 'Write|Edit|NotebookEdit|Bash';
+const MATCHER = 'Write|Edit|NotebookEdit|Bash|Monitor|PowerShell';
 const PB = '.project-' + 'brain';
 
 let ok = true;
