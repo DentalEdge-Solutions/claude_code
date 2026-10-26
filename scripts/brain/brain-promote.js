@@ -55,8 +55,19 @@ if (hits.length) {
 const destDir = to === 'canon' ? path.resolve(target, 'canon')
   : to === 'superseded' ? path.resolve(target, 'decisions', 'superseded') : activeDir;
 const dest = path.join(destDir, path.basename(src));
-// Writing a file onto itself and then removing the source would delete it.
-if (dest === src) {
+// Writing a file onto itself and then removing the source would delete it. Compared by file
+// identity, not path text: on a case-insensitive disk decisions/ACTIVE/x.md is decisions/active/x.md
+// (PR7-R-3). A destination that cannot be compared counts as the same file.
+const sameFile = (() => {
+  if (dest === src) return true;
+  if (!fs.existsSync(dest)) return false;
+  try {
+    const a = fs.statSync(src), b = fs.statSync(dest);
+    if (a.dev === b.dev && a.ino === b.ino) return true;
+    return fs.realpathSync.native(src) === fs.realpathSync.native(dest);
+  } catch { return true; }
+})();
+if (sameFile) {
   console.error(`brain-promote: source and destination are the same file: ${rel}`);
   process.exit(1);
 }
