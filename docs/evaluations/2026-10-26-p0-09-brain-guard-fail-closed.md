@@ -242,7 +242,13 @@ and 10 of 10 allowed as intended; self-review 0 of 6; J/K both denied.
 
 ### Deliberate residuals (kept, with reasons; updated in review round 1)
 
-1. An archive extract (`cpio -id`, `tar -x`, `unzip`) run outside the capsule whose archive holds capsule paths (round 2). A command built at run time with **no** protected-looking text (`$(printf …)` producing both `canon` and the
+1. An extractor whose input the guard cannot see: an archive extract (`tar -x`, `cpio -i`, `unzip`), `rsync` from a
+   source, or a path-less `git checkout`/`restore`/`apply`, run with the working directory outside the capsule, at the
+   capsule root or in `decisions/`: the archive, source or patch can hold `canon/…` or `decisions/active/…` members,
+   and the command line names no protected path (round 2; widened in round 3, PR7-R-15; base allowed these too). Run
+   from inside `canon/` or `decisions/active/`, it is denied (the working directory is protected). Follow-up
+   candidate: treat an extractor in a non-reader stage as reaching the protected folders whenever the shell is
+   inside the capsule. A command built at run time with **no** protected-looking text (`$(printf …)` producing both `canon` and the
    capsule name, a decoded string, a script an executor runs), and store-then-run across two calls (a message or
    log line written in one Bash call and run by `sh` in a later one) — static analysis cannot decide; blocking every
    expansion in every command would block ordinary work.
@@ -265,7 +271,13 @@ and 10 of 10 allowed as intended; self-review 0 of 6; J/K both denied.
    `for f in <active>/*.md; do head "$f"; done`; `( cat <canon file> & )` (N4); a commit, PR or capture message that names a
    protected folder in a heredoc or substitution (round 2: pass it with `git commit -F`, `--body-file` or stdin); prose and fixture lines in the real corpus; `cd .project-brai? && make`. Every PowerShell
    call in a project with a capsule (deliberate, review M: PowerShell is not parsed; this project does not use it).
-7. G4 and G5 of the P11 repair stay as recorded (a capsule-leaving `cd` on a line with a group is not honored).
+7. G4 of the P11 repair ("the reader exemption depends on knowing each reader's program-running options") is now
+   mostly addressed: each reader passes only with options from its own allowlist, and git readers with a
+   per-subcommand allowlist (review O, Q), so an unknown option ends the exemption. What remains: grep, egrep,
+   fgrep, rg, test, `[`, true and false take any option (none of their options writes a file; rg `--pre` and
+   `--hostname-bin` are caught as program-running), find is checked by its actions, and the delete rule's own reader
+   exemption (`NON_EXEC`, kept from P11 as the floor's) still lists programs, not options. G5 stays as recorded (a
+   capsule-leaving `cd` on a line with a group is not honored).
 8. A reader is trusted by name: a program planted in a `PATH` folder (or `/usr/local/bin`, `/opt/homebrew/bin`) under a
    reader's name runs as that reader.
 9. **The guard does not protect itself** (N6): a Write to `hooks/brain/brain-security-guard.sh`, or to the first
@@ -439,6 +451,18 @@ The reviewer closes findings. Base of this round: `b33c6d1`.
 - Mutants on the round-2 code: 5 of 5 killed (guidance text off, `-c` back for every reader, unquoted sed form off, unquoted sed with any script, MultiEdit not checked). A follow-up commit (`b361b3f` red → `0c60e59`) makes the brain-capture reason say that brain-capture reads the message from stdin when `--message` is absent (`brain-capture.js --type <type> < <file>`).
 
 **Round 2 checks:** `node scripts/run-all-tests.js` alone: **47/47 suites passed**, no F1 retry printed; `node scripts/validate-skills.js` exit 0; `node scripts/ci-scan-skills.js` PASS, no unmatched or stale findings; `bash -n` (through node) on the guard, `brain-self-install.sh`, `install.sh`, `uninstall.sh` exit 0; `security-doc-wrap.test.js` passes; the hidden-character and static scans are in the report.
+
+## Review round 3 (independent review of `1d6b3de`): author's answers
+
+The reviewer approves; no blocking finding. No guard code changed in this round.
+
+| ID | Answer | Red → fix | Test |
+|---|---|---|---|
+| PR7-R-14 | Deny tests for `git -ccore.pager=cat log`, `git -cdiff.external=cat diff` and `git --frobnicate log` on a canon file (path built at run time); they pass on the current code. In scratch copies (discarded afterwards): mutant T3 (unknown global option not treated as config) is **killed** by the `--frobnicate` case. Mutant T2 alone (attached `-cX` not matched as `-c`) **still passes**: every attached `-cX` is also an unknown global option, and that branch denies it, so T2 is equivalent while T3's branch stands. T2 and T3 together are **killed** by the `-ccore.pager` case | tests only, `1d03b76` | `brain-hooks.test.js` review Q block |
+| PR7-R-15 | Coordinator decision: recorded, not code (base allowed these too). Residual 1 now covers any extractor whose input the guard cannot see (`tar -x`, `cpio -i`, `unzip`, `rsync`, a path-less `git checkout`/`restore`/`apply`) run outside the capsule, at its root or in `decisions/`; denied from inside `canon/` or `decisions/active/`; a follow-up candidate. Same text in `SECOND_BRAIN_SECURITY.md` | docs | — |
+| Residual 7 | G4 is no longer dropped: it is mostly addressed by the per-program and per-git-subcommand option allowlists; what remains is listed | docs | — |
+
+**Round 3 checks:** `node scripts/run-all-tests.js` alone: **47/47 suites passed**, no F1 retry printed; `security-doc-wrap.test.js` passes; the changed files (the test file, this record, `SECOND_BRAIN_SECURITY.md`) hold no bidi, zero-width or control characters in their added lines.
 
 ## Owner actions
 

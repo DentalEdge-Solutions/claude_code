@@ -239,6 +239,10 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
    reaches a protected folder (`awk`, `sort`, `less`, `python3 -c`, `node -e`, most `sed`) or
    carries the word `rm` next to a capsule path (`xargs grep rm …`, `git rm --cached …`). Known
    limits:
+   - an extractor whose input the guard cannot see (`tar -x`, `cpio -i`, `unzip`, `rsync`, a
+     path-less `git checkout`/`restore`/`apply`) run outside the capsule, at its root or in
+     `decisions/`: its archive, source or patch can hold canon/ or decisions/active/ members
+     (denied when run from inside canon/ or decisions/active/; a follow-up candidate);
    - commands built at run time without any protected-looking text (a decoded string, a
      script an executor runs); loops whose body holds the only capsule reference after a
      variable; code that writes or deletes through an API the guard does not name;
