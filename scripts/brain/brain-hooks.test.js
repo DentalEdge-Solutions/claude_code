@@ -821,6 +821,22 @@ try {
     assert.ok(isDeny(res), `must deny (self-review): ${cmd.slice(0, 120)} → ${res.stdout} ${res.stderr}`);
   }
 
+  // 6i-j. Reviews J (state drift) and K (parser differential). The guard keeps no state between
+  // calls; the inputs it reads from the environment cannot turn a block into an allow: with HOME
+  // unset a ~ word is an expansion it cannot follow. K: the cd builtin reads "link/.." logically
+  // (the folder holding the link), a program physically; words are checked both ways.
+  seedCapsule();
+  fs.symlinkSync(path.join(BRAIN, 'decisions'), path.join(TMP, 'zz2'));
+  fs.mkdirSync(path.join(TMP, 'other', 'sub'), { recursive: true });
+  fs.symlinkSync(path.join(TMP, 'other', 'sub'), path.join(BRAIN, 'decisions', 'xl'));
+  {
+    let res = bashAt('cd zz2/xl/../active && touch d.md', TMP);
+    assert.ok(isDeny(res), `logical cd into decisions/active must be denied: ${res.stdout}`);
+    res = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Bash',
+      tool_input: { command: 'cp /tmp/x ~/canon-notes.md' }, cwd: TMP }, TMP, { env: { HOME: '' } });
+    assert.ok(isDeny(res), `with HOME unset, a ~ word next to a protected-looking name must be denied: ${res.stdout}`);
+  }
+
   // 6i-g. A truncated guard program blocks. The node program sits in a bash single-quoted string,
   // so a stray apostrophe ends it early; during P0-09 one did (in a comment), and the program that
   // still ran defined its helpers, checked nothing and allowed every call with exit 0. The program
