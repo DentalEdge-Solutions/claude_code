@@ -1058,7 +1058,13 @@ try {
     if (/git commit|gh pr/.test(cmd))
       assert.ok(/git commit -F/.test(res.stdout) && /--body-file/.test(res.stdout), `the reason says how to pass the message: ${res.stdout}`);
     else
-      assert.ok(/--message/.test(res.stdout), `the reason says to avoid naming the protected paths in --message: ${res.stdout}`);
+      assert.ok(/--message/.test(res.stdout) && /stdin/.test(res.stdout),
+        `the reason says brain-capture reads the message from stdin, or to avoid the paths in --message: ${res.stdout}`);
+  }
+  // brain-capture reads the message from stdin when --message is absent: from a file outside the capsule it passes
+  {
+    const res = bashAt(`node scripts/brain/brain-capture.js --type note < ${path.join(TMP, 'msg.txt')}`, TMP);
+    assert.strictEqual(res.stdout.trim(), '', `brain-capture from a file passes: ${res.stdout}`);
   }
   // Legacy MultiEdit edits a file like Edit; cpio is no reader (it writes files from an archive).
   let me = tool('MultiEdit', { file_path: path.join(BRAIN, 'canon', 'x.md'), edits: [] });
