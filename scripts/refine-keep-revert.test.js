@@ -26,11 +26,12 @@ function test(label, fn) {
   catch (e) { console.error(`FAIL ${label}: ${e.message}`); ok = false; }
 }
 
-// track: which definition's size decides a neutral result. sync: the keep step copies the skill to ~/.claude/skills.
+// track: which definition's size decides a neutral result. staged: the keep step stages the skill for the owner's
+// deploy instead of copying it to ~/.claude/skills (P0-08; scripts/staged-deploys.test.js checks no step copies it).
 const RULE_DOCS = [
-  { file: 'skills/skill-refine/SKILL.md', track: 'skill', sync: true },
+  { file: 'skills/skill-refine/SKILL.md', track: 'skill', staged: true },
   { file: 'skills/skill-refine/REFERENCE.md', track: 'skill' },
-  { file: '.claude/agents/skill-refine-agent.md', track: 'skill', sync: true },
+  { file: '.claude/agents/skill-refine-agent.md', track: 'skill', staged: true },
   { file: 'skills/agent-refine/SKILL.md', track: 'agent' },
   { file: 'skills/agent-refine/REFERENCE.md', track: 'agent' },
   { file: '.claude/agents/agent-refine-agent.md', track: 'agent' },
@@ -51,7 +52,7 @@ const LOG_DECISIONS = 'KEPT/REVERTED/NEUTRAL-KEPT/NEUTRAL-REVERTED';
 // Bold markers dropped, so "**REVERT unless …**" and "REVERT unless …" read the same.
 const linesWith = (text, s) => text.split('\n').map(l => l.replace(/\*\*/g, '')).filter(l => l.includes(s));
 
-for (const { file, track, sync } of RULE_DOCS) {
+for (const { file, track, staged } of RULE_DOCS) {
   const text = fs.readFileSync(path.join(REPO, file), 'utf8');
 
   test(`${file}: the keep band keeps`, () => {
@@ -76,7 +77,7 @@ for (const { file, track, sync } of RULE_DOCS) {
       assert.ok(!/if it did(?:n.t| not)/i.test(l), `neutral line keeps when the file did not get shorter: ${l.trim()}`);
       assert.ok(l.includes(BASELINE_KEPT), `neutral line lacks "${BASELINE_KEPT}": ${l.trim()}`);
       if (track === 'skill') assert.ok(l.toLowerCase().includes(LEVER_DE), `neutral line lacks "${LEVER_DE}": ${l.trim()}`);
-      if (sync) assert.match(l, /if it did, KEEP and sync as above/i, `neutral KEEP does not sync: ${l.trim()}`);
+      if (staged) assert.match(l, /if it did, KEEP \(staged as above\)/i, `neutral KEEP is not staged: ${l.trim()}`);
     }
   });
 
