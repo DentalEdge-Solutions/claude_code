@@ -62,17 +62,17 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
      pipeline is a pure reader (`grep`, `cat`, `ls`, `head`, `wc`, `stat`, `diff`, `jq`, `echo`,
      `find` without `-exec`/`-delete`/`-fprint`/`-fls`, `git status/log/diff/show/grep/blame/
      ls-files/ls-tree/rev-parse/add/commit` …, no `--output`; run by bare name or from `/bin`,
-     `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, never `./cat`), or `sed -n '<a>[,<b>]p'`
-     (single-quoted, line numbers, `$` or `/re/`, then plain file names), or a stage of plain
-     lowercase assignments (`x=1;`), with no `$(…)`, backticks, heredoc, comment or writing
-     redirect. Each reader passes only with options from its allowlist (an unknown option makes
-     it no reader; `printf` takes none, `git -p` is no reader). Message text is data: the literal
-     value of `git commit -m/-F`, `gh pr create|edit --title/--body/--body-file` and
-     `brain-capture.js --message/--title` (single-quoted, double-quoted with no `$` or backtick,
-     or `$(cat <<'X' … X)` with a quoted delimiter) is not read for paths, but only when every
-     command of the call is `git add/commit/push/status/log/diff/show`, `gh pr
-     create/edit/view`, `brain-capture` or a plain `cd`, so the message cannot be read back and
-     run in the same call. A command reaches them:
+     `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, never `./cat`), or `sed -n <a>[,<b>]p`
+     (`'<a>[,<b>]p'` single-quoted with line numbers, `$` or `/re/`, or unquoted with line
+     numbers, then plain file names), or a stage of plain lowercase assignments (`x=1;`), with no
+     `$(…)`, backticks, heredoc, comment or writing redirect. Each reader passes only with options
+     from its allowlist (an unknown option makes it no reader; `printf` takes none, `git -p` is
+     no reader; `-c` ends the exemption only as a git global option). Commit, PR and capture
+     messages get the same checks as any other text: a message that names a protected folder in
+     a heredoc or a substitution is denied, and the reason says to write it to a file outside the
+     capsule and use `git commit -F <file>` or `gh pr create|edit --body-file <file>` (review
+     round 2 removed a literal-message exemption that read comments and ANSI-C quoting differently
+     from bash). A command reaches them:
      - by name in its text, with ANSI-C `$'…'` escapes decoded, quotes and backslashes dropped,
        folded, `//` and `/./` collapsed; or the word `canon`/`active` in a command that also names
        the capsule or runs inside it;
@@ -93,7 +93,8 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
      capsule folder itself as `--target`. Over 5,000 words or 20,000 disk lookups, a command
      passes only in a read-only form. The guard also runs on `Monitor`, whose command goes
      through these rules, and on `PowerShell`, which it cannot parse: in a project with a capsule
-     every PowerShell call is denied (the tool is opt-in on macOS and Linux). A Write, Edit or
+     every PowerShell call is denied (the tool is opt-in on macOS and Linux); and on legacy
+     `MultiEdit`, checked like Edit. A Write, Edit, MultiEdit or
      NotebookEdit target with more than one hard link is compared by device and inode with the
      files of canon/ and decisions/active/ (at most 5,000 entries; past that or on error,
      denied). The weekly review stages a changed decision as a candidate
