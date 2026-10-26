@@ -78,6 +78,21 @@ try {
   assert.deepStrictEqual(shared.hooks.PreToolUse, [{ matcher: MATCHER, hooks: [GUARD] }],
     'guard registered once in settings.json: exec form, timeout 30, onFailure block');
 
+  // 2b. PR7-R-4: the standalone install (no install.sh before it) also gives the target the guard
+  //     script its fail-closed registration names. Without it every Write/Edit/Bash there would be
+  //     blocked (bash cannot open the missing script: a failure, and onFailure is "block").
+  const targetGuard = path.join(TMP, 'hooks', 'brain', 'brain-security-guard.sh');
+  assert.ok(fs.existsSync(targetGuard), 'the guard script is in the target');
+  {
+    const h = shared.hooks.PreToolUse[0].hooks[0];
+    const res = spawnSync(h.command, h.args.map(a => a.split('${CLAUDE_PROJECT_DIR}').join(TMP)), {
+      encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: TMP },
+      input: JSON.stringify({ tool_name: 'Write', tool_input: { file_path: path.join(TMP, '.project-brain', 'canon', 'x.md'), content: 'x' } }),
+    });
+    assert.strictEqual(res.status, 0, `the registered handler runs in the target: ${res.status} ${res.stderr}`);
+    assert.ok(res.stdout.includes('"permissionDecision":"deny"'), 'and denies a canon write there');
+  }
+
   // 3. .gitignore gained the sessions line exactly once
   const gi = fs.readFileSync(path.join(TMP, '.gitignore'), 'utf8');
   assert.strictEqual((gi.match(/^\.project-brain\/sessions\/$/gm) || []).length, 1);
