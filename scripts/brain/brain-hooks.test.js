@@ -753,6 +753,24 @@ try {
     }
   }
 
+  // 6i-g. A truncated guard program blocks. The node program sits in a bash single-quoted string,
+  // so a stray apostrophe ends it early; during P0-09 one did (in a comment), and the program that
+  // still ran defined its helpers, checked nothing and allowed every call with exit 0. The program
+  // now exits non-zero unless it reaches its last line, so the wrapper blocks (exit 2).
+  {
+    seedCapsule();
+    const src = fs.readFileSync(path.join(HOOKS, 'brain-security-guard.sh'), 'utf8');
+    const at = src.indexOf('const realOr = ');
+    assert.ok(at > 0, 'guard layout: realOr helper present');
+    const broken = path.join(TMP, 'broken-guard.sh');
+    fs.writeFileSync(broken, src.slice(0, at) + '// stray apostrophes: it\x27s the guard\x27s\n' + src.slice(at));
+    const res = spawnSync('bash', [broken], { encoding: 'utf8', timeout: 15000, env: { ...process.env, CLAUDE_PROJECT_DIR: TMP },
+      input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Write',
+        tool_input: { file_path: path.join(BRAIN, 'canon', 'x.md'), content: 'x' } }) });
+    assert.ok(res.status === 2 || isDeny({ stdout: res.stdout || '' }),
+      `a truncated guard program must block, not allow: status ${res.status} ${res.stdout} ${res.stderr}`);
+  }
+
   // 6j. P11 — timing: every rule must stay linear. 512 KB still fits the old env-var path,
   // so these inputs reach the regexes (the old ones were quadratic: minutes, not ms).
   const K = 1 << 19;
