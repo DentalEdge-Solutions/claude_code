@@ -157,12 +157,41 @@ test('the scan reads .sh, .js, .mjs and .py files under the definition trees and
     put('.claude/agents/demo-agent/deploy.py', "shutil.copytree('skills/demo', os.path.expanduser('~/.claude/skills/demo'))\n");
     put('skills/demo/scripts/read-settings.js', "const s = readFile(os.homedir(), '.claude', 'settings.json');\n");
     put('skills/demo/scripts/notes.txt', 'cp -R skills/demo ~/.claude/skills/\n');   // not a script: not read
+    // Review PR6-R-11: the folder named as separate path parts beside a home token (N4-N6), and .ts/.cjs/.mts/.cts (N9, N10).
+    put('skills/demo/scripts/n4.js', "fs.cpSync('skills/demo', path.join(process.env.HOME, '.claude', 'skills', n), { recursive: true });\n");
+    put('skills/demo/scripts/n5.py', "shutil.copytree('skills/demo', os.path.join(os.path.expanduser('~'), '.claude', 'skills', n))\n");
+    put('skills/demo/scripts/n6.py', "shutil.copytree('skills/demo', Path.home() / '.claude' / 'skills' / n)\n");
+    put('skills/demo/scripts/n9.ts', "fs.cpSync('skills/demo', path.join(os.homedir(), '.claude', 'skills', n), { recursive: true });\n");
+    put('skills/demo/scripts/n10.cjs', "fs.cpSync('skills/demo', path.join(os.homedir(), '.claude/skills', n), { recursive: true });\n");
+    put('skills/demo/scripts/n11.mts', "await $`cp -R skills/demo ~/.claude/skills/`;\n");
+    put('skills/demo/scripts/n12.cts', "fs.cpSync('skills/demo', path.join(os.homedir(), '.claude', 'skills', n));\n");
+    // Clean: a home token with another .claude file, and the project's own skills folder.
+    put('skills/demo/scripts/clean.py', "p = os.path.join(os.path.expanduser('~'), '.claude', 'settings.json')\n");
+    put('skills/demo/scripts/clean.ts', "const d = path.join(REPO, '.claude', 'skills', n);\n");
     const found = deploySteps(tmp).map(x => x.split(':')[0]).sort();
     assert.deepStrictEqual(found, ['.claude/agents/demo-agent/deploy.py', 'skills/demo/scripts/deploy.js',
-      'skills/demo/scripts/deploy.mjs', 'skills/demo/scripts/deploy.sh']);
+      'skills/demo/scripts/deploy.mjs', 'skills/demo/scripts/deploy.sh', 'skills/demo/scripts/n10.cjs',
+      'skills/demo/scripts/n11.mts', 'skills/demo/scripts/n12.cts', 'skills/demo/scripts/n4.js',
+      'skills/demo/scripts/n5.py', 'skills/demo/scripts/n6.py', 'skills/demo/scripts/n9.ts']);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// Review PR6-R-10: the code-path check must be linear. One 1 MB line of a repeated home token, with no skills path
+// (the backtracking case), per token. The bound is generous; the measured times are printed.
+test('the code-path check stays linear on a 1 MB line of repeated home tokens (review PR6-R-10)', () => {
+  const slow = [];
+  for (const token of ['homedir() ', 'os.environ ', 'process.env.HOME ', 'expanduser( ', 'Path.home() ', "homedir() '.claude' "]) {
+    const line = token.repeat(Math.ceil((1 << 20) / token.length)).slice(0, 1 << 20);
+    const t0 = process.hrtime.bigint();
+    const hits = codeUserSkills(line);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    console.log(`  1 MB of ${JSON.stringify(token.trim())}: ${ms.toFixed(1)} ms, ${hits.length} hit(s)`);
+    assert.deepStrictEqual(hits, [], token);
+    if (ms >= 1000) slow.push(`${token.trim()}: ${ms.toFixed(0)} ms`);
+  }
+  assert.deepStrictEqual(slow, []);
 });
 
 // The three steps that deployed, and what they say now.
