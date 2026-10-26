@@ -584,6 +584,82 @@ try {
     for (const c of cmds) assert.strictEqual(denyBash(c).stdout.trim(), '', `weekly-review command must pass: ${c}`);
   }
 
+  // 6i-e. P0-09 background security review ("authorization-bypass" on e8c673e). The G3 change let
+  // an rm word pass in any pipeline of programs that never RUN their arguments, but several of
+  // those WRITE: git restore/switch/branch, touch, mkdir, find -fprint. Main denied these when a
+  // canon file name held "rm". The reader set for G3 is now programs that neither run nor write.
+  // The same review closed gaps the new decisions/active/ rule shared with canon/ (writers the
+  // mutation words missed, case variants on a case-insensitive disk, symlinked Write paths) and
+  // narrowed the G1 script path to this project's scripts/brain/brain-promote.js.
+  for (const cmd of [
+    // regressions found on e8c673e (main denied each one)
+    'git restore --source=HEAD~3 .project-brain/canon/rm-x.md',
+    'git restore .project-brain/canon/rm-x.md',
+    'touch .project-brain/canon/rm-x.md',
+    'mkdir .project-brain/canon/rm-dir',
+    'git switch -f rm-branch -- .project-brain/canon',
+    'git branch -f rm .project-brain/canon',
+    'find .project-brain/canon -name rm -fprint .project-brain/canon/y.md',
+    'git log --output=.project-brain/canon/rm-x.md',
+    'git diff --output .project-brain/canon/rm-x.md',
+    'uniq .project-brain/canon/rm-a.md .project-brain/canon/rm-b.md',
+    // writers the mutation words missed, on canon/ and decisions/active/
+    'git restore .project-brain/decisions/active/d.md',
+    'git checkout -- .project-brain/decisions/active/d.md',
+    'git checkout HEAD~3 -- .project-brain/canon/x.md',
+    'git restore --source=HEAD~9 .project-brain/decisions/active/rm-x.md',
+    'git log --output=.project-brain/decisions/active/d.md',
+    'touch .project-brain/decisions/active/new.md',
+    'mkdir .project-brain/decisions/active/sub',
+    'ln -s /tmp/x .project-brain/decisions/active/new.md',
+    'truncate -s0 .project-brain/decisions/active/d.md',
+    'dd if=/tmp/x of=.project-brain/decisions/active/d.md',
+    'install /tmp/x .project-brain/decisions/active/d.md',
+    'rsync /tmp/x .project-brain/decisions/active/d.md',
+    'rsync -a --delete /tmp/e/ .project-brain/canon/',
+    'tar -xf /tmp/t.tar -C .project-brain/decisions/active',
+    'patch .project-brain/decisions/active/d.md /tmp/p.diff',
+    // case variants: macOS disks are case-insensitive by default
+    'echo x > .PROJECT-BRAIN/decisions/active/d.md',
+    'echo x > .Project-Brain/canon/y.md',
+    'echo x > .project-brain/decisions/ACTIVE/d.md',
+    'echo x > .project-brain/CANON/y.md',
+    'rm -rf .PROJECT-BRAIN',
+    'cd .Project-Brain && rm -rf decisions',
+    // G1: only this project's scripts/brain/brain-promote.js keeps the exemption
+    'node /tmp/scripts/brain/brain-promote.js .project-brain/canon/y.md --approve --rm',
+    'node /tmp/scripts/brain/brain-promote.js --approve --cp x .project-brain/canon/y.md',
+    'node x/scripts/brain/brain-promote.js --approve --cp x .project-brain/canon/y.md',
+  ]) {
+    assert.ok(isDeny(denyBash(cmd)), `must deny (background review): ${cmd}`);
+  }
+  for (const cmd of [
+    // still allowed: readers of an rm-named canon file, and a promote by this project's path
+    'cat .project-brain/canon/rm-notes.md',
+    'grep rm .project-brain/canon/x.md',
+    'git log --oneline -- .project-brain/canon/rm-x.md',
+    'git diff -- .project-brain/canon/rm-x.md',
+    'find .project-brain/canon -name "*rm*"',
+    `node ${path.join(REPO, 'scripts', 'brain', 'brain-promote.js')} --target .project-brain canon/rm-x.md --approve`,
+  ]) {
+    r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: cmd } }, REPO);
+    assert.strictEqual(r.stdout.trim(), '', `must allow (background review): ${cmd} → ${r.stdout}`);
+  }
+  // Write/Edit/NotebookEdit through a symlink into the capsule, or with a case variant of a
+  // protected folder, are denied.
+  seedCapsule();
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'active'), path.join(TMP, 'lnk-active'));
+  fs.symlinkSync(path.join(BRAIN, 'canon'), path.join(TMP, 'lnk-canon'));
+  for (const tool of ['Write', 'Edit', 'NotebookEdit']) {
+    const at = p => (tool === 'NotebookEdit' ? { notebook_path: p, new_source: 'x' } : { file_path: p, content: 'x' });
+    for (const p of [path.join(TMP, 'lnk-active', 'd.md'), path.join(TMP, 'lnk-canon', 'new', 'd.md'),
+      path.join(TMP, '.PROJECT-BRAIN', 'decisions', 'active', 'd.md'), path.join(BRAIN, 'Decisions', 'Active', 'd.md'),
+      path.join(BRAIN, 'CANON', 'd.md')]) {
+      r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: at(p) });
+      assert.ok(isDeny(r), `${tool} must be denied (background review): ${p} → ${r.stdout}`);
+    }
+  }
+
   // 6j. P11 — timing: every rule must stay linear. 512 KB still fits the old env-var path,
   // so these inputs reach the regexes (the old ones were quadratic: minutes, not ms).
   const K = 1 << 19;
