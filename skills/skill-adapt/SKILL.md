@@ -81,10 +81,7 @@ Rewrite a sourced skill so it fits your project like a native skill — not a tr
      > "This skill depends on `<agent-name>` which is not in `.claude/agents/`. Run `/agent-scout` to find and install it, or continue without it — the skill will fail at the step that invokes it."
    - If all agents are present, continue silently.
 
-10. **Sync to runtime** — copy to the global skills directory so Claude Code can use it immediately:
-    ```bash
-    cp -r skills/<skill-name> ~/.claude/skills/
-    ```
+10. **Stage, do not deploy** — the adapted skill stays in `skills/<skill-name>/` (staged: record it in the step 14 report; deployment waits for owner approval). Claude Code loads skills from `~/.claude/skills/`, so the adapted version is not live until the owner deploys it (the deploy rule in CLAUDE.md).
 
 11. **Conflict check** — compare the new description against installed skills: `ls skills/`. If trigger overlap > 50% with an existing skill, propose a more specific description or ask the user whether to replace.
 
@@ -92,7 +89,7 @@ Rewrite a sourced skill so it fits your project like a native skill — not a tr
 
 13. **Test the trigger** — give 2-3 realistic user prompts that should activate this skill. Verify the description routes those prompts correctly. If not, sharpen the description and re-test.
 
-14. **Report** — summarise: what was adapted from which source, what was removed, what was added, and why.
+14. **Report** — summarise: what was adapted from which source, what was removed, what was added, and why. State that the skill is staged in `skills/<skill-name>/` and waits for the owner's deploy.
 
 ## Adaptation rules
 
@@ -100,5 +97,6 @@ Rewrite a sourced skill so it fits your project like a native skill — not a tr
 - Never remove the source commit hash — needed for upstream version checking.
 - One skill per directory — don't merge multiple skills into one file.
 - Never change script logic or scoring thresholds — only adapt framing, triggers, and step names.
+- Never copy the skill into `~/.claude/skills/` or deploy it any other way — the result is staged; the owner deploys it after approval (CLAUDE.md).
 
 See [REFERENCE.md](REFERENCE.md) for the validation checklist, provenance template, and allowed/forbidden changes table.

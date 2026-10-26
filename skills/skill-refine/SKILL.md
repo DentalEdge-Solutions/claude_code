@@ -32,7 +32,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
    mkdir -p evals/<skill-name>/refine
    [ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline
    ```
-   Refine copies live under `evals/<skill-name>/refine/` (gitignored), never in the skill folder: the keep step syncs that folder into `~/.claude/skills/`.
+   Refine copies live under `evals/<skill-name>/refine/` (gitignored), never in the skill folder: the skill folder is what the owner deploys into `~/.claude/skills/` and what install.sh copies, so a copy kept there would ship with the skill.
    Then check staleness: if `refine-input.json` was written today **and** `SKILL.md` has not been modified since — trust the baseline scores directly, no re-run needed. If the skill was changed since eval ran, re-run only the failing scenarios (3 reps, same parallel subagent pattern as skill-eval) as a re-eval in `refine/re-eval-0` (step 7) to refresh the baseline before proceeding. If baseline is already ≥ 90%, ask the user whether to continue.
 
 3. **Route by failing metric** — the correct lever depends on *which* metric is failing:
@@ -52,7 +52,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 
 5. **Hypothesis** — pick ONE change from the lever space. Consult the failure mode → lever table in REFERENCE.md. Track which levers have been tried this session (coverage) — in early iterations, vary lever types; in later iterations, exploit the best-performing lever.
 
-6. **Mutate** — first copy the whole skill folder, before the edit, into a fresh folder outside it (step 8 syncs the skill folder; fresh, because N, the iteration number, repeats across sessions):
+6. **Mutate** — first copy the whole skill folder, before the edit, into a fresh folder outside it (the skill folder is what gets deployed; fresh, because N, the iteration number, repeats across sessions):
    `rm -rf "evals/<skill-name>/refine/pre-iter-N" && mkdir -p "evals/<skill-name>/refine/pre-iter-N" && cp -R "skills/<skill-name>/." "evals/<skill-name>/refine/pre-iter-N/"`
    Then make exactly the targeted edit, to one file, `<file>`, relative to the skill folder: `SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E. No other changes. A symlinked `<file>` is out of scope: a revert can't restore it, so pick another file. `wc -c < evals/<skill-name>/refine/pre-iter-N/SKILL.md` is the size before the edit.
 
@@ -64,21 +64,21 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
    If `init` or `status` exits non-zero, first revert the pending edit (none for re-eval-0) from `pre-iter-N` exactly as step 8's REVERT does, then stop the refine session and report it to the user — never work around it, and never `init` without `--evaluator-ref`.
 
 8. **Keep or revert** (`score` is the training-set pass rate from step 7; the bands are in percentage points of it; see thresholds in REFERENCE.md):
-   - score > baseline + 2% → **KEEP**. Sync to runtime: `cp -r skills/<skill-name> ~/.claude/skills/`
+   - score > baseline + 2% → **KEEP** (staged: record in SKILL-REFINE-LOG.md; deployment waits for owner approval). The kept edit stays in `skills/<skill-name>/`; nothing is copied anywhere else.
    - score < baseline − 5% → **REVERT**: restore the edited file from step 6's copy, or delete it if the edit created it:
      `if [ -e "evals/<skill-name>/refine/pre-iter-N/<file>" ]; then cp "evals/<skill-name>/refine/pre-iter-N/<file>" "skills/<skill-name>/<file>"; else rm "skills/<skill-name>/<file>"; fi`
      Then check that nothing else differs from the copy; this must print nothing:
      `diff -rq -x SKILL-EVAL.md -x SKILL-REFINE-LOG.md "evals/<skill-name>/refine/pre-iter-N" "skills/<skill-name>"`
      If it lists a file, restore it the same way; if it lists a folder the edit created, remove it.
      `SKILL-EVAL.md` and `SKILL-REFINE-LOG.md` are not restored.
-   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → **REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit**; if it did, **KEEP** and sync as above, and the baseline stays as it was. A neutral Lever D or E edit is always reverted.
+   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → **REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit**; if it did, **KEEP** (staged as above), and the baseline stays as it was. A neutral Lever D or E edit is always reverted.
    - Log the iteration either way — failed hypotheses are data.
 
 9. **Repeat** steps 5–8 until any convergence criterion is met (see REFERENCE.md).
 
 10. **Final validation** — invoke `skill-eval` on the improved skill with `--context evals/project-context.json`. Do not implement a separate eval process — skill-eval IS the final validation. This produces a new `SKILL-EVAL.md` replacing the old one, giving a clean before/after comparison on identical methodology. The held-out `project-native`, `project-workflow`, and `multi-turn` scenarios run here for the first time during this refinement session. All 5 metrics (including resilience_score) must be reported. Its `init` also takes `--evaluator-ref <REF>`; any non-zero `init` or `status` exit stops the session and is reported (every kept edit was measured, so nothing is pending).
 
-11. **Write report** — save `skills/<skill-name>/SKILL-REFINE-LOG.md` using the template in REFERENCE.md. If claude-mem is installed, persist a summary there too.
+11. **Write report** — save `skills/<skill-name>/SKILL-REFINE-LOG.md` using the template in REFERENCE.md. If claude-mem is installed, persist a summary there too. End by telling the user the result is staged in `skills/<skill-name>/` and is not live until the owner deploys it (the deploy rule in CLAUDE.md).
 
 ## Rules
 
@@ -88,6 +88,7 @@ BUDGET:  default 10 iterations, stop early at 95%+ for 3 consecutive
 - **Log every iteration** — including failed hypotheses. They're data.
 - **Don't rewrite** — if pass rate < 40% after 5 iterations, recommend a rebuild instead: `superpowers:writing-skills` if installed, otherwise by hand per skill-scout's no-results step; then `skill-audit` → `skill-eval`.
 - **Never skip the baseline backup** — `SKILL.md.baseline` must exist before the first mutation.
+- **Stage, never deploy** — Never copy the skill into `~/.claude/skills/` or deploy it any other way: every KEEP stays staged in `skills/<skill-name>/`, and the owner deploys it after approval (CLAUDE.md).
 - **Never edit the evaluator** — no lever (A–E) may edit `skill-eval/scripts/harvest-evidence.js`, `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`, `agent-eval/scripts/generate-agent-evals.js` or `skill-eval/REFERENCE.md` (under `skills/`; `run-manifest.js evaluator` lists them). The run manifest pins their sha256 and refuses an iteration whose evaluator changed.
 - **Never edit a run manifest** — no step may edit an `evals/<skill-name>/iteration-*/run-manifest.json`, the `eval_manifest` that `refine-input.json` names, its `eval_manifest` and `eval_scenarios_sha256` fields, or the `refine/evals.json` copy: the manifests anchor `--evaluator-ref`, and the copy is the scenario set checked against `eval_scenarios_sha256`.
 

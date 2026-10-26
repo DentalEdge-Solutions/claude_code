@@ -93,7 +93,7 @@ Security gate for sourced skill files and agent definitions. Scans SKILL.md cont
 **Triggers:** "audit this skill", "check skill security", "scan this skill from GitHub"
 
 #### `skill-adapt`
-Rewrites a PASS-audited skill to match the project's terminology, workflow gates, and installed skill ecosystem. Reads all 9 fields from `evals/project-context.json`: uses `hooks` to avoid adding redundant workflow steps already covered by PostToolUse automation, `mcp_servers` to add prerequisite notes when a required integration is missing, and `plugins` to catch capability conflicts. Detects agent dependencies in the adapted skill and warns if any are missing from `.claude/agents/`.
+Rewrites a PASS-audited skill to match the project's terminology, workflow gates, and installed skill ecosystem. Reads all 9 fields from `evals/project-context.json`: uses `hooks` to avoid adding redundant workflow steps already covered by PostToolUse automation, `mcp_servers` to add prerequisite notes when a required integration is missing, and `plugins` to catch capability conflicts. Detects agent dependencies in the adapted skill and warns if any are missing from `.claude/agents/`. The result is staged in `skills/<name>/`; the owner deploys it (the deploy rule in `CLAUDE.md`).
 
 **Triggers:** "adapt this skill", "customize this skill for my project", "install this skill"
 
@@ -117,7 +117,7 @@ Produces **5 metrics**: eval pass rate (≥ 80%), trigger accuracy (≥ 85%), co
 **Triggers:** "evaluate this skill", "run skill tests", "measure skill effectiveness"
 
 #### `skill-refine`
-Applies Karpathy's autoresearch loop to improve a skill that fails eval metrics. Routes by failing metric to one of 5 levers (description, checklist, examples, reference docs, scripts), mutates one lever per iteration, re-scores with `skill-eval-agent`, keeps or reverts. Low resilience score routes to Lever A (tighten trigger conditions). Runs up to 10 iterations autonomously.
+Applies Karpathy's autoresearch loop to improve a skill that fails eval metrics. Routes by failing metric to one of 5 levers (description, checklist, examples, reference docs, scripts), mutates one lever per iteration, re-scores with `skill-eval-agent`, keeps or reverts. Low resilience score routes to Lever A (tighten trigger conditions). Runs up to 10 iterations autonomously. Kept edits are staged in `skills/<name>/`; the owner deploys them.
 
 **Triggers:** "refine this skill", "improve this skill", "run autoresearch on this skill"
 

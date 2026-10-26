@@ -79,8 +79,8 @@ own eval logic.
    - eval_pass_rate < 80% (triggers and resilience fine) → active_lever = "B–E" per iteration.
    - Multiple failing → fix Lever A first (resilience and trigger issues share the root cause).
 
-4. Create baseline backup (once, before first mutation), outside the skill folder (step 7d
-   syncs that folder into ~/.claude/skills/):
+4. Create baseline backup (once, before first mutation), outside the skill folder (the owner
+   deploys that folder into ~/.claude/skills/, so a backup there would ship with it):
    `mkdir -p evals/<skill-name>/refine`
    `[ -e evals/<skill-name>/refine/SKILL.md.baseline ] || cp skills/<skill-name>/SKILL.md evals/<skill-name>/refine/SKILL.md.baseline`
    If .baseline already exists (prior session), do NOT overwrite.
@@ -116,8 +116,8 @@ own eval logic.
    Track coverage: vary levers in iters 1–4 (explore), exploit best lever in 5+.
    State hypothesis before mutating — log it first, then act.
 
-   7b. Safety snapshot, before the edit: copy the whole skill folder into a fresh folder outside it (7d syncs
-   the skill folder; fresh, because N repeats across sessions):
+   7b. Safety snapshot, before the edit: copy the whole skill folder into a fresh folder outside it (the skill
+   folder is what gets deployed; fresh, because N repeats across sessions):
    `rm -rf "evals/<skill-name>/refine/pre-iter-N" && mkdir -p "evals/<skill-name>/refine/pre-iter-N" && cp -R "skills/<skill-name>/." "evals/<skill-name>/refine/pre-iter-N/"`
    Then make exactly ONE targeted edit (use Edit, or Write for a new file), to one file, `<file>`, relative to
    the skill folder: `SKILL.md` for Levers A–C, `REFERENCE.md` for D, the script for E. Nothing else.
@@ -141,14 +141,14 @@ own eval logic.
    Also run 1 regression rep on each previously-passing scenario.
 
    7d. Keep or revert (`score` is the training-set pass rate from 7c; the bands are in percentage points of it):
-   - score > baseline + 2% → KEEP. Sync: `cp -r skills/<skill-name> ~/.claude/skills/`
+   - score > baseline + 2% → KEEP (staged: record in SKILL-REFINE-LOG.md; deployment waits for owner approval). The kept edit stays in `skills/<skill-name>/`.
    - score < baseline − 5% → REVERT. Restore the edited file from the snapshot, or delete it if the edit created it:
      `if [ -e "evals/<skill-name>/refine/pre-iter-N/<file>" ]; then cp "evals/<skill-name>/refine/pre-iter-N/<file>" "skills/<skill-name>/<file>"; else rm "skills/<skill-name>/<file>"; fi`
      Then check that nothing else differs from the copy; this must print nothing:
      `diff -rq -x SKILL-EVAL.md -x SKILL-REFINE-LOG.md "evals/<skill-name>/refine/pre-iter-N" "skills/<skill-name>"`
      If it lists a file, restore it the same way; if it lists a folder the edit created, remove it.
      `SKILL-EVAL.md` and `SKILL-REFINE-LOG.md` are not restored.
-   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit. If it did, KEEP and sync as above, and the baseline stays as it was; if not, restore as above. A neutral Lever D or E edit is always reverted.
+   - baseline − 5% ≤ score ≤ baseline + 2% (neutral) → REVERT unless the edit made `SKILL.md` shorter, with fewer bytes (`wc -c`) than before the edit. If it did, KEEP (staged as above), and the baseline stays as it was; if not, restore as above. A neutral Lever D or E edit is always reverted.
    Mark lever as exhausted if reverted ≥ 2× with no improvement (a neutral revert counts as a revert; a neutral KEEP is not an improvement).
 
    7e. Append to SKILL-REFINE-LOG.md:
@@ -174,7 +174,8 @@ own eval logic.
 10. Append final log entry (baseline→final delta, iterations used, effective levers,
     convergence reason).
 
-11. Print one-paragraph summary.
+11. Print one-paragraph summary. It ends by saying the result is staged in `skills/<skill-name>/` and is not
+    live until the owner deploys it (the deploy rule in CLAUDE.md).
 
 **Output Format:**
 - `skills/<skill-name>/SKILL.md` (improved or restored to baseline)
@@ -189,6 +190,8 @@ own eval logic.
 - Never exit without writing the final log entry.
 - Never continue past 10 iterations.
 - Never skip the per-iteration safety snapshot before mutating.
+- Never copy the skill into `~/.claude/skills/` or deploy it any other way: the owner deploys it after
+  approval (CLAUDE.md); KEEPs stay staged in `skills/<skill-name>/`.
 - Never edit an evaluator file with any lever (A–E): `skill-eval/scripts/harvest-evidence.js`,
   `skill-eval/scripts/run-manifest.js`, `skill-eval/scripts/generate-seed-evals.js`,
   `agent-eval/scripts/generate-agent-evals.js`, `skill-eval/REFERENCE.md` (under `skills/`).

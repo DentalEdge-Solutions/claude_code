@@ -3,7 +3,8 @@
 // (E13, PR #4 triage; the E8 class). They used to sit in the definition's own folder (`skills/<name>/SKILL.md.baseline`,
 // `….pre-iter-N`, `.claude/agents/<name>.md.baseline`) or beside it (`skills/<name>-backup-<date>/`, which install.sh
 // step 2 syncs into ~/.claude/skills as a second copy of the skill). None was ignored here, and skill-refine-agent's
-// keep step (`cp -r skills/<name> ~/.claude/skills/`) carried them into the installed skill. They now live under
+// keep step, which copied the skill into ~/.claude/skills until P0-08 staged it, carried them into the installed
+// skill; the owner's deploy copies the same folder today. They now live under
 // evals/<name>/, which is ignored here (evals/.gitignore) and in target projects (install.sh ignores evals/).
 //
 // Every check reads the paths from the documents themselves (review N1): a copy written anywhere git does not

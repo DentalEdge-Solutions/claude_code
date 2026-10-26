@@ -195,6 +195,7 @@ Rewrites the PASS-audited skill to match your project. Reads all 9 fields from `
 - Checks `mcp_servers` — adds prerequisite notes if the skill assumes an integration you don't have
 - Checks `plugins` — flags capability conflicts with installed plugins
 - Writes full provenance metadata block (source URL, commit hash, adapted date, license)
+- Stages the result in `skills/<name>/` and never deploys it: the adapted version is live only after you deploy it (`cp -R skills/<name>/. ~/.claude/skills/<name>/`), as the deploy rule in `CLAUDE.md` says
 
 For 2+ PASS candidates, run `skill-synthesizer-agent` first to produce a synthesis plan before adapting.
 
@@ -251,6 +252,8 @@ Runs the **Karpathy autoresearch loop**: one hypothesis → one surgical edit �
 - **Lever E** — Script output format
 
 Train/test split: `adversarial` scenarios always stay in the training set (direct Lever A signal). `project-native`, `project-workflow`, and `multi-turn` are held out until final validation.
+
+Every KEEP is staged: it stays in `skills/<name>/` and is recorded in `SKILL-REFINE-LOG.md`. Neither `skill-refine` nor `skill-refine-agent` deploys it; the refined skill is live only after you deploy it, as the deploy rule in `CLAUDE.md` says.
 
 ---
 
