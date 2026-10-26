@@ -15,6 +15,7 @@
 'use strict';
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const REPO = path.join(__dirname, '..');
@@ -87,12 +88,18 @@ test('the matcher flags the three original deploy steps and their variants, and 
     'cp -r skills/x "$HOME"/.claude/skills/', 'cp -r skills/x "$HOME/.claude/skills/"', 'cp -r skills/x ${HOME}/.claude/skills',
     'cp -r skills/x /Users/someone/.claude/skills/', 'cp -r skills/x "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/"',
     'ln -s "$PWD/skills/x" ~/.claude/skills/x', 'cp -r skills/x 2>/dev/null ~/.claude/skills/', 'cp -r skills/x \\\n  ~/.claude/skills/',
+    // Destination first, and a cd into the folder before the copy (review PR6-R-5).
+    'cp -t ~/.claude/skills/ -R skills/x', 'cp -Rt ~/.claude/skills skills/x', 'cp --target-directory=$HOME/.claude/skills -R skills/x',
+    'mv --target-directory ~/.claude/skills skills/x', 'cd ~/.claude/skills && cp -R /repo/skills/x .',
+    'cd "$HOME/.claude/skills"; rsync -a /repo/skills/x .',
   ];
   for (const s of flagged) assert.strictEqual(userSkillsCopies(s).length, 1, `not flagged: ${s}`);
   const clean = [
     'cp -R skills/<skill-name>/. evals/<skill-name>/adapt-backup-$TS/', 'cp ~/.claude/skills/x/SKILL.md evals/x/installed.md',
     'diff -rq skills/x ~/.claude/skills/x', 'ls ~/.claude/skills/', 'read from `~/.claude/skills/<name>/`',
     'cp .claude/agents/x.md evals/agents/x/refine/x.md.baseline', 'cp -r skills/x .claude/skills/',
+    'cp -t evals/x/ skills/x/SKILL.md', 'rsync -t skills/x/ evals/x/', 'cd ~/.claude/skills && ls',
+    'cd ~/.claude/skills && cp x/SKILL.md /tmp/x.md',
   ];
   for (const s of clean) assert.deepStrictEqual(userSkillsCopies(s), [], `flagged: ${s}`);
 });
@@ -100,6 +107,27 @@ test('the matcher flags the three original deploy steps and their variants, and 
 test('no definition under skills/, .claude/agents/, .claude/skills/, packs/ or the Hermes skills copies a skill into ~/.claude/skills (P0-08)', () => {
   assert.ok(definitionFiles().length > 0, 'no definitions found');
   assert.deepStrictEqual(deploySteps(), []);
+});
+
+// Review PR6-R-4: skill-refine's Lever E edits a skill's scripts, so the scan reads scripts too. A mutant tree in a
+// fresh temp folder: one deploying script per language, a clean one reading the home settings file, a clean skill.
+test('the scan reads .sh, .js, .mjs and .py files under the definition trees and catches a script deploy (review PR6-R-4)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'staged-deploys-test-'));
+  try {
+    const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(tmp, rel)), { recursive: true }); fs.writeFileSync(path.join(tmp, rel), text); };
+    put('skills/demo/SKILL.md', '---\nname: demo\n---\nStage the result; the owner deploys it.\n');
+    put('skills/demo/scripts/deploy.sh', '#!/bin/sh\ncp -R skills/demo ~/.claude/skills/\n');
+    put('skills/demo/scripts/deploy.js', "fs.cpSync('skills/demo', path.join(os.homedir(), '.claude', 'skills', 'demo'), { recursive: true });\n");
+    put('skills/demo/scripts/deploy.mjs', "execSync('rsync -a skills/demo/ ~/.claude/skills/demo/');\n");
+    put('.claude/agents/demo-agent/deploy.py', "shutil.copytree('skills/demo', os.path.expanduser('~/.claude/skills/demo'))\n");
+    put('skills/demo/scripts/read-settings.js', "const s = readFile(os.homedir(), '.claude', 'settings.json');\n");
+    put('skills/demo/scripts/notes.txt', 'cp -R skills/demo ~/.claude/skills/\n');   // not a script: not read
+    const found = deploySteps(tmp).map(x => x.split(':')[0]).sort();
+    assert.deepStrictEqual(found, ['.claude/agents/demo-agent/deploy.py', 'skills/demo/scripts/deploy.js',
+      'skills/demo/scripts/deploy.mjs', 'skills/demo/scripts/deploy.sh']);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 // The three steps that deployed, and what they say now.
@@ -152,6 +180,8 @@ test('install.sh: the CLAUDE.md section it writes into targets carries the same 
   assert.ok(start !== -1 && end > start, 'pipeline section markers not found');
   const section = text.slice(start, end);
   for (const s of ['the owner deploys it (`cp -R skills/<name>/. ~/.claude/skills/<name>/`)',
+    // review PR6-R-7: macOS folder files ignored, and the only-installed case explained
+    '`diff -rq -x .DS_Store skills/<name> ~/.claude/skills/<name>`', 'an "Only in ~/.claude/skills/',
     "Claude Code loads skills from `~/.claude/skills/`, not from this project's `skills/`",
     OWNER_DEFINITION, 'skill-adapt, skill-refine and skill-refine-agent stage their result and never deploy it themselves']) {
     assert.ok(section.includes(s), `missing: ${s}`);

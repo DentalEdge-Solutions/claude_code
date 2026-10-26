@@ -146,7 +146,8 @@ for (const { dir, file, telemetry } of SETTINGS_FILES) {
 // This proves the rule strings cover the intended command texts under that model. It does not prove Claude Code
 // prompts: that is the owner's probe in the record (auto mode, fresh session).
 
-// The roadmap list (S5 P0-07), in its order, then the home-variable and no-slash forms the record adds.
+// The roadmap list (S5 P0-07), in its order, then the forms the record adds: the no-slash and home-variable cp forms,
+// and (review PR6-R-3) `git -C <dir>` pushes and branch deletes and brain-promote by an absolute or ./ path.
 const ASK_RULES = [
   'Bash(git push *)', 'Bash(gh pr merge *)', 'Bash(gh pr review *)', 'Bash(gh api *)', 'Bash(gh auth *)',
   'Bash(git push * --delete *)', 'Bash(git branch -D *)', 'Bash(node scripts/brain/brain-promote.js *)',
@@ -154,6 +155,7 @@ const ASK_RULES = [
   'Bash(./install.sh*)', 'Bash(bash install.sh*)', 'Bash(./uninstall.sh*)', 'Bash(bash uninstall.sh*)',
   'Bash(cp * ~/.claude/skills)', 'Bash(cp * $HOME/.claude/skills*)', 'Bash(cp * "$HOME/.claude/skills*)',
   'Bash(cp * "$HOME"/.claude/skills*)',
+  'Bash(git -C * push *)', 'Bash(git -C * push)', 'Bash(git -C * branch -D *)', 'Bash(node */scripts/brain/brain-promote.js *)',
 ];
 
 // The HR1 deny lists, in their committed order (P0-07 leaves them unchanged): the same names, anchored at the
@@ -197,6 +199,9 @@ const MUST_ASK = [
   'cp -R skills/skill-adapt ~/.claude/skills', 'cp skills/x/SKILL.md ~/.claude/skills/x/SKILL.md',
   'cp -R skills/x/. $HOME/.claude/skills/x/', 'cp -R skills/x "$HOME/.claude/skills/x/"', 'cp -R skills/x "$HOME"/.claude/skills/',
   './install.sh /tmp/target', './install.sh', 'bash install.sh /tmp/target', './uninstall.sh /tmp/target', 'bash uninstall.sh',
+  'git -C /abs/repo push origin fix/x', 'git -C . push', 'git -C /abs/repo push origin --delete fix/x',
+  'git -C /abs/repo branch -D fix/x', 'node /abs/repo/scripts/brain/brain-promote.js --approve x',
+  'node ./scripts/brain/brain-promote.js --approve x',
 ];
 // Routine commands that must not prompt because of these rules (other rules and the mode still decide them).
 const MUST_NOT_ASK = [
@@ -205,13 +210,18 @@ const MUST_NOT_ASK = [
   'node scripts/run-all-tests.js', 'node scripts/check-skill-deploy.js', 'bash -n install.sh uninstall.sh',
   'cp -R skills/x/. evals/x/adapt-backup-1/', 'cp evals/x/refine/pre-iter-3/SKILL.md skills/x/SKILL.md',
   'cp ~/.claude/skills/x/SKILL.md /tmp/x.md', 'node scripts/brain/brain-search.js promote',
+  'git -C /abs/repo status', 'git -C /abs/repo log --oneline -5', 'git -C /abs/repo branch -d fix/x',
+  'node /abs/repo/scripts/brain/brain-search.js promote',
 ];
+// A routine command the `git -C * push *` rule also catches, because its `*` spans words: it prompts, nothing worse.
+// Pinned so the record's note on over-matching stays true.
+const KNOWN_OVERMATCH = ['git -C /abs/repo commit -m "fix: push guard"'];
 // Forms the record lists as residuals (rules are not a security boundary). Pinned so the residual list stays true.
 const KNOWN_ESCAPES = [
-  'git -C . push origin main', 'git -c push.default=current push', "git 'push' origin main",
+  'git -c push.default=current push', "git 'push' origin main", 'git --git-dir=/r/.git push origin main',
+  'git branch --delete --force fix/x',
   'rsync -a skills/x/ ~/.claude/skills/x/', 'cp -R skills/x ${HOME}/.claude/skills/', 'cp -R skills/x /Users/u/.claude/skills/',
   'node -e "require(\'https\').request(\'https://api.github.com\')"', 'bash ./install.sh /tmp/t', 'sh install.sh /tmp/t',
-  'node ./scripts/brain/brain-promote.js --approve x',
 ];
 
 test('the Bash rule model reads the documented examples the way the docs table does', () => {
@@ -253,6 +263,10 @@ for (const { dir, file } of SETTINGS_FILES) {
 
   test(`${where}: the recorded residual forms still escape the ask rules (P0-07; update the record if one is caught)`, () => {
     assert.deepStrictEqual(KNOWN_ESCAPES.flatMap(c => askedBy(ask, c).map(r => `${c} ← ${r}`)), []);
+  });
+
+  test(`${where}: the recorded over-match still prompts (review PR6-R-3)`, () => {
+    assert.deepStrictEqual(KNOWN_OVERMATCH.filter(c => askedBy(ask, c).length === 0), []);
   });
 
   test(`${where}: every ask rule is a Bash rule this test can read, and each one is reached by a fixture (P0-07)`, () => {
