@@ -936,6 +936,42 @@ try {
       assert.strictEqual(res.stdout.trim(), '', `PowerShell in a project without a capsule passes: ${res.stdout}`);
     } finally { fs.rmSync(bare, { recursive: true, force: true }); }
   }
+  // Reviews O (allowlist semantics) and P (control regression), and round-1 mutant follow-ups.
+  // P: message text is data only while it cannot reach a program that runs it in the same
+  // command (base denied the store-then-run form). O: a reader passes only with options from its
+  // allowlist; printf -v and git -p are not readers; the R-1 exemption covers cat heredocs only.
+  for (const cmd of [
+    'git commit -m "rm -rf .project-brain" && git log -1 --format=%B | sh',
+    "git commit -m \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\" && git log -1 --format=%B | bash",
+    'git commit -m \'cp README.md .project-brain/canon/y.md\' && git log -1 --format=%B | xargs -I{} sh -c {}',
+    "git commit -m \"$(sh <<'EOF'\ncp README.md .project-brain/canon/y.md\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF' && rm -rf .project-brain\nx\nEOF\n)\"",
+    'gh pr create --body-file <(cp README.md .project-brain/canon/y.md)',
+    'git -p log -- .project-brain/canon/x.md',
+    'git --paginate show HEAD:.project-brain/canon/x.md',
+    'printf -v PATH /tmp/evil; cat .project-brain/canon/x.md',
+    'cat --frobnicate .project-brain/canon/x.md',
+    'head --frobnicate .project-brain/canon/x.md',
+    // R-7: a brace word past the work budget cannot be resolved; next to a protected-looking name it fails closed
+    'cp x ' + '{a,b}'.repeat(6) + 'z'.repeat(4000) + ' canon',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (reviews O, P): ${JSON.stringify(cmd.slice(0, 160))} → ${res.stdout}`);
+  }
+  for (const cmd of [
+    "git add -A && git commit -m \"$(cat <<'EOF'\nupdate .project-brain/canon notes\nEOF\n)\" && git push -u origin HEAD",
+    "git commit -m 'x' -- .project-brain/canon/x.md",
+    'git commit --amend -m "canon notes"',
+    'head -n 5 .project-brain/canon/x.md',
+    'tail -f .project-brain/canon/x.md',
+    "grep -rn --include='*.md' x .project-brain/canon",
+    'ls -la .project-brain/canon',
+    'wc -l .project-brain/canon/x.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (reviews O, P): ${JSON.stringify(cmd)} → ${res.stdout}`);
+  }
+
   // Review N and the author's probes: the single-quote reading behind R-1 must not desync from
   // bash. A quote inside a comment or a heredoc body is no quote, so it cannot hide a later
   // substitution; and an assignment stage may not change how a later reader runs (PATH, IFS …).
