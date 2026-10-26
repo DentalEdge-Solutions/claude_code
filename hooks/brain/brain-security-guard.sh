@@ -675,14 +675,47 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
     printf: /^$/,
     cd: /^-[LPe@]+$/, pushd: /^-n$|^[+-]\d+$/, popd: /^-n$|^[+-]\d+$/,
   };
-  // git global options, before the subcommand (values of -C, --git-dir … skipped).
-  const gitGlobals = (rest) => {
+  // git global options, before the subcommand (values of -C, --git-dir … skipped); next is the
+  // index of the subcommand.
+  const gitGlobalsAt = (rest) => {
     const out = [];
-    for (let i = 0; rest && i < rest.length && rest[i].startsWith("-"); i++) {
+    let i = 0;
+    for (; rest && i < rest.length && rest[i].startsWith("-"); i++) {
       out.push(rest[i]);
       if (GIT_ARG_OPT.test(rest[i])) i++;
     }
-    return out;
+    return { out, next: i };
+  };
+  const gitGlobals = (rest) => gitGlobalsAt(rest).out;
+  // Options each git reader subcommand may take (review Q): an option outside the list makes the
+  // stage no reader. Options that run a program (-O, --open-files-in-pager, --ext-diff,
+  // --textconv, an editor, a signing program, an interactive mode) and that write a file
+  // (--output) are not listed; -c, --config-env, --exec-path and VAR= prefixes already end the
+  // exemption (nonExec).
+  const LOGISH = "-\\d+|-n\\d*|--max-count=\\d+|--skip=\\d+|--oneline|-p|-u|--patch|--no-patch|-s|--stat(=\\S+)?|--shortstat|--numstat|--name-only|--name-status|--summary|--raw|--format=.*|--pretty(=.*)?|--graph|--decorate(=\\w+)?|--no-decorate|--all|--abbrev-commit|--abbrev(=\\d+)?|--(since|until|after|before|author|committer|grep|date|diff-filter)=.*|--author|--grep|-i|--regexp-ignore-case|--reverse|--follow|--first-parent|--no-merges|--merges|--color(=\\w+)?|--no-color|-U\\d+|--unified=\\d+|-M\\d*|-C\\d*|--find-renames(=\\S+)?|-w|--ignore-[a-z-]+|--word-diff(=\\w+)?|--minimal|--patience|--histogram|--no-ext-diff|--no-textconv|-z|--cherry-pick|--left-right|--topo-order|--date-order|--full-diff|--relative(=.*)?|-R|--binary|--check|--exit-code|--quiet|--cached|--staged|--no-index|-L\\S*";
+  const GIT_OPT_ALLOW = {
+    status: /^(-s|--short|-b|--branch|--porcelain(=v\d)?|--long|-u\w*|--untracked-files(=\w+)?|--ignored(=\w+)?|-z|--no-column|--ahead-behind|--no-ahead-behind|--renames|--no-renames|-v)$/,
+    log: new RegExp("^(" + LOGISH + ")$"),
+    show: new RegExp("^(" + LOGISH + ")$"),
+    diff: new RegExp("^(" + LOGISH + ")$"),
+    grep: /^(-[niwvlLcEFPGhHIaroqWpz]+|-[ABC]\d*|-e|-f|--(line-number|ignore-case|word-regexp|invert-match|count|files-with-matches|files-without-match|full-name|break|heading|show-function|function-context|and|or|not|all-match|quiet|recursive|only-matching|column|cached|untracked|no-index|no-color|null)|--color(=\w+)?|--max-depth=\d+|--threads=\d+|--max-count=\d+)$/,
+    blame: /^(-L\S*|-[ltewscnfp]+|-M\d*|-C\d*|--porcelain|--line-porcelain|--incremental|--date=\S+|--root|--show-stats|--color-lines|--color-by-age|--show-name|--show-number|--abbrev=\d+)$/,
+    "ls-files": /^(-[cdmoisukztvf]+|-x\S*|--(cached|deleted|modified|others|ignored|stage|unmerged|killed|exclude-standard|directory|no-empty-directory|full-name|error-unmatch|recurse-submodules|eol|deduplicate|sparse)|--(exclude|exclude-from|format)=.*|--abbrev(=\d+)?)$/,
+    "ls-tree": /^(-[drtlz]+|--(name-only|name-status|object-only|full-name|full-tree|long)|--abbrev(=\d+)?|--format=.*)$/,
+    "rev-parse": /^--?[a-z][\w-]*(=.*)?$/,
+    add: /^(-[AunvfN]+|--(all|update|dry-run|verbose|force|intent-to-add|ignore-errors|ignore-missing|no-all|renormalize|sparse))$/,
+    commit: /^(-[amnqsv]+|--message(=.*)?|-F|--file(=.*)?|--(all|amend|no-edit|signoff|no-verify|allow-empty|allow-empty-message|quiet|verbose|dry-run|short|porcelain)|--(author|date|cleanup|fixup|squash)=.*)$/,
+  };
+  const gitOptsOk = (g) => {
+    if (!g) return false;
+    const { next } = gitGlobalsAt(g);
+    const re = GIT_OPT_ALLOW[g[next]];
+    if (!re) return false;
+    for (const t of g.slice(next + 1)) {
+      if (t === "--") break;
+      if (t.length > 1 && t.startsWith("-") && !re.test(t)) return false;
+    }
+    return true;
   };
   const optsOk = (h) => {
     const re = OPT_ALLOW[h.cmd];
@@ -695,7 +728,8 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   };
   const pureReader = (h) => nonExec(h) && !h.rest.some((t) => /^--ou/.test(t)) && ((READERS.has(h.cmd) && optsOk(h))
     || (h.cmd === "find" && !h.rest.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t)))
-    || (h.cmd === "git" && GIT_READERS.has(gitSub(h.git).sub) && !gitGlobals(h.git).some((t) => /^(-p|--paginate)$/.test(t))));
+    || (h.cmd === "git" && GIT_READERS.has(gitSub(h.git).sub) && !gitGlobals(h.git).some((t) => /^(-p|--paginate)$/.test(t))
+      && gitOptsOk(h.git)));
   // A reader stage: a pure reader, or a plain dry run of the git clean subcommand (plainCleanDryRun),
   // which only lists files.
   // A reader runs by bare name or from a system folder, never a project path (./cat, sub/git:
