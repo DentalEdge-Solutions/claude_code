@@ -33,9 +33,15 @@ guard() {
   exec node -e '
 const fs = require("fs");
 const path = require("path");
+// The program must deny or reach its last line. This text is a bash single-quoted string, so a
+// stray apostrophe ends it early and node runs only the part before it; that part exits 3 here,
+// and the wrapper blocks the call (it did once during P0-09: the helpers ran, nothing was checked).
+let finished = false;
+process.on("exit", (code) => { if (code === 0 && !finished) process.exitCode = 3; });
 const deny = (reason) => {
   console.log(JSON.stringify({ hookSpecificOutput: {
     hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }));
+  finished = true;
   process.exit(0);
 };
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -542,6 +548,8 @@ if (tool === "Bash") {
   if (/reference-repositories\/sources\//.test(cmd) && /\b(cp|mv|ln|rsync)\b/.test(cmd) && /\.claude\/skills|~\/\.claude/.test(cmd))
     deny("Direct install from reference-repositories/sources/ is forbidden — route through skill-scout, skill-audit, skill-adapt");
 }
+// Last line: every check ran and none denied, so the call is allowed (exit 0).
+finished = true;
 ' 2>/dev/null
 }
 # Run the guard with a deadline. node runs in the background with the hook input on fd 3 (a
