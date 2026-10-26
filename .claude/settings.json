@@ -17,6 +17,27 @@
       "Edit(/infra/hermes-agent/data/home/**)",
       "Edit(/infra/hermes-agent/data/.claude/**)",
       "Edit(/infra/hermes-agent/data/.claude.json)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh pr review *)",
+      "Bash(gh api *)",
+      "Bash(gh auth *)",
+      "Bash(git push * --delete *)",
+      "Bash(git branch -D *)",
+      "Bash(node scripts/brain/brain-promote.js *)",
+      "Bash(cp * ~/.claude/skills/*)",
+      "Bash(cp -r * ~/.claude/skills/*)",
+      "Bash(cp -R * ~/.claude/skills/*)",
+      "Bash(./install.sh*)",
+      "Bash(bash install.sh*)",
+      "Bash(./uninstall.sh*)",
+      "Bash(bash uninstall.sh*)",
+      "Bash(cp * ~/.claude/skills)",
+      "Bash(cp * $HOME/.claude/skills*)",
+      "Bash(cp * \"$HOME/.claude/skills*)",
+      "Bash(cp * \"$HOME\"/.claude/skills*)"
     ]
   },
   "hooks": {
