@@ -53,11 +53,28 @@ const inp = j.tool_input;
 if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
   const target = tool === "NotebookEdit" ? inp.notebook_path : inp.file_path;
   if (typeof target !== "string") malformed(tool + " without a string path");
-  // Normalize first — "…/.project-brain/decisions/../canon/x.md" must not slip past.
+  // Normalize first — "…/.project-brain/decisions/../canon/x.md" must not slip past. Then also
+  // check the real path: the deepest folder of it that exists, with symlinks resolved, plus the
+  // rest (a symlink to the capsule must not slip past). Both are matched without regard to case:
+  // macOS disks are case-insensitive by default, so .PROJECT-BRAIN/CANON is canon there.
   const fp = path.resolve(target);
-  if (/\/\.project-brain\/canon(\/|$)/.test(fp))
+  // A path over 4096 characters cannot be opened (PATH_MAX is 1024 on macOS, 4096 on Linux), so the
+  // walk is skipped there; it keeps the walk short (at most about 2,000 steps).
+  const real = (() => {
+    if (fp.length > 4096) return fp;
+    let dir = fp; const rest = [];
+    for (;;) {
+      try { return path.join(fs.realpathSync(dir), ...rest); } catch { /* walk up */ }
+      const up = path.dirname(dir);
+      if (up === dir) return fp;
+      rest.unshift(path.basename(dir));
+      dir = up;
+    }
+  })();
+  const under = (re) => re.test(fp) || re.test(real);
+  if (under(/\/\.project-brain\/canon(\/|$)/i))
     deny("Direct writes to .project-brain/canon/ are forbidden. Promote a reviewed candidate instead: node scripts/brain/brain-promote.js <candidate> --approve --to canon");
-  if (/\/\.project-brain\/decisions\/active(\/|$)/.test(fp))
+  if (under(/\/\.project-brain\/decisions\/active(\/|$)/i))
     deny("Direct writes to .project-brain/decisions/active/ are forbidden. Stage the change as a candidate with the same file name and apply it with: node scripts/brain/brain-promote.js decisions/candidates/<file> --approve --to active --force (retire one with: --to superseded)");
 }
 
@@ -95,16 +112,20 @@ if (tool === "Bash") {
   };
   const joined = joinLines(inp.command);
   const cmd = joined.text;
-  const CAPSULE = /\.project-brain/;
+  // Case-insensitive: macOS disks are case-insensitive by default, so .PROJECT-BRAIN is the capsule
+  // there (background security review of P0-09).
+  const CAPSULE = /\.project-brain/i;
 
   // ── canon and decisions/active mutations (checked below, once the shell helpers exist) ──
   // Direct reference, or split reference (e.g. "cd .project-brain && … >> canon/y.md").
-  const touchesCanon = /\.project-brain\/canon/.test(cmd)
-    || (/\bcanon\//.test(cmd) && CAPSULE.test(cmd));
-  const touchesActive = /\.project-brain\/decisions\/active/.test(cmd)
-    || (/\bactive\//.test(cmd) && CAPSULE.test(cmd));
+  const touchesCanon = /\.project-brain\/canon/i.test(cmd)
+    || (/\bcanon\//i.test(cmd) && CAPSULE.test(cmd));
+  const touchesActive = /\.project-brain\/decisions\/active/i.test(cmd)
+    || (/\bactive\//i.test(cmd) && CAPSULE.test(cmd));
   // G1 (P0-09): the exemption holds only for a command that is exactly one plain call,
-  // "node [path/]scripts/brain/brain-promote.js <words> … --approve …": no separator, redirect,
+  // "node <script> <words> … --approve …", where <script> is scripts/brain/brain-promote.js,
+  // ./scripts/brain/brain-promote.js or $CLAUDE_PROJECT_DIR/scripts/brain/brain-promote.js
+  // written out (never another folder that merely ends that way): no separator, redirect,
   // substitution, quote, escape, glob, assignment, comment or control character anywhere in the
   // raw command, so nothing can be chained to it. Read on the raw text: with no backslash there
   // is no line continuation either. Anything else gets no exemption.
@@ -114,7 +135,9 @@ if (tool === "Bash") {
     const ws = raw.trim().split(/ +/);
     const script = ws[1] || "";
     return ws[0] === "node"
-      && (script === "scripts/brain/brain-promote.js" || script.endsWith("/scripts/brain/brain-promote.js"))
+      && (script === "scripts/brain/brain-promote.js" || script === "./scripts/brain/brain-promote.js"
+        || (!!process.env.CLAUDE_PROJECT_DIR
+          && script === path.join(process.env.CLAUDE_PROJECT_DIR, "scripts", "brain", "brain-promote.js")))
       && ws.slice(2).includes("--approve");
   })();
   // Redirects to the null device or stderr-merge can never write canon — strip
@@ -129,12 +152,16 @@ if (tool === "Bash") {
     const k = seg.search(/\bsed\b/);
     return k >= 0 && seg.indexOf("-i", k) >= 0;
   });
-  // Every mutation word except rm. An rm word counts unless the command is a pure reader
-  // pipeline (readerOnly below): G3, P0-09.
+  // Mutation words that always count.
   const mutatesNoRm = /(>>?|\btee\b|\bmv\b|\bcp\b)/.test(scrubbed) || sedInPlace
     || /\bnode\s+(-e|--eval)\b|\bpython3?\s+-c\b|\bperl\s+-e\b/.test(scrubbed)
     || /writeFileSync|\bopen\(/.test(scrubbed);
-  const rmWord = /\brm\b/.test(scrubbed);
+  // Words that count unless the command is a pure reader pipeline (readerOnly below), where they
+  // can only be arguments or parts of file names: rm (G3, P0-09), and the writers the words above
+  // miss (touch, mkdir, ln, truncate, dd, install, rsync, tar, unzip, patch; git restore,
+  // checkout, switch, reset, stash, apply, merge, pull, rebase, cherry-pick, revert, read-tree,
+  // checkout-index; an --output option; find -fprint/-fls), added by the background security review.
+  const softWord = /\b(rm|touch|mkdir|ln|truncate|dd|install|rsync|tar|unzip|patch|restore|checkout|switch|reset|stash|apply|merge|pull|rebase|cherry-pick|revert|read-tree|checkout-index)\b|--ou|\s-f(print|ls)/.test(scrubbed);
 
   // ── deleting the capsule ───────────────────────────────────────────────────
   // As on main, any rm/rmdir/unlink/shred word counts as a delete — also behind sudo,
@@ -348,18 +375,30 @@ if (tool === "Bash") {
     return pipelines;
   };
   const SUBST = /\$\(|`|[<>]\(/;
-  // A pure reader pipeline: one foreground pipeline whose every stage runs a program that never
-  // executes its arguments (nonExec), with no command or process substitution, no heredoc, no
-  // ANSI-C quoting or comment that could desync the parse, and no file-writing redirect. In it an
-  // rm word can only be a literal argument or part of a file name. Shared by the canon/active
-  // rule (G3) and the floor of the delete rule below.
+  // One foreground pipeline whose every stage passes ok, with no command or process substitution,
+  // no heredoc, no ANSI-C quoting or comment that could desync the parse, and no file-writing
+  // redirect.
   const WEIRD = /\$\x27|#|<<|\$\(|`|<\(|>\(/;
-  const readerOnly = () => {
+  const onePipelineOf = (ok) => {
     if (WEIRD.test(cmd) || />/.test(scrubbed)) return false;
     const pls = splitShell(cmd);
-    return pls.length === 1 && !pls[0].bg && pls[0].stages.every((stg) => nonExec(head(stg)));
+    return pls.length === 1 && !pls[0].bg && pls[0].stages.every((stg) => ok(head(stg)));
   };
-  if ((touchesCanon || touchesActive) && !isApprovedPromote && (mutatesNoRm || (rmWord && !readerOnly())))
+  // A pure reader: a program that neither runs its arguments (nonExec) nor writes a file. NON_EXEC
+  // alone is not enough: touch, mkdir, tee, uniq (an output file), find -fprint, git restore,
+  // switch, branch, tag and mv write (background security review of P0-09). No --output option.
+  const READERS = new Set(["grep", "egrep", "fgrep", "rg", "cat", "ls", "head", "tail", "wc", "stat", "du",
+    "diff", "cmp", "cut", "tr", "basename", "dirname", "realpath", "readlink", "column", "nl", "pwd", "jq",
+    "echo", "printf", "test", "[", "true", "false", "cd", "pushd", "popd"]);
+  const GIT_READERS = new Set(["status", "log", "diff", "show", "grep", "blame", "ls-files", "ls-tree", "rev-parse",
+    "add", "commit"]);
+  const pureReader = (h) => nonExec(h) && !h.rest.some((t) => /^--ou/.test(t)) && (READERS.has(h.cmd)
+    || (h.cmd === "find" && !h.rest.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t)))
+    || (h.cmd === "git" && GIT_READERS.has(gitSub(h.git).sub)));
+  // G3 (P0-09): in a pure reader pipeline a soft word (rm, touch, git restore …) can only be a
+  // literal argument or part of a file name, so it does not count there.
+  const readerOnly = () => onePipelineOf(pureReader);
+  if ((touchesCanon || touchesActive) && !isApprovedPromote && (mutatesNoRm || (softWord && !readerOnly())))
     deny(touchesCanon ? "Only brain-promote.js --approve may modify .project-brain/canon/"
       : "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote)");
   // Fail closed on a kept line continuation in a command that names the capsule. A pair is kept
@@ -391,7 +430,7 @@ if (tool === "Bash") {
       const plain = stages.length === 1 && !bg && !hasGrouping;
       // When the stage names the capsule ("cd \"$(git rev-parse …)/.project-brain\""),
       // take the target from the capsule name on; otherwise the first non-option word.
-      const named = unquote(stages[0]).match(/\.project-brain\S*/);
+      const named = unquote(stages[0]).match(/\.project-brain\S*/i);
       const target = named ? named[0] : h0.rest.find((t) => !t.startsWith("-"));
       if (h0.cmd === "popd") { if (plain && dirStack.length) depth = dirStack.pop(); }
       else {
@@ -431,13 +470,16 @@ if (tool === "Bash") {
   // shell separators first (linear), then in each segment look for an rm word that starts before
   // a .project-brain mention. search(\brm\b) and lastIndexOf are each linear, so the whole check
   // is O(n). Semantics match main: an rm word followed later by .project-brain in one segment.
+  // Read lowercased (P0-09 background review): .PROJECT-BRAIN is the capsule on a
+  // case-insensitive disk, and RM finds /bin/rm there.
   const mainDelete = cmd.split(/[|;&]/).some((seg) => {
-    const bi = seg.lastIndexOf(".project-brain");
+    const low = seg.toLowerCase();
+    const bi = low.lastIndexOf(".project-brain");
     if (bi < 0) return false;
-    const ri = seg.search(/\brm\b/);
+    const ri = low.search(/\brm\b/);
     return ri >= 0 && ri < bi;
   });
-  if (mainDelete && !readerOnly())
+  if (mainDelete && !onePipelineOf(nonExec))
     deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
 
   // Reference sources are documentation only — block direct installs into the skills dir.
