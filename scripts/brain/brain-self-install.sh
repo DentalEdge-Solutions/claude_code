@@ -43,6 +43,19 @@ fi
 #    P0-09) is removed. Both files are read and checked before either is written; a file it cannot
 #    read stops the install here, both files unchanged (set -e). A file is written only if it changed.
 mkdir -p "${TARGET}/.claude"
+# The fail-closed registration needs its script in the target first (PR7-R-4): install.sh copies
+# hooks/brain/ before calling this, a standalone run copies it here. If the guard is still missing,
+# stop before either settings file is written.
+GUARD_SCRIPT="${TARGET}/hooks/brain/brain-security-guard.sh"
+if [ ! -f "${GUARD_SCRIPT}" ] && [ "${REPO_DIR}" != "${TARGET}" ] && [ -f "${REPO_DIR}/hooks/brain/brain-security-guard.sh" ]; then
+  mkdir -p "${TARGET}/hooks/brain"
+  cp -R "${REPO_DIR}/hooks/brain/." "${TARGET}/hooks/brain/"
+  echo "✓ hooks/brain copied into ${TARGET} (the guard the registration runs)"
+fi
+if [ ! -f "${GUARD_SCRIPT}" ]; then
+  echo "Error: ${GUARD_SCRIPT} is missing; the guard is registered fail-closed, so its script must exist first. Nothing was registered." >&2
+  exit 3
+fi
 MERGED="$(node -e '
 const fs = require("fs");
 const dir = process.argv[1] + "/.claude";
