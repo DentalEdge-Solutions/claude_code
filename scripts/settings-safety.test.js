@@ -74,7 +74,10 @@ try {
   });
   // P0-09: the guard is registered in the shared settings.json; one it cannot read stops the
   // install too, and neither file is written (both are checked before either is written).
-  BAD.forEach(([why, text, reason], i) => {
+  // In settings.json the installer writes only PreToolUse, so a wrong-typed Stop there is not its
+  // concern; a wrong-typed PreToolUse is.
+  [...BAD.filter(b => b[3]), ['has an object for PreToolUse, the event it writes there',
+    '{"hooks": {"PreToolUse": {"hooks": []}}}\n', /its "hooks\.PreToolUse" is not a list/]].forEach(([why, text, reason], i) => {
     const goodLocal = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo own' }] }] } }, null, 2);
     const t = target(`brain-bad-shared-${i}`, { [SHARED]: text, [LOCAL]: goodLocal });
     const r = run('scripts/brain/brain-self-install.sh', [t]);
