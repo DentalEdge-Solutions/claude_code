@@ -1,26 +1,36 @@
 #!/usr/bin/env bash
 # hooks/brain/brain-security-guard.sh — PreToolUse guard. The ONLY blocking brain
-# hook. Denies: direct Write/Edit/NotebookEdit into .project-brain/canon/; Bash
-# mutations of canon/ not going through brain-promote --approve; deleting the
-# capsule (any rm/rmdir/unlink/shred word, find -delete, git rm/clean, fs.rmSync,
-# shutil.rmtree, also after a cd into the capsule). Only stages run by programs that
-# never execute their arguments (grep, cat, echo, git add/commit/log …) are exempt.
-# Failure policy (owner decision P11, 2026-10-15):
+# hook. Denies: direct Write/Edit/NotebookEdit into .project-brain/canon/ or
+# .project-brain/decisions/active/; Bash mutations of either not made by exactly one
+# brain-promote.js --approve call; deleting the capsule (any rm/rmdir/unlink/shred word,
+# find -delete, git rm/clean, fs.rmSync, shutil.rmtree, also after a cd into the capsule).
+# Only stages run by programs that never execute their arguments (grep, cat, echo, git
+# add/commit/log …) are exempt.
+# Failure policy (P0-09, 2026-10-26; supersedes the P11 fail-open policy of 2026-10-15):
 #   - bad input (empty, not JSON, not an object with tool_name/tool_input) fails
 #     CLOSED: deny with a reason. Claude Code always sends valid input.
-#   - node missing or crashing fails OPEN but VISIBLY: stderr warning, a log line in
-#     .project-brain/reports/guard-failures.log, exit 1 (a non-blocking hook error
-#     the user sees). Denying there would block every Write/Edit/Bash, the fix included.
-# Denial is expressed via permissionDecision with exit 0. Every pattern is linear-time:
-# a hook that times out lets the tool call through. brain-self-install.sh registers this
-# hook with a 30 s timeout (Claude Code's default is 600 s), so a stall costs 30 s, not 10 min.
+#   - node missing, crashing, killed or past the deadline below fails CLOSED: exit 2
+#     (Claude Code blocks the call and shows the stderr reason to Claude), a stderr
+#     reason and a log line in .project-brain/reports/guard-failures.log. If node is
+#     broken, every Write/Edit/Bash is blocked: the owner's break-glass procedure is in
+#     docs/SECOND_BRAIN_SECURITY.md.
+#   - the registration sets "onFailure": "block" (a guard that cannot start, or that runs
+#     past the hook timeout of 30 s, blocks) — see .claude/settings.json.
+# Denial is expressed via permissionDecision with exit 0. Every pattern is linear-time.
+# The guard stops node at BRAIN_GUARD_DEADLINE_S (default 20 s, under the 30 s hook timeout),
+# so a stall blocks the call even under a registration without onFailure.
 # Defense-in-depth only: brain-promote --approve + git history are the real
 # canon boundary; this guard raises the cost of accidental/careless mutation.
 set -u
 ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+DEADLINE="${BRAIN_GUARD_DEADLINE_S:-20}"
+case "${DEADLINE}" in ''|*[!0-9]*|0) DEADLINE=20 ;; esac
 # The hook input reaches node on stdin, never through an environment variable: a large
-# input (a big Write) would exceed the exec size limit and make the guard fail open.
-DECISION="$(node -e '
+# input (a big Write) would exceed the exec size limit and make node fail to start.
+# exec: the background job below is node itself, so the deadline kills the process that holds
+# the output pipe (killing a subshell would leave node running and the pipe open).
+guard() {
+  exec node -e '
 const fs = require("fs");
 const path = require("path");
 const deny = (reason) => {
@@ -47,6 +57,8 @@ if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
   const fp = path.resolve(target);
   if (/\/\.project-brain\/canon(\/|$)/.test(fp))
     deny("Direct writes to .project-brain/canon/ are forbidden. Promote a reviewed candidate instead: node scripts/brain/brain-promote.js <candidate> --approve --to canon");
+  if (/\/\.project-brain\/decisions\/active(\/|$)/.test(fp))
+    deny("Direct writes to .project-brain/decisions/active/ are forbidden. Stage the change as a candidate with the same file name and apply it with: node scripts/brain/brain-promote.js decisions/candidates/<file> --approve --to active --force (retire one with: --to superseded)");
 }
 
 if (tool === "Bash") {
@@ -85,13 +97,26 @@ if (tool === "Bash") {
   const cmd = joined.text;
   const CAPSULE = /\.project-brain/;
 
-  // ── canon mutations ────────────────────────────────────────────────────────
+  // ── canon and decisions/active mutations (checked below, once the shell helpers exist) ──
   // Direct reference, or split reference (e.g. "cd .project-brain && … >> canon/y.md").
   const touchesCanon = /\.project-brain\/canon/.test(cmd)
     || (/\bcanon\//.test(cmd) && CAPSULE.test(cmd));
-  // indexOf instead of [\s\S]* keeps this linear on long inputs.
-  const promoteAt = cmd.search(/brain-promote(\.js)?\b/);
-  const isApprovedPromote = promoteAt >= 0 && cmd.indexOf("--approve", promoteAt) >= 0;
+  const touchesActive = /\.project-brain\/decisions\/active/.test(cmd)
+    || (/\bactive\//.test(cmd) && CAPSULE.test(cmd));
+  // G1 (P0-09): the exemption holds only for a command that is exactly one plain call,
+  // "node [path/]scripts/brain/brain-promote.js <words> … --approve …": no separator, redirect,
+  // substitution, quote, escape, glob, assignment, comment or control character anywhere in the
+  // raw command, so nothing can be chained to it. Read on the raw text: with no backslash there
+  // is no line continuation either. Anything else gets no exemption.
+  const raw = inp.command;
+  const isApprovedPromote = (() => {
+    if (/[^\x20-\x7e]/.test(raw) || /[;&|<>`$()\\"\x27#*?{}\[\]~!=]/.test(raw)) return false;
+    const ws = raw.trim().split(/ +/);
+    const script = ws[1] || "";
+    return ws[0] === "node"
+      && (script === "scripts/brain/brain-promote.js" || script.endsWith("/scripts/brain/brain-promote.js"))
+      && ws.slice(2).includes("--approve");
+  })();
   // Redirects to the null device or stderr-merge can never write canon — strip
   // them before mutation detection so read commands like "ls canon/ 2>/dev/null"
   // are not falsely denied. A real redirect target (> canon/x.md) survives.
@@ -104,11 +129,12 @@ if (tool === "Bash") {
     const k = seg.search(/\bsed\b/);
     return k >= 0 && seg.indexOf("-i", k) >= 0;
   });
-  const mutates = /(>>?|\btee\b|\bmv\b|\bcp\b|\brm\b)/.test(scrubbed) || sedInPlace
+  // Every mutation word except rm. An rm word counts unless the command is a pure reader
+  // pipeline (readerOnly below): G3, P0-09.
+  const mutatesNoRm = /(>>?|\btee\b|\bmv\b|\bcp\b)/.test(scrubbed) || sedInPlace
     || /\bnode\s+(-e|--eval)\b|\bpython3?\s+-c\b|\bperl\s+-e\b/.test(scrubbed)
     || /writeFileSync|\bopen\(/.test(scrubbed);
-  if (touchesCanon && mutates && !isApprovedPromote)
-    deny("Only brain-promote.js --approve may modify .project-brain/canon/");
+  const rmWord = /\brm\b/.test(scrubbed);
 
   // ── deleting the capsule ───────────────────────────────────────────────────
   // As on main, any rm/rmdir/unlink/shred word counts as a delete — also behind sudo,
@@ -322,6 +348,20 @@ if (tool === "Bash") {
     return pipelines;
   };
   const SUBST = /\$\(|`|[<>]\(/;
+  // A pure reader pipeline: one foreground pipeline whose every stage runs a program that never
+  // executes its arguments (nonExec), with no command or process substitution, no heredoc, no
+  // ANSI-C quoting or comment that could desync the parse, and no file-writing redirect. In it an
+  // rm word can only be a literal argument or part of a file name. Shared by the canon/active
+  // rule (G3) and the floor of the delete rule below.
+  const WEIRD = /\$\x27|#|<<|\$\(|`|<\(|>\(/;
+  const readerOnly = () => {
+    if (WEIRD.test(cmd) || />/.test(scrubbed)) return false;
+    const pls = splitShell(cmd);
+    return pls.length === 1 && !pls[0].bg && pls[0].stages.every((stg) => nonExec(head(stg)));
+  };
+  if ((touchesCanon || touchesActive) && !isApprovedPromote && (mutatesNoRm || (rmWord && !readerOnly())))
+    deny(touchesCanon ? "Only brain-promote.js --approve may modify .project-brain/canon/"
+      : "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote)");
   // Fail closed on a kept line continuation in a command that names the capsule. A pair is kept
   // only inside single quotes or a comment, so where joinLines reads quotes as bash does this is
   // rare; where it does not (a heredoc body, $\x27\x5c\x27\x27), the rules below see a split command, and no
@@ -397,30 +437,43 @@ if (tool === "Bash") {
     const ri = seg.search(/\brm\b/);
     return ri >= 0 && ri < bi;
   });
-  if (mainDelete) {
-    const WEIRD = /\$\x27|#|<<|\$\(|`|<\(|>\(/;
-    const scrubRedir = cmd.replace(/&>\s*\/dev\/null/g, " ")
-      .replace(/>\s*\/dev\/null/g, " ").replace(/>&\d+/g, " ");
-    const floorPls = splitShell(cmd);
-    const tinyExempt = floorPls.length === 1 && !floorPls[0].bg && !WEIRD.test(cmd)
-      && !/>/.test(scrubRedir) && floorPls[0].stages.every((stg) => nonExec(head(stg)));
-    if (!tinyExempt)
-      deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
-  }
+  if (mainDelete && !readerOnly())
+    deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
 
   // Reference sources are documentation only — block direct installs into the skills dir.
   if (/reference-repositories\/sources\//.test(cmd) && /\b(cp|mv|ln|rsync)\b/.test(cmd) && /\.claude\/skills|~\/\.claude/.test(cmd))
     deny("Direct install from reference-repositories/sources/ is forbidden — route through skill-scout, skill-audit, skill-adapt");
 }
-' 2>/dev/null)" || {
+' 2>/dev/null
+}
+# Run the guard with a deadline. node runs in the background with the hook input on fd 3 (a
+# background job would otherwise read /dev/null); a watcher kills it once the deadline passes.
+# The watcher writes nothing to the command substitution, so a normal check returns at once, and
+# it kills only after a sleep that succeeded: a sleep that fails cannot cut a check short.
+exec 3<&0
+DECISION="$(
+  guard 0<&3 &
+  GUARD_PID=$!
+  (
+    trap 'kill "${SLEEP_PID:-}" 2>/dev/null; exit 0' TERM
+    sleep "${DEADLINE}" &
+    SLEEP_PID=$!
+    wait "${SLEEP_PID}" && kill -KILL "${GUARD_PID}" 2>/dev/null
+  ) >/dev/null 2>&1 3<&- &
+  WATCH_PID=$!
+  wait "${GUARD_PID}"
   RC=$?
-  MSG="brain-security-guard: node could not run the guard (exit ${RC}) — failing open, this tool call was NOT checked"
+  kill -TERM "${WATCH_PID}" 2>/dev/null
+  exit "${RC}"
+)" || {
+  RC=$?
+  MSG="brain-security-guard: node could not run the guard, or it passed its ${DEADLINE} s deadline (exit ${RC}) — this tool call is BLOCKED (the guard fails closed). If node is broken, the owner's break-glass procedure is in docs/SECOND_BRAIN_SECURITY.md"
   echo "${MSG}" >&2
   if [ -d "${ROOT}/.project-brain" ]; then
     mkdir -p "${ROOT}/.project-brain/reports" 2>/dev/null
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${MSG}" >> "${ROOT}/.project-brain/reports/guard-failures.log" 2>/dev/null
   fi
-  exit 1
+  exit 2
 }
 [ -n "${DECISION}" ] && printf '%s' "${DECISION}"
 exit 0
