@@ -57,7 +57,7 @@ const isDeny = r => r.stdout.includes('"permissionDecision":"deny"');
 const root = settingsOf(ROOT_SETTINGS);
 const hermes = settingsOf(HERMES_SETTINGS);
 
-test('root settings.json registers the guard once: exec form, the four tools, timeout 30, onFailure block', () => {
+test('root settings.json registers the guard once: exec form, the guarded tools, timeout 30, onFailure block', () => {
   const g = guardsIn(root);
   assert.strictEqual(g.length, 1, `one guard handler, found ${g.length}`);
   assert.strictEqual(g[0].ev, 'PreToolUse');
@@ -87,7 +87,7 @@ test('the telemetry hooks stay fail-open: no onFailure "block" on any non-guard 
   assert.ok(allHooks(root).some(x => /scripts\/telemetry\//.test(x.h.command)), 'telemetry hooks still registered');
 });
 
-test('infra/hermes-agent settings register the guard launcher: the four tools, timeout 30, onFailure block', () => {
+test('infra/hermes-agent settings register the guard launcher: the guarded tools, timeout 30, onFailure block', () => {
   const g = guardsIn(hermes);
   assert.strictEqual(g.length, 1, `one guard handler, found ${g.length}`);
   assert.strictEqual(g[0].ev, 'PreToolUse');

@@ -139,7 +139,15 @@ const removed = removeCommand(L, H("brain-security-guard.sh").command);
 // 600 s default, and "block", so a stall or a crash blocks the call instead of letting it through.
 const GUARD = { type: "command", command: "bash", args: ["${CLAUDE_PROJECT_DIR}/hooks/brain/brain-security-guard.sh"] };
 const GUARD_DEFAULTS = { timeout: 30, onFailure: "block" };
-if (ensureHookEntry(shared.settings, "PreToolUse", "Write|Edit|NotebookEdit|Bash", { ...GUARD, ...GUARD_DEFAULTS })) added++;
+// Every tool that writes files or runs commands: Monitor runs a command like Bash, PowerShell runs
+// commands (PR7-R-6). An entry from before they were listed is widened in place, not duplicated.
+const MATCHER = "Write|Edit|NotebookEdit|Bash|Monitor|PowerShell";
+for (const entry of shared.settings.hooks.PreToolUse || [])
+  if (entry && entry.matcher === "Write|Edit|NotebookEdit|Bash" && Array.isArray(entry.hooks) && entry.hooks.some((h) => same(h, GUARD))) {
+    entry.matcher = MATCHER;
+    added++;
+  }
+if (ensureHookEntry(shared.settings, "PreToolUse", MATCHER, { ...GUARD, ...GUARD_DEFAULTS })) added++;
 added += ensureDefaults(shared.settings, "PreToolUse", GUARD, GUARD_DEFAULTS);
 for (const f of [local, shared]) {
   const text = JSON.stringify(f.settings, null, 2) + "\n";

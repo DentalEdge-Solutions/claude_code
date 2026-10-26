@@ -112,33 +112,44 @@ const ansiC = (s) => s.replace(/\$\x27((?:\\.|[^\x27\\])*)\x27/g, (m, body) => b
     if (/^[0-7]/.test(c)) return String.fromCharCode(parseInt(c, 8));
     return { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", f: "\f", v: "\v" }[c] || c;
   }));
-// Brace expansion as bash does it ({a,b}; a sequence {x..y} may be anything, so it becomes *), at
-// most 64 results: null when there would be more.
+// Brace expansion as bash does it ({a,b}; a sequence {x..y} may be anything, so it becomes *).
+// Only a group with a top-level comma or ".." expands; matching braces are found in one pass and a
+// nested group is skipped by its match, so a word costs O(length) per result (PR7-R-7: rescanning
+// each "{" was quadratic, 4.5 s per MB of nested braces). At most 64 results and 200,000 characters
+// of work: past either, null (the word cannot be resolved; callers fail closed only when the
+// command looks protected).
 const braces = (w) => {
   const out = [];
+  let work = 0, over = false;
   const go = (s) => {
-    if (out.length > 64) return;
+    if (over) return;
+    work += s.length;
+    if (work > 200000 || out.length > 64) { over = true; return; }
+    const m = new Array(s.length).fill(-1), st = [];
     for (let i = 0; i < s.length; i++) {
-      if (s[i] !== "{") continue;
-      let depth = 0, j = i, commas = [];
-      for (; j < s.length; j++) {
-        if (s[j] === "{") depth++;
-        else if (s[j] === "}") { depth--; if (depth === 0) break; }
-        else if (s[j] === "," && depth === 1) commas.push(j);
+      if (s[i] === "{") st.push(i);
+      else if (s[i] === "}" && st.length) m[st.pop()] = i;
+    }
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] !== "{" || m[i] < 0) continue;
+      const j = m[i], commas = [];
+      let seq = false;
+      for (let k = i + 1; k < j; k++) {
+        if (s[k] === "{" && m[k] > 0) { k = m[k]; continue; }
+        if (s[k] === ",") commas.push(k);
+        else if (s[k] === "." && s[k + 1] === ".") seq = true;
       }
-      if (j >= s.length) break;
-      const inner = s.slice(i + 1, j);
       if (commas.length) {
         let from = i + 1;
         for (const c of [...commas, j]) { go(s.slice(0, i) + s.slice(from, c) + s.slice(j + 1)); from = c + 1; }
         return;
       }
-      if (/\.\./.test(inner)) { go(s.slice(0, i) + "*" + s.slice(j + 1)); return; }
+      if (seq) { go(s.slice(0, i) + "*" + s.slice(j + 1)); return; }
     }
     out.push(s);
   };
   go(w);
-  return out.length > 64 ? null : out;
+  return over || out.length > 64 ? null : out;
 };
 // Does a glob (already brace-expanded) name a protected folder, a folder above it or one below it?
 // Segments are compared folded; *, ? and [...] match within a segment and, as in bash, not a
@@ -188,9 +199,46 @@ if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
     deny("Direct writes to .project-brain/canon/ are forbidden. Promote a reviewed candidate instead: node scripts/brain/brain-promote.js <candidate> --approve --to canon");
   if (kind === "active")
     deny("Direct writes to .project-brain/decisions/active/ are forbidden. Stage the change as a candidate with the same file name and apply it with: node scripts/brain/brain-promote.js decisions/candidates/<file> --approve --to active --force (retire one with: --to superseded)");
+  // A hard link shares the file: an existing target with more than one link is compared, by device
+  // and inode, with every file under canon/ and decisions/active/ of the capsules this session can
+  // reach (PR7-R-11b). At most 5,000 entries are read; past that, or on an error, it is denied.
+  let st = null;
+  try { st = fs.statSync(path.resolve(CWD, target)); } catch { /* no such file: nothing shared */ }
+  if (st && st.isFile() && st.nlink > 1) {
+    const roots = new Set([canonical(path.join(process.env.CLAUDE_PROJECT_DIR || CWD, ".project-brain"), "/"),
+      canonical(".project-brain", CWD)]);
+    let seen = 0, linked = false, failed = false;
+    const walk = (dir) => {
+      let ents;
+      try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { if (e.code !== "ENOENT") failed = true; return; }
+      for (const e of ents) {
+        if (linked || failed) return;
+        if (++seen > 5000) { failed = true; return; }
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.isFile()) {
+          try { const s = fs.statSync(p); if (s.dev === st.dev && s.ino === st.ino) linked = true; } catch { failed = true; }
+        }
+      }
+    };
+    for (const r of roots) { walk(path.join(r, "canon")); walk(path.join(r, "decisions", "active")); }
+    if (linked || failed)
+      deny("brain-security-guard: this file is a hard link" + (linked ? " to a file under .project-brain/canon/ or decisions/active/" : " the guard could not compare with the protected folders") + " — writing it would change governed memory. Remove the link, or promote a candidate with brain-promote.");
+  }
 }
 
-if (tool === "Bash") {
+// PowerShell is not parsed: a command that shows a protected-looking name (folded, either slash)
+// fails closed, reads included (PR7-R-6; the tool is opt-in on macOS).
+if (tool === "PowerShell") {
+  if (typeof inp.command !== "string") malformed("PowerShell command is not a string");
+  const t = fold(inp.command.replace(/\\/g, "/").replace(/[`"\x27]/g, ""));
+  if (/\.project-b|roject-brain|\bcanon\b|\bdecisions\b|\/active\b|\bactive\//.test(t))
+    deny("brain-security-guard: PowerShell commands that name .project-brain, canon, decisions or active are denied (the guard does not parse PowerShell). Use the Read tool, or brain-promote for changes.");
+}
+
+// Monitor runs a command like Bash and uses the Bash permission rules (tools reference); its command
+// goes through the same rules. A WebSocket watch has no command.
+if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   if (typeof inp.command !== "string") malformed("Bash command is not a string");
   // Bash removes a backslash-newline (a line continuation), so "r\<newline>m" is rm. Join them
   // first, so every rule below and the floor see the command bash runs. Quotes are tracked as
@@ -223,7 +271,107 @@ if (tool === "Bash") {
     return { text: out, kept };
   };
   const joined = joinLines(inp.command);
-  const cmd = joined.text;
+  // Message text is data (PR7-R-1). The value of git commit -m/--message/-F/--file, of gh pr
+  // create|edit --title/-t/--body/-b/--body-file/-F and of brain-capture.js --message/--title is
+  // replaced by the word DATA when bash passes it on literally: single-quoted, double-quoted with no
+  // $ or backtick, or a $(cat <<X … X) whose delimiter is quoted (bash does not expand that body).
+  // An unquoted delimiter, a $ or a backtick in the value keeps it, so every rule still reads it.
+  // Only the named commands, run by bare name with no VAR= prefix, and only their option values.
+  const blankData = (s) => {
+    if (s.includes("\x00")) return s;
+    // 1. Quoted-delimiter heredocs read by cat inside $( … ): placeholders \x00N\x00 for now.
+    const held = [];
+    let work = "", from = 0;
+    const re = /\$\(\s*cat\s+<<(-?)\s*(?:\x27([A-Za-z_][\w-]*)\x27|"([A-Za-z_][\w-]*)"|\\([A-Za-z_][\w-]*))[ \t]*\n/g;
+    let m;
+    while ((m = re.exec(s))) {
+      const delim = m[2] || m[3] || m[4], dash = m[1] === "-";
+      let pos = re.lastIndex, end = -1;
+      for (;;) {
+        const nl = s.indexOf("\n", pos);
+        const line = s.slice(pos, nl < 0 ? s.length : nl);
+        if ((dash ? line.replace(/^\t+/, "") : line) === delim) { end = nl < 0 ? s.length : nl; break; }
+        if (nl < 0) break;
+        pos = nl + 1;
+      }
+      if (end < 0) break;
+      const close = /^[ \t\n]*\)/.exec(s.slice(end, end + 4096));
+      if (!close) { re.lastIndex = end; continue; }
+      const stop = end + close[0].length;
+      work += s.slice(from, m.index) + "\x00" + held.length + "\x00";
+      held.push(s.slice(m.index, stop));
+      from = stop;
+      re.lastIndex = stop;
+    }
+    work += s.slice(from);
+    // 2. Tokens with positions (quotes kept), split into commands at unquoted ; & | and newlines.
+    const toks = [];
+    let cur = null, q = "";
+    const flush = () => { if (cur) { toks.push(cur); cur = null; } };
+    for (let i = 0; i < work.length; i++) {
+      const c = work[i];
+      if (q) { cur.raw += c; if (c === "\\" && q === "\"" && i + 1 < work.length) { cur.raw += work[++i]; } else if (c === q) q = ""; continue; }
+      if (c === "\\" && i + 1 < work.length) { if (!cur) cur = { start: i, raw: "" }; cur.raw += c + work[++i]; continue; }
+      if (c === "\x27" || c === "\"") { if (!cur) cur = { start: i, raw: "" }; cur.raw += c; q = c; continue; }
+      if (/\s/.test(c) || ";&|()<>".includes(c)) {
+        flush();
+        if (c === "\n" || ";&|()".includes(c)) toks.push({ sep: true });
+        continue;
+      }
+      if (!cur) cur = { start: i, raw: "" };
+      cur.raw += c;
+    }
+    flush();
+    const LIT = /^(\x27[^\x27]*\x27|"(?:[^"\\$`]|\\[^$`])*"|"\x00\d+\x00"|\x00\d+\x00)$/;
+    const blanks = [];
+    let seg = [];
+    const endSeg = () => {
+      const w = seg.map((t) => t.raw);
+      let opts = null, at = 0;
+      if (w[0] === "git") {
+        let i = 1;
+        while (w[i] === "-C" || w[i] === "-c") i += 2;
+        if (w[i] === "commit") { opts = /^(-[A-Za-z]*m|--message|-F|--file)$/; at = i + 1; }
+      } else if (w[0] === "gh" && w[1] === "pr" && (w[2] === "create" || w[2] === "edit")) {
+        opts = /^(--title|-t|--body|-b|--body-file|-F)$/; at = 3;
+      } else if (w[0] === "node" && /^(\.\/)?scripts\/brain\/brain-capture\.js$/.test(w[1] || "")) {
+        opts = /^(--message|--title)$/; at = 2;
+      }
+      if (opts) for (let i = at; i < seg.length; i++) {
+        const eq = w[i].indexOf("=");
+        if (opts.test(w[i]) && i + 1 < seg.length && LIT.test(w[i + 1])) { blanks.push(seg[i + 1]); i++; }
+        else if (eq > 0 && opts.test(w[i].slice(0, eq)) && LIT.test(w[i].slice(eq + 1)))
+          blanks.push({ start: seg[i].start + eq + 1, raw: w[i].slice(eq + 1) });
+      }
+      seg = [];
+    };
+    for (const t of toks) { if (t.sep) endSeg(); else seg.push(t); }
+    endSeg();
+    let outText = "", at2 = 0;
+    for (const b of blanks.sort((x, y) => x.start - y.start)) {
+      outText += work.slice(at2, b.start) + "DATA";
+      at2 = b.start + b.raw.length;
+    }
+    outText += work.slice(at2);
+    // 3. Heredocs that were not message values are put back as they were.
+    return outText.replace(/\x00(\d+)\x00/g, (x, n) => held[Number(n)]);
+  };
+  const cmd = blankData(joined.text);
+  // Single-quoted text is literal: an expansion inside it (a backtick or $ in a message) is not
+  // one, and a # inside it is no comment (PR7-R-1, R-2). ANSI-C $\x27…\x27 still counts: its $ stays outside the neutralised quotes.
+  const sqNeutral = (() => {
+    let o = "", q = "";
+    for (let i = 0; i < cmd.length; i++) {
+      const c = cmd[i];
+      if (q === "\x27") { if (c === "\x27") { q = ""; o += c; } else o += "_"; continue; }
+      if (q === "\"") { if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; continue; } if (c === "\"") q = ""; o += c; continue; }
+      if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; continue; }
+      if (c === "\x27" && cmd[i - 1] !== "$") q = c;
+      else if (c === "\"") q = c;
+      o += c;
+    }
+    return o;
+  })();
   // Case-insensitive: macOS disks are case-insensitive by default, so .PROJECT-BRAIN is the capsule
   // there (background security review of P0-09).
   const CAPSULE = /\.project-brain/i;
@@ -342,8 +490,9 @@ if (tool === "Bash") {
       if (/^\d*(<<?<?|>>?|&>>?|>&|<&)/.test(w)) { i += /^\d*(<<?<?|>>?|&>>?)$/.test(w) ? 2 : 1; continue; }
       break;
     }
-    const cmd = prog((ws[i] || "").replace(/^[({!]+/, ""));
-    return { cmd, rest: ws.slice(i + 1), env, git: cmd === "git" ? gitArgs(stage) : [] };
+    const word = (ws[i] || "").replace(/^[({!]+/, "");
+    const cmd = prog(word);
+    return { cmd, word, rest: ws.slice(i + 1), env, git: cmd === "git" ? gitArgs(stage) : [] };
   };
   // Global options that take the next word as their value (git 2.54). That value must never be
   // read as the subcommand: in "git --namespace log rebase -x …" the subcommand is rebase.
@@ -486,11 +635,25 @@ if (tool === "Bash") {
     || (h.cmd === "git" && GIT_READERS.has(gitSub(h.git).sub)));
   // A reader stage: a pure reader, or a plain dry run of the git clean subcommand (plainCleanDryRun),
   // which only lists files.
-  const readerStage = (stg) => { const h = head(stg); return pureReader(h) || plainCleanDryRun(stg, h); };
+  // A reader runs by bare name or from a system folder, never a project path (./cat, sub/git:
+  // PR7-R-11a).
+  const SYSTEM_BIN = /^\/(usr\/(local\/)?)?bin\/[^\/]+$|^\/opt\/homebrew\/bin\/[^\/]+$/;
+  // The one sed form that only prints: sed -n with a single-quoted script of one or two addresses
+  // (line numbers, $ or a /regex/) and p, then plain file names (PR7-R-2). Any other sed can write
+  // (w, W), run (e) or read more (r).
+  const SED_PRINT = /^\s*sed\s+-n\s+\x27(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/)(?:,(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/))?p\x27(?:\s+[^\s\-;&|<>`$()\x27"\\][^\s;&|<>`$()\x27"\\]*)*\s*$/;
+  // A stage of plain literal assignments only (x=1;) sets shell variables and runs nothing.
+  const LITERAL_ASSIGN = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.\/:@%+,-]*\s*)+$/;
+  const readerStage = (stg) => {
+    const h = head(stg);
+    if (LITERAL_ASSIGN.test(stg) || SED_PRINT.test(stg)) return true;
+    if (h.word !== h.cmd && !SYSTEM_BIN.test(h.word)) return false;
+    return pureReader(h) || plainCleanDryRun(stg, h);
+  };
   // A read-only form: every stage of every pipeline is a pure reader, with no command or process
   // substitution, no heredoc, no ANSI-C quoting or comment that could desync the parse, and no
   // file-writing redirect. Nothing in it can write a file.
-  const readerForm = () => !WEIRD.test(cmd) && !/>/.test(scrubbed)
+  const readerForm = () => !WEIRD.test(sqNeutral) && !/>/.test(scrubbed)
     && splitShell(cmd).every((pl) => pl.stages.filter((s) => s.trim()).every(readerStage));
 
   // ── canon/ and decisions/active/: an allowlist, not a list of write verbs ─────────────────
@@ -534,6 +697,16 @@ if (tool === "Bash") {
   // With HOME unset, a ~ word cannot be resolved either.
   const EXPANSION = process.env.HOME ? /\$[^\s]|`|^~[^\/\s]/ : /\$[^\s]|`|^~/;
   const GLOB = /[*?[]|\{[^{}]*(,|\.\.)[^{}]*\}/;
+  // Protected-looking: a capsule fragment, the word canon or decisions, or active as a path
+  // segment (not "is-active").
+  const PROT_LOOK = /\.project-b|roject-brain|\bcanon\b|\bdecisions\b|\/active\b|\bactive\//;
+  const looksProtected = PROT_LOOK.test(fcmd) || cwdKind !== null;
+  // A pattern a program matches itself (find -path/-name/-regex …, or any word with glob
+  // characters) follows no bash glob rule: in a stage that is not a reader, one whose folded text
+  // looks protected counts as reaching the protected folders (PR7-R-8). find . -name "*.md"
+  // -delete, with no protected-looking text, stays a stated residual.
+  const FIND_PATTERN = /^-i?(path|name|regex|wholename|lname)$/;
+  let patternArg = false;
   let dirs = [cwdAbs], dirUnknown = false, budget = 5000, ancestorArg = false;
   const tooMany = distinct.length > 5000;
   // A read-only form passes the protected-path rule whatever its words reach, so nothing is
@@ -545,6 +718,8 @@ if (tool === "Bash") {
     const raws = shellWordsRaw(stg);
     const ws = [...new Set([...shellWords(stg), ...shellWords(ansiC(stg)), ...raws.flatMap((w) => [w, ...w.split(/[=<>]+/)])])].filter(Boolean);
     const reader = readerStage(stg);
+    if (!reader && raws.some((w, i) => (GLOB.test(w) || (i > 0 && FIND_PATTERN.test(raws[i - 1])))
+      && PROT_LOOK.test(fold(w.replace(/[\\"\x27]/g, ""))))) patternArg = true;
     for (const w of ws) {
       if (w.length > 4096) continue;
       for (const d of dirs) {
@@ -583,22 +758,22 @@ if (tool === "Bash") {
   const segsOf = (p) => p.split("/").filter(Boolean).map(fold);
   const protTargets = [...roots].flatMap((r) => [segsOf(r + "/canon"), segsOf(r + "/decisions/active")]);
   const rootTargets = [...roots].map(segsOf);
-  const globHits = (targets) => !tooMany && pieces.some((w) => {
+  // A word whose braces cannot be expanded within budget (null) cannot be resolved: it counts only
+  // when the command looks protected (PR7-R-7). A read-only form needs none of this.
+  const globHits = (targets) => !tooMany && !readOnly && pieces.some((w) => {
     if (EXPANSION.test(w) || !GLOB.test(w)) return false;
     const alts = w.length <= 4096 ? braces(home(w)) : null;
-    return alts === null || alts.some((a) => globReaches(a, cwdAbs, targets));
+    return alts === null ? looksProtected : alts.some((a) => globReaches(a, cwdAbs, targets));
   });
-  const undecidable = rawWords.some((w) => EXPANSION.test(w));
-  // Protected-looking: a capsule fragment, the word canon or decisions, or active as a path
-  // segment (not "is-active").
-  const looksProtected = /\.project-b|roject-brain|\bcanon\b|\bdecisions\b|\/active\b|\bactive\//.test(fcmd) || cwdKind !== null;
+  const undecidable = [...shellWordsRaw(sqNeutral), ...shellWordsRaw(ansiC(sqNeutral))].some((w) => EXPANSION.test(w));
   const capsuleLooking = /\.project-b|roject-brain/.test(fcmd) || cwdKind !== null;
   const capsuleCtx = CAPSULE.test(fcmd) || cwdKind !== null || kinds.size > 0;
-  const hitCanon = /\.project-brain\/canon\b/.test(fcmd) || (capsuleCtx && /\bcanon\b/.test(fcmd))
+  // A name ends at a path boundary: decisions/active.md is a file in decisions/ (N4).
+  const hitCanon = /\.project-brain\/canon(?![\w.-])/.test(fcmd) || (capsuleCtx && /\bcanon(?![\w.-])/.test(fcmd))
     || cwdKind === "canon" || kinds.has("canon");
-  const hitActive = /\.project-brain\/decisions\/active\b/.test(fcmd) || (capsuleCtx && /\bactive\b/.test(fcmd))
+  const hitActive = /\.project-brain\/decisions\/active(?![\w.-])/.test(fcmd) || (capsuleCtx && /\bactive(?![\w.-])/.test(fcmd))
     || cwdKind === "active" || kinds.has("active");
-  const hitOther = ancestorArg || globHits(protTargets) || ((undecidable || dirUnknown) && looksProtected);
+  const hitOther = ancestorArg || patternArg || globHits(protTargets) || ((undecidable || dirUnknown) && looksProtected);
   const isBrainTool = !/[^\x20-\x7e]/.test(raw) && !/[;&|<>`$()\\"\x27#*?{}\[\]~!=]/.test(raw) && (() => {
     const ws = raw.trim().split(/ +/);
     const m = /^(?:\.\/)?scripts\/brain\/brain-(verify|lint|search|context-pack|compile|capture)\.js$/.test(ws[1] || "");
@@ -633,9 +808,14 @@ if (tool === "Bash") {
     // A stage names the capsule by name, by a word that resolves into it on disk, by a glob or
     // brace word that may match it (or a folder above it), or by an expansion the guard cannot
     // follow in a command that shows the capsule name (review G).
+    // A glob or pattern word whose folded text looks protected names it too (find -path
+    // "*canon*" -delete, PR7-R-8); one whose braces cannot be expanded within budget counts when
+    // the command shows the capsule name.
     const namesCapsule = (s) => CAPSULE.test(s) || (onDisk && (shellWords(s).some((w) => wordKindCwd.has(w))
-      || shellWordsRaw(s).some((w) => (EXPANSION.test(w) ? capsuleLooking
-        : GLOB.test(w) && (w.length > 4096 || ((alts) => alts === null || alts.some((a) => globReaches(a, cwdAbs, rootTargets)))(braces(home(w))))))));
+      || shellWordsRaw(s).some((w, i, a) => (EXPANSION.test(w) ? capsuleLooking
+        : ((GLOB.test(w) || (i > 0 && FIND_PATTERN.test(a[i - 1]))) && PROT_LOOK.test(fold(w)))
+          || (GLOB.test(w) && (w.length > 4096 ? capsuleLooking
+            : ((alts) => (alts === null ? capsuleLooking : alts.some((x) => globReaches(x, cwdAbs, rootTargets))))(braces(home(w)))))))));
     let depth = depthOf(cwdAbs);
     const dirStack = [];
     // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd
