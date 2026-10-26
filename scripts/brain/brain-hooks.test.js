@@ -14,15 +14,31 @@ const BRAIN = path.join(TMP, '.project-brain');
 const today = new Date().toISOString().slice(0, 10);
 
 // Every hook run has a timeout: a hanging hook (e.g. a ReDoS in the guard) must fail
-// the test, not stall it. A timed-out PreToolUse hook lets the tool call through.
-function runHook(name, event, root = TMP, { raw, env = {} } = {}) {
-  const r = spawnSync('bash', [path.join(HOOKS, name)], {
-    encoding: 'utf8', input: raw !== undefined ? raw : JSON.stringify(event),
-    env: { ...process.env, CLAUDE_PROJECT_DIR: root, ...env },
-    timeout: 15000, maxBuffer: 16 * 1024 * 1024,
-  });
+// the test, not stall it.
+// F1 quarantine (P0-09 step 0, docs/evaluations/2026-10-26-p0-09-brain-guard-fail-closed.md): the
+// 512 KB timing loop (6j) once in about 1,930 runs saw the guard process stall past this timeout on
+// an input that otherwise takes about 0.1 s; the root cause is not found (triage F1). A timing run
+// that times out is therefore retried once, and the retry must meet the same bound. A super-linear
+// pattern is deterministic and fails both runs; a one-off stall is reported on stderr, never hidden.
+function runHook(name, event, root = TMP, { raw, env = {}, retryOnTimeout = false } = {}) {
+  let ms = 0;
+  const spawn = () => {
+    const t0 = Date.now();
+    const res = spawnSync('bash', [path.join(HOOKS, name)], {
+      encoding: 'utf8', input: raw !== undefined ? raw : JSON.stringify(event),
+      env: { ...process.env, CLAUDE_PROJECT_DIR: root, ...env },
+      timeout: 15000, maxBuffer: 16 * 1024 * 1024,
+    });
+    ms = Date.now() - t0;
+    return res;
+  };
+  let r = spawn();
+  if (retryOnTimeout && r.error && r.error.code === 'ETIMEDOUT') {
+    process.stderr.write(`F1 quarantine: ${name} timed out once (${r.error.message}); retrying once\n`);
+    r = spawn();
+  }
   assert.ok(!r.error, `${name} failed to run or timed out: ${r.error && r.error.message}`);
-  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+  return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', ms };
 }
 function seedCapsule() {
   fs.rmSync(TMP, { recursive: true, force: true });
@@ -142,22 +158,65 @@ try {
     assert.ok(/malformed|unreadable/i.test(r.stdout), `${label}: the reason must say the input was bad: ${r.stdout}`);
   }
 
-  // 6f. P11 — when node itself cannot run, the guard fails OPEN but VISIBLY: exit 1 (a
-  // non-blocking hook error the user sees), a stderr warning and a log line in the capsule.
-  // Allowing here is deliberate: denying would block every Write/Edit/Bash, the fix included.
-  for (const code of [1, 127]) {
-    seedCapsule();
+  // 6f. P0-09 (supersedes P11's fail-open): when node cannot run the guard — it is missing, exits
+  // non-zero, is killed, cannot start, or runs past the guard's deadline — the guard fails CLOSED:
+  // exit 2 (Claude Code blocks the call and shows stderr to Claude), a stderr reason, and a log line
+  // in the capsule. The registration's onFailure "block" covers a guard that cannot start at all.
+  const flog = path.join(BRAIN, 'reports', 'guard-failures.log');
+  const fakeNode = (body, extra = {}) => {
     const fakeBin = path.join(TMP, 'fakebin');
     fs.mkdirSync(fakeBin, { recursive: true });
-    fs.writeFileSync(path.join(fakeBin, 'node'), `#!/bin/sh\nexit ${code}\n`, { mode: 0o755 });
-    r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Bash',
-      tool_input: { command: 'ls' } }, TMP, { env: { PATH: `${fakeBin}:${process.env.PATH}` } });
-    assert.strictEqual(r.status, 1, `node exit ${code}: guard must exit 1 so the failure is shown: ${r.stderr}`);
-    assert.strictEqual(r.stdout.trim(), '', `node exit ${code}: no decision is printed`);
-    assert.ok(/failing open/.test(r.stderr), `node exit ${code}: stderr warns: ${r.stderr}`);
-    const flog = path.join(BRAIN, 'reports', 'guard-failures.log');
-    assert.ok(fs.existsSync(flog), `node exit ${code}: a log line is written`);
-    assert.ok(/brain-security-guard.*failing open/.test(fs.readFileSync(flog, 'utf8')), 'log line names the guard');
+    fs.writeFileSync(path.join(fakeBin, 'node'), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    for (const [name, text] of Object.entries(extra)) fs.writeFileSync(path.join(fakeBin, name), text, { mode: 0o755 });
+    return { PATH: `${fakeBin}:${process.env.PATH}` };
+  };
+  const lsEvent = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } };
+  const blockedClosed = (res, label) => {
+    assert.strictEqual(res.status, 2, `${label}: the guard must exit 2 so the call is blocked: ${res.status} ${res.stderr}`);
+    assert.strictEqual(res.stdout.trim(), '', `${label}: no decision is printed`);
+    assert.ok(/BLOCKED/.test(res.stderr) && /fails closed/.test(res.stderr), `${label}: stderr says why: ${res.stderr}`);
+    assert.ok(/SECOND_BRAIN_SECURITY\.md/.test(res.stderr), `${label}: stderr points at the break-glass procedure`);
+    assert.ok(!/failing open/.test(res.stderr), `${label}: never "failing open"`);
+    assert.ok(fs.existsSync(flog), `${label}: a log line is written`);
+    assert.ok(/brain-security-guard.*fails closed/.test(fs.readFileSync(flog, 'utf8')), `${label}: the log line names the guard`);
+  };
+  for (const [label, body] of [['node exits 1', 'exit 1'], ['node missing (127)', 'exit 127'], ['node killed', 'kill -9 $$']]) {
+    seedCapsule();
+    blockedClosed(runHook('brain-security-guard.sh', lsEvent, TMP, { env: fakeNode(body) }), label);
+  }
+  // a real node that cannot start: a preload module that does not exist
+  seedCapsule();
+  blockedClosed(runHook('brain-security-guard.sh', lsEvent, TMP,
+    { env: { NODE_OPTIONS: '--require /nonexistent-p0-09-preload.js' } }), 'node cannot start');
+  // timeout: a node that hangs is stopped at the deadline, and the call is blocked
+  seedCapsule();
+  {
+    const t0 = Date.now();
+    const res = runHook('brain-security-guard.sh', lsEvent, TMP, { env: { ...fakeNode('exec sleep 30'), BRAIN_GUARD_DEADLINE_S: '1' } });
+    const ms = Date.now() - t0;
+    blockedClosed(res, 'node hangs');
+    assert.ok(ms < 8000, `node hangs: blocked at the 1 s deadline, not after ${ms} ms`);
+    assert.ok(/deadline/.test(res.stderr), `node hangs: stderr names the deadline: ${res.stderr}`);
+  }
+  // the deadline never cuts a normal check short: with a sleep that fails at once, nothing is killed
+  seedCapsule();
+  {
+    const env = fakeNode('exec "$REAL_NODE" "$@"', { sleep: '#!/bin/sh\nexit 1\n' });
+    env.REAL_NODE = process.execPath;
+    let res = runHook('brain-security-guard.sh', lsEvent, TMP, { env });
+    assert.strictEqual(res.status, 0, `broken sleep: an ordinary command still passes: ${res.stderr}`);
+    assert.strictEqual(res.stdout.trim(), '');
+    res = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Write',
+      tool_input: { file_path: path.join(BRAIN, 'canon', 'x.md'), content: 'x' } }, TMP, { env });
+    assert.ok(isDeny(res), `broken sleep: a canon write is still denied: ${res.stdout}`);
+  }
+  // a normal check returns at once: the deadline's watcher never holds the output open
+  seedCapsule();
+  {
+    const t0 = Date.now();
+    const res = runHook('brain-security-guard.sh', lsEvent, TMP, { env: { BRAIN_GUARD_DEADLINE_S: '30' } });
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.ok(Date.now() - t0 < 5000, 'a normal check does not wait for the deadline');
   }
 
   // 6g. P11 — false positives: read-only commands where "rm" is an argument or part of a
@@ -202,6 +261,29 @@ try {
     'git add .project-brain/decisions/a.md \\\n  .project-brain/index.md',
     'grep -rn "rm -rf" \\\n  .project-brain/decisions',
     'echo "a # b" \\\n  && ls .project-brain',
+    // P0-09 G3: a canon file whose name holds the word rm, read by a pure reader pipeline
+    'cat .project-brain/canon/rm-notes.md',
+    'grep rm .project-brain/canon/x.md',
+    'grep -rn "rm -rf" .project-brain/canon/',
+    'ls .project-brain/canon/2026-10-15-static-scan-rm-rf-root.md',
+    'git add .project-brain/canon/rm-x.md',
+    'head -5 .project-brain/canon/rm.md | grep x',
+    'git log --oneline -- .project-brain/canon/rm-x.md',
+    'wc -l .project-brain/canon/rm-x.md 2>/dev/null',
+    // P0-09 G1: exactly one brain-promote call keeps its exemption
+    'node scripts/brain/brain-promote.js decisions/candidates/a.md --approve --to canon',
+    // (an rm word before the capsule name would meet the delete rule's floor, which P0-09 does not relax)
+    'node scripts/brain/brain-promote.js --target .project-brain canon/a-rm-note.md --approve',
+    'node ./scripts/brain/brain-promote.js --target .project-brain canon/rm-x.md --approve --to active',
+    // P0-09: decisions/active/ is readable, and the weekly review's route through brain-promote passes
+    'cat .project-brain/decisions/active/d.md',
+    'cat .project-brain/decisions/active/2026-10-15-static-scan-rm-rf-root-checks.md',
+    'ls .project-brain/decisions/active/',
+    'git add .project-brain/decisions/active/d.md',
+    'grep -rn x .project-brain/decisions/active 2>/dev/null',
+    'git diff -- .project-brain/decisions/active/',
+    'node scripts/brain/brain-promote.js decisions/active/d.md --approve --to superseded',
+    'node scripts/brain/brain-promote.js decisions/candidates/d.md --approve --to active --force',
   ]) {
     r = denyBash(cmd);
     assert.strictEqual(r.stdout.trim(), '', `must allow: ${cmd} → ${r.stdout}`);
@@ -420,6 +502,44 @@ try {
     "cat <<EOF\nit's\nEOF\nrm -rf .project-\\\nbrain",
     "echo $'\\' #' ; rm -rf .project-\\\nbrain",
     "cat <<EOF\nit's\nEOF\ncd .project-\\\nbrain && rm -rf decisions",
+    // P0-09 G1: the brain-promote exemption covers exactly one call, nothing chained to it
+    'node scripts/brain/brain-promote.js decisions/candidates/a.md --approve && echo x > .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js decisions/candidates/a.md --approve; echo x >> .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js x --approve; echo x > .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js a.md --approve\necho x > .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js a.md --approve | tee .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js a.md --approve > .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js a.md --approve & echo x > .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js $(cp x .project-brain/canon/y.md) --approve',
+    'node scripts/brain/brain-promote.js `cp x .project-brain/canon/y.md` --approve',
+    'cp x .project-brain/canon/y.md && node scripts/brain/brain-promote.js a.md --approve',
+    'echo x > .project-brain/canon/y.md # node scripts/brain/brain-promote.js a.md --approve',
+    'node /tmp/evil/brain-promote.js .project-brain/canon/y.md --approve --rm',
+    'FOO=1 node scripts/brain/brain-promote.js a.md --approve; mv x .project-brain/canon/y.md',
+    'node scripts/brain/brain-promote.js a.md --approve && sed -i s/a/b/ .project-brain/decisions/active/d.md',
+    // P0-09 G3: the narrowed rm check still denies every real mutation of canon
+    'cat .project-brain/canon/rm-x.md | sh',
+    'cat .project-brain/canon/rm-x.md > .project-brain/canon/y.md',
+    'D=.project-brain/canon; rm $D/x.md',
+    'cat .project-brain/canon/rm-x.md; rm -f canon/x.md',
+    'echo "$(rm .project-brain/canon/x.md)"',
+    'xargs rm < .project-brain/canon/list.md',
+    'cat .project-brain/canon/rm-x.md & rm canon/y.md',
+    'cat .project-brain/canon/rm-x.md | xargs rm',
+    'grep -l x .project-brain/canon/* | xargs rm',
+    // P0-09: decisions/active/ is protected like canon/ (writes, edits, moves; deletes were already)
+    'echo x >> .project-brain/decisions/active/d.md',
+    'sed -i s/a/b/ .project-brain/decisions/active/d.md',
+    'cd .project-brain/decisions && echo x > active/d.md',
+    'cd .project-brain && cp /tmp/x decisions/active/d.md',
+    'git mv .project-brain/decisions/active/a.md .project-brain/decisions/superseded/a.md',
+    'mv .project-brain/decisions/active/a.md .project-brain/decisions/superseded/',
+    'cp x .project-brain/decisions/active/',
+    'tee .project-brain/decisions/active/d.md < x',
+    'node -e "require(\'fs\').writeFileSync(\'.project-brain/decisions/active/d.md\',\'x\')"',
+    'python3 -c "open(\'.project-brain/decisions/active/d.md\',\'w\')"',
+    'perl -e 1 .project-brain/decisions/active/d.md',
+    'rm .project-brain/decisions/active/d.md',
   ]) {
     assert.ok(isDeny(denyBash(cmd)), `must deny: ${cmd}`);
   }
@@ -439,30 +559,582 @@ try {
     tool_input: { notebook_path: path.join(TMP, 'n.ipynb'), new_source: 'x' } });
   assert.strictEqual(r.stdout.trim(), '', 'NotebookEdit outside canon passes');
 
+  // 6i-c. P0-09: Write, Edit and NotebookEdit into decisions/active/ are denied (path-normalized);
+  // candidates, superseded and look-alike folders are not.
+  for (const tool of ['Write', 'Edit', 'NotebookEdit']) {
+    const at = p => (tool === 'NotebookEdit' ? { notebook_path: p, new_source: 'x' } : { file_path: p, content: 'x' });
+    for (const p of [path.join(BRAIN, 'decisions', 'active', 'd.md'), path.join(BRAIN, 'decisions') + '/candidates/../active/d.md']) {
+      r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: at(p) });
+      assert.ok(isDeny(r) && r.stdout.includes('decisions/active/'), `${tool} into decisions/active must be denied: ${p} → ${r.stdout}`);
+    }
+    for (const p of [path.join(BRAIN, 'decisions', 'candidates', 'd.md'), path.join(BRAIN, 'decisions', 'superseded', 'd.md'),
+      path.join(BRAIN, 'decisions', 'activex', 'd.md'), path.join(TMP, 'src', 'active', 'd.md')]) {
+      r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: at(p) });
+      assert.strictEqual(r.stdout.trim(), '', `${tool} must pass: ${p} → ${r.stdout}`);
+    }
+  }
+
+  // 6i-d. P0-09: every brain-promote command the weekly review names passes the guard, so its
+  // decision step completes by the brain-promote route (placeholders filled with a file name).
+  {
+    const skill = fs.readFileSync(path.join(REPO, 'skills', 'brain-weekly-review', 'SKILL.md'), 'utf8');
+    const cmds = [...skill.matchAll(/`(node scripts\/brain\/brain-promote\.js [^`]+)`/g)].map(m => m[1].replace(/<[^>]+>/g, '2026-10-21-x'));
+    assert.ok(cmds.some(c => /--to active --force/.test(c)) && cmds.some(c => /--to superseded/.test(c)),
+      `the weekly review names both brain-promote routes: ${JSON.stringify(cmds)}`);
+    for (const c of cmds) assert.strictEqual(denyBash(c).stdout.trim(), '', `weekly-review command must pass: ${c}`);
+  }
+
+  // 6i-e. P0-09 background security review ("authorization-bypass" on e8c673e). The G3 change let
+  // an rm word pass in any pipeline of programs that never RUN their arguments, but several of
+  // those WRITE: git restore/switch/branch, touch, mkdir, find -fprint. Main denied these when a
+  // canon file name held "rm". The reader set for G3 is now programs that neither run nor write.
+  // The same review closed gaps the new decisions/active/ rule shared with canon/ (writers the
+  // mutation words missed, case variants on a case-insensitive disk, symlinked Write paths) and
+  // narrowed the G1 script path to this project's scripts/brain/brain-promote.js.
+  for (const cmd of [
+    // regressions found on e8c673e (main denied each one)
+    'git restore --source=HEAD~3 .project-brain/canon/rm-x.md',
+    'git restore .project-brain/canon/rm-x.md',
+    'touch .project-brain/canon/rm-x.md',
+    'mkdir .project-brain/canon/rm-dir',
+    'git switch -f rm-branch -- .project-brain/canon',
+    'git branch -f rm .project-brain/canon',
+    'find .project-brain/canon -name rm -fprint .project-brain/canon/y.md',
+    'git log --output=.project-brain/canon/rm-x.md',
+    'git diff --output .project-brain/canon/rm-x.md',
+    'uniq .project-brain/canon/rm-a.md .project-brain/canon/rm-b.md',
+    // writers the mutation words missed, on canon/ and decisions/active/
+    'git restore .project-brain/decisions/active/d.md',
+    'git checkout -- .project-brain/decisions/active/d.md',
+    'git checkout HEAD~3 -- .project-brain/canon/x.md',
+    'git restore --source=HEAD~9 .project-brain/decisions/active/rm-x.md',
+    'git log --output=.project-brain/decisions/active/d.md',
+    'touch .project-brain/decisions/active/new.md',
+    'mkdir .project-brain/decisions/active/sub',
+    'ln -s /tmp/x .project-brain/decisions/active/new.md',
+    'truncate -s0 .project-brain/decisions/active/d.md',
+    'dd if=/tmp/x of=.project-brain/decisions/active/d.md',
+    'install /tmp/x .project-brain/decisions/active/d.md',
+    'rsync /tmp/x .project-brain/decisions/active/d.md',
+    'rsync -a --delete /tmp/e/ .project-brain/canon/',
+    'tar -xf /tmp/t.tar -C .project-brain/decisions/active',
+    'patch .project-brain/decisions/active/d.md /tmp/p.diff',
+    // case variants: macOS disks are case-insensitive by default
+    'echo x > .PROJECT-BRAIN/decisions/active/d.md',
+    'echo x > .Project-Brain/canon/y.md',
+    'echo x > .project-brain/decisions/ACTIVE/d.md',
+    'echo x > .project-brain/CANON/y.md',
+    'rm -rf .PROJECT-BRAIN',
+    'cd .Project-Brain && rm -rf decisions',
+    // G1: only this project's scripts/brain/brain-promote.js keeps the exemption
+    'node /tmp/scripts/brain/brain-promote.js .project-brain/canon/y.md --approve --rm',
+    'node /tmp/scripts/brain/brain-promote.js --approve --cp x .project-brain/canon/y.md',
+    'node x/scripts/brain/brain-promote.js --approve --cp x .project-brain/canon/y.md',
+  ]) {
+    assert.ok(isDeny(denyBash(cmd)), `must deny (background review): ${cmd}`);
+  }
+  for (const cmd of [
+    // still allowed: readers of an rm-named canon file, and a promote by this project's path
+    'cat .project-brain/canon/rm-notes.md',
+    'grep rm .project-brain/canon/x.md',
+    'git log --oneline -- .project-brain/canon/rm-x.md',
+    'git diff -- .project-brain/canon/rm-x.md',
+    'find .project-brain/canon -name "*rm*"',
+    `node ${path.join(REPO, 'scripts', 'brain', 'brain-promote.js')} --target .project-brain canon/rm-x.md --approve`,
+  ]) {
+    r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: cmd } }, REPO);
+    assert.strictEqual(r.stdout.trim(), '', `must allow (background review): ${cmd} → ${r.stdout}`);
+  }
+  // Write/Edit/NotebookEdit through a symlink into the capsule, or with a case variant of a
+  // protected folder, are denied.
+  seedCapsule();
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'active'), path.join(TMP, 'lnk-active'));
+  fs.symlinkSync(path.join(BRAIN, 'canon'), path.join(TMP, 'lnk-canon'));
+  for (const tool of ['Write', 'Edit', 'NotebookEdit']) {
+    const at = p => (tool === 'NotebookEdit' ? { notebook_path: p, new_source: 'x' } : { file_path: p, content: 'x' });
+    for (const p of [path.join(TMP, 'lnk-active', 'd.md'), path.join(TMP, 'lnk-canon', 'new', 'd.md'),
+      path.join(TMP, '.PROJECT-BRAIN', 'decisions', 'active', 'd.md'), path.join(BRAIN, 'Decisions', 'Active', 'd.md'),
+      path.join(BRAIN, 'CANON', 'd.md')]) {
+      r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: at(p) });
+      assert.ok(isDeny(r), `${tool} must be denied (background review): ${p} → ${r.stdout}`);
+    }
+  }
+
+  // 6i-f. P0-09 background security reviews, second batch (after 82a075b): (A) incomplete denylist,
+  // (B) case-insensitivity differential, (C) Unicode case folding, (D) symlinks, (F) path
+  // normalization, and the shell's working directory. The protected-path rule is now an allowlist: a command that reaches canon/
+  // or decisions/active/ — by name after case and Unicode folding, through a symlink, or from a
+  // working directory inside the capsule — passes only as one plain brain-promote call or a
+  // pipeline of pure readers. Write/Edit/NotebookEdit compare folded, symlink-resolved paths.
+  seedCapsule();
+  // (D) fixtures: symlinks into the capsule whose names do not mention it
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'active'), path.join(TMP, 'lnk-active'));
+  fs.symlinkSync(path.join(BRAIN, 'canon'), path.join(TMP, 'lnk-canon'));
+  fs.symlinkSync(BRAIN, path.join(TMP, 'lnk-capsule'));
+  fs.writeFileSync(path.join(BRAIN, 'canon', 'x.md'), 'x\n');
+  fs.symlinkSync(path.join(BRAIN, 'canon', 'x.md'), path.join(TMP, 'lnk-file.md'));
+  fs.mkdirSync(path.join(TMP, 'src-active'), { recursive: true });
+  // (F) the OS resolves a symlink before "..": lnk-deep/../active is decisions/active, while the
+  // same text resolved lexically is <TMP>/active
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'candidates'), path.join(TMP, 'lnk-deep'));
+  const bashAt = (cmd, cwd) => runHook('brain-security-guard.sh',
+    { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: cmd }, cwd });
+  for (const cmd of [
+    // (A) writers no denylist named
+    'sort -o .project-brain/canon/x.md /tmp/x',
+    'perl -pi -e s/a/b/ .project-brain/decisions/active/d.md',
+    'ruby -e 1 .project-brain/canon/x.md',
+    'curl -o .project-brain/canon/x.md https://example.invalid/x',
+    'wget -O .project-brain/decisions/active/d.md https://example.invalid/x',
+    'chmod 000 .project-brain/canon/x.md',
+    'split -l 1 /tmp/x .project-brain/canon/part',
+    'node scripts/some-tool.js .project-brain/decisions/active/d.md',
+    'bash /tmp/w.sh .project-brain/canon/x.md',
+    'xxd -r /tmp/h .project-brain/canon/x.md',
+    'ed -s .project-brain/canon/x.md < /tmp/cmds',
+    'cd .project-brain && cd canon && touch x.md',
+    'cd .project-brain/decisions && sqlite3 x.db .dump && cp /tmp/x active',
+    // (B, C) case and Unicode variants that a case-insensitive, normalization-insensitive disk
+    // resolves onto the protected folders
+    'echo x > .project-brain/Canon/y.md',
+    'touch .PROJECT-BRAIN/CANON/y.md',
+    'echo x > .project-brain/\uFF43\uFF41\uFF4E\uFF4F\uFF4E/y.md',
+    'echo x > .project-brain/deci\u017Fions/active/d.md',
+    'echo x > .project-bra\u0130n/canon/y.md',
+    'echo x > .project-bra\u0131n/decisions/active/d.md',
+    'rm -rf .project-bra\u0130n',
+    'rm -rf .\uFF50roject-brain/decisions',
+    'cd .project-bra\u0131n && rm -rf decisions',
+    // (D) a symlink into the capsule, named without the capsule's name
+    'cp /tmp/x lnk-active/d.md',
+    'cd lnk-canon && touch y.md',
+    'echo x > lnk-canon/y.md',
+    'rm -rf lnk-capsule/decisions',
+    // (F) path normalization: the same folder spelled the ways the filesystem accepts
+    'echo x > .project-brain//canon/y.md',
+    'echo x > .project-brain/./canon/y.md',
+    'echo x > .project-brain/decisions/x/../active/d.md',
+    'echo x >.project-brain/canon/y.md',
+    'cp /tmp/x lnk-deep/../active/d.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (review batch 2): ${JSON.stringify(cmd)} \u2192 ${res.stdout} ${res.stderr}`);
+  }
+  // A working directory inside the capsule (the hook input's cwd follows the shell's cd)
+  for (const [cmd, cwd] of [
+    ['rm -rf decisions', BRAIN],
+    ['echo x > d.md', path.join(BRAIN, 'decisions', 'active')],
+    ['touch y.md', path.join(BRAIN, 'canon')],
+    ['cp /tmp/x active/d.md', path.join(BRAIN, 'decisions')],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.ok(isDeny(res), `must deny from cwd ${cwd}: ${cmd} \u2192 ${res.stdout}`);
+  }
+  for (const [cmd, cwd] of [
+    ['cat x.md', path.join(BRAIN, 'canon')],
+    ['grep -rn rm .', BRAIN],
+    ['ls decisions/active', BRAIN],
+    ['git add .project-brain/canon/x.md && git commit -m "canon x"', TMP],
+    ['cat lnk-canon/x.md', TMP],
+    ['echo done', TMP],
+    ['ls', path.join(TMP, 'src-active')],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (review batch 2): ${cmd} in ${cwd} \u2192 ${res.stdout}`);
+  }
+  // Write/Edit/NotebookEdit: Unicode and case variants, and a symlink to a protected file itself
+  for (const tool of ['Write', 'Edit', 'NotebookEdit']) {
+    const at = p => (tool === 'NotebookEdit' ? { notebook_path: p, new_source: 'x' } : { file_path: p, content: 'x' });
+    for (const p of [path.join(BRAIN, '\uFF43\uFF41\uFF4E\uFF4F\uFF4E', 'd.md'), path.join(BRAIN, 'deci\u017Fions', 'active', 'd.md'),
+      path.join(TMP, '.project-bra\u0130n', 'canon', 'd.md'), path.join(TMP, 'lnk-file.md'), path.join(TMP, 'lnk-capsule', 'canon', 'n.md'),
+      path.join(TMP, 'lnk-deep') + '/../active/d.md', path.join(BRAIN) + '//canon/./d.md']) {
+      r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: at(p) });
+      assert.ok(isDeny(r), `${tool} must be denied (review batch 2): ${JSON.stringify(p)} \u2192 ${r.stdout}`);
+    }
+  }
+
+  // 6i-h. P0-09 background reviews (G) incomplete target detection and (H) parser differential:
+  // a word that may resolve to a protected folder, or to one of its parents, makes a command that is
+  // not a read-only form fail closed, whatever the verb or the argument position: globs and brace
+  // expansion matched against the protected folders, quotes and backslashes inside a name, ANSI-C
+  // $'...' escapes decoded, --opt=PATH, redirections and here-strings, a cd into a parent, and a
+  // variable or command substitution next to a protected-looking name (static analysis cannot
+  // tell where it leads). The same holds for deleting the capsule.
+  seedCapsule();
+  for (const [cmd, cwd] of [
+    ['touch .project-brai?/canon/x.md', TMP],
+    ['cp /tmp/x .project-{brain,x}/canon/y.md', TMP],
+    ['cp /tmp/x .pro*/can*/y.md', TMP],
+    ['cp /tmp/x .project-brain/decisions/[a]ctive/d.md', TMP],
+    ['D=.project-brain; cp /tmp/x "$D/canon/y.md"', TMP],
+    ['P=.project-bra; cp /tmp/x ${P}in/canon/y.md', TMP],
+    ['cp /tmp/x "$(printf .project-bra)in/canon/y.md"', TMP],
+    ['cp --target-directory=.project-brain/canon /tmp/x', TMP],
+    ['tee <<<"x" .project-brain/decisions/active/d.md', TMP],
+    ['cd .project-brain/decisions/candidates && cp /tmp/x ../active/d.md', TMP],
+    ['cp /tmp/x $\x27\\x2eproject-brain/canon/y.md\x27', TMP],
+    ['cp /tmp/x .proj\\ect-brain/canon/y.md', TMP],
+    ['cp /tmp/x .pro"ject-br"ain/canon/y.md', TMP],
+    ['mv .project-brain /tmp/gone', TMP],
+    ['chmod -R 000 .project-brain/decisions', TMP],
+    ['rsync -a --delete /tmp/empty/ .project-brain/', TMP],
+    ['rm -rf .project-brai?', TMP],
+    ['rm -rf .project-{brain,x}', TMP],
+    ['D=.project-brain; rm -rf "$D"', TMP],
+    ['rm -rf *', BRAIN],
+    ['rm -rf .[p]*', TMP],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.ok(isDeny(res), `must deny (reviews G, H): ${JSON.stringify(cmd)} in ${cwd} → ${res.stdout}`);
+  }
+  for (const [cmd, cwd] of [
+    ['ls .project-brai?/canon', TMP],
+    ['grep -rn x .project-{brain,x}/canon', TMP],
+    ['node scripts/brain/brain-verify.js --target .project-brain', TMP],
+    ['node scripts/brain/brain-lint.js --target .project-brain', TMP],
+    ['rm -rf build/*', TMP],
+    ['rm -f *.log', TMP],
+    ['cp /tmp/x .project-brain/decisions/candidates/y.md', TMP],
+    ['echo $HOME', TMP],
+    ['node scripts/brain/brain-capture.js --type note --message "weekly review"', TMP],
+    ['git log --oneline -3', TMP],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (reviews G, H): ${JSON.stringify(cmd)} in ${cwd} → ${res.stdout}`);
+  }
+
+  // 6i-i. Self-review after G and H (author probes, P0-09): a brain tool call pointed at a protected
+  // folder with --target writes inside it (capture writes <target>/sessions/, compile
+  // <target>/decisions/candidates/); a command padded past the lookup budget must not skip the
+  // on-disk check; ~user is an expansion the guard cannot follow.
+  seedCapsule();
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'active'), path.join(TMP, 'zz'));
+  for (const [cmd, cwd] of [
+    ['node scripts/brain/brain-capture.js --target .project-brain/canon --message x', TMP],
+    ['node scripts/brain/brain-compile.js --all --target .project-brain/decisions/active', TMP],
+    ['node scripts/brain/brain-lint.js --target zz', TMP],
+    [Array.from({ length: 6000 }, (_, i) => `w${i}`).join(' ') + ' ; cp /tmp/x zz/d.md', TMP],
+    ['cd /tmp && cd / && cp /tmp/x ' + Array.from({ length: 2600 }, (_, i) => `w${i}`).join(' ') + ' zz/d.md', TMP],
+    ['cp /tmp/x ~nobody/canon/y.md', TMP],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.ok(isDeny(res), `must deny (self-review): ${cmd.slice(0, 120)} → ${res.stdout} ${res.stderr}`);
+  }
+
+  // 6i-j. Reviews J (state drift) and K (parser differential). The guard keeps no state between
+  // calls; the inputs it reads from the environment cannot turn a block into an allow: with HOME
+  // unset a ~ word is an expansion it cannot follow. K: the cd builtin reads "link/.." logically
+  // (the folder holding the link), a program physically; words are checked both ways.
+  seedCapsule();
+  fs.symlinkSync(path.join(BRAIN, 'decisions'), path.join(TMP, 'zz2'));
+  fs.mkdirSync(path.join(TMP, 'other', 'sub'), { recursive: true });
+  fs.symlinkSync(path.join(TMP, 'other', 'sub'), path.join(BRAIN, 'decisions', 'xl'));
+  {
+    let res = bashAt('cd zz2/xl/../active && touch d.md', TMP);
+    assert.ok(isDeny(res), `logical cd into decisions/active must be denied: ${res.stdout}`);
+    res = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'Bash',
+      tool_input: { command: 'cp /tmp/x ~/canon-notes.md' }, cwd: TMP }, TMP, { env: { HOME: '' } });
+    assert.ok(isDeny(res), `with HOME unset, a ~ word next to a protected-looking name must be denied: ${res.stdout}`);
+  }
+
+  // 6i-k. Mutant follow-ups. A name fully hex-encoded in ANSI-C quoting shows no protected-looking
+  // text until decoded (mutant M11 survived the earlier cases, which also showed the name). And a
+  // word that merely contains "active" (systemctl is-active) next to a variable is not a
+  // protected-looking name: that false positive blocked ordinary box commands.
+  {
+    const hex = (s) => [...s].map((c) => '\\x' + c.charCodeAt(0).toString(16)).join('');
+    let res = bashAt(`cp /tmp/x $'${hex('.project-brain')}/${hex('canon')}/y.md'`, TMP);
+    assert.ok(isDeny(res), `a fully hex-encoded ANSI-C name must be denied: ${res.stdout}`);
+    res = bashAt('systemctl is-active "$UNIT" && echo ok', TMP);
+    assert.strictEqual(res.stdout.trim(), '', `is-active with a variable must pass: ${res.stdout}`);
+  }
+
+  // 6i-l. Review round 1 (PR7-R-1, R-2, R-6, R-8, R-10, R-11, N4).
+  seedCapsule();
+  fs.writeFileSync(path.join(BRAIN, 'canon', 'x.md'), 'x\n');
+  const tool = (name, input, cwd = TMP) => runHook('brain-security-guard.sh',
+    { hook_event_name: 'PreToolUse', tool_name: name, tool_input: input, cwd });
+  for (const cmd of [
+    // a single-quoted or plain message on git commit, a reader, passes as before (no exemption needed)
+    "git commit -m 'touch .project-brain/canon notes'",
+    'git commit -am "docs: canon and decisions/active"',
+    // R-2: a narrow sed -n print form, and a plain literal assignment before a reader
+    "sed -n '1,40p' .project-brain/canon/x.md",
+    "sed -n '5p' .project-brain/decisions/active/d.md",
+    "sed -n '/^title:/p' .project-brain/canon/x.md",
+    // PR7-R-13: the unquoted numeric sed form, and grep -c (a count, not git -c)
+    'sed -n 1,40p .project-brain/canon/x.md',
+    'sed -n 5p .project-brain/decisions/active/d.md',
+    'grep -c x .project-brain/decisions/active/d.md',
+    // PR7-R-12 guidance: a message in a file outside the capsule, or a protected file read as the message
+    `git commit -F ${path.join(TMP, 'msg.txt')}`,
+    `gh pr create --title t --body-file ${path.join(TMP, 'msg.txt')}`,
+    `gh pr edit 12 --body-file ${path.join(TMP, 'msg.txt')}`,
+    'git commit -F .project-brain/canon/x.md',
+    "sed -n '$p' .project-brain/canon/x.md",
+    'x=1; cat .project-brain/canon/x.md',
+    // R-11a: a reader at a system path
+    '/bin/cat .project-brain/canon/x.md',
+    '/usr/bin/grep x .project-brain/canon/x.md',
+    // N4: decisions/active.md is a file in decisions/, not decisions/active/
+    'echo x > .project-brain/decisions/active.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (round 1): ${JSON.stringify(cmd)} → ${res.stdout}`);
+  }
+  for (const cmd of [
+    // R-1: live substitutions, an unquoted delimiter, a heredoc fed to a shell, a heredoc as a path
+    'git commit -m "$(cp README.md .project-brain/canon/y.md)"',
+    'git commit -m "$(cat <<EOF\n$(cp README.md .project-brain/canon/y.md)\nEOF\n)"',
+    "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\" && cp README.md .project-brain/canon/y.md",
+    "bash <<'EOF'\ncp README.md .project-brain/canon/y.md\nEOF",
+    "cp README.md \"$(cat <<'EOF'\n.project-brain/canon/y.md\nEOF\n)\"",
+    'git commit -m "msg `cp README.md .project-brain/canon/y.md`"',
+    "gh pr create --body \"$(cat <<'EOF'\nx\nEOF\n)\" --repo x/y; rm -rf .project-brain",
+    // R-2: anything beyond the print form stays denied
+    "sed -n '1p;w .project-brain/canon/y.md' .project-brain/canon/x.md",
+    "sed -n '1w /tmp/x' .project-brain/canon/x.md",
+    "sed -i '' s/a/b/ .project-brain/canon/x.md",
+    'sed -n 1,40p .project-brain/canon/x.md > .project-brain/canon/y.md',
+    'sed -n 1w .project-brain/canon/x.md',
+    "awk '{print}' .project-brain/canon/x.md",
+    'x=$(cp README.md .project-brain/canon/y.md); cat .project-brain/canon/x.md',
+    'x=1 cat .project-brain/canon/x.md | sh',
+    // R-8: program-level patterns that reach the protected folders
+    "find . -path '*/canon/*' -delete",
+    "find . -path '*decisions/active*' -delete",
+    "find . -path '*canon*' -exec sed -i '' s/a/b/ {} +",
+    "find . -name x.md -path '*canon*' -exec cp /dev/null {} \\;",
+    // R-10: a substitution inside a reader, a backtick building the name
+    'cat $(cp README.md .project-brain/canon/y.md)',
+    'cat `cp README.md .project-brain/canon/y.md`',
+    'cp README.md `printf .project-bra`in/canon/y.md',
+    // R-11a: a reader named like a system tool but run from a project path
+    './cat .project-brain/canon/x.md',
+    'sub/git add .project-brain/canon/x.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (round 1): ${JSON.stringify(cmd)} → ${res.stdout}`);
+  }
+  // R-6: Monitor runs a command like Bash. PowerShell cannot be parsed reliably (wildcards,
+  // concatenation, -join, variables, aliases, encoded commands: review M), so in a project that has
+  // a capsule every PowerShell call is denied; without a capsule the guard has nothing to protect.
+  for (const [name, input, deny] of [
+    ['Monitor', { command: 'rm -rf .project-brain', description: 'x' }, true],
+    ['Monitor', { command: 'cp README.md .project-brain/canon/y.md', description: 'x' }, true],
+    ['Monitor', { command: 'tail -f .project-brain/reports/x.log', description: 'x' }, false],
+    ['Monitor', { ws: { url: 'wss://example.invalid/x' }, description: 'x' }, false],
+    ['PowerShell', { command: 'Remove-Item -Recurse .project-brain' }, true],
+    ['PowerShell', { command: 'Set-Content -Path .\\.PROJECT-BRAIN\\canon\\x.md -Value x' }, true],
+    ['PowerShell', { command: 'Remove-Item -Recurse -Force .proj*' }, true],
+    ['PowerShell', { command: 'Remove-Item -Recurse ("." + "project-" + "brain")' }, true],
+    ['PowerShell', { command: 'Get-ChildItem C:\\Users' }, true],
+  ]) {
+    const res = tool(name, input);
+    assert.strictEqual(isDeny(res), deny, `${name} ${JSON.stringify(input)} → ${res.status} ${res.stdout}`);
+  }
+  {
+    const bare = fs.mkdtempSync(path.join(require('os').tmpdir(), 'no-capsule-'));
+    try {
+      const res = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'PowerShell',
+        tool_input: { command: 'Get-ChildItem' }, cwd: bare }, bare);
+      assert.strictEqual(res.stdout.trim(), '', `PowerShell in a project without a capsule passes: ${res.stdout}`);
+    } finally { fs.rmSync(bare, { recursive: true, force: true }); }
+  }
+  // Reviews O (allowlist semantics) and P (control regression), and round-1 mutant follow-ups.
+  // P: message text is data only while it cannot reach a program that runs it in the same
+  // command (base denied the store-then-run form). O: a reader passes only with options from its
+  // allowlist; printf -v and git -p are not readers; the R-1 exemption covers cat heredocs only.
+  for (const cmd of [
+    'git commit -m "rm -rf .project-brain" && git log -1 --format=%B | sh',
+    "git commit -m \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\" && git log -1 --format=%B | bash",
+    'git commit -m \'cp README.md .project-brain/canon/y.md\' && git log -1 --format=%B | xargs -I{} sh -c {}',
+    "git commit -m \"$(sh <<'EOF'\ncp README.md .project-brain/canon/y.md\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF' && rm -rf .project-brain\nx\nEOF\n)\"",
+    'gh pr create --body-file <(cp README.md .project-brain/canon/y.md)',
+    'git -p log -- .project-brain/canon/x.md',
+    'git --paginate show HEAD:.project-brain/canon/x.md',
+    'printf -v PATH /tmp/evil; cat .project-brain/canon/x.md',
+    'cat --frobnicate .project-brain/canon/x.md',
+    'head --frobnicate .project-brain/canon/x.md',
+    // R-7: a brace word past the work budget cannot be resolved; next to a protected-looking name it fails closed
+    'cp x ' + '{a,b}'.repeat(6) + 'z'.repeat(4000) + ' canon',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (reviews O, P): ${JSON.stringify(cmd.slice(0, 160))} → ${res.stdout}`);
+  }
+  for (const cmd of [
+    "git commit -m 'x' -- .project-brain/canon/x.md",
+    'git commit --amend -m "canon notes"',
+    'head -n 5 .project-brain/canon/x.md',
+    'tail -f .project-brain/canon/x.md',
+    "grep -rn --include='*.md' x .project-brain/canon",
+    'ls -la .project-brain/canon',
+    'wc -l .project-brain/canon/x.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (reviews O, P): ${JSON.stringify(cmd)} → ${res.stdout}`);
+  }
+
+  // Review Q: git reader subcommands pass only with options from a per-subcommand allowlist.
+  // Programs run through git options, config and environment stay denied; unknown options too.
+  for (const cmd of [
+    'git grep -Ocat x -- .project-brain/canon/x.md', 'git grep -O cat x -- .project-brain/canon/x.md',
+    'git grep --open-files-in-pager=cat x -- .project-brain/canon/x.md', 'git grep --ope=cat x -- .project-brain/canon/x.md',
+    'git -c core.pager=cat log -- .project-brain/canon/x.md', 'git --config-env=core.pager=X log -- .project-brain/canon/x.md',
+    'git --exec-path=/tmp log -- .project-brain/canon/x.md', 'GIT_PAGER=cat git log -- .project-brain/canon/x.md',
+    'GIT_EXTERNAL_DIFF=x git diff -- .project-brain/canon/x.md', 'GIT_CONFIG_COUNT=1 git log -- .project-brain/canon/x.md',
+    'git diff --ext-diff -- .project-brain/canon/x.md', 'git show --textconv HEAD:.project-brain/canon/x.md',
+    'git log --output=.project-brain/canon/x.md', 'git log --frobnicate -- .project-brain/canon/x.md',
+    'git blame --contents .project-brain/canon/x.md .project-brain/canon/x.md', 'git add --chmod=+x .project-brain/canon/x.md',
+    'git add -e .project-brain/canon/x.md', 'git commit -S -m x -- .project-brain/canon/x.md',
+    // PR7-R-14: an attached -c<key>=<value> and an unknown global option end the exemption too
+    `git -ccore.pager=cat log -- ${path.join('.project-' + 'brain', 'canon', 'x.md')}`,
+    `git -cdiff.external=cat diff -- ${path.join('.project-' + 'brain', 'canon', 'x.md')}`,
+    `git --frobnicate log -- ${path.join('.project-' + 'brain', 'canon', 'x.md')}`,
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (review Q): ${cmd} → ${res.stdout}`);
+  }
+  for (const cmd of [
+    'git log --oneline -3 -- .project-brain/canon/x.md', 'git log -p -- .project-brain/canon/x.md',
+    'git diff --stat HEAD -- .project-brain/canon/x.md', 'git show HEAD:.project-brain/canon/x.md',
+    'git status --short .project-brain', 'git grep -n x -- .project-brain/canon/x.md', 'git blame .project-brain/canon/x.md',
+    'git ls-files .project-brain', 'git rev-parse --show-toplevel', 'git add -A .project-brain/canon',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (review Q): ${cmd} → ${res.stdout}`);
+  }
+
+  // Review N and the author's probes: the single-quote reading behind R-1 must not desync from
+  // bash. A quote inside a comment or a heredoc body is no quote, so it cannot hide a later
+  // substitution; and an assignment stage may not change how a later reader runs (PATH, IFS …).
+  for (const cmd of [
+    "echo x # it's\ncp README.md \"$(printf .project-bra)in/canon/y.md\"",
+    "cat <<EOF\nit's\nEOF\ncp README.md \"$(printf .project-bra)in/canon/y.md\"",
+    "echo x # it's\ncp README.md `printf .project-bra`in/canon/y.md",
+    'PATH=/tmp/evil; cat .project-brain/canon/x.md',
+    'IFS=x; cat .project-brain/canon/x.md',
+    'BASH_ENV=/tmp/x; cat .project-brain/canon/x.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (review N): ${JSON.stringify(cmd)} → ${res.stdout}`);
+  }
+  // R-11b: a Write through a hard link to a canon file is a write to canon; an ordinary hard link is not
+  fs.linkSync(path.join(BRAIN, 'canon', 'x.md'), path.join(TMP, 'hard.md'));
+  fs.writeFileSync(path.join(TMP, 'a.md'), 'a\n');
+  fs.linkSync(path.join(TMP, 'a.md'), path.join(TMP, 'b.md'));
+  for (const t of ['Write', 'Edit']) {
+    let res = tool(t, { file_path: path.join(TMP, 'hard.md'), content: 'x' });
+    assert.ok(isDeny(res), `${t} through a hard link to a canon file must be denied: ${res.stdout}`);
+    res = tool(t, { file_path: path.join(TMP, 'b.md'), content: 'x' });
+    assert.strictEqual(res.stdout.trim(), '', `${t} through an ordinary hard link passes: ${res.stdout}`);
+  }
+
+
+  // 6i-m. Review round 2. PR7-R-12: the message-data exemption read comments and ANSI-C quoting
+  // differently from bash, so commands bash runs were hidden as message text; it is removed. A
+  // message names the protected folders at its own risk: such a commit or PR command is denied,
+  // and the reason says to write the message to a file outside the capsule (git commit -F,
+  // gh pr create|edit --body-file).
+  fs.writeFileSync(path.join(TMP, 'msg.txt'), 'msg\n');
+  for (const cmd of [
+    "git commit -m x # -m \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\"",
+    "git commit -m $'x\\' -m \"$(cat <<'EOF'\n'\nrm -rf .project-brain\nEOF\n)\"",
+    "git commit -m x # -m \"$(cat <<'EOF'\necho pwned > .project-brain/canon/x.md\nEOF\n)\"",
+    "gh pr create --title t # --body \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\"",
+    "node scripts/brain/brain-capture.js --title t # --message \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\"",
+    "( git commit -m x # -m $(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)",
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (PR7-R-12): ${JSON.stringify(cmd)} → ${res.stdout}`);
+  }
+  for (const cmd of [
+    "git commit -m \"$(cat <<'EOF'\nfix(brain-guard): protect decisions/active and .project-brain/canon\n\nrm the old notes; touches .project-brain/decisions/active\n\nCo-Authored-By: X <x@example.invalid>\nEOF\n)\"",
+    "gh pr create --title \"P0-09: canon and decisions/active\" --body \"$(cat <<'EOF'\n## Summary\n- .project-brain/canon is protected\n- `decisions/active/` too\nEOF\n)\"",
+    "gh pr edit 12 --body \"$(cat <<'EOF'\nrm -rf .project-brain is denied\nEOF\n)\"",
+    "node scripts/brain/brain-capture.js --type note --message 'reviewed 9 items in `decisions/active/`'",
+    'node scripts/brain/brain-capture.js --type note --message "only writer to .project-brain/canon and decisions/active"',
+    "git add -A && git commit -m \"$(cat <<'EOF'\nupdate .project-brain/canon notes\nEOF\n)\" && git push -u origin HEAD",
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `a message naming the protected folders is checked like any text: ${JSON.stringify(cmd)} → ${res.stdout}`);
+    if (/git commit|gh pr/.test(cmd))
+      assert.ok(/git commit -F/.test(res.stdout) && /--body-file/.test(res.stdout), `the reason says how to pass the message: ${res.stdout}`);
+    else
+      assert.ok(/--message/.test(res.stdout) && /stdin/.test(res.stdout),
+        `the reason says brain-capture reads the message from stdin, or to avoid the paths in --message: ${res.stdout}`);
+  }
+  // brain-capture reads the message from stdin when --message is absent: from a file outside the capsule it passes
+  {
+    const res = bashAt(`node scripts/brain/brain-capture.js --type note < ${path.join(TMP, 'msg.txt')}`, TMP);
+    assert.strictEqual(res.stdout.trim(), '', `brain-capture from a file passes: ${res.stdout}`);
+  }
+  // Legacy MultiEdit edits a file like Edit; cpio is no reader (it writes files from an archive).
+  let me = tool('MultiEdit', { file_path: path.join(BRAIN, 'canon', 'x.md'), edits: [] });
+  assert.ok(isDeny(me), `MultiEdit into canon must be denied: ${me.stdout}`);
+  me = tool('MultiEdit', { file_path: path.join(TMP, 'a.md'), edits: [] });
+  assert.strictEqual(me.stdout.trim(), '', 'MultiEdit elsewhere passes');
+  me = bashAt('cpio -id < /tmp/a.cpio', path.join(BRAIN, 'canon'));
+  assert.ok(isDeny(me), `cpio inside canon must be denied: ${me.stdout}`);
+
+  // 6i-g. A truncated guard program blocks. The node program sits in a bash single-quoted string,
+  // so a stray apostrophe ends it early; during P0-09 one did (in a comment), and the program that
+  // still ran defined its helpers, checked nothing and allowed every call with exit 0. The program
+  // now exits non-zero unless it reaches its last line, so the wrapper blocks (exit 2).
+  {
+    seedCapsule();
+    const src = fs.readFileSync(path.join(HOOKS, 'brain-security-guard.sh'), 'utf8');
+    const at = src.indexOf('const realOr = ');
+    assert.ok(at > 0, 'guard layout: realOr helper present');
+    const broken = path.join(TMP, 'broken-guard.sh');
+    fs.writeFileSync(broken, src.slice(0, at) + '// stray apostrophes: it\x27s the guard\x27s\n' + src.slice(at));
+    const res = spawnSync('bash', [broken], { encoding: 'utf8', timeout: 15000, env: { ...process.env, CLAUDE_PROJECT_DIR: TMP },
+      input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Write',
+        tool_input: { file_path: path.join(BRAIN, 'canon', 'x.md'), content: 'x' } }) });
+    assert.ok(res.status === 2 || isDeny({ stdout: res.stdout || '' }),
+      `a truncated guard program must block, not allow: status ${res.status} ${res.stdout} ${res.stderr}`);
+  }
+
   // 6j. P11 — timing: every rule must stay linear. 512 KB still fits the old env-var path,
   // so these inputs reach the regexes (the old ones were quadratic: minutes, not ms).
   const K = 1 << 19;
-  for (const [label, cmd] of [
-    ['rm + spaces', 'rm ' + ' '.repeat(K) + '.project-brain'],
-    ['many rm', 'rm '.repeat(K / 3) + '.project-brain'],
-    ['many separators', 'cd .project-brain' + ' && rm'.repeat(K / 6)],
-    ['find -exec', 'find .project-brain ' + '-exec '.repeat(K / 6) + 'x'],
-    ['quotes', 'grep "' + '"'.repeat(K) + ' .project-brain'],
-    ['canon redirects', '.project-brain/canon ' + '2>/dev/null '.repeat(K / 12)],
-    ['digits', '.project-brain/canon ' + '1'.repeat(K)],
-    ['many sed', '.project-brain/canon ' + 'sed '.repeat(K / 4)],
-    ['many brain-promote', '.project-brain/canon > x ' + 'brain-promote '.repeat(K / 14)],
+  for (const [label, cmd, expect] of [
+    ['rm + spaces', 'rm ' + ' '.repeat(K) + '.project-brain', 'deny'],
+    ['many rm', 'rm '.repeat(K / 3) + '.project-brain', 'deny'],
+    ['many separators', 'cd .project-brain' + ' && rm'.repeat(K / 6), 'deny'],
+    ['find -exec', 'find .project-brain ' + '-exec '.repeat(K / 6) + 'x', 'deny'],
+    ['quotes', 'grep "' + '"'.repeat(K) + ' .project-brain', 'allow'],
+    ['canon redirects', '.project-brain/canon ' + '2>/dev/null '.repeat(K / 12), 'deny'],
+    ['digits', '.project-brain/canon ' + '1'.repeat(K), 'deny'],
+    ['many sed', '.project-brain/canon ' + 'sed '.repeat(K / 4), 'deny'],
+    ['many brain-promote', '.project-brain/canon > x ' + 'brain-promote '.repeat(K / 14), 'deny'],
     // P11 re-review RR3: the git clean dry-run check was /^-[A-Za-z]*n[A-Za-z]*$/, quadratic
-    ['git clean option', 'git clean -' + 'n'.repeat(K) + '1 .project-brain'],
-    ['many git options', 'git ' + '--bare '.repeat(K / 7) + 'clean .project-brain'],
+    ['git clean option', 'git clean -' + 'n'.repeat(K) + '1 .project-brain', 'deny'],
+    ['many git options', 'git ' + '--bare '.repeat(K / 7) + 'clean .project-brain', 'deny'],
     // joinLines once read the last character of the string it was building, which flattened it
     // on every # (4 s at 512 KB, 16 s at 1 MB)
-    ['comments and continuations', 'ls # x ' + '\\\n#'.repeat(K / 3) + ' .project-brain'],
+    ['comments and continuations', 'ls # x ' + '\\\n#'.repeat(K / 3) + ' .project-brain', 'deny'],
+    // P0-09: the G3 reader check, the G1 one-call check and the decisions/active rule
+    ['canon rm readers', '.project-brain/canon/rm ' + '| cat '.repeat(K / 6), 'deny'],
+    ['canon rm words', 'cat .project-brain/canon/x ' + 'rm '.repeat(K / 3), 'allow'],
+    ['canon rm stages', 'cat .project-brain/canon/rm' + ' | grep x'.repeat(K / 9), 'allow'],
+    ['active redirects', '.project-brain/decisions/active/x ' + '2>/dev/null '.repeat(K / 12) + '> y', 'deny'],
+    ['active words', 'cd .project-brain && ' + 'active/ '.repeat(K / 8) + '> x', 'deny'],
+    ['promote args', 'node scripts/brain/brain-promote.js ' + 'a '.repeat(K / 2) + '--approve .project-brain/canon/rm', 'deny'],
+    ['promote chain', 'node scripts/brain/brain-promote.js a --approve' + ' && x'.repeat(K / 5) + ' .project-brain/canon/rm', 'deny'],
+    ['promote path', 'node ' + 'a/'.repeat(K / 2) + 'scripts/brain/brain-promote.js --approve .project-brain/canon/rm', 'deny'],
+    // PR7-R-7: nested brace groups without a comma (braces() rescanned each one: about 4.5 s per MB)
+    ['nested braces cat', 'cat ' + Array.from({ length: Math.floor(K / 4100) }, (_, i) => '{'.repeat(2040) + '*' + i + '}'.repeat(2040)).join(' '), 'allow'],
+    ['nested braces cp', 'cp x ' + Array.from({ length: Math.floor(K / 4100) }, (_, i) => '{'.repeat(2040) + '*' + i + '}'.repeat(2040)).join(' '), 'allow'],
   ]) {
-    const t0 = Date.now();
-    denyBash(cmd);
-    const ms = Date.now() - t0;
+    // A runner timeout retries once (F1 quarantine, see runHook); the bound applies to the run kept.
+    const { ms, stdout, status } = runHook('brain-security-guard.sh', null, TMP, { retryOnTimeout: true,
+      raw: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: cmd } }) });
     assert.ok(ms < 3000, `${label}: guard took ${ms} ms on a 512 KB command`);
+    // PR7-R-9: the decision is checked too, on the run kept
+    const denied = status === 2 || stdout.includes('"permissionDecision":"deny"');
+    assert.strictEqual(denied ? 'deny' : 'allow', expect, `${label}: expected ${expect}`);
   }
 
   // 7. Post-lint: always exit 0; warns via additionalContext only on sensitive content

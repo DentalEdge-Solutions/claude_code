@@ -226,15 +226,15 @@ echo ""
 
 # ── Second Brain removal (mirrors install step 8) ───────────────────────────
 if [ -d "${TARGET}/hooks/brain" ] || [ -d "${TARGET}/scripts/brain" ]; then
-    rm -rf "${TARGET}/hooks/brain" "${TARGET}/scripts/brain" "${TARGET}/schemas/brain" "${TARGET}/templates/second-brain"
-    ok "removed brain hooks, scripts, schemas, templates"
-    # Remove our hook entries (match by command string; leave everything else)
-    SETTINGS="${TARGET}/.claude/settings.local.json"
-    if [ -f "${SETTINGS}" ] && command -v node &>/dev/null; then
-        if BRAIN_HOOKS_REMOVED="$(node -e '
+    # Registrations first. The security guard is registered in the shared settings.json with
+    # "onFailure": "block" (P0-09), so a registration that names a deleted script would block every
+    # Write, Edit and Bash call: hooks/brain/ goes only once that registration is gone. The other
+    # brain hooks are in settings.local.json. Match by "hooks/brain/" in the command or an argument;
+    # leave everything else. A file this cannot read is left as it is: exit non-zero and warn
+    # (review N2, N3).
+    BRAIN_UNMERGE_JS='
 const fs = require("fs");
 const file = process.argv[1];
-// A file this cannot read is left as it is: exit non-zero and the shell warns (review N2, N3).
 function refuse(why) { process.stderr.write(`Error: ${file}: ${why}.\n`); process.exit(3); }
 const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const raw = fs.readFileSync(file, "utf8");
@@ -245,6 +245,7 @@ try { s = JSON.parse(raw); } catch (e) { refuse(`it is not valid JSON (${e.messa
 if (!plain(s)) refuse("it is not a JSON object");
 if (s.hooks == null) { process.stdout.write("0"); process.exit(0); }
 if (!plain(s.hooks)) refuse("its \"hooks\" is not an object");
+const ours = (h) => h && [h.command, ...(Array.isArray(h.args) ? h.args : [])].some((x) => /hooks\/brain\//.test(String(x || "")));
 // Remove our hooks one by one, keeping the owner hooks that share an entry with them; drop an
 // entry only when every hook in it was ours (review N10). Anything malformed is kept as found.
 let removed = 0;
@@ -253,7 +254,7 @@ for (const ev of Object.keys(s.hooks)) {
   const kept = [];
   for (const e of s.hooks[ev]) {
     if (!e || !Array.isArray(e.hooks)) { kept.push(e); continue; }
-    const rest = e.hooks.filter(h => !(h && /hooks\/brain\//.test(h.command || "")));
+    const rest = e.hooks.filter((h) => !ours(h));
     removed += e.hooks.length - rest.length;
     if (rest.length === e.hooks.length) kept.push(e);
     else if (rest.length) kept.push({ ...e, hooks: rest });
@@ -263,15 +264,39 @@ for (const ev of Object.keys(s.hooks)) {
 }
 if (removed) fs.writeFileSync(file, JSON.stringify(s, null, 2) + "\n");
 process.stdout.write(String(removed));
-' "${SETTINGS}")"; then
-            if [ "${BRAIN_HOOKS_REMOVED}" != "0" ]; then
-                ok "removed ${BRAIN_HOOKS_REMOVED} brain hook$([ "${BRAIN_HOOKS_REMOVED}" = "1" ] || echo s) from ${SETTINGS}"
+'
+    # unmerge <file>: prints the outcome; returns 1 when the file could not be read or changed.
+    unmerge_brain_hooks() {
+        local file="$1" n
+        if n="$(node -e "${BRAIN_UNMERGE_JS}" "${file}")"; then
+            if [ "${n}" != "0" ]; then
+                ok "removed ${n} brain hook$([ "${n}" = "1" ] || echo s) from ${file}"
             else
-                skip "no brain hook entries found in ${SETTINGS}"
+                skip "no brain hook entries found in ${file}"
             fi
-        else
-            warn "brain hooks not removed: ${SETTINGS} was left unchanged (see the error above); remove them by hand"
+            return 0
         fi
+        warn "brain hooks not removed: ${file} was left unchanged (see the error above); remove them by hand"
+        return 1
+    }
+    GUARD_REGISTRATION_GONE=true
+    SHARED_SETTINGS="${TARGET}/.claude/settings.json"
+    if [ -f "${SHARED_SETTINGS}" ]; then
+        if ! command -v node &>/dev/null || ! unmerge_brain_hooks "${SHARED_SETTINGS}"; then
+            GUARD_REGISTRATION_GONE=false
+        fi
+    fi
+    SETTINGS="${TARGET}/.claude/settings.local.json"
+    if [ -f "${SETTINGS}" ] && command -v node &>/dev/null; then
+        unmerge_brain_hooks "${SETTINGS}" || true
+    fi
+    rm -rf "${TARGET}/scripts/brain" "${TARGET}/schemas/brain" "${TARGET}/templates/second-brain"
+    if ${GUARD_REGISTRATION_GONE}; then
+        rm -rf "${TARGET}/hooks/brain"
+        ok "removed brain hooks, scripts, schemas, templates"
+    else
+        ok "removed brain scripts, schemas, templates"
+        warn "kept ${TARGET}/hooks/brain/: the guard may still be registered in ${SHARED_SETTINGS} with onFailure \"block\", and a registration naming a deleted script blocks every Write, Edit and Bash call. Remove the brain-security-guard hook from that file by hand, then delete hooks/brain/."
     fi
     # Remove CLAUDE.md marker section (keep everything outside the markers)
     CLAUDE_MD="${TARGET}/CLAUDE.md"

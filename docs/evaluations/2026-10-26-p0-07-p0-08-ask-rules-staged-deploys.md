@@ -141,9 +141,12 @@ rules that load in executor runs and deny the listed commands there. The checkli
 
 The P0-09 part of OC-4 (root *hooks* loading in Hermes runs) is separate and stays open.
 
-### Pending owner probe (acceptance, no-UI evidence row)
+### Owner probe (acceptance, no-UI evidence row) — done 2026-10-26
 
-Not run: an implementer cannot start a fresh interactive session. To run by the owner, after merge (or in a checkout
+**Update 2026-10-26 (recorded in the P0-09 record's PR):** the owner ran the fresh-session probe below on
+2026-10-26, and the approval prompts appeared as expected. Status: pending → done.
+
+Not run by the implementer: an implementer cannot start a fresh interactive session. To run by the owner, after merge (or in a checkout
 of this branch), from the repository root. Every probe is harmless if a rule fails to match and the command runs:
 `git push --dry-run` sends nothing (it does contact `origin` with the owner's credential); `gh pr merge` names a PR
 number that does not exist (one authenticated API call that fails); every deploy probe copies from a source that does
@@ -169,7 +172,11 @@ Run the `git push` and `gh pr merge` probes once before the settings trim below 
 prompt, because the local `Bash(git push *)` / `Bash(git *)` allow does not outrank the project ask. Record each
 input, what was shown (a prompt or an automatic run) and the answer in this file or the PR.
 
-### Owner action (not performed here)
+### Owner action (not performed here) — done 2026-10-26
+
+**Update 2026-10-26:** the owner removed from the local settings the three allows named below (`Bash(git push *)`,
+`Bash(gh pr *)`, `Bash(git *)`), and also `Bash(python3 *)`, `Bash(python3 -c ' *)`, three old
+`cp -r … ~/.claude/skills/…` allows and two old `/tmp` restore `cp` allows. The local file was not read in this work.
 
 In the gitignored `.claude/settings.local.json` at the main checkout's root (not read or edited in this work): remove
 `Bash(git push *)`, `Bash(gh pr *)` and `Bash(git *)` from `permissions.allow`, and review `Bash(python3 *)` (S5 cites
@@ -344,7 +351,7 @@ fail). No hidden or bidi characters in the 2 files changed in round 2.
 
 ## Not measured
 
-- The owner probe above (P0-07 acceptance) — pending owner.
+- The owner probe above (P0-07 acceptance) — done by the owner on 2026-10-26 (the prompts appeared as expected).
 - The Hermes box probe — optional, owner-run, for review #12.
 - skill-eval of skill-refine and skill-adapt after the step changes — P1-10 (B6).
 - Deploys: after merge the owner deploys skill-refine and skill-adapt (`cp -R skills/<name>/. ~/.claude/skills/<name>/`)

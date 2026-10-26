@@ -337,7 +337,7 @@ BRAIN_MARKER
         ok "second brain installed (mode: ${BRAIN_MODE}) — verify passed"
     else
         dryrun "would copy hooks/brain, scripts/brain, schemas/brain, templates/second-brain"
-        dryrun "would create ${BRAIN} + merge 6 hook entries + append CLAUDE.md marker"
+        dryrun "would create ${BRAIN} + merge 5 brain hooks into .claude/settings.local.json and the security guard (onFailure block) into .claude/settings.json + append CLAUDE.md marker"
         dryrun "would set brain_mode=${BRAIN_MODE} in brain-profile.json"
     fi
     echo ""

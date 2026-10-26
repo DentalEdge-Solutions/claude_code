@@ -70,6 +70,9 @@ try {
   r = install('install.sh', ['--with-second-brain']);
   assert.strictEqual(r.status, 0, `install --with-second-brain failed:\n${r.stdout.slice(-2000)}\n${r.stderr}`);
   assert.ok(/hooks\/brain\//.test(fs.readFileSync(LOCAL, 'utf8')), 'brain hooks registered');
+  // P0-09: the guard is registered in the shared file, fail-closed; the other brain hooks stay local
+  assert.ok(/brain-security-guard\.sh/.test(fs.readFileSync(SETTINGS, 'utf8')), 'guard registered in settings.json');
+  assert.ok(!/brain-security-guard\.sh/.test(fs.readFileSync(LOCAL, 'utf8')), 'guard not in settings.local.json');
   r = install('uninstall.sh', [], 'y\nn\n');
   assert.strictEqual(r.status, 0, `uninstall.sh failed on null entries:\n${r.stdout.slice(-2000)}\n${r.stderr}`);
   const after = JSON.parse(fs.readFileSync(SETTINGS, 'utf8')).hooks;
@@ -77,6 +80,7 @@ try {
   // it is not ours, so the entry stays with it (review N8: it used to stay whole, still running a
   // script uninstall had deleted).
   assert.ok(!/scripts\/telemetry\//.test(JSON.stringify(after)), 'telemetry hooks removed');
+  assert.ok(!/hooks\/brain\//.test(JSON.stringify(after)), 'the guard registration removed from settings.json');
   assert.deepStrictEqual(after.PostToolUse, [null, { matcher: 'Skill|Task', hooks: [null] }],
     'our hook leaves the mixed entry; the nulls stay');
   for (const ev of EVENTS) assert.strictEqual(after[ev][0], null, `settings.json ${ev}: the null entry is kept`);
