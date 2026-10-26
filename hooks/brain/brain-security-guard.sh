@@ -64,7 +64,13 @@ const inp = j.tool_input;
 const fold = (s) => s.normalize("NFKD").replace(/\p{M}/gu, "").toUpperCase().toLowerCase();
 // The working directory of the shell: the cwd field of the hook input (it follows a cd), else the cwd of this process.
 const CWD = typeof j.cwd === "string" && j.cwd ? j.cwd : process.cwd();
-const realOr = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+// At most 50,000 lookups on disk per call (a padded command must not stall the guard); past that,
+// fsExhausted is set and a Bash command passes only in a read-only form.
+let fsCalls = 0, fsExhausted = false;
+const realOr = (p) => {
+  if (++fsCalls > 50000) { fsExhausted = true; return null; }
+  try { return fs.realpathSync(p); } catch { return null; }
+};
 // canonical: the path the operating system opens. Walks the segments left to right as the kernel
 // does: each existing prefix is replaced by its real path (symlinks resolved), so ".." applies to
 // the real folder ("link/../x" is the link target parent x, not the lexical one); "" and "." are
@@ -523,11 +529,15 @@ if (tool === "Bash") {
   // resolutions; past that, or after a cd to a target the guard cannot follow, the folder is
   // unknown. A parent folder (the capsule or decisions/) counts only as an argument of a stage
   // that is not a pure reader ("cd .project-brain && ls" is fine; "mv .project-brain x" is not).
-  const EXPANSION = /\$[^\s]|`/;
+  // A variable, $(…), backticks, ANSI-C quoting, or ~user: text the guard cannot resolve.
+  const EXPANSION = /\$[^\s]|`|^~[^\/\s]/;
   const GLOB = /[*?[]|\{[^{}]*(,|\.\.)[^{}]*\}/;
   let dirs = [cwdAbs], dirUnknown = false, budget = 5000, ancestorArg = false;
   const tooMany = distinct.length > 5000;
-  if (!tooMany) for (const { stages } of splitShell(cmd)) for (const stg of stages) {
+  // A read-only form passes the protected-path rule whatever its words reach, so nothing is
+  // resolved for it.
+  const readOnly = readerForm();
+  if (!tooMany && !readOnly) for (const { stages } of splitShell(cmd)) for (const stg of stages) {
     const h = head(stg);
     const raws = shellWordsRaw(stg);
     const ws = [...new Set([...shellWords(stg), ...shellWords(ansiC(stg)), ...raws.flatMap((w) => [w, ...w.split(/[=<>]+/)])])].filter(Boolean);
@@ -582,14 +592,18 @@ if (tool === "Bash") {
   const isBrainTool = !/[^\x20-\x7e]/.test(raw) && !/[;&|<>`$()\\"\x27#*?{}\[\]~!=]/.test(raw) && (() => {
     const ws = raw.trim().split(/ +/);
     const m = /^(?:\.\/)?scripts\/brain\/brain-(verify|lint|search|context-pack|compile|capture)\.js$/.test(ws[1] || "");
-    return ws[0] === "node" && m;
+    // At most the capsule folder itself as --target (each tool writes below its target:
+    // sessions/, decisions/candidates/, reports/), never a protected folder.
+    const t = ws.indexOf("--target");
+    return ws[0] === "node" && m && (t < 0 || (t + 1 < ws.length && roots.has(canonical(ws[t + 1], CWD))));
   })();
-  if ((hitCanon || hitActive || hitOther) && !isApprovedPromote && !isBrainTool && !readerForm())
+  if (((hitCanon || hitActive) && !isApprovedPromote && !readOnly)
+    || (hitOther && !isApprovedPromote && !isBrainTool && !readOnly))
     deny(hitCanon ? "Only brain-promote.js --approve may modify .project-brain/canon/ (a command that reaches it passes only as one brain-promote call or a read-only form: grep, cat, ls, git log/diff/add …)"
       : hitActive ? "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote; other commands that reach it pass only in a read-only form)"
       : "brain-security-guard: a word of this command may reach .project-brain/canon/ or decisions/active/ (a parent folder, a glob or brace pattern, or a variable or substitution the guard cannot follow) — denied unless the command is a read-only form. Name the path plainly, or split the command.");
-  if (tooMany && !readerForm())
-    deny("brain-security-guard: more than 5,000 distinct words; the guard cannot check where they lead on disk. Split the command.");
+  if ((tooMany || fsExhausted || budget < 0) && !readOnly)
+    deny("brain-security-guard: too many words or path lookups (over 5,000 words or 50,000 lookups); the guard cannot check where they lead on disk. Split the command.");
 
   // Fail closed on a kept line continuation in a command that names the capsule. A pair is kept
   // only inside single quotes or a comment, so where joinLines reads quotes as bash does this is
