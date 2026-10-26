@@ -69,17 +69,24 @@ function userSkillsCopies(text) {
   return bad;
 }
 
-// Code in a script that names the user-level skills folder: path.join(os.homedir(), '.claude', 'skills', …), or
-// homedir() / expanduser( / process.env.HOME / os.environ with '.claude/skills' on the same line. Scripts under the
-// definition trees must not address that folder at all (review PR6-R-4); none does today (check-skill-deploy.js
-// lives in scripts/, which is not a definition tree).
-const CODE_USER_SKILLS = /homedir\(\)\s*,\s*['"`]\.claude['"`]\s*,\s*['"`]skills['"`]|(?:homedir\(\)|expanduser\(|process\.env\.HOME\b|os\.environ)[^\n]*\.claude\/skills/;
-const codeUserSkills = text => text.split('\n').filter(l => CODE_USER_SKILLS.test(l)).map(l => l.trim());
+// Code in a script that names the user-level skills folder: on one line, a home token (homedir(), expanduser(,
+// process.env.HOME, os.environ, Path.home()) and the folder, either as `.claude/skills` or as the quoted path parts
+// '.claude' and 'skills' (path.join(process.env.HOME, '.claude', 'skills'), Path.home() / '.claude' / 'skills';
+// review PR6-R-11). Scripts under the definition trees must not address that folder at all (review PR6-R-4); none
+// does today (check-skill-deploy.js lives in scripts/, which is not a definition tree).
+// Each check is a separate single pass over the line: fixed alternatives with no `[^\n]*` between them, so a long
+// line of repeated tokens cannot make it backtrack (review PR6-R-10; timed below).
+const HOME_TOKEN = /homedir\(\)|expanduser\(|process\.env\.HOME\b|os\.environ|Path\.home\(\)/;
+const QUOTED_CLAUDE = /['"`]\.claude['"`]/;
+const QUOTED_SKILLS = /['"`]skills['"`]/;
+const namesUserSkills = l => HOME_TOKEN.test(l)
+  && (l.includes('.claude/skills') || (QUOTED_CLAUDE.test(l) && QUOTED_SKILLS.test(l)));
+const codeUserSkills = text => text.split('\n').filter(namesUserSkills).map(l => l.trim());
 
 // Reports and logs are dated history, not definitions: SKILL-EVAL.md, <agent>-EVAL.md, *-REFINE-LOG.md.
 const REPORT = /(?:^|-)EVAL\.md$|REFINE-LOG\.md$/;
 // Scripts: no exclusion. No script under these trees, test files included, holds a deploy form today.
-const SCRIPT = /\.(?:sh|js|mjs|py)$/;
+const SCRIPT = /\.(?:sh|js|cjs|mjs|ts|cts|mts|py)$/;
 const DEFINITION_DIRS = ['skills', '.claude/agents', '.claude/skills', 'packs', 'infra/hermes-agent/skills'];
 
 function walk(dir, keep, out = []) {
