@@ -153,7 +153,7 @@ test('the scan reads .sh, .js, .mjs and .py files under the definition trees and
     put('skills/demo/SKILL.md', '---\nname: demo\n---\nStage the result; the owner deploys it.\n');
     put('skills/demo/scripts/deploy.sh', '#!/bin/sh\ncp -R skills/demo ~/.claude/skills/\n');
     put('skills/demo/scripts/deploy.js', "fs.cpSync('skills/demo', path.join(os.homedir(), '.claude', 'skills', 'demo'), { recursive: true });\n");
-    put('skills/demo/scripts/deploy.mjs', "execSync('rsync -a skills/demo/ ~/.claude/skills/demo/');\n");
+    put('skills/demo/scripts/deploy.mjs', 'await $`rsync -a skills/demo/ ~/.claude/skills/demo/`;\n');   // zx-style shell template
     put('.claude/agents/demo-agent/deploy.py', "shutil.copytree('skills/demo', os.path.expanduser('~/.claude/skills/demo'))\n");
     put('skills/demo/scripts/read-settings.js', "const s = readFile(os.homedir(), '.claude', 'settings.json');\n");
     put('skills/demo/scripts/notes.txt', 'cp -R skills/demo ~/.claude/skills/\n');   // not a script: not read
