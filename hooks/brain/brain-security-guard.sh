@@ -64,11 +64,12 @@ const inp = j.tool_input;
 const fold = (s) => s.normalize("NFKD").replace(/\p{M}/gu, "").toUpperCase().toLowerCase();
 // The working directory of the shell: the cwd field of the hook input (it follows a cd), else the cwd of this process.
 const CWD = typeof j.cwd === "string" && j.cwd ? j.cwd : process.cwd();
-// At most 50,000 lookups on disk per call (a padded command must not stall the guard); past that,
-// fsExhausted is set and a Bash command passes only in a read-only form.
+// At most 20,000 lookups on disk per call (a padded command must not stall the guard); past that,
+// fsExhausted is set and a Bash command passes only in a read-only form. No state is kept between
+// calls: every decision comes from this input and the filesystem now.
 let fsCalls = 0, fsExhausted = false;
 const realOr = (p) => {
-  if (++fsCalls > 50000) { fsExhausted = true; return null; }
+  if (++fsCalls > 20000) { fsExhausted = true; return null; }
   try { return fs.realpathSync(p); } catch { return null; }
 };
 // canonical: the path the operating system opens. Walks the segments left to right as the kernel
@@ -530,14 +531,16 @@ if (tool === "Bash") {
   // unknown. A parent folder (the capsule or decisions/) counts only as an argument of a stage
   // that is not a pure reader ("cd .project-brain && ls" is fine; "mv .project-brain x" is not).
   // A variable, $(…), backticks, ANSI-C quoting, or ~user: text the guard cannot resolve.
-  const EXPANSION = /\$[^\s]|`|^~[^\/\s]/;
+  // With HOME unset, a ~ word cannot be resolved either.
+  const EXPANSION = process.env.HOME ? /\$[^\s]|`|^~[^\/\s]/ : /\$[^\s]|`|^~/;
   const GLOB = /[*?[]|\{[^{}]*(,|\.\.)[^{}]*\}/;
   let dirs = [cwdAbs], dirUnknown = false, budget = 5000, ancestorArg = false;
   const tooMany = distinct.length > 5000;
   // A read-only form passes the protected-path rule whatever its words reach, so nothing is
   // resolved for it.
   const readOnly = readerForm();
-  if (!tooMany && !readOnly) for (const { stages } of splitShell(cmd)) for (const stg of stages) {
+  if (!tooMany && !readOnly) resolve: for (const { stages } of splitShell(cmd)) for (const stg of stages) {
+    if (fsExhausted || budget < 0) break resolve;
     const h = head(stg);
     const raws = shellWordsRaw(stg);
     const ws = [...new Set([...shellWords(stg), ...shellWords(ansiC(stg)), ...raws.flatMap((w) => [w, ...w.split(/[=<>]+/)])])].filter(Boolean);
@@ -545,19 +548,24 @@ if (tool === "Bash") {
     for (const w of ws) {
       if (w.length > 4096) continue;
       for (const d of dirs) {
-        if (--budget < 0) { dirUnknown = true; break; }
-        const k = kindOf(canonical(home(w), d));
-        if (!k) continue;
-        if (!wordKind.has(w) || k === "canon" || k === "active") wordKind.set(w, k);
-        if (d === cwdAbs) wordKindCwd.set(w, k);
-        if (k === "ancestor" && !reader) ancestorArg = true;
+        if (--budget < 0 || fsExhausted) { dirUnknown = true; break resolve; }
+        // Both readings: physical, as a program opens it ("link/.." is the parent of the link
+        // target), and logical, as the cd builtin reads it ("link/.." is the folder holding the link).
+        for (const abs of [canonical(home(w), d), canonical(path.resolve(d, home(w)), "/")]) {
+          const k = kindOf(abs);
+          if (!k) continue;
+          if (!wordKind.has(w) || k === "canon" || k === "active") wordKind.set(w, k);
+          if (d === cwdAbs) wordKindCwd.set(w, k);
+          if (k === "ancestor" && !reader) ancestorArg = true;
+        }
       }
     }
     if (h.cmd === "cd" || h.cmd === "pushd") {
       const t = raws.slice(raws.indexOf(h.cmd) + 1).find((x) => !x.startsWith("-"));
       if (t !== undefined && (EXPANSION.test(t) || GLOB.test(t) || t === "-")) dirUnknown = true;
       else {
-        const next = dirs.map((d) => canonical(home(t === undefined ? "~" : t), d));
+        const tt = home(t === undefined ? "~" : t);
+        const next = dirs.flatMap((d) => [canonical(tt, d), canonical(path.resolve(d, tt), "/")]);
         dirs = [...new Set([...dirs, ...next])];
         if (dirs.length > 16) { dirs = dirs.slice(0, 16); dirUnknown = true; }
       }
@@ -603,7 +611,7 @@ if (tool === "Bash") {
       : hitActive ? "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote; other commands that reach it pass only in a read-only form)"
       : "brain-security-guard: a word of this command may reach .project-brain/canon/ or decisions/active/ (a parent folder, a glob or brace pattern, or a variable or substitution the guard cannot follow) — denied unless the command is a read-only form. Name the path plainly, or split the command.");
   if ((tooMany || fsExhausted || budget < 0) && !readOnly)
-    deny("brain-security-guard: too many words or path lookups (over 5,000 words or 50,000 lookups); the guard cannot check where they lead on disk. Split the command.");
+    deny("brain-security-guard: too many words or path lookups (over 5,000 words or 20,000 lookups); the guard cannot check where they lead on disk. Split the command.");
 
   // Fail closed on a kept line continuation in a command that names the capsule. A pair is kept
   // only inside single quotes or a comment, so where joinLines reads quotes as bash does this is
