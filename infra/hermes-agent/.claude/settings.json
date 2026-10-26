@@ -54,7 +54,7 @@
             "command": "bash",
             "args": [
               "-c",
-              "for g in \"$1/hooks/brain/brain-security-guard.sh\" \"$1/../../hooks/brain/brain-security-guard.sh\"; do if [ -f \"$g\" ]; then exec bash \"$g\"; fi; done; echo '{\"systemMessage\":\"brain-security-guard not found from this session (CLAUDE_PROJECT_DIR); this tool call was not checked\"}'; exit 0",
+              "d=\"$1\"; while [ -n \"$d\" ]; do if [ -f \"$d/hooks/brain/brain-security-guard.sh\" ]; then exec bash \"$d/hooks/brain/brain-security-guard.sh\"; fi; n=$(dirname \"$d\"); [ \"$n\" = \"$d\" ] && break; d=$n; done; echo \"brain-security-guard not found at or above the project folder of this session ($1); this tool call is BLOCKED (the guard fails closed). Break-glass: docs/SECOND_BRAIN_SECURITY.md\" >&2; exit 2",
               "brain-guard-launcher",
               "${CLAUDE_PROJECT_DIR}"
             ],

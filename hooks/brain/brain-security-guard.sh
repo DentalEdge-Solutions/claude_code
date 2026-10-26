@@ -50,31 +50,60 @@ if (!isObj(j.tool_input)) malformed("tool_input is not an object");
 const tool = j.tool_name;
 const inp = j.tool_input;
 
+// ── One canonical form for every protected-path check (P0-09 background reviews B, C, D, F) ──
+// fold: the name a case-insensitive, normalization-insensitive disk (macOS APFS) resolves to, or a
+// broader one: compatibility decomposition (fullwidth letters, the Kelvin sign and the long s
+// become ASCII), combining marks dropped (a dotted I loses its dot), then upper- and lowercased
+// (a dotless i becomes i). Folding more than the disk does only adds denials.
+const fold = (s) => s.normalize("NFKD").replace(/\p{M}/gu, "").toUpperCase().toLowerCase();
+// The working directory of the shell: the cwd field of the hook input (it follows a cd), else the cwd of this process.
+const CWD = typeof j.cwd === "string" && j.cwd ? j.cwd : process.cwd();
+const realOr = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+// canonical: the path the operating system opens. Walks the segments left to right as the kernel
+// does: each existing prefix is replaced by its real path (symlinks resolved), so ".." applies to
+// the real folder ("link/../x" is the link target parent x, not the lexical one); "" and "." are
+// skipped; a missing segment is kept as written. Over 4096 characters a path cannot be opened
+// (PATH_MAX), so it is only resolved lexically; the walk is at most about 2,000 steps.
+const canonical = (p, base) => {
+  const start = path.isAbsolute(p) ? "/" : (realOr(base) || path.resolve(base));
+  if (p.length > 4096) return path.resolve(start, p);
+  let cur = start;
+  for (const seg of p.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") { cur = path.dirname(cur); continue; }
+    const next = path.join(cur, seg);
+    cur = realOr(next) || next;
+  }
+  return cur;
+};
+// kindOf: "canon", "active" or "capsule" for a canonical absolute path under .project-brain
+// (compared folded), else null. depthOf: segments below the last capsule folder, or -1.
+const kindOf = (abs) => {
+  const s = abs.split("/").map(fold);
+  let k = null;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== ".project-brain") continue;
+    if (s[i + 1] === "canon") return "canon";
+    if (s[i + 1] === "decisions" && s[i + 2] === "active") k = "active";
+    else if (!k) k = "capsule";
+  }
+  return k;
+};
+const depthOf = (abs) => {
+  const s = abs.split("/").map(fold);
+  const i = s.lastIndexOf(".project-brain");
+  return i < 0 ? -1 : s.length - i - 1;
+};
+const home = (w) => (/^~(\/|$)/.test(w) && process.env.HOME ? path.join(process.env.HOME, w.slice(1)) : w);
+
 if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
   const target = tool === "NotebookEdit" ? inp.notebook_path : inp.file_path;
   if (typeof target !== "string") malformed(tool + " without a string path");
-  // Normalize first — "…/.project-brain/decisions/../canon/x.md" must not slip past. Then also
-  // check the real path: the deepest folder of it that exists, with symlinks resolved, plus the
-  // rest (a symlink to the capsule must not slip past). Both are matched without regard to case:
-  // macOS disks are case-insensitive by default, so .PROJECT-BRAIN/CANON is canon there.
-  const fp = path.resolve(target);
-  // A path over 4096 characters cannot be opened (PATH_MAX is 1024 on macOS, 4096 on Linux), so the
-  // walk is skipped there; it keeps the walk short (at most about 2,000 steps).
-  const real = (() => {
-    if (fp.length > 4096) return fp;
-    let dir = fp; const rest = [];
-    for (;;) {
-      try { return path.join(fs.realpathSync(dir), ...rest); } catch { /* walk up */ }
-      const up = path.dirname(dir);
-      if (up === dir) return fp;
-      rest.unshift(path.basename(dir));
-      dir = up;
-    }
-  })();
-  const under = (re) => re.test(fp) || re.test(real);
-  if (under(/\/\.project-brain\/canon(\/|$)/i))
+  // The canonical form: "..", ".", "//" and symlinks resolved as the kernel does, names folded.
+  const kind = kindOf(canonical(target, CWD));
+  if (kind === "canon")
     deny("Direct writes to .project-brain/canon/ are forbidden. Promote a reviewed candidate instead: node scripts/brain/brain-promote.js <candidate> --approve --to canon");
-  if (under(/\/\.project-brain\/decisions\/active(\/|$)/i))
+  if (kind === "active")
     deny("Direct writes to .project-brain/decisions/active/ are forbidden. Stage the change as a candidate with the same file name and apply it with: node scripts/brain/brain-promote.js decisions/candidates/<file> --approve --to active --force (retire one with: --to superseded)");
 }
 
@@ -115,13 +144,9 @@ if (tool === "Bash") {
   // Case-insensitive: macOS disks are case-insensitive by default, so .PROJECT-BRAIN is the capsule
   // there (background security review of P0-09).
   const CAPSULE = /\.project-brain/i;
-
-  // ── canon and decisions/active mutations (checked below, once the shell helpers exist) ──
-  // Direct reference, or split reference (e.g. "cd .project-brain && … >> canon/y.md").
-  const touchesCanon = /\.project-brain\/canon/i.test(cmd)
-    || (/\bcanon\//i.test(cmd) && CAPSULE.test(cmd));
-  const touchesActive = /\.project-brain\/decisions\/active/i.test(cmd)
-    || (/\bactive\//i.test(cmd) && CAPSULE.test(cmd));
+  // The command folded (case and Unicode, as for paths), with "//" and "/./" collapsed: the text
+  // the protected-path rule and a second pass of the delete rule read.
+  const fcmd = fold(cmd).replace(/\/(?:\.?\/)+/g, "/");
   // G1 (P0-09): the exemption holds only for a command that is exactly one plain call,
   // "node <script> <words> … --approve …", where <script> is scripts/brain/brain-promote.js,
   // ./scripts/brain/brain-promote.js or $CLAUDE_PROJECT_DIR/scripts/brain/brain-promote.js
@@ -148,20 +173,6 @@ if (tool === "Bash") {
     .replace(/&>\s*\/dev\/null/g, " ")
     .replace(/>\s*\/dev\/null/g, " ")
     .replace(/>&\d+/g, " ");
-  const sedInPlace = scrubbed.split("|").some((seg) => {
-    const k = seg.search(/\bsed\b/);
-    return k >= 0 && seg.indexOf("-i", k) >= 0;
-  });
-  // Mutation words that always count.
-  const mutatesNoRm = /(>>?|\btee\b|\bmv\b|\bcp\b)/.test(scrubbed) || sedInPlace
-    || /\bnode\s+(-e|--eval)\b|\bpython3?\s+-c\b|\bperl\s+-e\b/.test(scrubbed)
-    || /writeFileSync|\bopen\(/.test(scrubbed);
-  // Words that count unless the command is a pure reader pipeline (readerOnly below), where they
-  // can only be arguments or parts of file names: rm (G3, P0-09), and the writers the words above
-  // miss (touch, mkdir, ln, truncate, dd, install, rsync, tar, unzip, patch; git restore,
-  // checkout, switch, reset, stash, apply, merge, pull, rebase, cherry-pick, revert, read-tree,
-  // checkout-index; an --output option; find -fprint/-fls), added by the background security review.
-  const softWord = /\b(rm|touch|mkdir|ln|truncate|dd|install|rsync|tar|unzip|patch|restore|checkout|switch|reset|stash|apply|merge|pull|rebase|cherry-pick|revert|read-tree|checkout-index)\b|--ou|\s-f(print|ls)/.test(scrubbed);
 
   // ── deleting the capsule ───────────────────────────────────────────────────
   // As on main, any rm/rmdir/unlink/shred word counts as a delete — also behind sudo,
@@ -375,15 +386,8 @@ if (tool === "Bash") {
     return pipelines;
   };
   const SUBST = /\$\(|`|[<>]\(/;
-  // One foreground pipeline whose every stage passes ok, with no command or process substitution,
-  // no heredoc, no ANSI-C quoting or comment that could desync the parse, and no file-writing
-  // redirect.
   const WEIRD = /\$\x27|#|<<|\$\(|`|<\(|>\(/;
-  const onePipelineOf = (ok) => {
-    if (WEIRD.test(cmd) || />/.test(scrubbed)) return false;
-    const pls = splitShell(cmd);
-    return pls.length === 1 && !pls[0].bg && pls[0].stages.every((stg) => ok(head(stg)));
-  };
+  const scrub = (s) => s.replace(/&>\s*\/dev\/null/g, " ").replace(/>\s*\/dev\/null/g, " ").replace(/>&\d+/g, " ");
   // A pure reader: a program that neither runs its arguments (nonExec) nor writes a file. NON_EXEC
   // alone is not enough: touch, mkdir, tee, uniq (an output file), find -fprint, git restore,
   // switch, branch, tag and mv write (background security review of P0-09). No --output option.
@@ -395,92 +399,144 @@ if (tool === "Bash") {
   const pureReader = (h) => nonExec(h) && !h.rest.some((t) => /^--ou/.test(t)) && (READERS.has(h.cmd)
     || (h.cmd === "find" && !h.rest.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t)))
     || (h.cmd === "git" && GIT_READERS.has(gitSub(h.git).sub)));
-  // G3 (P0-09): in a pure reader pipeline a soft word (rm, touch, git restore …) can only be a
-  // literal argument or part of a file name, so it does not count there.
-  const readerOnly = () => onePipelineOf(pureReader);
-  if ((touchesCanon || touchesActive) && !isApprovedPromote && (mutatesNoRm || (softWord && !readerOnly())))
-    deny(touchesCanon ? "Only brain-promote.js --approve may modify .project-brain/canon/"
-      : "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote)");
+  // A read-only form: every stage of every pipeline is a pure reader, with no command or process
+  // substitution, no heredoc, no ANSI-C quoting or comment that could desync the parse, and no
+  // file-writing redirect. Nothing in it can write a file.
+  const readerForm = () => !WEIRD.test(cmd) && !/>/.test(scrubbed)
+    && splitShell(cmd).every((pl) => pl.stages.filter((s) => s.trim()).every((stg) => pureReader(head(stg))));
+
+  // ── canon/ and decisions/active/: an allowlist, not a list of write verbs ─────────────────
+  // (P0-09; background reviews A-D, F.) A command that reaches canon/ or decisions/active/ passes
+  // only as exactly one brain-promote call (G1) or as a read-only form (which also settles G3: an
+  // rm word in a reader pipeline is only an argument or part of a file name). It reaches them:
+  //   - by name, in the folded text: ".project-brain/canon", ".project-brain/decisions/active",
+  //     or the word canon / active in a command that also names the capsule or runs inside it;
+  //   - on disk: a word of the command that, resolved from the working directory as the kernel
+  //     would (symlinks, "..", "~"), lands in a protected folder;
+  //   - from a working directory inside a protected folder.
+  // More than 5,000 distinct words are not resolved on disk; such a command passes only in a
+  // read-only form.
+  const cwdAbs = canonical(CWD, "/");
+  const cwdKind = kindOf(cwdAbs);
+  const wordKind = new Map();
+  const distinct = [...new Set(shellWords(cmd))];
+  const tooMany = distinct.length > 5000;
+  if (!tooMany) for (const w of distinct) {
+    const k = w.length <= 4096 ? kindOf(canonical(home(w), CWD)) : null;
+    if (k) wordKind.set(w, k);
+  }
+  const kinds = new Set(wordKind.values());
+  const capsuleCtx = CAPSULE.test(fcmd) || cwdKind !== null || kinds.size > 0;
+  const hitCanon = /\.project-brain\/canon\b/.test(fcmd) || (capsuleCtx && /\bcanon\b/.test(fcmd))
+    || cwdKind === "canon" || kinds.has("canon");
+  const hitActive = /\.project-brain\/decisions\/active\b/.test(fcmd) || (capsuleCtx && /\bactive\b/.test(fcmd))
+    || cwdKind === "active" || kinds.has("active");
+  if ((hitCanon || hitActive) && !isApprovedPromote && !readerForm())
+    deny(hitCanon ? "Only brain-promote.js --approve may modify .project-brain/canon/ (a command that reaches it passes only as one brain-promote call or a read-only form: grep, cat, ls, git log/diff/add …)"
+      : "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote; other commands that reach it pass only in a read-only form)");
+  if (tooMany && !readerForm())
+    deny("brain-security-guard: more than 5,000 distinct words; the guard cannot check where they lead on disk. Split the command.");
+
   // Fail closed on a kept line continuation in a command that names the capsule. A pair is kept
   // only inside single quotes or a comment, so where joinLines reads quotes as bash does this is
   // rare; where it does not (a heredoc body, $\x27\x5c\x27\x27), the rules below see a split command, and no
   // list of delete words is complete (a glued -Or…m, an ANSI-C subcommand). So deny outright.
-  // The capsule is looked for in the fully joined text: the kept pair can split its name.
-  if (joined.kept >= 0 && CAPSULE.test(cmd.split("\\\n").join("")))
+  // The capsule is looked for in the fully joined, folded text: the kept pair can split its name.
+  if (joined.kept >= 0 && CAPSULE.test(fold(cmd.split("\\\n").join(""))))
     deny("brain-security-guard: a line continuation (backslash-newline) inside quotes or a comment, in a command that names .project-brain, is denied — the guard cannot tell how the shell will split it. Put the command on one line.");
-  let depth = -1;
-  const dirStack = [];
-  // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd
-  // in a context that does not move the parent shell (a subshell), or hide a cd that is not the
-  // first word of a group that is itself piped/backgrounded. Rather than parse nesting (fragile and
-  // repeatedly bypassed), a command line that contains ANY of these is treated as non-plain, so a
-  // capsule-LEAVING cd in it is never honored.
-  const hasGrouping = /[(){}]/.test(cmd) || /\bcase\b/.test(cmd);
-  for (const { stages, bg } of splitShell(cmd)) {
-    const heads = stages.map(head);
-    // Directory tracking is fail-closed and direction-aware. A move that ENTERS or stays in the
-    // capsule (new depth >= 0) is always honored — erring toward a deny is safe. A move that LEAVES
-    // the capsule (new depth < 0) is honored only from a plain standalone foreground command: one
-    // stage, not backgrounded, and with no grouping construct anywhere on the line (see hasGrouping).
-    // So a cd hidden in a subshell, brace group, case, pipeline or the background can never make a
-    // later relative delete look safe; the cost is a conservative deny of some exotic "leave the
-    // capsule inside a group" forms. popd/pushd are honored only when plain.
-    const h0 = heads[0];
-    if (h0.cmd === "cd" || h0.cmd === "pushd" || h0.cmd === "popd") {
-      const plain = stages.length === 1 && !bg && !hasGrouping;
-      // When the stage names the capsule ("cd \"$(git rev-parse …)/.project-brain\""),
-      // take the target from the capsule name on; otherwise the first non-option word.
-      const named = unquote(stages[0]).match(/\.project-brain\S*/i);
-      const target = named ? named[0] : h0.rest.find((t) => !t.startsWith("-"));
-      if (h0.cmd === "popd") { if (plain && dirStack.length) depth = dirStack.pop(); }
-      else {
-        if (h0.cmd === "pushd" && plain) dirStack.push(depth);
-        const nd = cdDepth(target, depth);
-        if (nd >= 0 || plain) depth = nd;
+
+  // ── deleting the capsule: run on the command and again with its capsule words folded (deny if
+  // either denies). The folded pass sees .PROJECT-BRAIN, fullwidth or dotted-i spellings as the
+  // capsule (the disk does); options elsewhere keep their case (git -C, grep -O). Words that
+  // resolve into the capsule on disk (a symlink) count as naming it, and a working directory inside
+  // the capsule is where the shell starts.
+  const deleteRule = (text, onDisk) => {
+    const textScrub = scrub(text);
+    const namesCapsule = (s) => CAPSULE.test(s) || (onDisk && shellWords(s).some((w) => wordKind.has(w)));
+    let depth = depthOf(cwdAbs);
+    const dirStack = [];
+    // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd
+    // in a context that does not move the parent shell (a subshell), or hide a cd that is not the
+    // first word of a group that is itself piped/backgrounded. Rather than parse nesting (fragile and
+    // repeatedly bypassed), a command line that contains ANY of these is treated as non-plain, so a
+    // capsule-LEAVING cd in it is never honored.
+    const hasGrouping = /[(){}]/.test(text) || /\bcase\b/.test(text);
+    for (const { stages, bg } of splitShell(text)) {
+      const heads = stages.map(head);
+      // Directory tracking is fail-closed and direction-aware. A move that ENTERS or stays in the
+      // capsule (new depth >= 0) is always honored — erring toward a deny is safe. A move that LEAVES
+      // the capsule (new depth < 0) is honored only from a plain standalone foreground command: one
+      // stage, not backgrounded, and with no grouping construct anywhere on the line (see hasGrouping).
+      // So a cd hidden in a subshell, brace group, case, pipeline or the background can never make a
+      // later relative delete look safe; the cost is a conservative deny of some exotic "leave the
+      // capsule inside a group" forms. popd/pushd are honored only when plain. A target that
+      // resolves into the capsule on disk (a symlink) enters it.
+      const h0 = heads[0];
+      if (h0.cmd === "cd" || h0.cmd === "pushd" || h0.cmd === "popd") {
+        const plain = stages.length === 1 && !bg && !hasGrouping;
+        // When the stage names the capsule ("cd \"$(git rev-parse …)/.project-brain\""),
+        // take the target from the capsule name on; otherwise the first non-option word.
+        const named = unquote(stages[0]).match(/\.project-brain\S*/i);
+        const target = named ? named[0] : h0.rest.find((t) => !t.startsWith("-"));
+        if (h0.cmd === "popd") { if (plain && dirStack.length) depth = dirStack.pop(); }
+        else {
+          if (h0.cmd === "pushd" && plain) dirStack.push(depth);
+          let nd = cdDepth(target, depth);
+          if (nd < 0 && onDisk && target !== undefined && target.length <= 4096)
+            nd = Math.max(nd, depthOf(canonical(home(target), CWD)));
+          if (nd >= 0 || plain) depth = nd;
+        }
+      }
+      if (depth < 0 && !stages.some(namesCapsule)) continue;
+      // Walk back from the last stage: a stage keeps its exemption only if every later
+      // stage is non-exec too, so output never reaches a shell, xargs or interpreter.
+      let downstreamNonExec = true;
+      for (let k = stages.length - 1; k >= 0; k--) {
+        const ne = nonExec(heads[k]);
+        if (stageDeletes(stages[k], heads[k], ne && downstreamNonExec && !SUBST.test(stages[k])))
+          deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
+        downstreamNonExec = downstreamNonExec && ne;
       }
     }
-    if (depth < 0 && !stages.some((s) => CAPSULE.test(s))) continue;
-    // Walk back from the last stage: a stage keeps its exemption only if every later
-    // stage is non-exec too, so output never reaches a shell, xargs or interpreter.
-    let downstreamNonExec = true;
-    for (let k = stages.length - 1; k >= 0; k--) {
-      const ne = nonExec(heads[k]);
-      if (stageDeletes(stages[k], heads[k], ne && downstreamNonExec && !SUBST.test(stages[k])))
-        deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
-      downstreamNonExec = downstreamNonExec && ne;
-    }
-  }
 
-  // ── superset-of-main floor ───────────────────────────────────────────────────
-  // main denies any rm word followed by .project-brain inside one ;|&-free segment, with a
-  // blunt regex that does not depend on how the command is parsed. Keep it as a hard floor so
-  // this guard never allows a capsule delete that main would block, even when a quirk of shell
-  // parsing (a quote in a comment, ANSI-C quoting, a heredoc body) would otherwise hide the rm.
-  // The one exemption: a single foreground pipeline whose every stage is a pure reader (grep,
-  // cat, git add/commit/log, find without -exec, ...), with no command or process substitution,
-  // none of those parser-desyncing constructs, no background, and no file-writing redirect.
-  // There an rm can only be a literal argument, so "grep rm <capsule path>" and a git add of a
-  // path whose name contains rm stay allowed, while store-then-run forms stay denied.
-  // Gate the whole floor on the match first: the test is linear and skips the heavier
-  // exemption check (which re-parses the command) for any input that cannot be a delete.
-  // No leading \d* in the fd-merge scrub — it made the replace quadratic on long digit runs.
-  // Linear form of main\x27s /\brm\b[^|;&]*\.project-brain/. That regex is O(n^2): on input
-  // padded with many "rm" words the [^|;&]* backtracks from every rm, ~195 s on 1 MB, and a
-  // PreToolUse hook that times out does NOT block the call — so it was a bypass. Split on the
-  // shell separators first (linear), then in each segment look for an rm word that starts before
-  // a .project-brain mention. search(\brm\b) and lastIndexOf are each linear, so the whole check
-  // is O(n). Semantics match main: an rm word followed later by .project-brain in one segment.
-  // Read lowercased (P0-09 background review): .PROJECT-BRAIN is the capsule on a
-  // case-insensitive disk, and RM finds /bin/rm there.
-  const mainDelete = cmd.split(/[|;&]/).some((seg) => {
-    const low = seg.toLowerCase();
-    const bi = low.lastIndexOf(".project-brain");
-    if (bi < 0) return false;
-    const ri = low.search(/\brm\b/);
-    return ri >= 0 && ri < bi;
-  });
-  if (mainDelete && !onePipelineOf(nonExec))
-    deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
+    // ── superset-of-main floor ─────────────────────────────────────────────────────
+    // main denies any rm word followed by .project-brain inside one ;|&-free segment, with a
+    // blunt regex that does not depend on how the command is parsed. Keep it as a hard floor so
+    // this guard never allows a capsule delete that main would block, even when a quirk of shell
+    // parsing (a quote in a comment, ANSI-C quoting, a heredoc body) would otherwise hide the rm.
+    // The one exemption: a single foreground pipeline whose every stage never runs its
+    // arguments (nonExec: grep, cat, git add/commit/log, find without -exec, ...), with no command
+    // or process substitution, none of those parser-desyncing constructs, no background, and no
+    // file-writing redirect. There an rm can only be a literal argument, so "grep rm <capsule
+    // path>" and a git add of a path whose name contains rm stay allowed, while store-then-run
+    // forms stay denied.
+    // Linear form of main\x27s /\brm\b[^|;&]*\.project-brain/. That regex is O(n^2): on input
+    // padded with many "rm" words the [^|;&]* backtracks from every rm, ~195 s on 1 MB, and a
+    // PreToolUse hook that times out did NOT block the call — so it was a bypass. Split on the
+    // shell separators first (linear), then in each segment look for an rm word that starts before
+    // a .project-brain mention. search(\brm\b) and lastIndexOf are each linear, so the whole check
+    // is O(n). Semantics match main: an rm word followed later by .project-brain in one segment.
+    // Read lowercased: .PROJECT-BRAIN is the capsule on a case-insensitive disk, and RM finds
+    // /bin/rm there.
+    const mainDelete = text.split(/[|;&]/).some((seg) => {
+      const low = seg.toLowerCase();
+      const bi = low.lastIndexOf(".project-brain");
+      if (bi < 0) return false;
+      const ri = low.search(/\brm\b/);
+      return ri >= 0 && ri < bi;
+    });
+    if (mainDelete) {
+      const pls = splitShell(text);
+      const exempt = !WEIRD.test(text) && !/>/.test(textScrub) && pls.length === 1 && !pls[0].bg
+        && pls[0].stages.every((stg) => nonExec(head(stg)));
+      if (!exempt) deny("Destructive command targeting .project-brain/ blocked — the capsule is governed memory");
+    }
+  };
+  deleteRule(cmd, true);
+  // The second pass folds only the words that fold onto the capsule name, so case-sensitive
+  // options elsewhere (git -C, grep -O) keep their meaning.
+  const pcmd = cmd.replace(/[^\s;&|<>()`$"\x27=]+/g, (w) => { const f = fold(w); return CAPSULE.test(f) ? f : w; });
+  if (pcmd !== cmd) deleteRule(pcmd, false);
 
   // Reference sources are documentation only — block direct installs into the skills dir.
   if (/reference-repositories\/sources\//.test(cmd) && /\b(cp|mv|ln|rsync)\b/.test(cmd) && /\.claude\/skills|~\/\.claude/.test(cmd))

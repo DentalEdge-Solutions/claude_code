@@ -40,10 +40,10 @@ const isGuard = h => /brain-security-guard\.sh/.test([h.command, ...(h.args || [
 const guardsIn = s => allHooks(s).filter(x => isGuard(x.h));
 
 // Run one exec-form handler as Claude Code would.
-function runHandler(h, projectDir, input) {
+function runHandler(h, projectDir, input, cwd = REPO) {
   const sub = v => v.split('${CLAUDE_PROJECT_DIR}').join(projectDir);
   const r = spawnSync(sub(h.command), (h.args || []).map(sub), {
-    input, encoding: 'utf8', timeout: 20000,
+    input, encoding: 'utf8', timeout: 20000, cwd,
     env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir },
   });
   assert.ok(!r.error, `handler failed to run: ${r.error && r.error.message}`);
@@ -118,8 +118,8 @@ test('hermes launcher fails closed when no folder at or above CLAUDE_PROJECT_DIR
   const [{ h }] = guardsIn(hermes);
   const nowhere = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-launcher-'));
   try {
-    for (const dir of [nowhere, path.join(nowhere, 'a', 'b'), path.join(nowhere, 'it has "quotes" and $(x)'), '']) {
-      const r = runHandler(h, dir, plainBash);
+    for (const dir of [nowhere, path.join(nowhere, 'a', 'b'), path.join(nowhere, 'it has "quotes" and $(x)'), '', 'relative/dir']) {
+      const r = runHandler(h, dir, plainBash, nowhere); // a relative dir walks up from the hook cwd
       assert.strictEqual(r.status, 2, `${JSON.stringify(dir)}: must block (exit 2): ${r.status} ${r.stdout} ${r.stderr}`);
       assert.match(r.stderr, /brain-security-guard.*not found.*BLOCKED/, `${dir}: stderr says why`);
       assert.match(r.stderr, /SECOND_BRAIN_SECURITY\.md/, `${dir}: stderr points at the break-glass procedure`);
