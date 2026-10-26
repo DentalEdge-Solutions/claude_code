@@ -837,6 +837,18 @@ try {
     assert.ok(isDeny(res), `with HOME unset, a ~ word next to a protected-looking name must be denied: ${res.stdout}`);
   }
 
+  // 6i-k. Mutant follow-ups. A name fully hex-encoded in ANSI-C quoting shows no protected-looking
+  // text until decoded (mutant M11 survived the earlier cases, which also showed the name). And a
+  // word that merely contains "active" (systemctl is-active) next to a variable is not a
+  // protected-looking name: that false positive blocked ordinary box commands.
+  {
+    const hex = (s) => [...s].map((c) => '\\x' + c.charCodeAt(0).toString(16)).join('');
+    let res = bashAt(`cp /tmp/x $'${hex('.project-brain')}/${hex('canon')}/y.md'`, TMP);
+    assert.ok(isDeny(res), `a fully hex-encoded ANSI-C name must be denied: ${res.stdout}`);
+    res = bashAt('systemctl is-active "$UNIT" && echo ok', TMP);
+    assert.strictEqual(res.stdout.trim(), '', `is-active with a variable must pass: ${res.stdout}`);
+  }
+
   // 6i-g. A truncated guard program blocks. The node program sits in a bash single-quoted string,
   // so a stray apostrophe ends it early; during P0-09 one did (in a comment), and the program that
   // still ran defined its helpers, checked nothing and allowed every call with exit 0. The program
