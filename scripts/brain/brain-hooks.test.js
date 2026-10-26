@@ -753,6 +753,56 @@ try {
     }
   }
 
+  // 6i-h. P0-09 background reviews (G) incomplete target detection and (H) parser differential:
+  // a word that may resolve to a protected folder, or to one of its parents, makes a command that is
+  // not a read-only form fail closed, whatever the verb or the argument position: globs and brace
+  // expansion matched against the protected folders, quotes and backslashes inside a name, ANSI-C
+  // $'...' escapes decoded, --opt=PATH, redirections and here-strings, a cd into a parent, and a
+  // variable or command substitution next to a protected-looking name (static analysis cannot
+  // tell where it leads). The same holds for deleting the capsule.
+  seedCapsule();
+  for (const [cmd, cwd] of [
+    ['touch .project-brai?/canon/x.md', TMP],
+    ['cp /tmp/x .project-{brain,x}/canon/y.md', TMP],
+    ['cp /tmp/x .pro*/can*/y.md', TMP],
+    ['cp /tmp/x .project-brain/decisions/[a]ctive/d.md', TMP],
+    ['D=.project-brain; cp /tmp/x "$D/canon/y.md"', TMP],
+    ['P=.project-bra; cp /tmp/x ${P}in/canon/y.md', TMP],
+    ['cp /tmp/x "$(printf .project-bra)in/canon/y.md"', TMP],
+    ['cp --target-directory=.project-brain/canon /tmp/x', TMP],
+    ['tee <<<"x" .project-brain/decisions/active/d.md', TMP],
+    ['cd .project-brain/decisions/candidates && cp /tmp/x ../active/d.md', TMP],
+    ['cp /tmp/x $\x27\\x2eproject-brain/canon/y.md\x27', TMP],
+    ['cp /tmp/x .proj\\ect-brain/canon/y.md', TMP],
+    ['cp /tmp/x .pro"ject-br"ain/canon/y.md', TMP],
+    ['mv .project-brain /tmp/gone', TMP],
+    ['chmod -R 000 .project-brain/decisions', TMP],
+    ['rsync -a --delete /tmp/empty/ .project-brain/', TMP],
+    ['rm -rf .project-brai?', TMP],
+    ['rm -rf .project-{brain,x}', TMP],
+    ['D=.project-brain; rm -rf "$D"', TMP],
+    ['rm -rf *', BRAIN],
+    ['rm -rf .[p]*', TMP],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.ok(isDeny(res), `must deny (reviews G, H): ${JSON.stringify(cmd)} in ${cwd} → ${res.stdout}`);
+  }
+  for (const [cmd, cwd] of [
+    ['ls .project-brai?/canon', TMP],
+    ['grep -rn x .project-{brain,x}/canon', TMP],
+    ['node scripts/brain/brain-verify.js --target .project-brain', TMP],
+    ['node scripts/brain/brain-lint.js --target .project-brain', TMP],
+    ['rm -rf build/*', TMP],
+    ['rm -f *.log', TMP],
+    ['cp /tmp/x .project-brain/decisions/candidates/y.md', TMP],
+    ['echo $HOME', TMP],
+    ['node scripts/brain/brain-capture.js --type note --message "weekly review"', TMP],
+    ['git log --oneline -3', TMP],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (reviews G, H): ${JSON.stringify(cmd)} in ${cwd} → ${res.stdout}`);
+  }
+
   // 6i-g. A truncated guard program blocks. The node program sits in a bash single-quoted string,
   // so a stray apostrophe ends it early; during P0-09 one did (in a comment), and the program that
   // still ran defined its helpers, checked nothing and allowed every call with exit 0. The program
