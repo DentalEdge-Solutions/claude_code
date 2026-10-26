@@ -972,6 +972,32 @@ try {
     assert.strictEqual(res.stdout.trim(), '', `must allow (reviews O, P): ${JSON.stringify(cmd)} → ${res.stdout}`);
   }
 
+  // Review Q: git reader subcommands pass only with options from a per-subcommand allowlist.
+  // Programs run through git options, config and environment stay denied; unknown options too.
+  for (const cmd of [
+    'git grep -Ocat x -- .project-brain/canon/x.md', 'git grep -O cat x -- .project-brain/canon/x.md',
+    'git grep --open-files-in-pager=cat x -- .project-brain/canon/x.md', 'git grep --ope=cat x -- .project-brain/canon/x.md',
+    'git -c core.pager=cat log -- .project-brain/canon/x.md', 'git --config-env=core.pager=X log -- .project-brain/canon/x.md',
+    'git --exec-path=/tmp log -- .project-brain/canon/x.md', 'GIT_PAGER=cat git log -- .project-brain/canon/x.md',
+    'GIT_EXTERNAL_DIFF=x git diff -- .project-brain/canon/x.md', 'GIT_CONFIG_COUNT=1 git log -- .project-brain/canon/x.md',
+    'git diff --ext-diff -- .project-brain/canon/x.md', 'git show --textconv HEAD:.project-brain/canon/x.md',
+    'git log --output=.project-brain/canon/x.md', 'git log --frobnicate -- .project-brain/canon/x.md',
+    'git blame --contents .project-brain/canon/x.md .project-brain/canon/x.md', 'git add --chmod=+x .project-brain/canon/x.md',
+    'git add -e .project-brain/canon/x.md', 'git commit -S -m x -- .project-brain/canon/x.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (review Q): ${cmd} → ${res.stdout}`);
+  }
+  for (const cmd of [
+    'git log --oneline -3 -- .project-brain/canon/x.md', 'git log -p -- .project-brain/canon/x.md',
+    'git diff --stat HEAD -- .project-brain/canon/x.md', 'git show HEAD:.project-brain/canon/x.md',
+    'git status --short .project-brain', 'git grep -n x -- .project-brain/canon/x.md', 'git blame .project-brain/canon/x.md',
+    'git ls-files .project-brain', 'git rev-parse --show-toplevel', 'git add -A .project-brain/canon',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (review Q): ${cmd} → ${res.stdout}`);
+  }
+
   // Review N and the author's probes: the single-quote reading behind R-1 must not desync from
   // bash. A quote inside a comment or a heredoc body is no quote, so it cannot hide a later
   // substitution; and an assignment stage may not change how a later reader runs (PATH, IFS …).
