@@ -855,18 +855,22 @@ try {
   const tool = (name, input, cwd = TMP) => runHook('brain-security-guard.sh',
     { hook_event_name: 'PreToolUse', tool_name: name, tool_input: input, cwd });
   for (const cmd of [
-    // R-1: a quoted-delimiter heredoc read by cat, and literal option values, are message text
-    "git commit -m \"$(cat <<'EOF'\nfix(brain-guard): protect decisions/active and .project-brain/canon\n\nrm the old notes; touches .project-brain/decisions/active\n\nCo-Authored-By: X <x@example.invalid>\nEOF\n)\"",
-    "gh pr create --title \"P0-09: canon and decisions/active\" --body \"$(cat <<'EOF'\n## Summary\n- .project-brain/canon is protected\n- `decisions/active/` too\nEOF\n)\"",
-    "gh pr edit 12 --body \"$(cat <<'EOF'\nrm -rf .project-brain is denied\nEOF\n)\"",
-    "node scripts/brain/brain-capture.js --type note --message 'reviewed 9 items in `decisions/active/`'",
-    'node scripts/brain/brain-capture.js --type note --message "only writer to .project-brain/canon and decisions/active"',
+    // a single-quoted or plain message on git commit, a reader, passes as before (no exemption needed)
     "git commit -m 'touch .project-brain/canon notes'",
     'git commit -am "docs: canon and decisions/active"',
     // R-2: a narrow sed -n print form, and a plain literal assignment before a reader
     "sed -n '1,40p' .project-brain/canon/x.md",
     "sed -n '5p' .project-brain/decisions/active/d.md",
-    "sed -n '/^## /p' .project-brain/canon/x.md",
+    "sed -n '/^title:/p' .project-brain/canon/x.md",
+    // PR7-R-13: the unquoted numeric sed form, and grep -c (a count, not git -c)
+    'sed -n 1,40p .project-brain/canon/x.md',
+    'sed -n 5p .project-brain/decisions/active/d.md',
+    'grep -c x .project-brain/decisions/active/d.md',
+    // PR7-R-12 guidance: a message in a file outside the capsule, or a protected file read as the message
+    `git commit -F ${path.join(TMP, 'msg.txt')}`,
+    `gh pr create --title t --body-file ${path.join(TMP, 'msg.txt')}`,
+    `gh pr edit 12 --body-file ${path.join(TMP, 'msg.txt')}`,
+    'git commit -F .project-brain/canon/x.md',
     "sed -n '$p' .project-brain/canon/x.md",
     'x=1; cat .project-brain/canon/x.md',
     // R-11a: a reader at a system path
@@ -890,8 +894,9 @@ try {
     // R-2: anything beyond the print form stays denied
     "sed -n '1p;w .project-brain/canon/y.md' .project-brain/canon/x.md",
     "sed -n '1w /tmp/x' .project-brain/canon/x.md",
-    'sed -n 1,40p .project-brain/canon/x.md',
     "sed -i '' s/a/b/ .project-brain/canon/x.md",
+    'sed -n 1,40p .project-brain/canon/x.md > .project-brain/canon/y.md',
+    'sed -n 1w .project-brain/canon/x.md',
     "awk '{print}' .project-brain/canon/x.md",
     'x=$(cp README.md .project-brain/canon/y.md); cat .project-brain/canon/x.md',
     'x=1 cat .project-brain/canon/x.md | sh',
@@ -959,7 +964,6 @@ try {
     assert.ok(isDeny(res), `must deny (reviews O, P): ${JSON.stringify(cmd.slice(0, 160))} → ${res.stdout}`);
   }
   for (const cmd of [
-    "git add -A && git commit -m \"$(cat <<'EOF'\nupdate .project-brain/canon notes\nEOF\n)\" && git push -u origin HEAD",
     "git commit -m 'x' -- .project-brain/canon/x.md",
     'git commit --amend -m "canon notes"',
     'head -n 5 .project-brain/canon/x.md',
@@ -1022,6 +1026,47 @@ try {
     res = tool(t, { file_path: path.join(TMP, 'b.md'), content: 'x' });
     assert.strictEqual(res.stdout.trim(), '', `${t} through an ordinary hard link passes: ${res.stdout}`);
   }
+
+
+  // 6i-m. Review round 2. PR7-R-12: the message-data exemption read comments and ANSI-C quoting
+  // differently from bash, so commands bash runs were hidden as message text; it is removed. A
+  // message names the protected folders at its own risk: such a commit or PR command is denied,
+  // and the reason says to write the message to a file outside the capsule (git commit -F,
+  // gh pr create|edit --body-file).
+  fs.writeFileSync(path.join(TMP, 'msg.txt'), 'msg\n');
+  for (const cmd of [
+    "git commit -m x # -m \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\"",
+    "git commit -m $'x\\' -m \"$(cat <<'EOF'\n'\nrm -rf .project-brain\nEOF\n)\"",
+    "git commit -m x # -m \"$(cat <<'EOF'\necho pwned > .project-brain/canon/x.md\nEOF\n)\"",
+    "gh pr create --title t # --body \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\"",
+    "node scripts/brain/brain-capture.js --title t # --message \"$(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)\"",
+    "( git commit -m x # -m $(cat <<'EOF'\nrm -rf .project-brain\nEOF\n)",
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (PR7-R-12): ${JSON.stringify(cmd)} → ${res.stdout}`);
+  }
+  for (const cmd of [
+    "git commit -m \"$(cat <<'EOF'\nfix(brain-guard): protect decisions/active and .project-brain/canon\n\nrm the old notes; touches .project-brain/decisions/active\n\nCo-Authored-By: X <x@example.invalid>\nEOF\n)\"",
+    "gh pr create --title \"P0-09: canon and decisions/active\" --body \"$(cat <<'EOF'\n## Summary\n- .project-brain/canon is protected\n- `decisions/active/` too\nEOF\n)\"",
+    "gh pr edit 12 --body \"$(cat <<'EOF'\nrm -rf .project-brain is denied\nEOF\n)\"",
+    "node scripts/brain/brain-capture.js --type note --message 'reviewed 9 items in `decisions/active/`'",
+    'node scripts/brain/brain-capture.js --type note --message "only writer to .project-brain/canon and decisions/active"',
+    "git add -A && git commit -m \"$(cat <<'EOF'\nupdate .project-brain/canon notes\nEOF\n)\" && git push -u origin HEAD",
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `a message naming the protected folders is checked like any text: ${JSON.stringify(cmd)} → ${res.stdout}`);
+    if (/git commit|gh pr/.test(cmd))
+      assert.ok(/git commit -F/.test(res.stdout) && /--body-file/.test(res.stdout), `the reason says how to pass the message: ${res.stdout}`);
+    else
+      assert.ok(/--message/.test(res.stdout), `the reason says to avoid naming the protected paths in --message: ${res.stdout}`);
+  }
+  // Legacy MultiEdit edits a file like Edit; cpio is no reader (it writes files from an archive).
+  let me = tool('MultiEdit', { file_path: path.join(BRAIN, 'canon', 'x.md'), edits: [] });
+  assert.ok(isDeny(me), `MultiEdit into canon must be denied: ${me.stdout}`);
+  me = tool('MultiEdit', { file_path: path.join(TMP, 'a.md'), edits: [] });
+  assert.strictEqual(me.stdout.trim(), '', 'MultiEdit elsewhere passes');
+  me = bashAt('cpio -id < /tmp/a.cpio', path.join(BRAIN, 'canon'));
+  assert.ok(isDeny(me), `cpio inside canon must be denied: ${me.stdout}`);
 
   // 6i-g. A truncated guard program blocks. The node program sits in a bash single-quoted string,
   // so a stray apostrophe ends it early; during P0-09 one did (in a comment), and the program that
