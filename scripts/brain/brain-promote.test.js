@@ -191,6 +191,25 @@ try {
   assert.ok(fs.existsSync(activeFile), 'the active decision stays on refusal');
   assert.strictEqual(run([ACTIVE, '--approve', '--to', 'superseded', '--force']).status, 0);
 
+  // 11. PR7-R-3: a self-promotion is refused by file identity, not by path text. On a
+  //     case-insensitive disk (APFS default) decisions/ACTIVE/d.md is decisions/active/d.md; the
+  //     string comparison let --force write the file onto itself and then delete it.
+  seed();
+  r = run([CAND, '--approve']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  fs.writeFileSync(path.join(TMP, 'canon', 'x.md'), fs.readFileSync(activeFile));
+  const caseInsensitive = fs.existsSync(path.join(TMP, 'decisions', 'ACTIVE', '2026-07-08-use-pipeline.md'));
+  if (!caseInsensitive) {
+    console.log('brain-promote.test.js §11 skipped: this filesystem is case-sensitive, so a case variant is another file');
+  } else {
+    const beforeCase = snapshot('.');
+    r = run(['decisions/ACTIVE/2026-07-08-use-pipeline.md', '--approve', '--to', 'active', '--force']);
+    assert.strictEqual(r.status, 1, `a case variant of the active file onto itself must be refused:\n${r.stdout}${r.stderr}`);
+    r = run(['CANON/x.md', '--approve', '--to', 'canon', '--force']);
+    assert.strictEqual(r.status, 1, `a case variant of a canon file onto itself must be refused:\n${r.stdout}${r.stderr}`);
+    assert.strictEqual(snapshot('.'), beforeCase, 'nothing deleted or rewritten');
+  }
+
   console.log('brain-promote.test.js: all assertions passed');
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });
