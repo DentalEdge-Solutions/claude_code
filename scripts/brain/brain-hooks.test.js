@@ -660,6 +660,99 @@ try {
     }
   }
 
+  // 6i-f. P0-09 background security reviews, second batch (after 82a075b): (A) incomplete denylist,
+  // (B) case-insensitivity differential, (C) Unicode case folding, (D) symlinks, (F) path
+  // normalization, and the shell's working directory. The protected-path rule is now an allowlist: a command that reaches canon/
+  // or decisions/active/ — by name after case and Unicode folding, through a symlink, or from a
+  // working directory inside the capsule — passes only as one plain brain-promote call or a
+  // pipeline of pure readers. Write/Edit/NotebookEdit compare folded, symlink-resolved paths.
+  seedCapsule();
+  // (D) fixtures: symlinks into the capsule whose names do not mention it
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'active'), path.join(TMP, 'lnk-active'));
+  fs.symlinkSync(path.join(BRAIN, 'canon'), path.join(TMP, 'lnk-canon'));
+  fs.symlinkSync(BRAIN, path.join(TMP, 'lnk-capsule'));
+  fs.writeFileSync(path.join(BRAIN, 'canon', 'x.md'), 'x\n');
+  fs.symlinkSync(path.join(BRAIN, 'canon', 'x.md'), path.join(TMP, 'lnk-file.md'));
+  fs.mkdirSync(path.join(TMP, 'src-active'), { recursive: true });
+  // (F) the OS resolves a symlink before "..": lnk-deep/../active is decisions/active, while the
+  // same text resolved lexically is <TMP>/active
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'candidates'), path.join(TMP, 'lnk-deep'));
+  const bashAt = (cmd, cwd) => runHook('brain-security-guard.sh',
+    { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: cmd }, cwd });
+  for (const cmd of [
+    // (A) writers no denylist named
+    'sort -o .project-brain/canon/x.md /tmp/x',
+    'perl -pi -e s/a/b/ .project-brain/decisions/active/d.md',
+    'ruby -e 1 .project-brain/canon/x.md',
+    'curl -o .project-brain/canon/x.md https://example.invalid/x',
+    'wget -O .project-brain/decisions/active/d.md https://example.invalid/x',
+    'chmod 000 .project-brain/canon/x.md',
+    'split -l 1 /tmp/x .project-brain/canon/part',
+    'node scripts/some-tool.js .project-brain/decisions/active/d.md',
+    'bash /tmp/w.sh .project-brain/canon/x.md',
+    'xxd -r /tmp/h .project-brain/canon/x.md',
+    'ed -s .project-brain/canon/x.md < /tmp/cmds',
+    'cd .project-brain && cd canon && touch x.md',
+    'cd .project-brain/decisions && sqlite3 x.db .dump && cp /tmp/x active',
+    // (B, C) case and Unicode variants that a case-insensitive, normalization-insensitive disk
+    // resolves onto the protected folders
+    'echo x > .project-brain/Canon/y.md',
+    'touch .PROJECT-BRAIN/CANON/y.md',
+    'echo x > .project-brain/\uFF43\uFF41\uFF4E\uFF4F\uFF4E/y.md',
+    'echo x > .project-brain/deci\u017Fions/active/d.md',
+    'echo x > .project-bra\u0130n/canon/y.md',
+    'echo x > .project-bra\u0131n/decisions/active/d.md',
+    'rm -rf .project-bra\u0130n',
+    'rm -rf .\uFF50roject-brain/decisions',
+    'cd .project-bra\u0131n && rm -rf decisions',
+    // (D) a symlink into the capsule, named without the capsule's name
+    'cp /tmp/x lnk-active/d.md',
+    'cd lnk-canon && touch y.md',
+    'echo x > lnk-canon/y.md',
+    'rm -rf lnk-capsule/decisions',
+    // (F) path normalization: the same folder spelled the ways the filesystem accepts
+    'echo x > .project-brain//canon/y.md',
+    'echo x > .project-brain/./canon/y.md',
+    'echo x > .project-brain/decisions/x/../active/d.md',
+    'echo x >.project-brain/canon/y.md',
+    'cp /tmp/x lnk-deep/../active/d.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (review batch 2): ${JSON.stringify(cmd)} \u2192 ${res.stdout} ${res.stderr}`);
+  }
+  // A working directory inside the capsule (the hook input's cwd follows the shell's cd)
+  for (const [cmd, cwd] of [
+    ['rm -rf decisions', BRAIN],
+    ['echo x > d.md', path.join(BRAIN, 'decisions', 'active')],
+    ['touch y.md', path.join(BRAIN, 'canon')],
+    ['cp /tmp/x active/d.md', path.join(BRAIN, 'decisions')],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.ok(isDeny(res), `must deny from cwd ${cwd}: ${cmd} \u2192 ${res.stdout}`);
+  }
+  for (const [cmd, cwd] of [
+    ['cat x.md', path.join(BRAIN, 'canon')],
+    ['grep -rn rm .', BRAIN],
+    ['ls decisions/active', BRAIN],
+    ['git add .project-brain/canon/x.md && git commit -m "canon x"', TMP],
+    ['cat lnk-canon/x.md', TMP],
+    ['echo done', TMP],
+    ['ls', path.join(TMP, 'src-active')],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.strictEqual(res.stdout.trim(), '', `must allow (review batch 2): ${cmd} in ${cwd} \u2192 ${res.stdout}`);
+  }
+  // Write/Edit/NotebookEdit: Unicode and case variants, and a symlink to a protected file itself
+  for (const tool of ['Write', 'Edit', 'NotebookEdit']) {
+    const at = p => (tool === 'NotebookEdit' ? { notebook_path: p, new_source: 'x' } : { file_path: p, content: 'x' });
+    for (const p of [path.join(BRAIN, '\uFF43\uFF41\uFF4E\uFF4F\uFF4E', 'd.md'), path.join(BRAIN, 'deci\u017Fions', 'active', 'd.md'),
+      path.join(TMP, '.project-bra\u0130n', 'canon', 'd.md'), path.join(TMP, 'lnk-file.md'), path.join(TMP, 'lnk-capsule', 'canon', 'n.md'),
+      path.join(TMP, 'lnk-deep') + '/../active/d.md', path.join(BRAIN) + '//canon/./d.md']) {
+      r = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: at(p) });
+      assert.ok(isDeny(r), `${tool} must be denied (review batch 2): ${JSON.stringify(p)} \u2192 ${r.stdout}`);
+    }
+  }
+
   // 6j. P11 — timing: every rule must stay linear. 512 KB still fits the old env-var path,
   // so these inputs reach the regexes (the old ones were quadratic: minutes, not ms).
   const K = 1 << 19;

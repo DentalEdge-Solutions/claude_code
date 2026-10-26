@@ -99,9 +99,9 @@ test('infra/hermes-agent settings register the guard launcher: the four tools, t
     'the project folder reaches the launcher as its own argument, never inside the script text');
 });
 
-test('hermes launcher reaches the guard whether CLAUDE_PROJECT_DIR is infra/hermes-agent or the repository root', () => {
+test('hermes launcher reaches the guard whether CLAUDE_PROJECT_DIR is infra/hermes-agent, a folder under it, or the repository root', () => {
   const [{ h }] = guardsIn(hermes);
-  for (const dir of [HERMES_DIR, REPO]) {
+  for (const dir of [HERMES_DIR, path.join(HERMES_DIR, 'bin'), REPO]) {
     const r = runHandler(h, dir, canonWrite(REPO));
     assert.strictEqual(r.status, 0, `${dir}: ${r.stderr}`);
     assert.ok(isDeny(r), `${dir}: canon write denied through the launcher: ${r.stdout}`);
@@ -110,18 +110,28 @@ test('hermes launcher reaches the guard whether CLAUDE_PROJECT_DIR is infra/herm
   }
 });
 
-test('hermes launcher never blocks because of a path that does not resolve: exit 0, a visible notice, no deny', () => {
+// Background security review (E), "fail-open in infra/hermes-agent/.claude/settings.json": the
+// first launcher exited 0 when it found no guard. It now walks up from CLAUDE_PROJECT_DIR (the
+// session's starting folder, or the repository root: both hold the guard at or above them) and
+// fails closed when no folder up to / holds it, so it never lets a call through unchecked.
+test('hermes launcher fails closed when no folder at or above CLAUDE_PROJECT_DIR holds the guard', () => {
   const [{ h }] = guardsIn(hermes);
   const nowhere = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-launcher-'));
   try {
-    for (const dir of [nowhere, path.join(nowhere, 'a', 'b'), path.join(nowhere, 'it has "quotes" and $(x)')]) {
-      const r = runHandler(h, dir, canonWrite(REPO));
-      assert.strictEqual(r.status, 0, `${dir}: must not block: ${r.stderr}`);
-      assert.ok(!isDeny(r), `${dir}: no decision without a guard`);
-      const msg = JSON.parse(r.stdout).systemMessage;
-      assert.match(msg, /brain-security-guard.*not found/, `${dir}: the user sees that the call was not checked`);
+    for (const dir of [nowhere, path.join(nowhere, 'a', 'b'), path.join(nowhere, 'it has "quotes" and $(x)'), '']) {
+      const r = runHandler(h, dir, plainBash);
+      assert.strictEqual(r.status, 2, `${JSON.stringify(dir)}: must block (exit 2): ${r.status} ${r.stdout} ${r.stderr}`);
+      assert.match(r.stderr, /brain-security-guard.*not found.*BLOCKED/, `${dir}: stderr says why`);
+      assert.match(r.stderr, /SECOND_BRAIN_SECURITY\.md/, `${dir}: stderr points at the break-glass procedure`);
     }
   } finally { fs.rmSync(nowhere, { recursive: true, force: true }); }
+});
+
+test('no settings file claims coverage it lacks: no guard handler can exit 0 without running the guard', () => {
+  for (const s of [root, hermes]) for (const { h } of guardsIn(s)) {
+    assert.ok(!/exit 0/.test((h.args || []).join(' ')), `a guard handler that can exit 0 unchecked: ${JSON.stringify(h)}`);
+    assert.strictEqual(h.onFailure, 'block');
+  }
 });
 
 if (!ok) process.exit(1);
