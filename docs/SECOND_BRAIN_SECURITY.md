@@ -43,13 +43,45 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
 1. **Script gate** — `brain-promote.js` is the *only* writer to `canon/` and
    `decisions/active/`; without `--approve` it exits 2 and writes nothing. Its
    positional path is normalized and confined to the capsule (no `../` traversal).
+   `--to superseded` moves a file from `decisions/active/` to `decisions/superseded/` (the weekly
+   review's route, P0-09); a source equal to its destination is refused.
 2. **Skill gate** — the `brain-promote` skill carries `disable-model-invocation: true`,
    so the platform itself prevents model-initiated promotion, and `risk_tier: critical`.
 3. **Hook gate** — `brain-security-guard.sh` (the only blocking hook) denies:
-   - direct `Write`/`Edit`/`NotebookEdit` into `.project-brain/canon/` (path-normalized;
-     NotebookEdit's `notebook_path` is checked too)
-   - `Bash` mutations of `canon/` not going through `brain-promote --approve`
-     (covers `cd`+relative paths and interpreter writes)
+   - direct `Write`/`Edit`/`NotebookEdit` into `.project-brain/canon/` or
+     `.project-brain/decisions/active/` (NotebookEdit's `notebook_path` is checked too). Every
+     path check uses one canonical form: segments walked as the kernel does (each existing prefix
+     replaced by its real path, so a symlink is resolved before `..`), names folded (NFKD,
+     combining marks dropped, upper- then lowercased: `.PROJECT-BRAIN`, fullwidth letters, the
+     long s and dotted or dotless i all match, as on a case-insensitive APFS disk or more)
+   - **canon/ and decisions/active/ — an allowlist, not a list of write verbs (P0-09).** A `Bash`
+     command that reaches them passes only as exactly one plain `brain-promote.js … --approve`
+     call (`node scripts/brain/brain-promote.js`, `./scripts/…` or the project's absolute path;
+     no separator, redirect, substitution, quote, escape, glob, assignment, comment or control
+     character: nothing can be chained to it) or as a **read-only form**: every stage of every
+     pipeline is a pure reader (`grep`, `cat`, `ls`, `head`, `wc`, `stat`, `diff`, `jq`, `echo`,
+     `find` without `-exec`/`-delete`/`-fprint`/`-fls`, `git status/log/diff/show/grep/blame/
+     ls-files/ls-tree/rev-parse/add/commit` …, no `--output`), with no `$(…)`, backticks, heredoc,
+     comment or writing redirect. A command reaches them:
+     - by name in its text, with ANSI-C `$'…'` escapes decoded, quotes and backslashes dropped,
+       folded, `//` and `/./` collapsed; or the word `canon`/`active` in a command that also names
+       the capsule or runs inside it;
+     - on disk: any word (split also at `=`, `<`, `>`) resolved from every folder the shell may be
+       in at that point (the hook input's `cwd` plus each `cd`/`pushd` target, physically and
+       logically), symlinks and `~` included;
+     - through a parent (the capsule folder or `decisions/`) given to a stage that is not a
+       reader (`mv`, `chmod -R`, `rsync --delete` of it);
+     - through a glob or brace word (`.project-brai?`, `.pro*/can*`, `.project-{brain,x}`)
+       that may match one of them, a parent or a file below;
+     - through an expansion the guard cannot follow (a variable, `$(…)`, backticks, `~user`,
+       a `cd` it cannot follow) in a command that shows a protected-looking name or runs in the
+       capsule: static analysis cannot decide, so it fails closed.
+     The brain tools that never write these folders (`brain-verify`, `-lint`, `-search`,
+     `-context-pack`, `-compile`, `-capture`) pass as one plain call when they name, at most, the
+     capsule folder itself as `--target`. Over 5,000 words or 20,000 disk lookups, a command
+     passes only in a read-only form. The weekly review stages a changed decision as a candidate
+     and applies it with `brain-promote.js … --to active --force`; a superseded one with
+     `--to superseded`.
    - deleting the capsule, when the capsule is the target:
      - **What counts as a delete:** any `rm`, `rmdir`, `unlink` or `shred` word, whatever runs
        it (`sudo`, `busybox`, `ssh`, `xargs`, `bash -c`, a here-string, a git alias, `… | sh`).
@@ -128,48 +160,63 @@ promotion), and `brain-lint` (sweep of the whole capsule, second net). The
    - direct installs (`cp`/`mv`/`ln`/`rsync`) from `reference-repositories/sources/` into the
      skills dir
 
-   **When the guard itself fails** (owner decision P11, 2026-10-15):
+   **When the guard itself fails — it fails closed** (P0-09, 2026-10-26; this supersedes the
+   P11 fail-open policy of 2026-10-15 and the F1 non-adoption of `onFailure: "block"`):
    - **Bad input fails closed.** Empty input, input that is not JSON, or JSON without a
      `tool_name` string and a `tool_input` object is denied with a reason. Claude Code always
      sends valid input, so this never blocks normal work; it points at a broken hook setup.
-   - **node missing or crashing fails open, visibly.** The guard prints a warning to stderr,
-     appends a line to `.project-brain/reports/guard-failures.log` (time and exit code only,
-     never the command), and exits 1. Claude Code shows exit 1 as a non-blocking hook error
-     and lets the call proceed. Denying here would block every Write, Edit and Bash call,
-     including the fix. Exit 0 would hide the warning: Claude Code ignores stderr on exit 0
-     ([hooks reference](https://code.claude.com/docs/en/hooks), checked 2026-10-15).
+   - **node missing, crashing, killed or too slow fails closed.** The guard prints the reason to
+     stderr, appends a line to `.project-brain/reports/guard-failures.log` (time, exit code and
+     "fails closed" only, never the command), and exits 2: Claude Code blocks the call and shows
+     the reason to Claude. The guard stops node at `BRAIN_GUARD_DEADLINE_S` (default 20 s, under
+     the 30 s hook timeout), so a stall blocks even under a registration without `onFailure`.
+     A program that ends early (a stray apostrophe can end its bash single-quoted text) exits 3
+     and is blocked the same way.
+   - **The registration sets `"onFailure": "block"` and `"timeout": 30`** (Claude Code
+     2.1.295 or later), so a guard that cannot start, exits with another code or reaches the
+     hook timeout blocks the call ([hooks reference](https://code.claude.com/docs/en/hooks),
+     "Block the action when a hook fails", read 2026-10-26 on Claude Code 2.1.310). It is
+     committed in `.claude/settings.json` in exec form (`bash` with the script path as its
+     argument). `brain-self-install.sh` writes the same registration into a target's
+     `.claude/settings.json` and removes the old shell-form, fail-open copy from its
+     `.claude/settings.local.json`; commit `hooks/brain/` with it, since a registration whose
+     script is missing blocks every Write, Edit and Bash call. Telemetry hooks stay fail-open.
+   - Sessions started in `infra/hermes-agent/` read `infra/hermes-agent/.claude/settings.json`
+     instead: it runs the guard from the first folder at or above `$CLAUDE_PROJECT_DIR` that
+     holds `hooks/brain/brain-security-guard.sh`, and blocks (exit 2) when none does.
+   - The guard keeps no state between calls: every decision comes from the hook input and the
+     filesystem at that moment.
    - The hook input reaches node on stdin, not through an environment variable: a large
      Write used to exceed the exec size limit and slip through unchecked.
-   - Every pattern is linear-time and tested on 512 KB to 1 MB commands. A PreToolUse hook
-     that times out (default 600 s) does not block the call, so a slow regex would be a
-     bypass. The 2026-10-16 re-review found one the P11 sweep missed (the `git clean`
-     dry-run check, reached only after a `clean` subcommand): a timing input must actually
-     reach the pattern it targets.
-   - `brain-self-install.sh` registers the guard with `"timeout": 30` (triage F1, owner
-     decision 2026-10-20). A stalled guard then costs each call 30 s instead of 10 minutes.
-     It still fails open after those 30 s: the timeout bounds the delay, it does not close
-     the gap. A normal check takes about 0.1 s on a 1 MB command (medians of 72 ms, n=15,
-     and 120 ms, n=200) and stayed under 1 s under heavy CPU load. A check that would have
-     needed 30 s to 600 s now fails open sooner, but at that rate it would take a command
-     of hundreds of MB. Re-running the installer gives the timeout to every untimed copy of
-     the guard (any matcher; matching hooks run in parallel) and keeps a timeout the owner
-     already set. An existing install changes only when the installer is re-run there.
-     `"onFailure": "block"` would make a timeout deny the call, but it also blocks on a node
-     failure, against P11; it was considered and not adopted
-     ([hooks reference](https://code.claude.com/docs/en/hooks), checked 2026-10-19 on
-     Claude Code 2.1.302).
+   - Every pattern is linear-time and tested on 512 KB to 1 MB commands; the P0-09 sweep runs
+     39 inputs of up to 1 MB end to end (worst about 1.2 s) with a 15 s kill per scan.
+
+   **Break-glass: when node or the guard is broken** (every Write, Edit and Bash call is
+   blocked, the fix included). The owner, outside Claude Code:
+   1. Read the reason Claude Code shows (or `.project-brain/reports/guard-failures.log`), and
+      check node in a terminal: `node --version`.
+   2. If node itself is broken, fix or reinstall node in the terminal; nothing else is needed.
+   3. If the guard must be bypassed for a repair, either start one session with all hooks off,
+      `claude --safe-mode` ("hooks … do not load"; code.claude.com/docs/en/cli-reference, read
+      2026-10-26), or edit `.claude/settings.json` in an editor outside Claude Code and set the
+      guard's `"onFailure"` to `"continue"` (or remove its `PreToolUse` entry). Settings
+      reload on save.
+   4. Repair, run `node scripts/brain/brain-hooks.test.js`, then undo step 3 (`git diff
+      .claude/settings.json` must show nothing) and start a normal session.
+   Never let Claude Code edit the registration during a break-glass: an agent that can turn
+   the guard off is the risk the guard exists for.
 
    The guard is **defense-in-depth**: `brain-promote --approve` + git history are the
    real boundary. It errs toward denial — a read command mentioning `canon/` alongside a
-   redirect/`node -e` can be a conservative false-positive. So can any program not on the
-   reader list that carries the word `rm` next to a capsule path (`xargs grep rm …`,
-   `sh -c "grep unlink …"`, `git rm --cached …`); split such commands. Known limits: it does
-   not follow shell variables (`D=.project-brain; rm -rf "$D"`), commands built at run time
-   (`$(printf …)`, a decoded string, a script an executor runs), loops over a capsule glob
-   (`for f in .project-brain/*; do rm "$f"; done`), or globs that could expand to the
-   capsule (`rm -rf .p*`). It does not treat moving or overwriting as deleting (`mv` of the
-   capsule, `rsync --delete`, `cp -r` over it, `truncate`, `: >`). Code that deletes through
-   an API the guard doesn't name also gets through.
+   redirect/`node -e` is denied (split it), and so is any program not on the reader list that
+   reaches a protected folder or carries the word `rm` next to a capsule path (`xargs grep
+   rm …`, `sh -c "grep unlink …"`, `git rm --cached …`). Known limits: commands built at run
+   time without any protected-looking text (a decoded string, a script an executor runs); a
+   path-less git command (`git reset --hard`, `git stash pop`, `git apply`) that rewrites
+   protected files; a hard link to a protected file made beforehand; loops whose body holds
+   the only capsule reference after a variable; code that writes or deletes through an API
+   the guard does not name. For deletes outside canon/ and decisions/active/, moving or
+   overwriting is still not deleting (`cp -r` over the capsule, `truncate`, `: >`).
 
 ## Reference sources — documentation only
 
