@@ -803,6 +803,24 @@ try {
     assert.strictEqual(res.stdout.trim(), '', `must allow (reviews G, H): ${JSON.stringify(cmd)} in ${cwd} → ${res.stdout}`);
   }
 
+  // 6i-i. Self-review after G and H (author probes, P0-09): a brain tool call pointed at a protected
+  // folder with --target writes inside it (capture writes <target>/sessions/, compile
+  // <target>/decisions/candidates/); a command padded past the lookup budget must not skip the
+  // on-disk check; ~user is an expansion the guard cannot follow.
+  seedCapsule();
+  fs.symlinkSync(path.join(BRAIN, 'decisions', 'active'), path.join(TMP, 'zz'));
+  for (const [cmd, cwd] of [
+    ['node scripts/brain/brain-capture.js --target .project-brain/canon --message x', TMP],
+    ['node scripts/brain/brain-compile.js --all --target .project-brain/decisions/active', TMP],
+    ['node scripts/brain/brain-lint.js --target zz', TMP],
+    [Array.from({ length: 6000 }, (_, i) => `w${i}`).join(' ') + ' ; cp /tmp/x zz/d.md', TMP],
+    ['cd /tmp && cd / && cp /tmp/x ' + Array.from({ length: 2600 }, (_, i) => `w${i}`).join(' ') + ' zz/d.md', TMP],
+    ['cp /tmp/x ~nobody/canon/y.md', TMP],
+  ]) {
+    const res = bashAt(cmd, cwd);
+    assert.ok(isDeny(res), `must deny (self-review): ${cmd.slice(0, 120)} → ${res.stdout} ${res.stderr}`);
+  }
+
   // 6i-g. A truncated guard program blocks. The node program sits in a bash single-quoted string,
   // so a stray apostrophe ends it early; during P0-09 one did (in a comment), and the program that
   // still ran defined its helpers, checked nothing and allowed every call with exit 0. The program
