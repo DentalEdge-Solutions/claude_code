@@ -147,7 +147,9 @@ Not run: an implementer cannot start a fresh interactive session. To run by the 
 of this branch), from the repository root. Every probe is harmless if a rule fails to match and the command runs:
 `git push --dry-run` sends nothing (it does contact `origin` with the owner's credential); `gh pr merge` names a PR
 number that does not exist (one authenticated API call that fails); every deploy probe copies from a source that does
-not exist, so `cp` fails and nothing reaches `~/.claude/skills/`.
+not exist, so `cp` fails and nothing reaches `~/.claude/skills/`. The source is relative, `./nonexistent-p0-07-probe`,
+inside the working directory, so `permissions.blockReadsOutsideWorkingDirectories` cannot be what prompts and the
+prompt seen comes from the ask rule (PR6-R-12).
 
 1. Start a fresh session: `claude --permission-mode auto` (a fresh process reads the new `.claude/settings.json`).
 2. For each input below, ask Claude to run exactly that command and report the result. Expected output for each: a
@@ -157,10 +159,10 @@ not exist, so `cp` fails and nothing reaches `~/.claude/skills/`.
    - `gh pr merge 999999 --repo DentalEdge-Solutions/claude_code` (rule 2)
    - `git status && git push --dry-run` (compound, D3; rule 1)
    - `git -C . push --dry-run` (rule 20)
-   - `cp -r /nonexistent-p0-07-probe ~/.claude/skills/` (rule 9 with an empty remainder after `skills/`: the exact
+   - `cp -r ./nonexistent-p0-07-probe ~/.claude/skills/` (rule 9 with an empty remainder after `skills/`: the exact
      shape of the old self-deploy line; this measures whether a trailing `*` matches nothing)
-   - `cp -R /nonexistent-p0-07-probe/. ~/.claude/skills/p0-07-probe/` (rules 9 and 11; the CLAUDE.md deploy shape)
-   - `cp -r /nonexistent-p0-07-probe "$HOME/.claude/skills/"` (rule 18; measures D2 for a `$HOME` form)
+   - `cp -R ./nonexistent-p0-07-probe/. ~/.claude/skills/p0-07-probe/` (rules 9 and 11; the CLAUDE.md deploy shape)
+   - `cp -r ./nonexistent-p0-07-probe "$HOME/.claude/skills/"` (rule 18; measures D2 for a `$HOME` form)
 3. `/permissions`: the 23 ask rules listed with `.claude/settings.json` as their source.
 
 Run the `git push` and `gh pr merge` probes once before the settings trim below and once after: per D7 both should
@@ -181,8 +183,9 @@ such as `gh` aliases, `rsync` or `${HOME}` deploys and scripts calling the GitHu
 
 Measured with `scripts/staged-deploys.test.js`'s matcher over every Markdown definition under `skills/`,
 `.claude/agents/`, `.claude/skills/`, `packs/` and `infra/hermes-agent/skills/` (90 files, reports and logs
-excluded) and, since review round 1, every `.sh`, `.js`, `.mjs` and `.py` file under the same trees (13 files, test
-files included; none needed an exclusion), at `fce8542` (via `git archive`) and at this branch's head:
+excluded) and, since review round 1, every script under the same trees (`.sh`, `.js`, `.mjs`, `.py`; since round 2
+also `.cjs`, `.ts`, `.mts`, `.cts`; 13 files, test files included; none needed an exclusion), at `fce8542` (via
+`git archive`) and at this branch's head:
 
 | Measure | `fce8542` | head |
 |---|---|---|
@@ -196,10 +199,16 @@ alone (fixtures in the test). Since review round 1 (PR6-R-5) it also reads the d
 `install` and `ln` (`-t DIR`, a flag cluster ending in `t` such as `-Rt DIR`, `--target-directory[=]DIR`; rsync's
 `-t` takes no value and is left alone), and a `cd` or `pushd` into the skills folder followed on the same line, after
 `&&` or `;`, by a copy to a relative destination (`cd ~/.claude/skills && cp -R /repo/skills/x .`). Both are single
-passes over the text. In scripts (PR6-R-4) it also flags code that names the folder: `path.join(os.homedir(),
-'.claude', 'skills', …)`, or `homedir()`, `expanduser(`, `process.env.HOME` or `os.environ` with `.claude/skills` on
-one line. A mutant tree in a fresh temp folder (a deploying `.sh`, `.js`, `.mjs` and `.py`, plus a clean script
-reading the home settings file and a `.txt` file that is not read) proves the script scan catches all four. Reports (`SKILL-EVAL.md`, `<agent>-EVAL.md`, `*-REFINE-LOG.md`) are dated history and are
+passes over the text. In scripts (PR6-R-4) it also flags code that names the folder. Since round 2 (PR6-R-10,
+R-11) that check is: a line holding a home token (`homedir()`, `expanduser(`, `process.env.HOME`, `os.environ`,
+`Path.home()`) and either `.claude/skills` or both quoted path parts `'.claude'` and `'skills'`. That catches
+`path.join(os.homedir(), '.claude', 'skills', n)`, `path.join(process.env.HOME, '.claude', 'skills', n)`,
+`os.path.join(os.path.expanduser('~'), '.claude', 'skills', n)` and `Path.home() / '.claude' / 'skills'`. Each part is
+its own single pass with fixed alternatives, so it is linear: at 1 MB of one repeated token on one line it took 0.2-0.4
+ms per token (round 1's `[^\n]*` form took 24.9-41.4 s; table below). A mutant tree in a fresh temp folder proves
+the script scan catches a deploy in each of `.sh`, `.js`, `.mjs`, `.py`, `.ts`, `.cjs`, `.mts` and `.cts`, and leaves
+alone a script reading the home settings file, a home-token line naming `'.claude'` with `settings.json`, a project
+`.claude/skills` path with no home token, and a `.txt` file. Reports (`SKILL-EVAL.md`, `<agent>-EVAL.md`, `*-REFINE-LOG.md`) are dated history and are
 excluded: `skills/skill-adapt/SKILL-EVAL.md:47` still quotes the old step 10.
 
 Mid-loop re-evaluation is unaffected: with-skill subagents load `skills/<name>/SKILL.md`, not the deployed copy
@@ -250,7 +259,8 @@ line, because `diff` prints the home path expanded, not as `~`. The line stays i
    `uninstall.sh`) and reinstalls.
 8. **Definitions can still say "deploy" in words.** The P0-08 test reads copy commands (since review round 1 also the
    destination-first and `cd`-then-copy forms, and code paths in scripts) and the three steps' wording; it cannot read
-   every way a sentence could instruct a deploy, a `cd` and a copy on different lines, or a script that builds the
+   every way a sentence could instruct a deploy (M19), a `cd` and a copy on different lines (N8), a variable assigned
+   on one line and used on another (N7: `DEST=~/.claude/skills`, then `cp -R … "$DEST"`), or a script that builds the
    path in pieces across lines. P0-07's `cp` rules are the second layer.
 9. **AgentShield grade not measured.** CI's security gate runs the pinned `ecc-agentshield@1.4.0` on `.claude/`;
    `npx` is not run locally (project rule). The local static scanner gives PASS, 0 findings on both settings files.
@@ -297,7 +307,7 @@ text missing `-x .DS_Store`).
 | ID | What was done | Where |
 |---|---|---|
 | PR6-R-1 | D10 reworded: `--setting-sources user` keeps project settings out; `--bare` skips project hooks and still applies the settings files' `env` block, and whether it applies `permissions.ask` is UNVERIFIED; the Hermes conclusion does not depend on it | this record, D10 |
-| PR6-R-2 | Owner probe rewritten: every deploy probe copies from `/nonexistent-p0-07-probe`; the real-deploy example removed; `~` with empty remainder, `~/…/p0-07-probe/` and `"$HOME/.claude/skills/"` forms added, plus `git -C . push --dry-run`; no quoted prompt string, the expected outcome is "a permission prompt for the Bash command, not an automatic run"; residual 6 says which forms the probe measures and which stay inferences | this record, Pending owner probe; Residuals 6 |
+| PR6-R-2 | Owner probe rewritten: every deploy probe copies from a nonexistent source (`./nonexistent-p0-07-probe` since round 2); the real-deploy example removed; `~` with empty remainder, `~/…/p0-07-probe/` and `"$HOME/.claude/skills/"` forms added, plus `git -C . push --dry-run`; no quoted prompt string, the expected outcome is "a permission prompt for the Bash command, not an automatic run"; residual 6 says which forms the probe measures and which stay inferences | this record, Pending owner probe; Residuals 6 |
 | PR6-R-3 | Rules 20-23 added to both files (lists identical, 23 rules); red `91443ca`, green `7ab8963`; semantics checked against D1 (two wildcards, so the bare-push rule is separate; `--delete` covered; absolute and `./` brain-promote covered, absolute with no argument not; the over-match pinned); residual 1 updated | `.claude/settings.json`, `infra/hermes-agent/.claude/settings.json`; `scripts/claude-settings.test.js` `ASK_RULES`, `MUST_ASK`, `MUST_NOT_ASK`, `KNOWN_OVERMATCH`, `KNOWN_ESCAPES`; this record, the ask list and Residuals 1 |
 | PR6-R-4 | The scan reads `.sh`, `.js`, `.mjs`, `.py` under the definition trees with the command matcher and a code-path check; no exclusion (none of the 13 scripts, tests included, holds a deploy form); a mutant tree in a fresh temp folder proves a script deploy is caught in each language | `scripts/staged-deploys.test.js` (`SCRIPT`, `scriptFiles`, `CODE_USER_SKILLS`, the mutant-tree test) |
 | PR6-R-5 | Fixed, not listed: the matcher reads `-t DIR`, `-Rt DIR`, `--target-directory[=]DIR` for cp, mv, install, ln, and a `cd`/`pushd` into the folder followed on the same line by a relative copy; both single passes; what stays out is in residual 8 | `scripts/staged-deploys.test.js` (`destination`, `CD_THEN`); this record, Residuals 8 |
@@ -305,6 +315,32 @@ text missing `-x .DS_Store`).
 | PR6-R-7 | Target text: `diff -rq -x .DS_Store`, and an "Only in" line for the `~/.claude/skills/<name>` side is a file only the installed copy has, to delete by hand; inside the markers, so uninstall stays in sync | `install.sh` pipeline section; `scripts/staged-deploys.test.js` install.sh test |
 | PR6-R-8 | Accepted, no code change: the staged state of skill-adapt is reported in its step 14 summary only; a durable record is a possible follow-up | this record, What changed (skill-adapt row) |
 | PR6-R-9 | Owner action extended to `gh *`, `cp *`, `rsync *`, `node *` allows in local or user settings; no settings file was read | this record, Owner action |
+
+## Review round 2: author's answers (the reviewer closes)
+
+| ID | What was done | Where |
+|---|---|---|
+| PR6-R-10 | The code-path check is now three separate single passes per line (`HOME_TOKEN`, then `includes('.claude/skills')` or the two quoted path parts), with no `[^\n]*` between tokens. A timing test runs one 1 MB line of each repeated token with no skills path and requires < 1 s each; red `fa1bc60`, green `cacb6f6` | `scripts/staged-deploys.test.js` (`HOME_TOKEN`, `namesUserSkills`, the timing test) |
+| PR6-R-11 | Fixed: N4, N5, N6 (separate quoted path parts beside a home token; `Path.home()` added as a token) and N9, N10 (`.ts`, `.cjs`; also `.mts`, `.cts`) are caught; red mutants in `fa1bc60`. Recorded, not fixed: N7 (a variable assigned on one line and used on another) and N8 (`cd` and `cp` on different lines), by name in residual 8. Over the real definition trees the check still finds 0 in 90 definitions and 13 scripts | `scripts/staged-deploys.test.js` (`SCRIPT`, the mutant tree); this record, P0-08 section and Residuals 8 |
+| PR6-R-12 | Every probe source is `./nonexistent-p0-07-probe`, inside the working directory, with the reason (a prompt cannot then come from `blockReadsOutsideWorkingDirectories`) | this record, Pending owner probe |
+
+Timing at 1 MB, one line of one repeated token, no skills path (same machine, `process.hrtime`):
+
+| Token | Round 1 form (red `fa1bc60`) | Round 2 form |
+|---|---|---|
+| `homedir()` | 41,350.9 ms | 0.2 ms |
+| `os.environ` | 37,642.2 ms | 0.4 ms |
+| `process.env.HOME` | 24,880.5 ms | 0.4 ms |
+| `expanduser(` | 35,273.4 ms | 0.2 ms |
+| `Path.home()` | 0.3 ms (not a token then) | 0.4 ms |
+| `homedir() '.claude'` | 28,338.6 ms | 0.4 ms |
+
+Round 2 checks: `node scripts/run-all-tests.js` alone, 46/46 suites passed on the first run (static-scan.test.js's
+timing cases passed; no re-run was needed); staged-deploys 12 PASS; `validate-skills.js` exit 0; `ci-scan-skills.js`
+exit 0 (general pass 30 targets, conformance pass 23, 0 unmatched, 0 stale); `bash -n install.sh uninstall.sh` exit 0;
+static scan: this record PASS, 0 findings; `scripts/staged-deploys.test.js` FLAG, 1 finding (`env-access`, the
+`process.env` text in a comment, a fixture and the token list; the file is not a CI scan target and FLAG does not
+fail). No hidden or bidi characters in the 2 files changed in round 2.
 
 ## Not measured
 
