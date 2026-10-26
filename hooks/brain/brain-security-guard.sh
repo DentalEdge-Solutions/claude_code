@@ -38,9 +38,10 @@ const path = require("path");
 // and the wrapper blocks the call (it did once during P0-09: the helpers ran, nothing was checked).
 let finished = false;
 process.on("exit", (code) => { if (code === 0 && !finished) process.exitCode = 3; });
+let denyHint = "";
 const deny = (reason) => {
   console.log(JSON.stringify({ hookSpecificOutput: {
-    hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }));
+    hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason + denyHint } }));
   finished = true;
   process.exit(0);
 };
@@ -190,7 +191,7 @@ const depthOf = (abs) => {
 };
 const home = (w) => (/^~(\/|$)/.test(w) && process.env.HOME ? path.join(process.env.HOME, w.slice(1)) : w);
 
-if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
+if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool)) {
   const target = tool === "NotebookEdit" ? inp.notebook_path : inp.file_path;
   if (typeof target !== "string") malformed(tool + " without a string path");
   // The canonical form: "..", ".", "//" and symlinks resolved as the kernel does, names folded.
@@ -274,120 +275,14 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
     return { text: out, kept };
   };
   const joined = joinLines(inp.command);
-  // Message text is data (PR7-R-1). The value of git commit -m/--message/-F/--file, of gh pr
-  // create|edit --title/-t/--body/-b/--body-file/-F and of brain-capture.js --message/--title is
-  // replaced by the word DATA when bash passes it on literally: single-quoted, double-quoted with no
-  // $ or backtick, or a $(cat <<X … X) whose delimiter is quoted (bash does not expand that body).
-  // An unquoted delimiter, a $ or a backtick in the value keeps it, so every rule still reads it.
-  // Only the named commands, run by bare name with no VAR= prefix, and only their option values.
-  const blankData = (s) => {
-    if (s.includes("\x00")) return s;
-    // 1. Quoted-delimiter heredocs read by cat inside $( … ): placeholders \x00N\x00 for now.
-    const held = [];
-    let work = "", from = 0;
-    const re = /\$\(\s*cat\s+<<(-?)\s*(?:\x27([A-Za-z_][\w-]*)\x27|"([A-Za-z_][\w-]*)"|\\([A-Za-z_][\w-]*))[ \t]*\n/g;
-    let m;
-    while ((m = re.exec(s))) {
-      const delim = m[2] || m[3] || m[4], dash = m[1] === "-";
-      let pos = re.lastIndex, end = -1;
-      for (;;) {
-        const nl = s.indexOf("\n", pos);
-        const line = s.slice(pos, nl < 0 ? s.length : nl);
-        if ((dash ? line.replace(/^\t+/, "") : line) === delim) { end = nl < 0 ? s.length : nl; break; }
-        if (nl < 0) break;
-        pos = nl + 1;
-      }
-      if (end < 0) break;
-      const close = /^[ \t\n]*\)/.exec(s.slice(end, end + 4096));
-      if (!close) { re.lastIndex = end; continue; }
-      const stop = end + close[0].length;
-      work += s.slice(from, m.index) + "\x00" + held.length + "\x00";
-      held.push(s.slice(m.index, stop));
-      from = stop;
-      re.lastIndex = stop;
-    }
-    work += s.slice(from);
-    // 2. Tokens with positions (quotes kept), split into commands at unquoted ; & | and newlines.
-    const toks = [];
-    let cur = null, q = "";
-    const flush = () => { if (cur) { toks.push(cur); cur = null; } };
-    for (let i = 0; i < work.length; i++) {
-      const c = work[i];
-      if (q) { cur.raw += c; if (c === "\\" && q === "\"" && i + 1 < work.length) { cur.raw += work[++i]; } else if (c === q) q = ""; continue; }
-      if (c === "\\" && i + 1 < work.length) { if (!cur) cur = { start: i, raw: "" }; cur.raw += c + work[++i]; continue; }
-      if (c === "\x27" || c === "\"") { if (!cur) cur = { start: i, raw: "" }; cur.raw += c; q = c; continue; }
-      if (/\s/.test(c) || ";&|()<>".includes(c)) {
-        flush();
-        if (c === "\n" || ";&|()".includes(c)) toks.push({ sep: true });
-        continue;
-      }
-      if (!cur) cur = { start: i, raw: "" };
-      cur.raw += c;
-    }
-    flush();
-    const LIT = /^(\x27[^\x27]*\x27|"(?:[^"\\$`]|\\[^$`])*"|"\x00\d+\x00"|\x00\d+\x00)$/;
-    const blanks = [];
-    // The text stays data only while no other command in the same call could run it (review P:
-    // git commit -m "<delete>" && git log -1 --format=%B | sh). So every command of the call must
-    // be one of these: git add/commit/push/status/log/diff/show (only -C before the subcommand),
-    // gh pr create/edit/view, or brain-capture. Anything else, and nothing is blanked.
-    let seg = [], allSafe = true;
-    const endSeg = () => {
-      const w = seg.map((t) => t.raw);
-      let opts = null, at = 0, safe = w.length === 0;
-      if (w[0] === "git") {
-        let i = 1;
-        while (w[i] === "-C") i += 2;
-        if (["add", "commit", "push", "status", "log", "diff", "show"].includes(w[i])) safe = true;
-        if (w[i] === "commit") { opts = /^(-[A-Za-z]*m|--message|-F|--file)$/; at = i + 1; }
-      } else if (w[0] === "gh" && w[1] === "pr" && ["create", "edit", "view"].includes(w[2])) {
-        safe = true;
-        if (w[2] !== "view") { opts = /^(--title|-t|--body|-b|--body-file|-F)$/; at = 3; }
-      } else if (w[0] === "node" && /^(\.\/)?scripts\/brain\/brain-capture\.js$/.test(w[1] || "")) {
-        safe = true;
-        opts = /^(--message|--title)$/; at = 2;
-      } else if (w[0] === "cd" && w.length <= 2) safe = true;
-      if (!safe) allSafe = false;
-      if (opts) for (let i = at; i < seg.length; i++) {
-        const eq = w[i].indexOf("=");
-        if (opts.test(w[i]) && i + 1 < seg.length && LIT.test(w[i + 1])) { blanks.push(seg[i + 1]); i++; }
-        else if (eq > 0 && opts.test(w[i].slice(0, eq)) && LIT.test(w[i].slice(eq + 1)))
-          blanks.push({ start: seg[i].start + eq + 1, raw: w[i].slice(eq + 1) });
-      }
-      seg = [];
-    };
-    for (const t of toks) { if (t.sep) endSeg(); else seg.push(t); }
-    endSeg();
-    if (!allSafe) return s;
-    let outText = "", at2 = 0;
-    for (const b of blanks.sort((x, y) => x.start - y.start)) {
-      outText += work.slice(at2, b.start) + "DATA";
-      at2 = b.start + b.raw.length;
-    }
-    outText += work.slice(at2);
-    // 3. Heredocs that were not message values are put back as they were.
-    return outText.replace(/\x00(\d+)\x00/g, (x, n) => held[Number(n)]);
-  };
-  const cmd = blankData(joined.text);
-  // Single-quoted text is literal: an expansion inside it (a backtick or $ in a message) is not
-  // one, and a # inside it is no comment (PR7-R-1, R-2). ANSI-C $\x27…\x27 still counts: its $ stays outside the neutralised quotes.
-  // Only where this reading matches bash: a comment or a heredoc outside quotes (where an
-  // apostrophe is no quote) makes the guard fall back to the plain text (review N).
-  const sqNeutral = (() => {
-    let o = "", q = "", prev = "";
-    for (let i = 0; i < cmd.length; i++) {
-      const c = cmd[i];
-      if (q === "\x27") { if (c === "\x27") { q = ""; o += c; } else o += "_"; prev = c; continue; }
-      if (q === "\"") { if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; continue; } if (c === "\"") q = ""; o += c; prev = c; continue; }
-      if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; prev = "x"; continue; }
-      if ((c === "#" && (!prev || /[\s;&|()]/.test(prev))) || (c === "<" && cmd[i + 1] === "<")) return cmd;
-      if (c === "\x27" && prev !== "$") q = c;
-      else if (c === "\"") q = c;
-      o += c;
-      prev = c;
-    }
-    return o;
-  })();
+  // Message text gets the same checks as any other text (PR7-R-12: a literal-message exemption
+  // read comments and ANSI-C quoting differently from bash, and hid commands bash runs). A commit,
+  // PR or capture command denied for its message gets a reason that says how to pass the message.
+  const cmd = joined.text;
+  if (/\bgit\b[^;&|\n]*\bcommit\b|\bgh\s+pr\s+(create|edit)\b/.test(cmd))
+    denyHint = " If this is a commit or PR message: write it to a file outside .project-brain (for example the session scratchpad) and pass it with git commit -F <file> or gh pr create|edit --body-file <file>.";
+  else if (/brain-capture\.js/.test(cmd))
+    denyHint = " If this is a brain-capture message: brain-capture has no file option, so avoid naming the protected paths (.project-brain/canon, decisions/active) literally in --message or --title.";
   // Case-insensitive: macOS disks are case-insensitive by default, so .PROJECT-BRAIN is the capsule
   // there (background security review of P0-09).
   const CAPSULE = /\.project-brain/i;
@@ -444,7 +339,7 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   // --open-files-in-pager (git accepts it shortened, so any --ope…), git -c, --ext-diff and
   // similar. Any of them ends the exemption. The program a reader runs through its config
   // (pager, diff driver) can only be set from the command line by -c or VAR=, both covered.
-  const EXEC_OPT = /^(--(pre|hostname-bin|pager|compress-program|use-compress-program|upload-pack|receive-pack|exec|config-env|exec-path|ext-diff|extcmd|tool|textconv|ope)|-c$|-[A-Za-z]*O)/;
+  const EXEC_OPT = /^(--(pre|hostname-bin|pager|compress-program|use-compress-program|upload-pack|receive-pack|exec|config-env|exec-path|ext-diff|extcmd|tool|textconv|ope)|-[A-Za-z]*O)/;
   const KEYWORDS = new Set(["do", "then", "else", "elif", "if", "while", "until", "time"]);
   const prog = (t) => t.replace(/^.*\//, "");
   const unquote = (s) => s.replace(/["\x27\\]/g, "");
@@ -738,7 +633,7 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   // The one sed form that only prints: sed -n with a single-quoted script of one or two addresses
   // (line numbers, $ or a /regex/) and p, then plain file names (PR7-R-2). Any other sed can write
   // (w, W), run (e) or read more (r).
-  const SED_PRINT = /^\s*sed\s+-n\s+\x27(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/)(?:,(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/))?p\x27(?:\s+[^\s\-;&|<>`$()\x27"\\][^\s;&|<>`$()\x27"\\]*)*\s*$/;
+  const SED_PRINT = /^\s*sed\s+-n\s+(?:\d+(?:,\d+)?p|\x27(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/)(?:,(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/))?p\x27)(?:\s+[^\s\-;&|<>`$()\x27"\\][^\s;&|<>`$()\x27"\\]*)*\s*$/;
   // A stage of plain literal assignments only (x=1;) sets shell variables and runs nothing. Lowercase
   // names only: PATH=, IFS=, BASH_ENV= and the like change how the next reader runs (review N).
   const LITERAL_ASSIGN = /^\s*(?:[a-z_][a-z0-9_]*=[A-Za-z0-9_.\/:@%+,-]*\s*)+$/;
@@ -751,7 +646,7 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   // A read-only form: every stage of every pipeline is a pure reader, with no command or process
   // substitution, no heredoc, no ANSI-C quoting or comment that could desync the parse, and no
   // file-writing redirect. Nothing in it can write a file.
-  const readerForm = () => !WEIRD.test(sqNeutral) && !/>/.test(scrubbed)
+  const readerForm = () => !WEIRD.test(cmd) && !/>/.test(scrubbed)
     && splitShell(cmd).every((pl) => pl.stages.filter((s) => s.trim()).every(readerStage));
 
   // ── canon/ and decisions/active/: an allowlist, not a list of write verbs ─────────────────
@@ -863,7 +758,7 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
     const alts = w.length <= 4096 ? braces(home(w)) : null;
     return alts === null ? looksProtected : alts.some((a) => globReaches(a, cwdAbs, targets));
   });
-  const undecidable = [...shellWordsRaw(sqNeutral), ...shellWordsRaw(ansiC(sqNeutral))].some((w) => EXPANSION.test(w));
+  const undecidable = rawWords.some((w) => EXPANSION.test(w));
   const capsuleLooking = /\.project-b|roject-brain/.test(fcmd) || cwdKind !== null;
   const capsuleCtx = CAPSULE.test(fcmd) || cwdKind !== null || kinds.size > 0;
   // A name ends at a path boundary: decisions/active.md is a file in decisions/ (N4).

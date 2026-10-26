@@ -140,10 +140,12 @@ const removed = removeCommand(L, H("brain-security-guard.sh").command);
 const GUARD = { type: "command", command: "bash", args: ["${CLAUDE_PROJECT_DIR}/hooks/brain/brain-security-guard.sh"] };
 const GUARD_DEFAULTS = { timeout: 30, onFailure: "block" };
 // Every tool that writes files or runs commands: Monitor runs a command like Bash, PowerShell runs
-// commands (PR7-R-6). An entry from before they were listed is widened in place, not duplicated.
-const MATCHER = "Write|Edit|NotebookEdit|Bash|Monitor|PowerShell";
+// commands (PR7-R-6), legacy MultiEdit edits a file like Edit (round 2). An entry with an earlier
+// matcher of this installer is widened in place, not duplicated.
+const MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash|Monitor|PowerShell";
+const OLD_MATCHERS = ["Write|Edit|NotebookEdit|Bash", "Write|Edit|NotebookEdit|Bash|Monitor|PowerShell"];
 for (const entry of shared.settings.hooks.PreToolUse || [])
-  if (entry && entry.matcher === "Write|Edit|NotebookEdit|Bash" && Array.isArray(entry.hooks) && entry.hooks.some((h) => same(h, GUARD))) {
+  if (entry && OLD_MATCHERS.includes(entry.matcher) && Array.isArray(entry.hooks) && entry.hooks.some((h) => same(h, GUARD))) {
     entry.matcher = MATCHER;
     added++;
   }
