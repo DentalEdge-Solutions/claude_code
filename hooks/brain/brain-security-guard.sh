@@ -84,6 +84,8 @@ const canonical = (p, base) => {
 };
 // kindOf: "canon", "active" or "capsule" for a canonical absolute path under .project-brain
 // (compared folded), else null. depthOf: segments below the last capsule folder, or -1.
+// "ancestor" is the capsule folder itself or its decisions/ folder: moving, re-permissioning or
+// syncing over it reaches the protected folders inside (background review G).
 const kindOf = (abs) => {
   const s = abs.split("/").map(fold);
   let k = null;
@@ -91,9 +93,77 @@ const kindOf = (abs) => {
     if (s[i] !== ".project-brain") continue;
     if (s[i + 1] === "canon") return "canon";
     if (s[i + 1] === "decisions" && s[i + 2] === "active") k = "active";
+    else if (k !== "active" && (i === s.length - 1 || (s[i + 1] === "decisions" && i + 1 === s.length - 1))) k = "ancestor";
     else if (!k) k = "capsule";
   }
   return k;
+};
+// ANSI-C quoting: bash decodes $\x27\x5cx2e...\x27 to text the rules below must see.
+const ansiC = (s) => s.replace(/\$\x27((?:\\.|[^\x27\\])*)\x27/g, (m, body) => body.replace(
+  /\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|.)/g, (e, c) => {
+    if (/^[xuU]/.test(c)) { const cp = parseInt(c.slice(1), 16); return cp <= 0x10FFFF ? String.fromCodePoint(cp) : ""; }
+    if (/^[0-7]/.test(c)) return String.fromCharCode(parseInt(c, 8));
+    return { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", f: "\f", v: "\v" }[c] || c;
+  }));
+// Brace expansion as bash does it ({a,b}; a sequence {x..y} may be anything, so it becomes *), at
+// most 64 results: null when there would be more.
+const braces = (w) => {
+  const out = [];
+  const go = (s) => {
+    if (out.length > 64) return;
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] !== "{") continue;
+      let depth = 0, j = i, commas = [];
+      for (; j < s.length; j++) {
+        if (s[j] === "{") depth++;
+        else if (s[j] === "}") { depth--; if (depth === 0) break; }
+        else if (s[j] === "," && depth === 1) commas.push(j);
+      }
+      if (j >= s.length) break;
+      const inner = s.slice(i + 1, j);
+      if (commas.length) {
+        let from = i + 1;
+        for (const c of [...commas, j]) { go(s.slice(0, i) + s.slice(from, c) + s.slice(j + 1)); from = c + 1; }
+        return;
+      }
+      if (/\.\./.test(inner)) { go(s.slice(0, i) + "*" + s.slice(j + 1)); return; }
+    }
+    out.push(s);
+  };
+  go(w);
+  return out.length > 64 ? null : out;
+};
+// Does a glob (already brace-expanded) name a protected folder, a folder above it or one below it?
+// Segments are compared folded; *, ? and [...] match within a segment and, as in bash, not a
+// leading dot unless the pattern segment starts with one. ".." and "." are applied lexically.
+const globReaches = (pattern, base, targets) => {
+  const segs = [];
+  for (const p of (pattern.startsWith("/") ? pattern : base + "/" + pattern).split("/")) {
+    if (!p || p === ".") continue;
+    if (p === "..") segs.pop(); else segs.push(fold(p));
+  }
+  // A bracket class matches one character (any: broader than bash, so only more denials).
+  const pats = segs.map((p) => p.replace(/\[[^\]]*\]/g, "?"));
+  // Wildcard match without a regex: two pointers, O(length of pattern x length of name).
+  const wild = (p, s) => {
+    let i = 0, k = 0, star = -1, mark = 0;
+    while (k < s.length) {
+      if (i < p.length && (p[i] === "?" || p[i] === s[k])) { i++; k++; }
+      else if (i < p.length && p[i] === "*") { star = i++; mark = k; }
+      else if (star >= 0) { i = star + 1; k = ++mark; }
+      else return false;
+    }
+    while (i < p.length && p[i] === "*") i++;
+    return i === p.length;
+  };
+  return targets.some((t) => {
+    const n = Math.min(t.length, pats.length);
+    for (let i = 0; i < n; i++) {
+      if (t[i].startsWith(".") && !pats[i].startsWith(".")) return false;
+      if (!wild(pats[i], t[i])) return false;
+    }
+    return true;
+  });
 };
 const depthOf = (abs) => {
   const s = abs.split("/").map(fold);
@@ -150,9 +220,11 @@ if (tool === "Bash") {
   // Case-insensitive: macOS disks are case-insensitive by default, so .PROJECT-BRAIN is the capsule
   // there (background security review of P0-09).
   const CAPSULE = /\.project-brain/i;
-  // The command folded (case and Unicode, as for paths), with "//" and "/./" collapsed: the text
-  // the protected-path rule and a second pass of the delete rule read.
-  const fcmd = fold(cmd).replace(/\/(?:\.?\/)+/g, "/");
+  // The command as the protected-path rule reads it: ANSI-C escapes decoded, quotes and
+  // backslashes dropped (bash joins .pro"ject"-br\ain into one name), folded (case and Unicode,
+  // as for paths), with "//" and "/./" collapsed (background reviews C, F, H).
+  const decoded = ansiC(cmd);
+  const fcmd = fold(decoded.replace(/[\\"\x27]/g, "")).replace(/\/(?:\.?\/)+/g, "/");
   // G1 (P0-09): the exemption holds only for a command that is exactly one plain call,
   // "node <script> <words> … --approve …", where <script> is scripts/brain/brain-promote.js,
   // ./scripts/brain/brain-promote.js or $CLAUDE_PROJECT_DIR/scripts/brain/brain-promote.js
@@ -405,11 +477,14 @@ if (tool === "Bash") {
   const pureReader = (h) => nonExec(h) && !h.rest.some((t) => /^--ou/.test(t)) && (READERS.has(h.cmd)
     || (h.cmd === "find" && !h.rest.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(t)))
     || (h.cmd === "git" && GIT_READERS.has(gitSub(h.git).sub)));
+  // A reader stage: a pure reader, or a plain dry run of the git clean subcommand (plainCleanDryRun),
+  // which only lists files.
+  const readerStage = (stg) => { const h = head(stg); return pureReader(h) || plainCleanDryRun(stg, h); };
   // A read-only form: every stage of every pipeline is a pure reader, with no command or process
   // substitution, no heredoc, no ANSI-C quoting or comment that could desync the parse, and no
   // file-writing redirect. Nothing in it can write a file.
   const readerForm = () => !WEIRD.test(cmd) && !/>/.test(scrubbed)
-    && splitShell(cmd).every((pl) => pl.stages.filter((s) => s.trim()).every((stg) => pureReader(head(stg))));
+    && splitShell(cmd).every((pl) => pl.stages.filter((s) => s.trim()).every(readerStage));
 
   // ── canon/ and decisions/active/: an allowlist, not a list of write verbs ─────────────────
   // (P0-09; background reviews A-D, F.) A command that reaches canon/ or decisions/active/ passes
@@ -424,22 +499,95 @@ if (tool === "Bash") {
   // read-only form.
   const cwdAbs = canonical(CWD, "/");
   const cwdKind = kindOf(cwdAbs);
+  //   - a parent of them (the capsule folder or decisions/, by name or on disk): a move, chmod -R or
+  //     rsync --delete of it reaches them (review G);
+  //   - a glob or brace word (.project-brai?, .pro*/can*, .project-{brain,x}) that may match one
+  //     of them, a parent or a file below, against the capsule folders this session can reach
+  //     (review G);
+  //   - an expansion the guard cannot follow (a variable, $(…), backticks, $\x27…\x27) in a command that
+  //     shows a protected-looking name (.project-b…, canon, decisions, active) or runs inside the
+  //     capsule: static analysis cannot tell where it leads, so it fails closed (reviews G, H).
+  // The brain scripts that never write canon/ or decisions/active/ (verify, lint, search,
+  // context-pack, compile, capture) pass as one plain call, like brain-promote.
   const wordKind = new Map();
-  const distinct = [...new Set(shellWords(cmd))];
+  // Resolved from the working directory only: the delete rule tracks cd itself.
+  const wordKindCwd = new Map();
+  // Words as bash splits them (quotes joined), each also split at = < > (--opt=PATH, x>PATH), plus
+  // the words of the ANSI-C decoded text.
+  const rawWords = [...new Set([...shellWordsRaw(cmd), ...shellWordsRaw(decoded)])];
+  const pieces = [...new Set(rawWords.flatMap((w) => [w, ...w.split(/[=<>]+/)]).filter(Boolean))];
+  const distinct = [...new Set([...shellWords(cmd), ...shellWords(decoded), ...pieces])];
+  // Words are resolved from every folder the shell may be in at that stage: the working directory,
+  // plus each cd/pushd target so far (kept, never dropped: a cd inside a subshell or a failed cd
+  // may not have moved the shell, so both stay possible). At most 16 folders and 5,000
+  // resolutions; past that, or after a cd to a target the guard cannot follow, the folder is
+  // unknown. A parent folder (the capsule or decisions/) counts only as an argument of a stage
+  // that is not a pure reader ("cd .project-brain && ls" is fine; "mv .project-brain x" is not).
+  const EXPANSION = /\$[^\s]|`/;
+  const GLOB = /[*?[]|\{[^{}]*(,|\.\.)[^{}]*\}/;
+  let dirs = [cwdAbs], dirUnknown = false, budget = 5000, ancestorArg = false;
   const tooMany = distinct.length > 5000;
-  if (!tooMany) for (const w of distinct) {
-    const k = w.length <= 4096 ? kindOf(canonical(home(w), CWD)) : null;
-    if (k) wordKind.set(w, k);
+  if (!tooMany) for (const { stages } of splitShell(cmd)) for (const stg of stages) {
+    const h = head(stg);
+    const raws = shellWordsRaw(stg);
+    const ws = [...new Set([...shellWords(stg), ...shellWords(ansiC(stg)), ...raws.flatMap((w) => [w, ...w.split(/[=<>]+/)])])].filter(Boolean);
+    const reader = readerStage(stg);
+    for (const w of ws) {
+      if (w.length > 4096) continue;
+      for (const d of dirs) {
+        if (--budget < 0) { dirUnknown = true; break; }
+        const k = kindOf(canonical(home(w), d));
+        if (!k) continue;
+        if (!wordKind.has(w) || k === "canon" || k === "active") wordKind.set(w, k);
+        if (d === cwdAbs) wordKindCwd.set(w, k);
+        if (k === "ancestor" && !reader) ancestorArg = true;
+      }
+    }
+    if (h.cmd === "cd" || h.cmd === "pushd") {
+      const t = raws.slice(raws.indexOf(h.cmd) + 1).find((x) => !x.startsWith("-"));
+      if (t !== undefined && (EXPANSION.test(t) || GLOB.test(t) || t === "-")) dirUnknown = true;
+      else {
+        const next = dirs.map((d) => canonical(home(t === undefined ? "~" : t), d));
+        dirs = [...new Set([...dirs, ...next])];
+        if (dirs.length > 16) { dirs = dirs.slice(0, 16); dirUnknown = true; }
+      }
+    }
   }
   const kinds = new Set(wordKind.values());
+  // The capsule folders this session can reach: the project one, the one below the working
+  // directory, and any a word or the working directory resolved into.
+  const roots = new Set([canonical(path.join(process.env.CLAUDE_PROJECT_DIR || CWD, ".project-brain"), "/"),
+    canonical(".project-brain", CWD)]);
+  for (const abs of [cwdAbs, ...[...wordKind.keys()].map((w) => canonical(home(w), CWD))]) {
+    const s = abs.split("/"); const i = s.map(fold).lastIndexOf(".project-brain");
+    if (i >= 0) roots.add(s.slice(0, i + 1).join("/"));
+  }
+  const segsOf = (p) => p.split("/").filter(Boolean).map(fold);
+  const protTargets = [...roots].flatMap((r) => [segsOf(r + "/canon"), segsOf(r + "/decisions/active")]);
+  const rootTargets = [...roots].map(segsOf);
+  const globHits = (targets) => !tooMany && pieces.some((w) => {
+    if (EXPANSION.test(w) || !GLOB.test(w)) return false;
+    const alts = w.length <= 4096 ? braces(home(w)) : null;
+    return alts === null || alts.some((a) => globReaches(a, cwdAbs, targets));
+  });
+  const undecidable = rawWords.some((w) => EXPANSION.test(w));
+  const looksProtected = /\.project-b|roject-brain|canon|decisions|\bactive\b/.test(fcmd) || cwdKind !== null;
+  const capsuleLooking = /\.project-b|roject-brain/.test(fcmd) || cwdKind !== null;
   const capsuleCtx = CAPSULE.test(fcmd) || cwdKind !== null || kinds.size > 0;
   const hitCanon = /\.project-brain\/canon\b/.test(fcmd) || (capsuleCtx && /\bcanon\b/.test(fcmd))
     || cwdKind === "canon" || kinds.has("canon");
   const hitActive = /\.project-brain\/decisions\/active\b/.test(fcmd) || (capsuleCtx && /\bactive\b/.test(fcmd))
     || cwdKind === "active" || kinds.has("active");
-  if ((hitCanon || hitActive) && !isApprovedPromote && !readerForm())
+  const hitOther = ancestorArg || globHits(protTargets) || ((undecidable || dirUnknown) && looksProtected);
+  const isBrainTool = !/[^\x20-\x7e]/.test(raw) && !/[;&|<>`$()\\"\x27#*?{}\[\]~!=]/.test(raw) && (() => {
+    const ws = raw.trim().split(/ +/);
+    const m = /^(?:\.\/)?scripts\/brain\/brain-(verify|lint|search|context-pack|compile|capture)\.js$/.test(ws[1] || "");
+    return ws[0] === "node" && m;
+  })();
+  if ((hitCanon || hitActive || hitOther) && !isApprovedPromote && !isBrainTool && !readerForm())
     deny(hitCanon ? "Only brain-promote.js --approve may modify .project-brain/canon/ (a command that reaches it passes only as one brain-promote call or a read-only form: grep, cat, ls, git log/diff/add …)"
-      : "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote; other commands that reach it pass only in a read-only form)");
+      : hitActive ? "Only brain-promote.js --approve may modify .project-brain/decisions/active/ (the weekly review stages a candidate and runs brain-promote; other commands that reach it pass only in a read-only form)"
+      : "brain-security-guard: a word of this command may reach .project-brain/canon/ or decisions/active/ (a parent folder, a glob or brace pattern, or a variable or substitution the guard cannot follow) — denied unless the command is a read-only form. Name the path plainly, or split the command.");
   if (tooMany && !readerForm())
     deny("brain-security-guard: more than 5,000 distinct words; the guard cannot check where they lead on disk. Split the command.");
 
@@ -458,7 +606,12 @@ if (tool === "Bash") {
   // the capsule is where the shell starts.
   const deleteRule = (text, onDisk) => {
     const textScrub = scrub(text);
-    const namesCapsule = (s) => CAPSULE.test(s) || (onDisk && shellWords(s).some((w) => wordKind.has(w)));
+    // A stage names the capsule by name, by a word that resolves into it on disk, by a glob or
+    // brace word that may match it (or a folder above it), or by an expansion the guard cannot
+    // follow in a command that shows the capsule name (review G).
+    const namesCapsule = (s) => CAPSULE.test(s) || (onDisk && (shellWords(s).some((w) => wordKindCwd.has(w))
+      || shellWordsRaw(s).some((w) => (EXPANSION.test(w) ? capsuleLooking
+        : GLOB.test(w) && (w.length > 4096 || ((alts) => alts === null || alts.some((a) => globReaches(a, cwdAbs, rootTargets)))(braces(home(w))))))));
     let depth = depthOf(cwdAbs);
     const dirStack = [];
     // Any grouping construct — a subshell ( ), a brace group { }, or a case statement — can run a cd
