@@ -20,55 +20,90 @@ const path = require('path');
 
 const REPO = path.join(__dirname, '..');
 
-// A copy command's arguments up to a shell separator or a closing backtick.
-const COPY = /\b(?:cp|rsync|install|ln|mv|ditto)\b((?:[ \t]+[^\s`;|&]+)+)/g;
+// A copy command: its name, then its arguments up to a shell separator or a closing backtick.
+const COPY = /\b(cp|rsync|install|ln|mv|ditto)\b((?:[ \t]+[^\s`;|&]+)+)/g;
+// GNU cp, mv, install and ln take the destination first with -t DIR, a flag cluster ending in t (-Rt DIR) or
+// --target-directory[=]DIR (review PR6-R-5). rsync's -t means "keep times" and takes no value.
+const TARGET_FIRST = new Set(['cp', 'mv', 'install', 'ln']);
 const REDIRECT = /^(?:\d*|&)[<>]/;   // 2>/dev/null, >log; a bare "2>" also takes the next operand
 // The user-level skills folder: home by any spelling, or the config folder variable.
 const USER_SKILLS = /^["']?(?:~|\$HOME|\$\{HOME\}|\/Users\/[^/]+|\/home\/[^/]+|\/root)["']?\/\.claude\/skills(?:\/|["']?$)|^["']?\$\{?CLAUDE_CONFIG_DIR\b[^}/]*(?:\}|[^}]*\})?["']?\/skills(?:\/|["']?$)/;
 
-function operands(args) {
+// The destination of one copy command: its target-directory value if it has one, else its last operand.
+function destination(cmd, args) {
   const out = [];
   const words = args.trim().split(/[ \t]+/);
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     if (REDIRECT.test(w)) { if (/[<>]$/.test(w)) i++; continue; }
+    if (TARGET_FIRST.has(cmd)) {
+      if (w.startsWith('--target-directory=')) return w.slice('--target-directory='.length);
+      if (w === '--target-directory' || /^-[A-Za-z]*t$/.test(w)) return words[i + 1];
+    }
     if (!w.startsWith('-')) out.push(w);
   }
-  return out;
+  return out.length >= 2 ? out[out.length - 1] : undefined;
 }
 
-// The copy commands in `text` whose destination is the user-level skills folder.
+// A cd (or pushd) into a folder, then the rest of that line after `&&` or `;`.
+const CD_THEN = /\b(?:cd|pushd)[ \t]+(\S+)[ \t]*(?:&&|;)([^\n`]*)/g;
+// A destination relative to the folder the cd entered: not absolute, not home, not a variable.
+const RELATIVE = /^["']?(?![/~$])/;
+
+// The copy commands in `text` whose destination is the user-level skills folder, written directly or reached
+// through a cd into that folder earlier on the same line (review PR6-R-5).
 function userSkillsCopies(text) {
   const joined = text.replace(/\\\r?\n[ \t]*/g, ' ');   // shell line continuations joined
   const bad = [];
   for (const m of joined.matchAll(COPY)) {
-    const ops = operands(m[1]);
-    if (ops.length < 2) continue;
-    if (USER_SKILLS.test(ops[ops.length - 1])) bad.push(m[0].trim());
+    const dst = destination(m[1], m[2]);
+    if (dst && USER_SKILLS.test(dst)) bad.push(m[0].trim());
+  }
+  for (const c of joined.matchAll(CD_THEN)) {
+    if (!USER_SKILLS.test(c[1])) continue;
+    for (const m of c[2].matchAll(COPY)) {
+      const dst = destination(m[1], m[2]);
+      if (dst && RELATIVE.test(dst)) bad.push(c[0].trim());
+    }
   }
   return bad;
 }
 
+// Code in a script that names the user-level skills folder: path.join(os.homedir(), '.claude', 'skills', …), or
+// homedir() / expanduser( / process.env.HOME / os.environ with '.claude/skills' on the same line. Scripts under the
+// definition trees must not address that folder at all (review PR6-R-4); none does today (check-skill-deploy.js
+// lives in scripts/, which is not a definition tree).
+const CODE_USER_SKILLS = /homedir\(\)\s*,\s*['"`]\.claude['"`]\s*,\s*['"`]skills['"`]|(?:homedir\(\)|expanduser\(|process\.env\.HOME\b|os\.environ)[^\n]*\.claude\/skills/;
+const codeUserSkills = text => text.split('\n').filter(l => CODE_USER_SKILLS.test(l)).map(l => l.trim());
+
 // Reports and logs are dated history, not definitions: SKILL-EVAL.md, <agent>-EVAL.md, *-REFINE-LOG.md.
 const REPORT = /(?:^|-)EVAL\.md$|REFINE-LOG\.md$/;
+// Scripts: no exclusion. No script under these trees, test files included, holds a deploy form today.
+const SCRIPT = /\.(?:sh|js|mjs|py)$/;
 const DEFINITION_DIRS = ['skills', '.claude/agents', '.claude/skills', 'packs', 'infra/hermes-agent/skills'];
 
-function mdFiles(dir, out = []) {
+function walk(dir, keep, out = []) {
   if (!fs.existsSync(dir)) return out;
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) mdFiles(p, out);
-    else if (e.name.endsWith('.md') && !REPORT.test(e.name)) out.push(p);
+    if (e.isDirectory()) walk(p, keep, out);
+    else if (keep(e.name)) out.push(p);
   }
   return out;
 }
-const definitionFiles = (root = REPO) => DEFINITION_DIRS.flatMap(d => mdFiles(path.join(root, d)));
+const definitionFiles = (root = REPO) => DEFINITION_DIRS.flatMap(d => walk(path.join(root, d), n => n.endsWith('.md') && !REPORT.test(n)));
+const scriptFiles = (root = REPO) => DEFINITION_DIRS.flatMap(d => walk(path.join(root, d), n => SCRIPT.test(n)));
 
-// Every copy into the user-level skills folder in the definitions under `root`, as "file: command".
-const deploySteps = (root = REPO) => definitionFiles(root)
-  .flatMap(f => userSkillsCopies(fs.readFileSync(f, 'utf8')).map(c => `${path.relative(root, f)}: ${c}`));
+// Every copy into the user-level skills folder in the definitions and their scripts under `root`, as "file: command".
+const deploySteps = (root = REPO) => [
+  ...definitionFiles(root).flatMap(f => userSkillsCopies(fs.readFileSync(f, 'utf8')).map(c => `${path.relative(root, f)}: ${c}`)),
+  ...scriptFiles(root).flatMap(f => {
+    const text = fs.readFileSync(f, 'utf8');
+    return [...userSkillsCopies(text), ...codeUserSkills(text)].map(c => `${path.relative(root, f)}: ${c}`);
+  }),
+];
 
-module.exports = { userSkillsCopies, definitionFiles, deploySteps };
+module.exports = { userSkillsCopies, definitionFiles, scriptFiles, deploySteps };
 if (require.main !== module) return;
 
 let ok = true;
@@ -181,7 +216,8 @@ test('install.sh: the CLAUDE.md section it writes into targets carries the same 
   const section = text.slice(start, end);
   for (const s of ['the owner deploys it (`cp -R skills/<name>/. ~/.claude/skills/<name>/`)',
     // review PR6-R-7: macOS folder files ignored, and the only-installed case explained
-    '`diff -rq -x .DS_Store skills/<name> ~/.claude/skills/<name>`', 'an "Only in ~/.claude/skills/',
+    // diff prints the expanded home path, so the text names the side, not a literal "Only in ~/…" line
+    '`diff -rq -x .DS_Store skills/<name> ~/.claude/skills/<name>`', 'an "Only in" line for the `~/.claude/skills/<name>` side',
     "Claude Code loads skills from `~/.claude/skills/`, not from this project's `skills/`",
     OWNER_DEFINITION, 'skill-adapt, skill-refine and skill-refine-agent stage their result and never deploy it themselves']) {
     assert.ok(section.includes(s), `missing: ${s}`);

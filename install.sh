@@ -185,7 +185,7 @@ This project uses the Skill Builder pipeline. Skills live in `skills/`. Agents l
 - Run `skill-refine` if any metric is below threshold — up to 10 iterations before escalating
 - Run `agent-eval` after every agent-adapt — same 5 thresholds; Dispatch Accuracy replaces Trigger Accuracy
 - Run `agent-refine` if any agent metric is below threshold — Lever E changes trigger agent-audit re-run automatically
-- After a skill change, the owner deploys it (`cp -R skills/<name>/. ~/.claude/skills/<name>/`) and checks it (`diff -rq skills/<name> ~/.claude/skills/<name>` prints nothing) — Claude Code loads skills from `~/.claude/skills/`, not from this project's `skills/`, so its skill loading does not see an undeployed change. 'Owner deploys' means the owner runs the deploy command or explicitly approves it. skill-adapt, skill-refine and skill-refine-agent stage their result and never deploy it themselves
+- After a skill change, the owner deploys it (`cp -R skills/<name>/. ~/.claude/skills/<name>/`) and checks it (`diff -rq -x .DS_Store skills/<name> ~/.claude/skills/<name>` prints nothing; an "Only in" line for the `~/.claude/skills/<name>` side is a file only the installed copy has, which the deploy never removes: delete it by hand) — Claude Code loads skills from `~/.claude/skills/`, not from this project's `skills/`, so its skill loading does not see an undeployed change. 'Owner deploys' means the owner runs the deploy command or explicitly approves it. skill-adapt, skill-refine and skill-refine-agent stage their result and never deploy it themselves
 
 ### Never
 

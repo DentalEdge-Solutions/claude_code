@@ -37,7 +37,11 @@
       "Bash(cp * ~/.claude/skills)",
       "Bash(cp * $HOME/.claude/skills*)",
       "Bash(cp * \"$HOME/.claude/skills*)",
-      "Bash(cp * \"$HOME\"/.claude/skills*)"
+      "Bash(cp * \"$HOME\"/.claude/skills*)",
+      "Bash(git -C * push *)",
+      "Bash(git -C * push)",
+      "Bash(git -C * branch -D *)",
+      "Bash(node */scripts/brain/brain-promote.js *)"
     ]
   },
   "hooks": {
