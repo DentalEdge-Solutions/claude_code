@@ -135,5 +135,140 @@ for (const { dir, file, telemetry } of SETTINGS_FILES) {
   });
 }
 
+// ── P0-07: ask rules for consequential commands ─────────────────────────────────────────────────────────────
+// docs/evaluations/2026-10-26-p0-07-p0-08-ask-rules-staged-deploys.md. The two committed settings files carry the
+// same `permissions.ask` list; their deny lists stay exactly the HR1 set above. The checks below read the rule
+// strings with a model of the documented Bash matching (code.claude.com/docs/en/permissions, read 2026-10-26):
+//   - a `*` matches any text, spaces included, and everything outside a `*` is matched as written;
+//   - a trailing ` *` that is the rule's only wildcard also matches the bare command (`git push`);
+//   - a deny or ask rule applies when ANY subcommand of a compound command matches (`&&`, `||`, `;`, `|`, `|&`,
+//     `&`, newline), and it matches past a leading variable assignment and the stripped wrappers.
+// This proves the rule strings cover the intended command texts under that model. It does not prove Claude Code
+// prompts: that is the owner's probe in the record (auto mode, fresh session).
+
+// The roadmap list (S5 P0-07), in its order, then the home-variable and no-slash forms the record adds.
+const ASK_RULES = [
+  'Bash(git push *)', 'Bash(gh pr merge *)', 'Bash(gh pr review *)', 'Bash(gh api *)', 'Bash(gh auth *)',
+  'Bash(git push * --delete *)', 'Bash(git branch -D *)', 'Bash(node scripts/brain/brain-promote.js *)',
+  'Bash(cp * ~/.claude/skills/*)', 'Bash(cp -r * ~/.claude/skills/*)', 'Bash(cp -R * ~/.claude/skills/*)',
+  'Bash(./install.sh*)', 'Bash(bash install.sh*)', 'Bash(./uninstall.sh*)', 'Bash(bash uninstall.sh*)',
+  'Bash(cp * ~/.claude/skills)', 'Bash(cp * $HOME/.claude/skills*)', 'Bash(cp * "$HOME/.claude/skills*)',
+  'Bash(cp * "$HOME"/.claude/skills*)',
+];
+
+// The HR1 deny lists, in their committed order (P0-07 leaves them unchanged): the same names, anchored at the
+// Hermes folder from each file's own folder.
+const HR1_ANCHOR = { '': '/infra/hermes-agent/', 'infra/hermes-agent': '/' };
+function hr1Deny(dir) {
+  const anchor = HR1_ANCHOR[dir];
+  const names = ['.env.ga', '.env.gaw', '.env.pr', 'data/auth.json', 'data/home/**', 'data/.claude/**', 'data/.claude.json'];
+  const one = tool => [`${tool}(**/.env)`, ...names.map(n => `${tool}(${anchor}${n})`)];
+  return [...one('Read'), ...one('Edit')];
+}
+
+// A Bash rule's specifier → RegExp over one subcommand's text, per the model above.
+function bashRuleRe(spec) {
+  const stars = (spec.match(/\*/g) || []).length;
+  const esc = s => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+  if (stars === 1 && spec.endsWith(' *')) return new RegExp(`^${esc(spec.slice(0, -2))}(?: .*)?$`, 's');
+  return new RegExp(`^${spec.split('*').map(esc).join('.*')}$`, 's');
+}
+const WRAPPERS = /^(?:(?:timeout(?: -k \S+)? \S+|time|nice(?: -n \S+)?|nohup|stdbuf(?: -\S+)*|command|builtin|noglob) )/;
+// The subcommands a deny or ask rule is checked against (not quote-aware: fixtures only).
+function subcommands(cmd) {
+  return cmd.split(/\|&|&&|\|\||[;|&\n]/).map(s => {
+    let t = s.trim().replace(/^[({]\s*/, '').replace(/^\$\(\s*/, '');
+    for (let prev = ''; prev !== t;) { prev = t; t = t.replace(/^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/, '').replace(WRAPPERS, ''); }
+    return t.replace(/\s*[)}]$/, '');
+  }).filter(Boolean);
+}
+const bashSpecs = rules => rules.map(r => r.match(/^Bash\((.*)\)$/)).filter(Boolean).map(m => ({ rule: m[0], re: bashRuleRe(m[1]) }));
+const askedBy = (rules, cmd) => bashSpecs(rules).filter(x => subcommands(cmd).some(s => x.re.test(s))).map(x => x.rule);
+
+// Commands that must prompt: each consequential action in the S5 P0-07 list, in the forms Claude usually writes.
+const MUST_ASK = [
+  'git push', 'git push origin main', 'git push -u origin fix/x', 'git push --force-with-lease origin fix/x',
+  'git push origin --delete fix/x', 'git add -A && git commit -m x && git push', 'timeout 60 git push origin fix/x',
+  'GIT_TRACE=1 git push origin fix/x', 'cd /tmp/repo; git push',
+  'gh pr merge 12 --squash', 'gh pr merge', 'gh pr review 12 --approve', 'gh api repos/o/r/pulls/12/merge -X PUT',
+  'gh api repos/o/r/pulls/12', 'gh auth status', 'gh auth token', 'gh auth login --with-token',
+  'git branch -D fix/x', 'node scripts/brain/brain-promote.js --approve x',
+  'cp -r skills/skill-refine ~/.claude/skills/', 'cp -R skills/skill-refine/. ~/.claude/skills/skill-refine/',
+  'cp -R skills/skill-adapt ~/.claude/skills', 'cp skills/x/SKILL.md ~/.claude/skills/x/SKILL.md',
+  'cp -R skills/x/. $HOME/.claude/skills/x/', 'cp -R skills/x "$HOME/.claude/skills/x/"', 'cp -R skills/x "$HOME"/.claude/skills/',
+  './install.sh /tmp/target', './install.sh', 'bash install.sh /tmp/target', './uninstall.sh /tmp/target', 'bash uninstall.sh',
+];
+// Routine commands that must not prompt because of these rules (other rules and the mode still decide them).
+const MUST_NOT_ASK = [
+  'git status', 'git commit -m "push the fix"', 'git log --oneline origin/main..HEAD', 'git branch -d fix/x',
+  'git checkout -b fix/x', 'gh pr view 12', 'gh pr create --draft --title x --body y', 'gh pr list',
+  'node scripts/run-all-tests.js', 'node scripts/check-skill-deploy.js', 'bash -n install.sh uninstall.sh',
+  'cp -R skills/x/. evals/x/adapt-backup-1/', 'cp evals/x/refine/pre-iter-3/SKILL.md skills/x/SKILL.md',
+  'cp ~/.claude/skills/x/SKILL.md /tmp/x.md', 'node scripts/brain/brain-search.js promote',
+];
+// Forms the record lists as residuals (rules are not a security boundary). Pinned so the residual list stays true.
+const KNOWN_ESCAPES = [
+  'git -C . push origin main', 'git -c push.default=current push', "git 'push' origin main",
+  'rsync -a skills/x/ ~/.claude/skills/x/', 'cp -R skills/x ${HOME}/.claude/skills/', 'cp -R skills/x /Users/u/.claude/skills/',
+  'node -e "require(\'https\').request(\'https://api.github.com\')"', 'bash ./install.sh /tmp/t', 'sh install.sh /tmp/t',
+  'node ./scripts/brain/brain-promote.js --approve x',
+];
+
+test('the Bash rule model reads the documented examples the way the docs table does', () => {
+  const m = (spec, cmd) => bashRuleRe(spec).test(cmd);
+  assert.ok(m('npm run build', 'npm run build') && !m('npm run build', 'npm run build --watch'));
+  assert.ok(m('npm run *', 'npm run build') && m('npm run *', 'npm run') && !m('npm run *', 'npm install'));
+  assert.ok(m('git log * main', 'git log --oneline main') && !m('git log * main', 'git log main'));
+  assert.ok(m('* --version', 'node --version') && !m('* --version', 'node -v'));
+  assert.ok(m('ls *', 'ls -la') && m('ls *', 'ls') && !m('ls *', 'lsof') && m('ls*', 'lsof'));
+  assert.ok(m('* --help *', 'npm --help x') && !m('* --help *', 'npm --help'));
+  assert.ok(m('git push *', 'git push origin main') && !m('git push *', 'git -C . push origin main'));
+  assert.deepStrictEqual(subcommands('cd /tmp && git clean -f'), ['cd /tmp', 'git clean -f']);
+  assert.deepStrictEqual(subcommands('FOO=bar timeout 30 rm -rf tmp/'), ['rm -rf tmp/']);
+});
+
+for (const { dir, file } of SETTINGS_FILES) {
+  const where = path.relative(REPO, file);
+  let settings = {};
+  try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* reported by the parse test above */ }
+  const perms = settings.permissions || {};
+  const ask = perms.ask || [];
+
+  test(`${where}: permissions.ask holds exactly the P0-07 list, in order, without duplicates (P0-07)`, () => {
+    assert.deepStrictEqual(ask, ASK_RULES);
+  });
+
+  test(`${where}: the deny list is the HR1 set, unchanged, and permissions holds only deny and ask (P0-07)`, () => {
+    assert.deepStrictEqual(perms.deny, hr1Deny(dir));
+    assert.deepStrictEqual(Object.keys(perms).sort(), ['ask', 'deny']);
+  });
+
+  test(`${where}: every consequential command matches an ask rule (P0-07)`, () => {
+    assert.deepStrictEqual(MUST_ASK.filter(c => askedBy(ask, c).length === 0), []);
+  });
+
+  test(`${where}: routine commands match no ask rule (P0-07)`, () => {
+    assert.deepStrictEqual(MUST_NOT_ASK.flatMap(c => askedBy(ask, c).map(r => `${c} ← ${r}`)), []);
+  });
+
+  test(`${where}: the recorded residual forms still escape the ask rules (P0-07; update the record if one is caught)`, () => {
+    assert.deepStrictEqual(KNOWN_ESCAPES.flatMap(c => askedBy(ask, c).map(r => `${c} ← ${r}`)), []);
+  });
+
+  test(`${where}: every ask rule is a Bash rule this test can read, and each one is reached by a fixture (P0-07)`, () => {
+    for (const r of ask) assert.match(r, /^Bash\(.+\)$/, r);
+    const reached = new Set(MUST_ASK.flatMap(c => askedBy(ask, c)));
+    assert.deepStrictEqual(ask.filter(r => !reached.has(r)), []);
+  });
+}
+
+test('the two committed settings files carry identical ask lists (P0-07)', () => {
+  const [a, b] = SETTINGS_FILES.map(({ file }) => {
+    try { return (JSON.parse(fs.readFileSync(file, 'utf8')).permissions || {}).ask; } catch { return undefined; }
+  });
+  assert.ok(Array.isArray(a) && a.length > 0, 'root ask list missing');
+  assert.deepStrictEqual(b, a);
+});
+
 if (!ok) process.exit(1);
 console.log('\nAll claude-settings tests passed.');
