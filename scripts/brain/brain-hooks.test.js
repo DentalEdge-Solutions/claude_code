@@ -911,7 +911,9 @@ try {
     const res = bashAt(cmd, TMP);
     assert.ok(isDeny(res), `must deny (round 1): ${JSON.stringify(cmd)} → ${res.stdout}`);
   }
-  // R-6: Monitor runs a command like Bash; PowerShell is not parsed, so protected-looking text fails closed
+  // R-6: Monitor runs a command like Bash. PowerShell cannot be parsed reliably (wildcards,
+  // concatenation, -join, variables, aliases, encoded commands: review M), so in a project that has
+  // a capsule every PowerShell call is denied; without a capsule the guard has nothing to protect.
   for (const [name, input, deny] of [
     ['Monitor', { command: 'rm -rf .project-brain', description: 'x' }, true],
     ['Monitor', { command: 'cp README.md .project-brain/canon/y.md', description: 'x' }, true],
@@ -919,10 +921,34 @@ try {
     ['Monitor', { ws: { url: 'wss://example.invalid/x' }, description: 'x' }, false],
     ['PowerShell', { command: 'Remove-Item -Recurse .project-brain' }, true],
     ['PowerShell', { command: 'Set-Content -Path .\\.PROJECT-BRAIN\\canon\\x.md -Value x' }, true],
-    ['PowerShell', { command: 'Get-ChildItem C:\\Users' }, false],
+    ['PowerShell', { command: 'Remove-Item -Recurse -Force .proj*' }, true],
+    ['PowerShell', { command: 'Remove-Item -Recurse ("." + "project-" + "brain")' }, true],
+    ['PowerShell', { command: 'Get-ChildItem C:\\Users' }, true],
   ]) {
     const res = tool(name, input);
     assert.strictEqual(isDeny(res), deny, `${name} ${JSON.stringify(input)} → ${res.status} ${res.stdout}`);
+  }
+  {
+    const bare = fs.mkdtempSync(path.join(require('os').tmpdir(), 'no-capsule-'));
+    try {
+      const res = runHook('brain-security-guard.sh', { hook_event_name: 'PreToolUse', tool_name: 'PowerShell',
+        tool_input: { command: 'Get-ChildItem' }, cwd: bare }, bare);
+      assert.strictEqual(res.stdout.trim(), '', `PowerShell in a project without a capsule passes: ${res.stdout}`);
+    } finally { fs.rmSync(bare, { recursive: true, force: true }); }
+  }
+  // Review N and the author's probes: the single-quote reading behind R-1 must not desync from
+  // bash. A quote inside a comment or a heredoc body is no quote, so it cannot hide a later
+  // substitution; and an assignment stage may not change how a later reader runs (PATH, IFS …).
+  for (const cmd of [
+    "echo x # it's\ncp README.md \"$(printf .project-bra)in/canon/y.md\"",
+    "cat <<EOF\nit's\nEOF\ncp README.md \"$(printf .project-bra)in/canon/y.md\"",
+    "echo x # it's\ncp README.md `printf .project-bra`in/canon/y.md",
+    'PATH=/tmp/evil; cat .project-brain/canon/x.md',
+    'IFS=x; cat .project-brain/canon/x.md',
+    'BASH_ENV=/tmp/x; cat .project-brain/canon/x.md',
+  ]) {
+    const res = bashAt(cmd, TMP);
+    assert.ok(isDeny(res), `must deny (review N): ${JSON.stringify(cmd)} → ${res.stdout}`);
   }
   // R-11b: a Write through a hard link to a canon file is a write to canon; an ordinary hard link is not
   fs.linkSync(path.join(BRAIN, 'canon', 'x.md'), path.join(TMP, 'hard.md'));
