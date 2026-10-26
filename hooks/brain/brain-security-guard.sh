@@ -227,13 +227,16 @@ if (["Write", "Edit", "NotebookEdit"].includes(tool)) {
   }
 }
 
-// PowerShell is not parsed: a command that shows a protected-looking name (folded, either slash)
-// fails closed, reads included (PR7-R-6; the tool is opt-in on macOS).
+// PowerShell cannot be parsed reliably (wildcards, string concatenation, -join, variables, aliases,
+// encoded commands: review M), so in a project that has a capsule every PowerShell call is denied
+// (PR7-R-6). The tool is opt-in on macOS and Linux; this project does not use it.
 if (tool === "PowerShell") {
-  if (typeof inp.command !== "string") malformed("PowerShell command is not a string");
-  const t = fold(inp.command.replace(/\\/g, "/").replace(/[`"\x27]/g, ""));
-  if (/\.project-b|roject-brain|\bcanon\b|\bdecisions\b|\/active\b|\bactive\//.test(t))
-    deny("brain-security-guard: PowerShell commands that name .project-brain, canon, decisions or active are denied (the guard does not parse PowerShell). Use the Read tool, or brain-promote for changes.");
+  const cwdReal = canonical(CWD, "/");
+  const hasCapsule = kindOf(cwdReal) !== null
+    || [path.join(process.env.CLAUDE_PROJECT_DIR || CWD, ".project-brain"), path.join(cwdReal, ".project-brain")]
+      .some((p) => { try { return fs.statSync(p).isDirectory(); } catch (e) { return e.code !== "ENOENT"; } });
+  if (hasCapsule)
+    deny("brain-security-guard: PowerShell is denied in a project with a .project-brain capsule — the guard cannot parse PowerShell, so it cannot tell whether a command reaches governed memory. Use the Bash tool, the Read tool, or brain-promote for changes.");
 }
 
 // Monitor runs a command like Bash and uses the Bash permission rules (tools reference); its command
@@ -359,16 +362,20 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   const cmd = blankData(joined.text);
   // Single-quoted text is literal: an expansion inside it (a backtick or $ in a message) is not
   // one, and a # inside it is no comment (PR7-R-1, R-2). ANSI-C $\x27…\x27 still counts: its $ stays outside the neutralised quotes.
+  // Only where this reading matches bash: a comment or a heredoc outside quotes (where an
+  // apostrophe is no quote) makes the guard fall back to the plain text (review N).
   const sqNeutral = (() => {
-    let o = "", q = "";
+    let o = "", q = "", prev = "";
     for (let i = 0; i < cmd.length; i++) {
       const c = cmd[i];
-      if (q === "\x27") { if (c === "\x27") { q = ""; o += c; } else o += "_"; continue; }
-      if (q === "\"") { if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; continue; } if (c === "\"") q = ""; o += c; continue; }
-      if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; continue; }
-      if (c === "\x27" && cmd[i - 1] !== "$") q = c;
+      if (q === "\x27") { if (c === "\x27") { q = ""; o += c; } else o += "_"; prev = c; continue; }
+      if (q === "\"") { if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; continue; } if (c === "\"") q = ""; o += c; prev = c; continue; }
+      if (c === "\\") { o += c + (cmd[i + 1] || ""); i++; prev = "x"; continue; }
+      if ((c === "#" && (!prev || /[\s;&|()]/.test(prev))) || (c === "<" && cmd[i + 1] === "<")) return cmd;
+      if (c === "\x27" && prev !== "$") q = c;
       else if (c === "\"") q = c;
       o += c;
+      prev = c;
     }
     return o;
   })();
@@ -642,8 +649,9 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   // (line numbers, $ or a /regex/) and p, then plain file names (PR7-R-2). Any other sed can write
   // (w, W), run (e) or read more (r).
   const SED_PRINT = /^\s*sed\s+-n\s+\x27(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/)(?:,(?:\d+|\$|\/[^\/\x27\\\n;{}]*\/))?p\x27(?:\s+[^\s\-;&|<>`$()\x27"\\][^\s;&|<>`$()\x27"\\]*)*\s*$/;
-  // A stage of plain literal assignments only (x=1;) sets shell variables and runs nothing.
-  const LITERAL_ASSIGN = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.\/:@%+,-]*\s*)+$/;
+  // A stage of plain literal assignments only (x=1;) sets shell variables and runs nothing. Lowercase
+  // names only: PATH=, IFS=, BASH_ENV= and the like change how the next reader runs (review N).
+  const LITERAL_ASSIGN = /^\s*(?:[a-z_][a-z0-9_]*=[A-Za-z0-9_.\/:@%+,-]*\s*)+$/;
   const readerStage = (stg) => {
     const h = head(stg);
     if (LITERAL_ASSIGN.test(stg) || SED_PRINT.test(stg)) return true;
