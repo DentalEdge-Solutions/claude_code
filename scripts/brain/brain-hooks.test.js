@@ -988,6 +988,10 @@ try {
     'git log --output=.project-brain/canon/x.md', 'git log --frobnicate -- .project-brain/canon/x.md',
     'git blame --contents .project-brain/canon/x.md .project-brain/canon/x.md', 'git add --chmod=+x .project-brain/canon/x.md',
     'git add -e .project-brain/canon/x.md', 'git commit -S -m x -- .project-brain/canon/x.md',
+    // PR7-R-14: an attached -c<key>=<value> and an unknown global option end the exemption too
+    `git -ccore.pager=cat log -- ${path.join('.project-' + 'brain', 'canon', 'x.md')}`,
+    `git -cdiff.external=cat diff -- ${path.join('.project-' + 'brain', 'canon', 'x.md')}`,
+    `git --frobnicate log -- ${path.join('.project-' + 'brain', 'canon', 'x.md')}`,
   ]) {
     const res = bashAt(cmd, TMP);
     assert.ok(isDeny(res), `must deny (review Q): ${cmd} → ${res.stdout}`);
