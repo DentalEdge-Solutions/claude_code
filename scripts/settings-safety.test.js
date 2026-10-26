@@ -72,6 +72,18 @@ try {
     assert.match(r.out, reason, `brain install, settings ${why}: gives the reason`);
     assert.strictEqual(read(t, LOCAL), text, `brain install, settings ${why}: file unchanged`);
   });
+  // P0-09: the guard is registered in the shared settings.json; one it cannot read stops the
+  // install too, and neither file is written (both are checked before either is written).
+  BAD.forEach(([why, text, reason], i) => {
+    const goodLocal = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo own' }] }] } }, null, 2);
+    const t = target(`brain-bad-shared-${i}`, { [SHARED]: text, [LOCAL]: goodLocal });
+    const r = run('scripts/brain/brain-self-install.sh', [t]);
+    assert.notStrictEqual(r.status, 0, `brain install, shared settings ${why}: must fail\n${tail(r.out)}`);
+    assert.match(r.out, /settings\.json was not changed/, `brain install, shared settings ${why}: names the file`);
+    assert.match(r.out, reason, `brain install, shared settings ${why}: gives the reason`);
+    assert.strictEqual(read(t, SHARED), text, `brain install, shared settings ${why}: file unchanged`);
+    assert.strictEqual(read(t, LOCAL), goodLocal, `brain install, shared settings ${why}: local file unchanged too`);
+  });
 
   // 2. install.sh warns, leaves settings.json byte for byte, and finishes the install.
   BAD.forEach(([why, text, reason], i) => {
@@ -110,12 +122,15 @@ try {
   const end = { type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/scripts/telemetry/log-outcome.js" --mode session-end' };
   const brainEnd = { type: 'command', command: 'bash "$CLAUDE_PROJECT_DIR/hooks/brain/brain-session-end.sh"' };
   const brainLoad = { type: 'command', command: 'bash "$CLAUDE_PROJECT_DIR/hooks/brain/brain-load.sh"' };
+  const guard = { type: 'command', command: 'bash', args: ['${CLAUDE_PROJECT_DIR}/hooks/brain/brain-security-guard.sh'],
+    timeout: 30, onFailure: 'block' };
   {
     const t = target('uninstall-mixed', {
       [SHARED]: JSON.stringify({ hooks: {
         PostToolUse: [{ matcher: 'Skill|Task', hooks: [own, inv, inv] }, { matcher: 'Skill|Task', hooks: [inv] }],
         Stop: [{ hooks: [end] }],
         SessionEnd: [null, { hooks: [null, end] }, { hooks: [] }],
+        PreToolUse: [{ matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [guard] }, { matcher: 'Bash', hooks: [own, guard] }],
       } }, null, 2),
       [LOCAL]: JSON.stringify({ hooks: {
         Stop: [{ hooks: [own, brainEnd] }, { hooks: [] }],
@@ -130,7 +145,9 @@ try {
       PostToolUse: [{ matcher: 'Skill|Task', hooks: [own] }],
       // a null entry, a null hook and an empty entry are the owner's, kept as found
       SessionEnd: [null, { hooks: [null] }, { hooks: [] }],
-    }, 'telemetry hooks removed one by one; the owner hook, nulls and empty entry kept');
+      PreToolUse: [{ matcher: 'Bash', hooks: [own] }],
+    }, 'telemetry hooks and the guard removed one by one; the owner hooks, nulls and empty entry kept');
+    assert.match(r.out, /removed 2 brain hooks from .*settings\.json/, 'the guard copies in settings.json are counted (P0-09)');
     // the count is of hooks, not entries: two of ours in one entry count twice (review P3)
     assert.match(r.out, /removed 5 telemetry hooks from/);
     assert.deepStrictEqual(json(t, LOCAL).hooks, { Stop: [{ hooks: [own] }, { hooks: [] }] },
@@ -152,7 +169,12 @@ try {
       assert.match(r.out, new RegExp(`${name}: ${reason.source}`), `uninstall, ${name} ${why}: gives the reason`);
     assert.strictEqual(read(t, SHARED), text, `uninstall, settings.json ${why}: unchanged`);
     assert.strictEqual(read(t, LOCAL), text, `uninstall, settings.local.json ${why}: unchanged`);
-    assert.ok(!fs.existsSync(path.join(t, 'hooks', 'brain')), `uninstall, settings ${why}: the brain files still go`);
+    // P0-09: the fail-closed guard's files go only when its registration in settings.json is gone:
+    // a registration naming a deleted script would block every Write, Edit and Bash call.
+    assert.strictEqual(fs.existsSync(path.join(t, 'hooks', 'brain')), unreadable,
+      `uninstall, settings ${why}: hooks/brain kept iff settings.json could not be read`);
+    assert.strictEqual(/kept .*hooks\/brain/.test(r.out), unreadable, `uninstall, settings ${why}: says why hooks/brain is kept`);
+    assert.ok(!fs.existsSync(path.join(t, 'scripts', 'brain')), `uninstall, settings ${why}: the other brain files still go`);
   });
 
   // 7. uninstall reads an empty or blank file as {}: nothing to remove, no warning, no write (review P1).

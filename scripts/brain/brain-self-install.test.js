@@ -1,6 +1,9 @@
 // scripts/brain/brain-self-install.test.js — installs a capsule into a temp
-// target, merges hooks into settings.local.json without clobbering, is
-// idempotent, and passes brain-verify.
+// target, merges hooks without clobbering, is idempotent, and passes brain-verify.
+// P0-09: the security guard is registered in the target's shared .claude/settings.json in exec
+// form with onFailure "block" and a 30 s timeout (a guard that cannot start, fails or times out
+// blocks the call); the five other brain hooks stay in .claude/settings.local.json; the old
+// shell-form, fail-open guard registration is removed from settings.local.json.
 'use strict';
 const { spawnSync } = require('child_process');
 const fs = require('fs');
@@ -10,25 +13,40 @@ const assert = require('assert');
 const REPO = path.join(__dirname, '..', '..');
 const SCRIPT = path.join(__dirname, 'brain-self-install.sh');
 const TMP = path.join(__dirname, '__selfinstall_test_tmp__');
+const LOCAL = path.join(TMP, '.claude', 'settings.local.json');
+const SHARED = path.join(TMP, '.claude', 'settings.json');
 
 function run() {
   const r = spawnSync('bash', [SCRIPT, TMP], { encoding: 'utf8', cwd: REPO });
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
+const json = f => JSON.parse(fs.readFileSync(f, 'utf8'));
+const MATCHER = 'Write|Edit|NotebookEdit|Bash';
+const GUARD = {
+  type: 'command', command: 'bash', args: ['${CLAUDE_PROJECT_DIR}/hooks/brain/brain-security-guard.sh'],
+  timeout: 30, onFailure: 'block',
+};
+const OLD_GUARD_CMD = 'bash "$CLAUDE_PROJECT_DIR/hooks/brain/brain-security-guard.sh"';
+const isGuard = h => h && (/brain-security-guard\.sh/.test(h.command || '')
+  || (Array.isArray(h.args) && h.args.some(a => /brain-security-guard\.sh/.test(a))));
+const guardHooks = list => (list || []).filter(Boolean).flatMap(e => (e.hooks || []).filter(Boolean)).filter(isGuard);
 
 try {
   fs.rmSync(TMP, { recursive: true, force: true });
   fs.mkdirSync(path.join(TMP, '.claude'), { recursive: true });
-  // Pre-existing hook that must survive the merge untouched
-  fs.writeFileSync(path.join(TMP, '.claude', 'settings.local.json'), JSON.stringify({
+  // Pre-existing hooks that must survive the merge untouched, in both files
+  fs.writeFileSync(LOCAL, JSON.stringify({
     hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo preexisting' }] }] },
   }, null, 2));
+  const sharedOwn = { permissions: { deny: ['Read(**/.env)'] },
+    hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo shared-own' }] }] } };
+  fs.writeFileSync(SHARED, JSON.stringify(sharedOwn, null, 2) + '\n');
   fs.writeFileSync(path.join(TMP, '.gitignore'), 'node_modules/\n');
 
   // 1. Install succeeds; capsule verifies; placeholders filled
   let r = run();
   assert.strictEqual(r.status, 0, `install failed:\n${r.stdout}\n${r.stderr}`);
-  // six registrations, each counted once (the guard's own timeout is not a second update)
+  // six registrations, each counted once: five local hooks and the guard in settings.json
   assert.match(r.stdout, /hook entries merged \(6 added or updated\)/);
   const brain = path.join(TMP, '.project-brain');
   const verify = spawnSync('node', [path.join(__dirname, 'brain-verify.js'), '--target', brain], { encoding: 'utf8' });
@@ -39,95 +57,108 @@ try {
   assert.strictEqual(profile.project_name, path.basename(TMP));
   assert.ok(/^\d{4}-\d{2}-\d{2}/.test(profile.created_at));
 
-  // 2. Hooks merged: 5 brain registrations present, pre-existing hook intact
-  const settings = JSON.parse(fs.readFileSync(path.join(TMP, '.claude', 'settings.local.json'), 'utf8'));
-  const flat = JSON.stringify(settings.hooks);
-  for (const h of ['brain-pre-compact.sh', 'brain-session-end.sh', 'brain-security-guard.sh', 'brain-post-lint.sh', 'brain-load.sh']) {
+  // 2. Five brain hooks in settings.local.json, the guard only in settings.json; owner hooks intact
+  const local = json(LOCAL);
+  const flat = JSON.stringify(local.hooks);
+  for (const h of ['brain-pre-compact.sh', 'brain-session-end.sh', 'brain-post-lint.sh', 'brain-load.sh']) {
     assert.ok(flat.includes(h), `${h} registered`);
   }
-  assert.ok(flat.includes('echo preexisting'), 'pre-existing hook survived');
-  assert.ok(Array.isArray(settings.hooks.Stop) && Array.isArray(settings.hooks.SessionEnd),
+  assert.ok(!flat.includes('brain-security-guard.sh'), 'the guard is not in settings.local.json');
+  assert.ok(flat.includes('echo preexisting'), 'pre-existing local hook survived');
+  assert.ok(Array.isArray(local.hooks.Stop) && Array.isArray(local.hooks.SessionEnd),
     'session-end script registered on both SessionEnd and Stop');
-  // The guard has an explicit 30 s timeout. Claude Code's default is 600 s, and a PreToolUse hook
-  // that times out does not block the call, so a stalled guard froze each call for 10 minutes and
-  // then let it through unchecked (triage F1).
-  const guardHooks = list => list.flatMap(e => e.hooks || []).filter(h => /brain-security-guard\.sh/.test(h.command || ''));
-  assert.deepStrictEqual(guardHooks(settings.hooks.PreToolUse).map(h => h.timeout), [30], 'guard registered once, with timeout 30');
-  // Only the guard: a timeout on SessionEnd, for one, would replace its short default budget (review G5).
-  const brainHooks = Object.values(settings.hooks).flat().flatMap(e => e.hooks || [])
-    .filter(h => /hooks\/brain\//.test(h.command || '') && !/brain-security-guard\.sh/.test(h.command));
-  assert.strictEqual(brainHooks.length, 5, 'five other brain hook registrations');
-  assert.ok(brainHooks.every(h => !('timeout' in h)), 'no other brain hook gets a timeout');
+  const brainHooks = Object.values(local.hooks).flat().flatMap(e => e.hooks || [])
+    .filter(h => /hooks\/brain\//.test(h.command || ''));
+  assert.strictEqual(brainHooks.length, 5, 'five brain hook registrations in settings.local.json');
+  assert.ok(brainHooks.every(h => !('timeout' in h) && !('onFailure' in h)),
+    'no other brain hook gets a timeout or onFailure: they stay fail-open (review G5)');
+  const shared = json(SHARED);
+  assert.deepStrictEqual(shared.permissions, sharedOwn.permissions, 'shared permissions kept');
+  assert.deepStrictEqual(shared.hooks.Stop, sharedOwn.hooks.Stop, 'shared owner hook kept');
+  assert.deepStrictEqual(shared.hooks.PreToolUse, [{ matcher: MATCHER, hooks: [GUARD] }],
+    'guard registered once in settings.json: exec form, timeout 30, onFailure block');
 
   // 3. .gitignore gained the sessions line exactly once
   const gi = fs.readFileSync(path.join(TMP, '.gitignore'), 'utf8');
   assert.strictEqual((gi.match(/^\.project-brain\/sessions\/$/gm) || []).length, 1);
 
-  // 4. Idempotent: re-run changes nothing
-  const settingsBefore = fs.readFileSync(path.join(TMP, '.claude', 'settings.local.json'), 'utf8');
+  // 4. Idempotent: re-run changes nothing in either file
+  const localBefore = fs.readFileSync(LOCAL, 'utf8');
+  const sharedBefore = fs.readFileSync(SHARED, 'utf8');
   const brainMdBefore = fs.readFileSync(path.join(brain, 'BRAIN.md'), 'utf8');
   r = run();
   assert.strictEqual(r.status, 0, r.stderr);
-  assert.strictEqual(fs.readFileSync(path.join(TMP, '.claude', 'settings.local.json'), 'utf8'), settingsBefore);
+  assert.match(r.stdout, /hook entries merged \(0 added or updated\)/);
+  assert.strictEqual(fs.readFileSync(LOCAL, 'utf8'), localBefore);
+  assert.strictEqual(fs.readFileSync(SHARED, 'utf8'), sharedBefore);
   assert.strictEqual(fs.readFileSync(path.join(brain, 'BRAIN.md'), 'utf8'), brainMdBefore);
   assert.strictEqual((fs.readFileSync(path.join(TMP, '.gitignore'), 'utf8').match(/\.project-brain\/sessions\//g) || []).length, 1);
 
-  // 5. An install from before the timeout gains it on re-run, without a second guard entry;
-  //    a timeout the owner set is kept.
-  const settingsFile = path.join(TMP, '.claude', 'settings.local.json');
-  const guardCmd = 'bash "$CLAUDE_PROJECT_DIR/hooks/brain/brain-security-guard.sh"';
-  const withGuard = hook => JSON.stringify({ hooks: { PreToolUse: [
-    { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [hook] }] } }, null, 2);
-  fs.writeFileSync(settingsFile, withGuard({ type: 'command', command: guardCmd }));
-  r = run();
-  assert.strictEqual(r.status, 0, r.stderr);
-  // 5 other hooks added + the guard's timeout added = 6 (review G7)
-  assert.match(r.stdout, /hook entries merged \(6 added or updated\)/);
-  let pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
-  assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [30], 'old guard entry gained timeout 30, no duplicate');
-  fs.writeFileSync(settingsFile, withGuard({ type: 'command', command: guardCmd, timeout: 45 }));
-  r = run();
-  assert.strictEqual(r.status, 0, r.stderr);
-  pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
-  assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [45], 'an owner-set timeout is kept');
-
-  // 6. Every untimed copy of the guard gets the timeout, whatever its matcher: matching hooks run
-  //    in parallel, so one untimed copy would still hold a call for 600 s (review G4).
-  //    An owner-set timeout of 0 is kept too.
-  fs.writeFileSync(settingsFile, JSON.stringify({ hooks: { PreToolUse: [
-    { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [{ type: 'command', command: guardCmd }] },
-    { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [{ type: 'command', command: guardCmd }] },
-    { matcher: 'Bash', hooks: [{ type: 'command', command: guardCmd }] },
-    { hooks: [{ type: 'command', command: guardCmd, timeout: 0 }] },
+  // 5. Migration: an install from before P0-09 has the shell-form guard in settings.local.json.
+  //    A re-run removes every copy of it there (any matcher, any timeout), keeps an owner hook
+  //    that shares its entry, and registers the exec-form guard in settings.json.
+  const old = { type: 'command', command: OLD_GUARD_CMD, timeout: 30 };
+  fs.writeFileSync(LOCAL, JSON.stringify({ hooks: { PreToolUse: [
+    { matcher: MATCHER, hooks: [old] },
+    { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo own-pre' }, { type: 'command', command: OLD_GUARD_CMD }] },
   ] } }, null, 2));
+  fs.rmSync(SHARED);
   r = run();
   assert.strictEqual(r.status, 0, r.stderr);
-  pre = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks.PreToolUse;
-  assert.deepStrictEqual(guardHooks(pre).map(h => h.timeout), [30, 30, 30, 0], 'every untimed guard copy gained 30; owner 0 kept');
+  assert.match(r.stdout, /hook entries merged \(6 added or updated\)/);
+  assert.match(r.stdout, /removed 2 old fail-open guard registrations from .*settings\.local\.json/);
+  assert.deepStrictEqual(json(LOCAL).hooks.PreToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo own-pre' }] }],
+    'old guard copies gone; the owner hook in the same entry kept');
+  assert.deepStrictEqual(guardHooks(json(SHARED).hooks.PreToolUse), [GUARD], 'the new guard is in settings.json');
+
+  // 6. An existing exec-form guard without timeout or onFailure gains both; a value the owner set
+  //    is kept (an explicit "continue" is the owner's documented choice); no duplicate is added.
+  const bare = { type: 'command', command: 'bash', args: GUARD.args };
+  fs.writeFileSync(SHARED, JSON.stringify({ hooks: { PreToolUse: [
+    { matcher: MATCHER, hooks: [bare] }, { matcher: 'Bash', hooks: [{ ...bare }] }] } }, null, 2));
+  r = run();
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.stdout, /hook entries merged \(2 added or updated\)/, 'two copies updated, none added');
+  assert.deepStrictEqual(guardHooks(json(SHARED).hooks.PreToolUse), [GUARD, GUARD], 'every copy gained timeout and onFailure');
+  fs.writeFileSync(SHARED, JSON.stringify({ hooks: { PreToolUse: [
+    { matcher: MATCHER, hooks: [{ ...bare, timeout: 45, onFailure: 'continue' }] }] } }, null, 2));
+  r = run();
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(guardHooks(json(SHARED).hooks.PreToolUse), [{ ...bare, timeout: 45, onFailure: 'continue' }],
+    'owner-set timeout and onFailure kept');
 
   // 7. A null entry, or a null hook inside an entry, in any list the installer writes to is kept
-  //    as found and does not stop the install (review G11: it exited 1 with "Cannot read
-  //    properties of null (reading 'matcher')" and wrote nothing).
+  //    as found and does not stop the install (review G11), in both files.
   const EVENTS = ['PreToolUse', 'PostToolUse', 'SessionStart', 'PreCompact', 'SessionEnd', 'Stop'];
-  fs.writeFileSync(settingsFile, JSON.stringify({ hooks: {
+  fs.writeFileSync(LOCAL, JSON.stringify({ hooks: {
     ...Object.fromEntries(EVENTS.map(ev => [ev, [null]])),
-    PreToolUse: [null, { matcher: 'Write|Edit|NotebookEdit|Bash', hooks: [null, { type: 'command', command: guardCmd }] }],
+    PreToolUse: [null, { matcher: MATCHER, hooks: [null, { type: 'command', command: OLD_GUARD_CMD }] }],
+  } }, null, 2));
+  fs.writeFileSync(SHARED, JSON.stringify({ hooks: {
+    PreToolUse: [null, { matcher: MATCHER, hooks: [null, { ...GUARD }] }],
   } }, null, 2));
   r = run();
   assert.strictEqual(r.status, 0, `install failed on null entries:\n${r.stdout}\n${r.stderr}`);
-  // 5 other hooks added + the guard's timeout added = 6; the existing guard is found past the nulls
-  assert.match(r.stdout, /hook entries merged \(6 added or updated\)/);
-  let hooks = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).hooks;
+  // 5 other hooks added; the guard is found past the nulls; the old local copy removed
+  assert.match(r.stdout, /hook entries merged \(5 added or updated\)/);
+  assert.match(r.stdout, /removed 1 old fail-open guard registration from /);
+  let hooks = json(LOCAL).hooks;
   for (const ev of EVENTS) assert.strictEqual(hooks[ev][0], null, `${ev}: the null entry is kept`);
-  assert.strictEqual(hooks.PreToolUse[1].hooks[0], null, 'the null hook inside an entry is kept');
-  const real = list => list.filter(Boolean).map(e => ({ ...e, hooks: (e.hooks || []).filter(Boolean) }));
-  assert.deepStrictEqual(guardHooks(real(hooks.PreToolUse)).map(h => h.timeout), [30], 'one guard, timeout 30');
-  for (const h of ['brain-pre-compact.sh', 'brain-session-end.sh', 'brain-post-lint.sh', 'brain-load.sh'])
-    assert.ok(JSON.stringify(hooks).includes(h), `${h} registered next to a null entry`);
-  const before = fs.readFileSync(settingsFile, 'utf8');
+  assert.deepStrictEqual(hooks.PreToolUse[1], { matcher: MATCHER, hooks: [null] }, 'the null hook beside the old guard is kept');
+  const sh = json(SHARED).hooks;
+  assert.strictEqual(sh.PreToolUse[0], null, 'settings.json null entry kept');
+  assert.deepStrictEqual(sh.PreToolUse[1].hooks, [null, GUARD], 'one guard, past a null hook');
+  const beforeLocal = fs.readFileSync(LOCAL, 'utf8');
+  const beforeShared = fs.readFileSync(SHARED, 'utf8');
   r = run();
   assert.strictEqual(r.status, 0, r.stderr);
-  assert.strictEqual(fs.readFileSync(settingsFile, 'utf8'), before, 'a re-run over null entries changes nothing');
+  assert.strictEqual(fs.readFileSync(LOCAL, 'utf8'), beforeLocal, 'a re-run over null entries changes nothing (local)');
+  assert.strictEqual(fs.readFileSync(SHARED, 'utf8'), beforeShared, 'a re-run over null entries changes nothing (shared)');
+
+  // 8. The guard path the registration names resolves inside the target (install.sh copies
+  //    hooks/brain there): with onFailure "block", a path that does not resolve blocks every call.
+  const resolved = GUARD.args[0].replace('${CLAUDE_PROJECT_DIR}', REPO);
+  assert.ok(fs.existsSync(resolved), `the registered guard path resolves: ${resolved}`);
 
   console.log('brain-self-install.test.js: all assertions passed');
 } finally {
