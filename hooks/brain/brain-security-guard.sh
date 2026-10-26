@@ -282,7 +282,7 @@ if (tool === "Bash" || (tool === "Monitor" && inp.command !== undefined)) {
   if (/\bgit\b[^;&|\n]*\bcommit\b|\bgh\s+pr\s+(create|edit)\b/.test(cmd))
     denyHint = " If this is a commit or PR message: write it to a file outside .project-brain (for example the session scratchpad) and pass it with git commit -F <file> or gh pr create|edit --body-file <file>.";
   else if (/brain-capture\.js/.test(cmd))
-    denyHint = " If this is a brain-capture message: brain-capture has no file option, so avoid naming the protected paths (.project-brain/canon, decisions/active) literally in --message or --title.";
+    denyHint = " If this is a brain-capture message: brain-capture reads the message from stdin when --message is absent, so write it to a file outside .project-brain and run node scripts/brain/brain-capture.js --type <type> < <file>; or do not name the protected paths (.project-brain/canon, decisions/active) literally in --message or --title.";
   // Case-insensitive: macOS disks are case-insensitive by default, so .PROJECT-BRAIN is the capsule
   // there (background security review of P0-09).
   const CAPSULE = /\.project-brain/i;
