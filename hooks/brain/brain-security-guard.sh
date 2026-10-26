@@ -501,11 +501,7 @@ if (tool === "Bash") {
   //     or the word canon / active in a command that also names the capsule or runs inside it;
   //   - on disk: a word of the command that, resolved from the working directory as the kernel
   //     would (symlinks, "..", "~"), lands in a protected folder;
-  //   - from a working directory inside a protected folder.
-  // More than 5,000 distinct words are not resolved on disk; such a command passes only in a
-  // read-only form.
-  const cwdAbs = canonical(CWD, "/");
-  const cwdKind = kindOf(cwdAbs);
+  //   - from a working directory inside a protected folder;
   //   - a parent of them (the capsule folder or decisions/, by name or on disk): a move, chmod -R or
   //     rsync --delete of it reaches them (review G);
   //   - a glob or brace word (.project-brai?, .pro*/can*, .project-{brain,x}) that may match one
@@ -515,7 +511,11 @@ if (tool === "Bash") {
   //     shows a protected-looking name (.project-b…, canon, decisions, active) or runs inside the
   //     capsule: static analysis cannot tell where it leads, so it fails closed (reviews G, H).
   // The brain scripts that never write canon/ or decisions/active/ (verify, lint, search,
-  // context-pack, compile, capture) pass as one plain call, like brain-promote.
+  // context-pack, compile, capture) pass as one plain call, like brain-promote. Over 5,000
+  // distinct words, 5,000 word resolutions or 20,000 disk lookups, a command passes only in a
+  // read-only form.
+  const cwdAbs = canonical(CWD, "/");
+  const cwdKind = kindOf(cwdAbs);
   const wordKind = new Map();
   // Resolved from the working directory only: the delete rule tracks cd itself.
   const wordKindCwd = new Map();
@@ -589,7 +589,9 @@ if (tool === "Bash") {
     return alts === null || alts.some((a) => globReaches(a, cwdAbs, targets));
   });
   const undecidable = rawWords.some((w) => EXPANSION.test(w));
-  const looksProtected = /\.project-b|roject-brain|canon|decisions|\bactive\b/.test(fcmd) || cwdKind !== null;
+  // Protected-looking: a capsule fragment, the word canon or decisions, or active as a path
+  // segment (not "is-active").
+  const looksProtected = /\.project-b|roject-brain|\bcanon\b|\bdecisions\b|\/active\b|\bactive\//.test(fcmd) || cwdKind !== null;
   const capsuleLooking = /\.project-b|roject-brain/.test(fcmd) || cwdKind !== null;
   const capsuleCtx = CAPSULE.test(fcmd) || cwdKind !== null || kinds.size > 0;
   const hitCanon = /\.project-brain\/canon\b/.test(fcmd) || (capsuleCtx && /\bcanon\b/.test(fcmd))
