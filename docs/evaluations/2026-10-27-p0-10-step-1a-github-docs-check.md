@@ -21,7 +21,7 @@ returns the same article text as the HTML page; the URLs in §8 are the human-re
 - Two rulesets on `main` combine: every rule of both applies and the strictest version wins, and a bypass is
   granted per ruleset. So a review ruleset whose only bypass is "For pull requests only" does not let anyone skip
   the checks of `main-protection`, which has no bypass. The docs say this in two places (about-rulesets and the
-  rulesets GA blog post); probe (e) confirms it.
+  rulesets GA blog post); probe (e) and step-1b T3 will test it.
 - Pull request authors cannot approve their own pull requests. A code-owner rule with `* @<owner>` therefore means
   only the owner's approval can satisfy it, and an approval by `dentaledge-bot` cannot.
 - Individual **users** can be bypass actors on repository rulesets since the changelog of 2026-05-07, which
@@ -29,8 +29,10 @@ returns the same article text as the HTML page; the URLs in §8 are the human-re
   page lags the changelog. Choice (x), the admin role, still works and does not need to change.
 - The required checks of `main-protection` are pinned to GitHub Actions (`integration_id` 15368) [Ver]. A commit
   status posted by the bot cannot satisfy them.
-- An outside collaborator on a **public** repository uses no paid seat. The docs say a seat is used only for a
-  **private** repository. This settles the "outside-collaborator billing" [Asm] for this repository.
+- An outside collaborator on a **public** repository should use no paid seat [Inf]. The docs say: "Unless you are
+  on a free plan, adding an outside collaborator to a private repository will use one of your paid licenses"; they
+  name no seat cost for a public repository. This answers the "outside-collaborator billing" [Asm] for this
+  repository as far as the docs go; the owner's billing page can confirm it (§5 check 3).
 
 **What does not work, or is not documented.**
 - **Token.** The docs say twice that a fine-grained token does not work for an outside collaborator: "Outside
@@ -61,7 +63,10 @@ returns the same article text as the HTML page; the URLs in §8 are the human-re
     classic rule per branch, layered with the rulesets).
   - **Candidate A** comes second, a "Restrict updates" ruleset in one of two variants. A-exempt: the owner (user)
     or the admin role is exempt, so merges are silent and leave no bypass entry. A-PR: "For pull requests only",
-    so every owner merge is a bypass and must be filtered out of the measure by ruleset.
+    so every owner merge is a bypass and must be filtered out of the measure by ruleset. Either way, A leaves no
+    per-merge entry in the org audit log (which has only `repository_ruleset.create/destroy/update`); its bypasses
+    are visible only in rule insights and the rule-suites API, whose `time_period` is at most a `month`, so the
+    owner-bypass measure must then be harvested at least monthly.
   - Step 1b tests B, then A-exempt, then A-PR, one at a time. If none works without blocking the owner's normal
     merges, the OC-2 exception applies, with `allow_auto_merge` kept false (false today [Ver]).
 - **Token: fine-grained first**, as OC-1 already says: Contents read and write, Pull requests read and write,
@@ -69,10 +74,12 @@ returns the same article text as the HTML page; the URLs in §8 are the human-re
   less.
   - It is the narrowest token, and this bot measured it working on this repository in July 2026. But the docs say
   it should not work, so step 1b must prove that it does.
-  - If it fails, use a **classic** token with no `workflow` scope. **`public_repo` is narrower than `repo`** and
-    is enough while `claude_code` is public (OC-1 says `repo`; this is the owner's choice). If the repository is
-    ever made private, the token stops working (fail closed) instead of reaching private repositories the bot is
-    later added to.
+  - If it fails, use a **classic** token with no `workflow` scope. **`public_repo` is narrower than `repo`**
+    [Docs] and should be enough while `claude_code` is public [Inf, pending T1's classic run]. If the repository
+    is ever made private, the token stops working (fail closed) instead of reaching private repositories the bot
+    is later added to. This is a recommendation for the owner: the `repo` wording in OC-1 is the coordinator's,
+    not the owner's (S6:401-404). If the owner adopts `public_repo`, the text of S5 P0-10 step 2 (and S5 §2.3
+    item 1, S6 D-13 and the OC-1 bullet) that says "`repo` scope" needs amending.
   - Before using a classic token, the owner checks the org's "Restrict personal access tokens (classic) from
     accessing your organizations" setting. By default classic tokens are allowed.
 
@@ -83,6 +90,9 @@ returns the same article text as the HTML page; the URLs in §8 are the human-re
 - An item in the keychain stored by `git-credential-osxkeychain` can be returned to any process that runs that
   helper [Inf]. "Only the agent account on the laptop" (probe (f)) therefore needs the owner's github.com keychain
   item removed, not only the `gh` login. The owner measures this; the agent never reads the keychain.
+- The same helper chain matters for step 1b: `git` does not read `GH_TOKEN`, and helpers are tried in turn, so a
+  probe `git push` could silently authenticate with the keychain credential instead of the test token. Every probe
+  push resets the helper chain and supplies only the test token, with a refusal control (§4, "Rules", DC-R-1).
 
 ## 2. Repository state read today [Ver]
 
@@ -91,8 +101,10 @@ returns the same article text as the HTML page; the URLs in §8 are the human-re
 | Visibility, owner | `gh repo view --json visibility,owner,isPrivate,isInOrganization,...` | `PUBLIC`, owner `DentalEdge-Solutions` (organization); merge, squash and rebase merges all allowed |
 | Auto-merge | `gh api graphql` (call 1) | `autoMergeAllowed: false` |
 | Rulesets | `gh api graphql` (call 1) | one ruleset, `main-protection`, `ACTIVE`, target `~DEFAULT_BRANCH`: deletion, non-fast-forward, pull request (`requiredApprovingReviewCount` 0, code-owner review, last-push approval and stale-dismissal all false), required status checks (strict; 4 contexts) |
+| PR-rule extras | REST `GET /repos/{o}/{r}/rulesets/19737624` [Ver by the reviewer, 2026-10-27; my GraphQL query did not select these fields] | `required_review_thread_resolution: true` (all conversations resolved before merge); `require_extra_approval_for_unattributed_changes: true` (the docs: "When Copilot opens a pull request that isn't attributed to a person, the ruleset requires one more approval"; "no effect if the ruleset requires zero approvals"; Copilot-only, so it does not touch bot or owner PRs [Inf]) |
+| Classic protection on `main` | public REST `GET /repos/{o}/{r}/branches/main` [Ver by the reviewer, 2026-10-27] | `protected: true` (from the ruleset), `protection.enabled: false`: corroborates that no classic branch protection rule targets `main` today [Inf]; the owner confirms in Settings → Branches (§5 check 4) |
 | Check source pinning | `gh api graphql` (call 2) | all 4 required contexts carry `integrationId: 15368` (the GitHub Actions app) |
-| PR #4 | `gh pr view 4 --json ...` | author `dentaledge-bot` (`is_bot: false`, a User account), head `proposal/2026-07-24_22-54-03` in `DentalEdge-Solutions/claude_code` (`isCrossRepository: false`), created 2026-07-25, `CLOSED`, not merged |
+| PR #4 | `gh pr view 4 --json ...` | author `dentaledge-bot` (`is_bot: false`, a User account), head `proposal/2026-07-24_22-54-03` in `DentalEdge-Solutions/claude_code` (`isCrossRepository: false`), created 2026-07-25, `CLOSED`, not merged; REST `author_association: "COLLABORATOR"` [Ver by the reviewer, 2026-10-27], which fits an outside collaborator rather than an org member (`MEMBER`) [Inf] |
 | CI triggers | `.github/workflows/ci.yml:3-7` | `push` and `pull_request` on `main` only, so CI does not run for PRs into `p0-10-probe/**` |
 | Git credential helper | `git config --show-origin --show-scope --get-regexp '^credential\.'` | `system  file:/opt/homebrew/etc/gitconfig  credential.helper osxkeychain`; no `gh` helper; remote `origin` is HTTPS |
 | Token variables | count of `GH_TOKEN`/`GITHUB_TOKEN`/`GH_ENTERPRISE_TOKEN` in this session's environment | 0 (names counted, no values read) |
@@ -111,8 +123,9 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 - [Comm] community discussion #113172 (2024-03 to 2026-08, no GitHub staff reply): with "Restrict updates",
   merging is blocked for everyone, including the repository owner and bypass-list members, with "The base branch
   does not allow updates". Bypass actors get a "bypass branch protections" checkbox on each merge. One report
-  (2025-08-26) says admins on the bypass list got no checkbox at all. Another (2026-07-23) says an App on the
-  bypass list was honoured by the synchronous merge endpoint but not by `gh pr merge --auto`. A workaround
+  (2025-08-26) says admins on the bypass list got no checkbox at all. Another (2026-07-23) concerns a ruleset with
+  review rules and a GitHub App on its bypass list, not "Restrict updates": the bypass was honoured by the
+  synchronous merge endpoint but not by `gh pr merge --auto` (relevant only to auto-merge, kept off). A workaround
   (2025-10-29) puts "Restrict updates" alone in a ruleset with admins "Exempted from rules".
 - [Docs] Bypass modes (REST "Create a repository ruleset"): `bypass_mode` is one of `always`, `pull_request`,
   `exempt` (default `always`): "pull_request means that an actor can only bypass rules on pull requests. …
@@ -128,8 +141,15 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
   is not evaluated for the owner at all, so no audit entry is created. The other rulesets still apply, because the
   exemption is per ruleset.
 - **Logging** [Docs]: rule insights list "Actions where someone has bypassed one or more rulesets", filterable "by
-  ruleset, branch, actor, and time period", and the rule-suites REST API returns the same data. So the §3 owner-bypass
-  measure can be counted per ruleset (count only bypasses of the **review** ruleset) [Inf].
+  ruleset, branch, actor, and time period", and the rule-suites REST API returns the same data
+  (`rule_suite_result` one of `pass`, `fail`, `bypass`, `all`; `time_period` "Can be one of: `hour`, `day`,
+  `week`, `month`", default `day`). The org audit log has only `repository_ruleset.create`, `.destroy` and
+  `.update` for rulesets, so **no per-merge bypass event** appears there [Docs: audit-log events list]. (The
+  classic `protected_branch.policy_override` event carries a `rule_suite_id` field; whether it ever fires for a
+  ruleset bypass is not documented, and the owner looks for it after T5 [UNVERIFIED].) A's
+  bypasses are visible only in rule insights and the rule-suites API. So the §3 owner-bypass measure can be counted
+  per ruleset (count only bypasses of the **review** ruleset), and it must be harvested **at least monthly**,
+  since the API's widest window is a month [Inf].
 
 **Candidate B — classic "Restrict who can push to matching branches".**
 - [Docs] Availability: "You can enable branch restrictions in public repositories owned by a GitHub Free
@@ -145,7 +165,10 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
   branch or create a matching branch." Separately, "By default, the restrictions of a branch protection rule do not
   apply to people with admin permissions … You can enable this setting [Do not allow bypassing the above settings]
   to apply the restrictions to admins … too." The two sentences do not say which wins if that setting is on.
-  [UNVERIFIED] Keep "Do not allow bypassing" **off** for B.
+  [UNVERIFIED] Keep "Do not allow bypassing" **off** for B. The full default exemption is wider than admins:
+  "the restrictions of a branch protection rule don't apply to people with admin permissions to the repository
+  **or custom roles with the 'bypass branch protections' permission**". So B's guarantee needs no custom role with
+  that permission assigned to anyone but the owner (owner check 5).
 - [Docs] Required checks still apply to the allowed pushers: "the people, teams, and apps that have permission to
   push to a protected branch will still be prevented from merging into the branch when the required checks fail"
   and "will still need to create a pull request when pull requests are required".
@@ -176,8 +199,8 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 |---|---|---|---|
 | PR merge covered | [UNVERIFIED] docs silent; [Comm] yes | same | [Docs] yes ("including merging a pull request") |
 | Owner's normal merge | bypass checkbox on every merge [Comm]; unreliable reports | normal [Docs: not evaluated] | normal [Docs: admins always] |
-| Owner merge logged | as a bypass in rule insights [Docs] | no bypass entry [Docs] | audit-log entry [UNVERIFIED] |
-| Inflates owner-bypass measure | yes, unless counted per ruleset | no | no |
+| Owner merge logged | as a bypass in rule insights and the rule-suites API only (no per-merge org audit-log event) [Docs] | no bypass entry anywhere [Docs] | audit-log entry [UNVERIFIED] |
+| Inflates owner-bypass measure | yes, unless counted per ruleset; harvest at least monthly (`time_period` max `month`) | no | no |
 | Can name the owner as a user | yes since 2026-05-07 [Docs] | user exemption [UNVERIFIED] (changelog names roles, teams, apps) | yes [Docs] |
 | Plan | rulesets in use here today [Ver] | same | public repo in any org [Docs] |
 | **Order for step 1b** | 3rd | 2nd | **1st** |
@@ -361,10 +384,11 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 - [Docs] GitHub: the macOS `osxkeychain` helper stores an "Internet password" entry for `github.com` (Keychain
   Access); it can be erased with `git credential-osxkeychain erase`.
 - [Ver] This laptop: `credential.helper osxkeychain` from the system file; no `gh` helper; HTTPS remote. [Inf] So
-  today `git push` uses whatever github.com credential is in the login keychain (account unknown to me), and
-  `git credential-osxkeychain get` (a trusted binary for that item) would hand it to any process of the user,
+  today `git push` uses whatever github.com credential is in the login keychain (account unknown to me), and the
+  osxkeychain helper (a trusted binary for that item) would hand it to any process of the user that invokes it,
   including an agent's Bash. That is a path to the owner's authority if the item is the owner's (credential canon
-  rule 2: enumerate every path).
+  rule 2: enumerate every path). Nobody should test this by retrieving the item; the presence check below shows
+  only the account.
 - **To make the laptop use only the agent account** [Inf; owner steps; step 3]:
   - remove the owner's github.com keychain item;
   - `gh auth logout --user <owner>`; the token is not revoked, so the owner revokes the `gh` OAuth grant or that
@@ -377,8 +401,10 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
     (owner check).
   - Probe (f) then: `gh auth status` lists only `dentaledge-bot`; `gh api user --jq .login` returns
     `dentaledge-bot`; `GIT_TRACE=1 git push --dry-run` to a probe ref shows only `gh auth git-credential` being run
-    (no secret printed); the keychain has no github.com item (the owner checks presence with an output that is a
-    byte count, never the value).
+    (no secret printed); the keychain has no github.com item. The owner checks with
+    `security find-internet-password -s github.com` **without `-w` or `-g`**: it prints the item's attributes,
+    including the account (`"acct"`), never the secret, and exits non-zero when no item exists. Do not pipe the
+    osxkeychain helper's `get` anywhere.
 
 ### Q7 — Admin-only reads for probe (g)
 
@@ -408,13 +434,15 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 - `infra/hermes-agent/.env.pr.example:2-4` and `infra/hermes-agent/README.md:317-323` describe the same fine-grained
   token. `docs/superpowers/handoffs/2026-10-09-review-9-pass.md:80` and
   `.project-brain/sessions/daily/2026-10-14.md:37` call it "the organisation-scoped GitHub token".
-- PR #4 [Ver]: authored by `dentaledge-bot` on 2026-07-25, head branch in the org repository itself (not a fork).
+- PR #4 [Ver]: authored by `dentaledge-bot` on 2026-07-25, head branch in the org repository itself (not a fork);
+  `author_association: "COLLABORATOR"` [Ver by the reviewer, 2026-10-27].
 - **Reconciliation** [Inf]:
   - the evidence is strong that, on 2026-07-25, a fine-grained token minted by this bot, with the org as resource
     owner, could push and open a PR here, against the docs' gap;
   - the 2026-10-09/10-14 notes repeat "organisation-scoped", which fits resource owner = org;
-  - "outside collaborator" is my reading of the org's 1 of 1 seats (S6, [Ver by the coordinator 2026-10-23]), not
-    stated in the 2026-07 records ("org collaborator");
+  - "outside collaborator" is my reading of the org's 1 of 1 seats (S6, [Ver by the coordinator 2026-10-23]),
+    corroborated by PR #4's `author_association: "COLLABORATOR"` (an org member would show `MEMBER`) [Inf]; it is
+    not stated in the 2026-07 records ("org collaborator");
   - the repository's visibility on 2026-07-25 is [Unk];
   - whether the org approval flow applied (and the owner approved it, or it did not apply to an outside
     collaborator) is [Unk].
@@ -427,20 +455,57 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 
 ## 4. What step 1b must test
 
-Rules for every test: **outside agent sessions**, by the owner; branch pattern **`p0-10-probe/**`** only, never
-`main`; test tokens minted from `dentaledge-bot` with the shortest expiry offered (the creation link accepts
-`expires_in` from 1 day), used through an environment variable in a terminal that no agent controls, **never
-printed**, revoked at the end and **proved dead** by a use that GitHub refuses ("prove death, never infer it",
-`credential-governance-lessons.md:136-137`); the test ruleset(s) and classic rule are deleted and the probe
-branches removed at the end; results (commands, HTTP codes, refusal texts, screenshots of the merge box) go to a
-dated `docs/evaluations/` record. CI does not run on probe PRs (`ci.yml:3-7` [Ver]), so the required check is a
-commit status `p0-10-probe/ci` set by the owner (`POST /repos/{o}/{r}/statuses/{sha}`, no `integration_id` in the
-probe rule).
+**Rules for every test.**
+
+- **Who and where.** The owner runs every test, outside agent sessions. Branches use the pattern
+  **`p0-10-probe/**`** only, never `main`.
+- **Targets (DC-R-3).** Every probe ruleset targets only `refs/heads/p0-10-probe/base`
+  (condition `include: ["refs/heads/p0-10-probe/base"]`), never `~DEFAULT_BRANCH` or `~ALL`. Every classic rule uses exactly the
+  pattern `p0-10-probe/base`. The owner creates each ruleset as **Disabled**, reads its target back, and only then
+  sets it **Active**.
+- **Test tokens.** Mint them from `dentaledge-bot` with the shortest expiry offered (the creation link accepts
+  `expires_in` from 1 day). Revoke them at the end and **prove each dead** by a use GitHub refuses ("prove death,
+  never infer it", `credential-governance-lessons.md:136-137`).
+- **How the token enters the shell (DC-R-12).** Use a terminal that does not run `claude` and is not controlled by
+  any agent. Work in a subshell, `( read -rs GH_TOKEN; export GH_TOKEN; … probe commands … )`, so the value is
+  typed or pasted at a silent prompt: it never appears on a command line or in shell history, it is never exported
+  in a shell that later launches `claude`, and it ends with the subshell. Never `echo` it, and never use `set -x`,
+  `GIT_TRACE_CURL` or `GIT_CURL_VERBOSE`. `gh` reads `GH_TOKEN` ahead of any stored login [Docs].
+- **git does not read `GH_TOKEN` (DC-R-1).** The laptop's system `osxkeychain` helper is tried first [Ver], so a
+  plain `git push` could silently use the keychain credential and make T1 "pass" with the wrong identity. Every
+  probe push resets the helper chain and supplies only the test token:
+
+  ```sh
+  GIT_TERMINAL_PROMPT=0 GIT_TRACE=1 git -c credential.helper= \
+    -c 'credential.helper=!f(){ echo username=dentaledge-bot; echo "password=$GH_TOKEN"; }; f' \
+    push origin HEAD:refs/heads/p0-10-probe/<name>
+  ```
+
+  The helper text is single-quoted, so `$GH_TOKEN` is expanded only inside the helper process. `GIT_TRACE` prints
+  the helper's command text, not the value [Inf]; the owner checks the first run's trace for that before keeping
+  it. A gh-backed helper (`!gh auth git-credential` with `GH_TOKEN` set) is an equivalent choice.
+- **Refusal control and identity, for every push probe.**
+  - Run the same command with the variable unset (`env -u GH_TOKEN …`) or with a revoked token. It must **fail**
+    (`GIT_TERMINAL_PROMPT=0` turns the password prompt into a failure).
+  - `GIT_TRACE=1` must show only that helper being run, never `git credential-osxkeychain`.
+  - The pusher shown in the repository's activity view, and the author of any PR the token opens, must be
+    `dentaledge-bot`; `gh api user --jq .login` run with the token gives the same check for `gh`.
+- **Cleanup order (DC-R-3).**
+  1. Delete the probe rulesets and the classic rule **first**: rulesets select "Restrict deletions" by default,
+     and a classic rule blocks deletion.
+  2. Then delete the probe branches and close the probe PRs.
+- **Records and CI.** Results go to a dated `docs/evaluations/` record: commands, HTTP codes, refusal texts and
+  screenshots of the merge box. CI does not run on probe PRs (`ci.yml:3-7` [Ver]), so the required check is a
+  commit status `p0-10-probe/ci` set by the owner (`POST /repos/{o}/{r}/statuses/{sha}`, with no
+  `integration_id` in the probe rule).
 
 **T0 setup (owner).** Create `p0-10-probe/base` from `main` and commit `/.github/CODEOWNERS` with
 `* @dentaledgesolutions` on that branch only, **before** any probe ruleset exists. Read
-`GET /repos/{o}/{r}/codeowners/errors?ref=p0-10-probe/base`. Expected: `errors: []`. If not, the org-owner
-"explicit write" question (Q5) is answered no.
+`GET /repos/{o}/{r}/codeowners/errors?ref=p0-10-probe/base`. Expected: `errors: []`. That only rules out syntax
+errors (DC-R-7). Whether the owner, an org owner, is **recognised as code owner** (Q5, "explicit write") is decided
+by T3's row "owner-authored PR approved by the bot": `REVIEW_REQUIRED` means a code owner was assigned and is still
+outstanding. If GitHub did not recognise the owner, no code owner would be assigned, and the bot's approval would
+satisfy the count (`APPROVED`).
 
 **T1 token type (fine-grained first).** Owner mints, as the bot: resource owner `DentalEdge-Solutions`, only
 `claude_code`, Contents RW, Pull requests RW, no Workflows.
@@ -449,7 +514,7 @@ probe rule).
 |---|---|---|---|
 | Org listed as resource owner | not said | yes | yes/no |
 | Token state | `pending` if approval applies to outside collaborators | n/a | state; owner approves if pending |
-| `git push` of `p0-10-probe/t1-head` | refused (gap) | succeeds | exit code, refusal text |
+| `git push` of `p0-10-probe/t1-head` (helper reset, token only, control run; see the rules above) | refused (gap) | succeeds | exit code, refusal text, trace shows only the test helper, pusher `dentaledge-bot` |
 | `gh pr create --base p0-10-probe/base` | refused | succeeds | PR number or error |
 | `gh pr view --json reviewDecision,statusCheckRollup`, `gh pr checks` | Checks API gap | n/a | works/fails |
 | `PUT …/pulls/{n}/update-branch` | Pull requests write | n/a | code |
@@ -457,15 +522,29 @@ probe rule).
 If the fine-grained token fails: repeat with a classic test token, `public_repo` first (`GH_TOKEN`; note what
 `gh auth login --with-token` says), then `repo` only if `public_repo` fails. Never `workflow`.
 
-**T2 workflow refusal (preview of probe (g)).** With the token that passed T1, push to `p0-10-probe/t2-head` a
-commit adding `.github/workflows/p0-10-probe-<random>.yml` whose contents exist on **no** branch. Expected (classic):
-the refusal quoted in Q2 ("refusing to allow a Personal Access Token to create or update workflow … without
-`workflow` scope") [Comm].
-Fine-grained wording: record it. Control: a non-workflow file to the same branch succeeds. Then delete the
-branch.
+**T2 workflow refusal (preview of probe (g)).** With the token that passed T1, and the same helper-reset push
+form, push to `p0-10-probe/t2-head` a commit adding `.github/workflows/p0-10-probe-<random-id>.yml`.
+- The file must be **inert** and its contents must exist on **no** branch (DC-R-2): a manual trigger only, one
+  no-op step, and a unique id in the name and the step:
+
+  ```yaml
+  name: p0-10 probe <random-id>
+  on: workflow_dispatch
+  jobs:
+    noop:
+      runs-on: ubuntu-latest
+      steps:
+        - run: echo "p0-10 probe <random-id>; never dispatched"
+  ```
+
+- Expected (classic): the refusal quoted in Q2 ("refusing to allow a Personal Access Token to create or update
+  workflow … without `workflow` scope") [Comm]. For a fine-grained token, record the wording.
+- Control: a non-workflow file pushed to the same branch succeeds. Then delete the branch.
+- Probe (g) later uses the same inert template, with a new id.
 
 **T3 two rulesets + review rules** (mirrors `main`, targets `refs/heads/p0-10-probe/base` only):
-- `probe-checks`: PR rule (0 approvals), required status check `p0-10-probe/ci` (strict), no bypass;
+- `probe-checks`: PR rule (0 approvals, `required_review_thread_resolution: true` as on `main` [Ver by the
+  reviewer]), required status check `p0-10-probe/ci` (strict), no bypass;
 - `probe-review`: PR rule with `required_approving_review_count: 1`, `require_code_owner_review`,
   `require_last_push_approval`, `dismiss_stale_reviews_on_push`; bypass **For pull requests only**. Note whether
   the UI offers the user `dentaledgesolutions` (R-A-14, changelog 2026-05-07); test with the **Repository admin
@@ -478,7 +557,7 @@ branch.
 | bot pushes after the owner's approval | approval dismissed; not mergeable until re-approved |
 | owner clicks **Update branch** on a bot PR, then approves | [UNVERIFIED]: approval likely cannot satisfy last-push (R-A-15) |
 | bot updates the branch (API), then owner approves | mergeable |
-| owner-authored PR approved by the bot | `reviewDecision: REVIEW_REQUIRED`; bot merge refused; owner merges via the PR-only bypass |
+| owner-authored PR approved by the bot | `reviewDecision: REVIEW_REQUIRED`; bot merge refused; owner merges via the PR-only bypass. This row decides whether the owner is recognised as code owner (T0; `APPROVED` here would mean no code owner was assigned) |
 | owner PR, status `failure`, try bypass merge | refused (`probe-checks` has no bypass) = probe (e) |
 | owner PR, status `success` | merges without review via the bypass |
 | `GET /rulesets/{probe-review id}` as bot / as owner | `current_user_can_bypass`: `never` / `pull_requests_only`; `bypass_actors` absent for the bot |
@@ -488,21 +567,34 @@ nobody listed (or the owner listed if the UI requires a name); "Do not allow byp
 
 | Probe | Expected |
 |---|---|
-| bot merges an owner-approved, green PR (UI and `PUT …/merge`) | refused [Docs]; record the message |
-| owner merges the same kind of PR | succeeds with no bypass prompt [Docs] |
+| bot merges an owner-approved, green PR (UI, `PUT …/pulls/{n}/merge` and `PUT …/pulls/{n}/merge-async`) | refused [Docs]; record each message |
+| owner merges the same kind of PR | succeeds with no bypass prompt [Inf, from "admins are always able to push"] |
+| owner-authored PR, status `success`, merged through the review ruleset's PR-only bypass | succeeds (admin passes B; checks green) [Inf] |
+| owner-authored PR, status `failure`, bypass merge attempted | refused (`probe-checks` has no bypass) [Docs: layering] |
 | org audit log after both | `protected_branch.rejected_ref_update` for the bot [Docs]; is the owner merge logged? [UNVERIFIED] |
 | rule insights | the owner merge shows "Pass" for `probe-checks`/`probe-review`, not "Bypass" [Inf] |
 
-**T5 candidate A** (only if B fails; delete B's rule first). Ruleset `probe-merge-lock` with "Restrict updates"
-only. (i) A-exempt: bypass = owner user, else admin role, mode **Exempt**. (ii) A-PR: same actor, **For pull
-requests only**. For each: the bot merge is refused ("The base branch does not allow updates" [Comm]); the
-owner's merge succeeds without (i) or with (ii) the bypass checkbox; rule insights show nothing (i) or "Bypass"
-(ii). Also try `gh pr merge` from the owner's own terminal.
+**T5 candidate A** (only if B fails; delete B's classic rule first). Ruleset `probe-merge-lock` with "Restrict
+updates" only, target `include: ["refs/heads/p0-10-probe/base"]` only, created Disabled and checked before Active.
+(i) A-exempt: bypass = owner user, else admin role, mode **Exempt**. (ii) A-PR: same actor, **For pull requests
+only**. For each:
+- the bot merge is refused (UI, `merge` and `merge-async`; "The base branch does not allow updates" [Comm]);
+- the owner's merge succeeds, without the bypass checkbox in (i) and with it in (ii);
+- rule insights and the rule-suites API (`rule_suite_result=bypass`) show nothing in (i) and "Bypass" in (ii);
+- the org audit log shows no per-merge event in either [Docs; check `protected_branch.policy_override`].
+
+Also try `gh pr merge` from the owner's own terminal.
 
 **T6 nothing else.** Do not enable auto-merge or a merge queue. `allow_auto_merge` stays false.
 
-**Cleanup and record.** Delete the probe rulesets and classic rule, delete `p0-10-probe/*` branches, close probe
-PRs, revoke the test token(s) and prove each dead, re-read `main-protection` unchanged, record.
+**Cleanup and record**, in this order:
+1. Delete the probe rulesets and the classic rule. Rulesets restrict deletions by default, and a classic rule
+   blocks deletion, so these go before the branches.
+2. Delete the `p0-10-probe/*` branches and close the probe PRs.
+3. Revoke the test token(s) and prove each dead.
+4. Final re-read: the rulesets list contains **only** `main-protection`, unchanged; `main` has **no** classic rule
+   (Settings → Branches, or public `GET /repos/{o}/{r}/branches/main` → `protection.enabled: false`).
+5. Record.
 
 ## 5. Owner-only checks (admin or the bot's own settings)
 
@@ -517,7 +609,10 @@ PRs, revoke the test token(s) and prove each dead, re-read `main-protection` unc
    2026-10-23]).
 4. **Repository → Settings → Branches**: does any classic branch protection rule target `main`? (Only one can
    apply; candidate B adds one.)
-5. **Repository → Collaborators**: `dentaledge-bot` = Write, not Admin, not Maintain; the list of admins.
+5. **Repository → Collaborators**: `dentaledge-bot` = Write, not Admin, not Maintain; the list of admins. **Org →
+   Settings → Repository roles**: list any custom roles, and confirm none with the "bypass branch protections"
+   permission is held by anyone but the owner. Classic protection exempts such roles as it exempts admins
+   (DC-R-11).
 6. **Repository → Rules**: `main-protection` bypass list empty; **Rules → Insights** available (dashboard needs
    Team or Enterprise Cloud).
 7. **Repository webhooks and deploy keys** (admin reads): note what exists; a deploy key with write is another push
@@ -526,7 +621,8 @@ PRs, revoke the test token(s) and prove each dead, re-read `main-protection` unc
 9. **As `dentaledge-bot`** (signed in outside agent sessions): its tokens list (expired `dentaledge-bot-pat`; any
    other live token), its SSH keys, its 2FA state, and whether it is a member of any other org.
 10. **Laptop** (step 3; the agent never reads these):
-    - is there a github.com "Internet password" in Keychain Access, and for which account?
+    - is there a github.com "Internet password" in the keychain, and for which account?
+      (`security find-internet-password -s github.com` without `-w`/`-g` shows the account, not the secret);
     - which accounts `gh auth status` lists;
     - SSH keys on the owner account;
     - `GH_TOKEN`/`GITHUB_TOKEN` in shell profiles;
@@ -536,7 +632,7 @@ PRs, revoke the test token(s) and prove each dead, re-read `main-protection` unc
 
 | Step | Can rely on (source) | Waits for |
 |---|---|---|
-| 2 token | classic allowed by default unless the org restricts [Docs]; fine-grained approval on by default for members [Docs]; workflow scope semantics and the same-contents exception [Docs]; seat: none (public) [Docs] | T1 (type), owner check 1-2 |
+| 2 token | classic allowed by default unless the org restricts [Docs]; fine-grained approval on by default for members [Docs]; workflow scope semantics and the same-contents exception [Docs]; seat: none expected for a public repository [Inf from Docs] | T1 (type), owner check 1-2 |
 | 3 paths | `GH_TOKEN` precedence, logout is local and does not revoke, switch semantics [Docs]; git uses `osxkeychain` here [Ver]; keychain item reachable by the trusted helper [Inf] | owner measurement (check 10) |
 | 4 CODEOWNERS | location, base-branch rule, write-access rule, errors endpoint with `ref` [Docs] | T0 (org-owner "explicit" access) |
 | 5 review ruleset | layering, most-restrictive, per-ruleset bypass, PR-only semantics, self-approval ban [Docs]; users eligible as bypass actors [Docs, changelog] | T3 |
@@ -546,7 +642,7 @@ PRs, revoke the test token(s) and prove each dead, re-read `main-protection` unc
 
 ## 7. Fallbacks if an assumption fails
 
-- **Fine-grained fails (T1)** → classic token, no `workflow`: `public_repo` (narrower) or `repo` (OC-1). If the org
+- **Fine-grained fails (T1)** → classic token, no `workflow`: `public_repo` (narrower) or `repo` (the coordinator's OC-1 wording). If the org
   restricts classic tokens, the owner either allows them (an org-wide change, so record it) or goes to the next
   bullet.
 - **Neither token type works, or the classic reach is unacceptable** → a **GitHub App** owned by the org, installed
@@ -586,7 +682,7 @@ PRs, revoke the test token(s) and prove each dead, re-read `main-protection` unc
 | S17 | Approving a PR with required reviews | https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/approving-a-pull-request-with-required-reviews | authors cannot approve |
 | S18 | Automatically merging a PR; Managing a merge queue | https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request · https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue | who can enable auto-merge; merge queue overrides the setting |
 | S19 | Audit log events for your organization; Reviewing the audit log | https://docs.github.com/en/organizations/keeping-your-organization-secure/managing-security-settings-for-your-organization/audit-log-events-for-your-organization · https://docs.github.com/en/organizations/keeping-your-organization-secure/managing-security-settings-for-your-organization/reviewing-the-audit-log-for-your-organization | `protected_branch.*`, `repository_ruleset.*`; owners only, 180 days |
-| S20 | Adding outside collaborators | https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-outside-collaborators/adding-outside-collaborators-to-repositories-in-your-organization | seats only for private repos; no teams |
+| S20 | Adding outside collaborators | https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-outside-collaborators/adding-outside-collaborators-to-repositories-in-your-organization | a seat is named for private repos (no statement on public); no teams |
 | S21 | Caching credentials; macOS Keychain | https://docs.github.com/en/get-started/git-basics/caching-your-github-credentials-in-git · https://docs.github.com/en/get-started/git-basics/updating-credentials-from-the-macos-keychain | osxkeychain item; erase |
 | S22 | Changelog 2026-05-07, user bypass | https://github.blog/changelog/2026-05-07-repository-rulesets-user-bypass-and-branch-renaming | users as bypass actors (repo rulesets) |
 | S23 | Changelog 2025-09-10, exempt bypass | https://github.blog/changelog/2025-09-10-github-ruleset-exemptions-and-repository-insights-updates/ | exempt type, silent |
@@ -621,3 +717,27 @@ Repository sources: S5 roadmap P0-10 (`S5-prioritized-roadmap.md:324-444`), S6 D
 - Community sources corroborate only; none decides a finding.
 - Nothing here was tested against GitHub's behaviour; every "expected" in §4 is a prediction from the docs, to be
   measured in step 1b. Machine facts (§2 git helper, environment) describe this laptop on 2026-10-27.
+- Round 1 additions use values the reviewer measured on 2026-10-27 (marked [Ver by the reviewer]) and one more
+  docs page, REST "rule suites" (https://docs.github.com/en/rest/repos/rule-suites, `time_period`,
+  `rule_suite_result`). No further `gh api` call was made in round 1.
+
+## 10. Review round 1 (2026-10-27): the author's answers
+
+The reviewer's findings DC-R-1 to DC-R-13 on `de1798a`. Each line says what changed; **only the reviewer closes a
+finding** (`docs/REVIEW_PROTOCOL.md`).
+
+| ID | Change made |
+|---|---|
+| DC-R-1 | §1 step-3 finding adds the probe-push risk. §4 rules: every probe push resets the helper chain (`-c credential.helper=` then a token-only helper), `GIT_TERMINAL_PROMPT=0`, a refusal control (variable unset or a revoked token must fail), and an identity check (trace shows only that helper; pusher and PR author `dentaledge-bot`). T1's push row points to these rules |
+| DC-R-2 | T2 gives an inert template (`on: workflow_dispatch`, one no-op step, unique id), reused by probe (g) |
+| DC-R-3 | §4 rules: every probe ruleset targets only `refs/heads/p0-10-probe/base`, every classic rule only that pattern; created Disabled, target read back, then Active. T5 states its target. Cleanup deletes rulesets and the classic rule before branches; the final re-read checks that only `main-protection` remains and `main` has no classic rule |
+| DC-R-4 | Q1 logging, the §1 summary and the comparison table: A has no per-merge org audit-log event; bypasses only in rule insights and the rule-suites API (`time_period` up to `month`); the measure is harvested at least monthly |
+| DC-R-5 | T4 adds the owner-authored PR rows (success merges via the PR-only bypass; failure refused) and `merge-async` to the bot-refusal row (also in T5) |
+| DC-R-6 | §1: "probe (e) … will test"; seat sentence quotes the docs without "only" and is [Inf]; `public_repo` "should be enough" [Inf, pending T1]. T4 owner-merge row is [Inf]. §6 and S20 rows adjusted |
+| DC-R-7 | T0 and T3: `codeowners/errors: []` rules out syntax errors only; T3's owner-authored-PR row (`REVIEW_REQUIRED`) decides code-owner recognition |
+| DC-R-8 | §2 adds `required_review_thread_resolution: true` and `require_extra_approval_for_unattributed_changes: true` (Copilot-only, quoted); `probe-checks` mirrors thread resolution |
+| DC-R-9 | §2 and Q8 cite PR #4 `author_association: "COLLABORATOR"` and public `GET /branches/main` `protection.enabled: false` [Inf] |
+| DC-R-10 | Q1: the 2026-07-23 report is described as a ruleset with review rules and an App bypass, not "Restrict updates" |
+| DC-R-11 | Q1 (B) quotes the custom-role exemption; owner check 5 lists custom roles with "bypass branch protections" |
+| DC-R-12 | Q6 and owner check 10 use `security find-internet-password -s github.com` without `-w`/`-g`; the helper `get` is no longer suggested. §4 rules say how the token enters (`read -rs` in a subshell, never on a command line, in history, or exported in a shell that launches `claude`) |
+| DC-R-13 | §1 token bullet: `repo` is the coordinator's OC-1 wording (S6:401-404); `public_repo` stays a recommendation; adopting it needs S5 step 2 (and S5 §2.3 item 1, S6 D-13/OC-1) amended. §7 fallback wording matches |
