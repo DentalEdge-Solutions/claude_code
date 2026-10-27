@@ -37,6 +37,13 @@ const EXCLUDED_PREFIXES = [
 ];
 // Dated eval reports (SKILL-EVAL.md, <agent>-EVAL.md, SKILL-REFINE-LOG.md): each records one past run.
 const EXCLUDED_BASENAME = /-EVAL\.md$|-REFINE-LOG\.md$/;
+// Single files, by exact path, each pinned to the number of lines that may name the retired agent. The brain's record
+// of the retirement itself, promoted 2026-10-27: it must name the agent so a later session can find why it went. Like
+// canon, it changes only through brain-promote --approve. Every other brain file is still checked. The count works
+// like the README pin (PR4-R-1): a line added to the file that names the agent fails the test below (BR-R-1).
+const EXCLUDED_FILES = {
+  '.project-brain/decisions/active/2026-10-24-p0-04-claude-md-evals-rule-amended-option-1-2026-10-24.md': 5,
+};
 // One allowed line, not a file: the README's manual cleanup for targets that already have the agent installed
 // (uninstall.sh discovers agents from this repo, so it cannot remove a file the repo no longer has). It must name the
 // file to delete. The whole line must be equal (PR4-R-1: a substring match let a second reference ride on it), and
@@ -56,6 +63,7 @@ function classify(rel, line) {
 
 function excluded(rel) {
   if (rel === SELF) return true;
+  if (Object.hasOwn(EXCLUDED_FILES, rel)) return true;
   if (EXCLUDED_PREFIXES.some(p => rel.startsWith(p))) return true;
   return EXCLUDED_BASENAME.test(path.posix.basename(rel));
 }
@@ -110,10 +118,22 @@ test('no tracked file outside the exclusions names skill-guardian or PROJECT-SKI
 
 test('the exclusions are narrow: they do not cover live definitions, docs or install scripts', () => {
   for (const f of ['README.md', 'docs/USER-GUIDE.md', 'install.sh', 'CLAUDE.md', '.claude/agents/skill-scout-agent.md',
-    'skills/project-audit/SKILL.md', 'evals/.gitignore']) {
+    'skills/project-audit/SKILL.md', 'evals/.gitignore',
+    '.project-brain/decisions/active/2026-10-26-brain-guard-fails-closed-supersedes-the-p11-fail-open-policy.md',
+    '.project-brain/decisions/candidates/x.md', '.project-brain/decisions/superseded/x.md', '.project-brain/BRAIN.md']) {
     assert.ok(!excluded(f), `${f} must be checked`);
   }
   assert.ok(excluded('skills/agent-refine/SKILL-EVAL.md') && excluded('skills/skill-adapt/SKILL-REFINE-LOG.md'));
+});
+
+// BR-R-1: each single-file exclusion stays tracked and names the agent on exactly its pinned number of lines, so a
+// line added later cannot ride on the exclusion, and a moved or renamed file fails here instead of going unchecked.
+test('each single-file exclusion is tracked and names the agent on exactly its pinned number of lines', () => {
+  for (const [rel, pinned] of Object.entries(EXCLUDED_FILES)) {
+    assert.ok(files.includes(rel), `${rel} is no longer tracked: remove or move its exclusion`);
+    const n = fs.readFileSync(path.join(REPO, rel), 'utf8').split('\n').filter(l => RETIRED.test(l)).length;
+    assert.strictEqual(n, pinned, `${rel}: ${n} lines name the retired agent, ${pinned} pinned`);
+  }
 });
 
 // PR4-R-1: the allowance covers that one README line exactly. Extra text on it that names the agent, or the same
