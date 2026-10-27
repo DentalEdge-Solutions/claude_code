@@ -37,6 +37,12 @@ const EXCLUDED_PREFIXES = [
 ];
 // Dated eval reports (SKILL-EVAL.md, <agent>-EVAL.md, SKILL-REFINE-LOG.md): each records one past run.
 const EXCLUDED_BASENAME = /-EVAL\.md$|-REFINE-LOG\.md$/;
+// Single files, by exact path. The brain's record of the retirement itself, promoted 2026-10-27: it must name the
+// agent so a later session can find why it went. Like canon, it changes only through brain-promote --approve. Every
+// other active decision is still checked.
+const EXCLUDED_FILES = [
+  '.project-brain/decisions/active/2026-10-24-p0-04-claude-md-evals-rule-amended-option-1-2026-10-24.md',
+];
 // One allowed line, not a file: the README's manual cleanup for targets that already have the agent installed
 // (uninstall.sh discovers agents from this repo, so it cannot remove a file the repo no longer has). It must name the
 // file to delete. The whole line must be equal (PR4-R-1: a substring match let a second reference ride on it), and
@@ -56,6 +62,7 @@ function classify(rel, line) {
 
 function excluded(rel) {
   if (rel === SELF) return true;
+  if (EXCLUDED_FILES.includes(rel)) return true;
   if (EXCLUDED_PREFIXES.some(p => rel.startsWith(p))) return true;
   return EXCLUDED_BASENAME.test(path.posix.basename(rel));
 }
@@ -110,7 +117,9 @@ test('no tracked file outside the exclusions names skill-guardian or PROJECT-SKI
 
 test('the exclusions are narrow: they do not cover live definitions, docs or install scripts', () => {
   for (const f of ['README.md', 'docs/USER-GUIDE.md', 'install.sh', 'CLAUDE.md', '.claude/agents/skill-scout-agent.md',
-    'skills/project-audit/SKILL.md', 'evals/.gitignore']) {
+    'skills/project-audit/SKILL.md', 'evals/.gitignore',
+    '.project-brain/decisions/active/2026-10-26-brain-guard-fails-closed-supersedes-the-p11-fail-open-policy.md',
+    '.project-brain/decisions/candidates/x.md', '.project-brain/BRAIN.md']) {
     assert.ok(!excluded(f), `${f} must be checked`);
   }
   assert.ok(excluded('skills/agent-refine/SKILL-EVAL.md') && excluded('skills/skill-adapt/SKILL-REFINE-LOG.md'));
