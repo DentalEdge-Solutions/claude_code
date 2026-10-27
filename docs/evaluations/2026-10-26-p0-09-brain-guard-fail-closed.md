@@ -119,7 +119,7 @@ from the repository root they find and run the real guard (no substitution is ex
 path, so this is harmless. The root registration's path is asserted to resolve in the checkout that holds the file (the shared-file
 case: a session at the repository root or a worktree root, V2-RS-11).
 
-**Owner probe (pending; the implementer cannot start sessions).** From a terminal, at the repository root of a
+**Owner probe (done 2026-10-27; result below).** From a terminal, at the repository root of a
 checkout that has this change:
 
 ```
@@ -134,6 +134,21 @@ status 0`; the last command prints the folder the session's `CLAUDE_PROJECT_DIR`
 Bash tool (if it prints an empty line, the value is visible only to hooks: then add `echo "$1" >&2;` at the start of the
 launcher's script for one probe run and read the `Hooks:` debug line instead, and revert). Record: which folder the
 variable names in a session started in `infra/hermes-agent/`.
+
+**Result (owner, 2026-10-27, on the laptop at `592d0c2`):**
+
+- **Coverage works.** The `ls` output was printed, and the debug log's `Hooks: PreToolUse:Bash [bash -c … brain-guard-launcher
+  ${CLAUDE_PROJECT_DIR}]` line ends `finished with status 0`: the launcher walked up, found the guard and allowed the
+  call. A fixed `${CLAUDE_PROJECT_DIR}/hooks/brain/…` path would have blocked every call there; option (c) holds.
+- **What the variable names.** In a session started in `infra/hermes-agent/`, hooks see the **subfolder**, not the
+  repository root: a SessionEnd hook error printed `…/claude_code/infra/hermes-agent/hooks/brain/brain-session-end.sh`.
+  The Bash tool's shell does not receive the variable (the `echo` printed an empty line), so the value comes from that
+  hook error; the launcher edit described above was not needed.
+- **Side finding (pre-existing, not from this change).** The four other brain hooks registered in the owner's local
+  settings (`brain-load`, `brain-session-end`, `brain-pre-compact`, `brain-post-lint`) use a fixed
+  `$CLAUDE_PROJECT_DIR/hooks/brain/` path. In sessions started in `infra/hermes-agent/` they fail open with "No such
+  file or directory": no brain load at start, no capture at the end. Nothing is blocked. Follow-up: give them the same
+  walk-up launcher as the guard.
 
 ## Hermes (OC-4, shared with P0-07): from the repository files only
 
@@ -166,6 +181,22 @@ or `blocking because onFailure is "block"` text in its output. **Checklist / rev
 that the root project settings now carry a fail-closed PreToolUse hook that loads in executor runs, and the Hermes
 checklist should gain "bash and node on `PATH` in the gateway image" (not edited here: the checklist lives under
 `infra/hermes-agent/bin/`, out of scope).
+
+**Result (owner, 2026-10-27, on the box).** Run from `/opt/projects/claude_code/infra/hermes-agent` with `sudo docker
+compose` (the box's `.env` is root `600`; from the home folder compose finds no configuration file):
+
+- **The guard can start there.** Inside the container, `bash` is `/usr/bin/bash` and `node --version` prints `v26.5.1`
+  (the container's `sh` printed only the first `command -v` argument, but `node` ran). The "bash not provable from the
+  repository" risk in point 4 is resolved: once the box has this change, exec form can start the guard.
+- **The box does not have this change yet.** Its checkout is at `20a2e7c` (PR #125, merged 2026-10-14), 62 merged PRs
+  behind `main` at the time, 13 of them touching files under `infra/hermes-agent/`. Its guard file is the September
+  version (3,263 bytes) and its root settings carry neither this registration nor the P0-07 ask rules, so executor
+  runs on the box still use the old fail-open guard. The risk meanwhile is low: those runs are plan mode with Read,
+  Grep and Glob, and the repository mount is read-only.
+- **Deferred (coordinator recommendation, not yet scheduled):** the box is updated through the Hermes checklist as part
+  of security review #12, not ad hoc for this probe. The probe's last step, one scheduled proposer run with no `hook error` or `blocking because
+  onFailure is "block"` text, follows that update, and the checklist gains "bash and node on `PATH` in the gateway
+  image".
 
 ## Old local registration (owner action)
 
@@ -466,23 +497,28 @@ The reviewer approves; no blocking finding. No guard code changed in this round.
 
 ## Owner actions
 
-1. Remove the old local fail-open guard registration (above).
+1. Remove the old local fail-open guard registration (above) — done 2026-10-26 (`brain-self-install.sh` removed one
+   old registration from the local settings).
 2. Deploy `brain-weekly-review` after merge: `cp -R skills/brain-weekly-review/. ~/.claude/skills/brain-weekly-review/`,
-   then `node scripts/check-skill-deploy.js`.
-3. The `$CLAUDE_PROJECT_DIR` probe from `infra/hermes-agent/` (above) — pending.
-4. The Hermes box probe for review #12 (above) — pending.
+   then `node scripts/check-skill-deploy.js` — done 2026-10-26 (all skills match).
+3. The `$CLAUDE_PROJECT_DIR` probe from `infra/hermes-agent/` (above) — done 2026-10-27.
+4. The Hermes box probe for review #12 (above) — partly done 2026-10-27: bash and node confirmed; the proposer run waits
+   for the box update in security review #12.
 5. Over the 14 days after merge: `grep -c 'failing open' .project-brain/reports/guard-failures.log` must not grow (the
    guard no longer writes it); any new "fails closed" line is a real failure to look at.
-6. Record the superseding decision through capture → compile → `brain-promote --approve` (Reversal stated).
+6. Record the superseding decision through capture → compile → `brain-promote --approve` (Reversal stated) — done
+   2026-10-27 on the owner's verdict (PR #183); the 2026-10-21 decision's status is updated at the weekly review.
 7. Re-run `bash scripts/brain/brain-self-install.sh` in any target project installed before this change (or
    `install.sh --with-second-brain`), and commit its `hooks/brain/` with the new `settings.json` entry.
 
 ## Not measured
 
-- A live session with the new registration (the implementer's own session runs the main checkout's guard and local
-  settings); the `onFailure` behaviour itself is documented (H1) and the script's exit codes are tested, but no
-  Claude Code process was observed blocking on them here.
-- The subdirectory and Hermes probes above.
+- `onFailure: "block"` in a live session: documented (H1) and the script's exit codes are tested, but no Claude Code
+  process has been observed blocking because the guard itself failed. Observed since merge (2026-10-26/27): the
+  registration loads in the coordinator's live session, where the guard denied several commands (a promote with a
+  chained `echo`, loops building brain paths from a variable, a redirect next to a canon read, a heredoc append naming
+  an active decision), and in the owner's subfolder probe (status 0).
+- The box's proposer run with the new guard (Check B's last step): waits for the box update in security review #12.
 - `bash -n` was run through `node` (`child_process.spawnSync('bash', ['-n', …])`): the worktree isolation layer refuses
   a direct `bash` call. Same check, different launcher.
 - skill-eval of brain-weekly-review after the step change — P1-10 (B6).
