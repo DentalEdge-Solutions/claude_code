@@ -1524,7 +1524,11 @@ The gate for real credentials and for any app code on the box is the **security 
 laptop; they change nothing a review looks at, but the box one is not read-only: it runs the two
 `run-client-audit` probes, which take the audit lock, start containers and make one outbound
 CONNECT), an independent reviewer (`deploy/security-review/REVIEWER-BRIEF.md`), and the
-operator's sign-off. A trial collection is read through `bin/summarize-review-bundle.py`, which lists every item with its status and prints counts, times and short words only. The collection is run with `sudo`. The box keeps 35 days of journal by a settings file of its own (`deploy/journald-hermes-retention.conf`, finding F58; `deploy/BRING-UP.md`, "The journal's retention"); review item D2.4 reports how far back the journal reaches. Raw bundles live in the gitignored `security-reviews/`; only the report
+operator's sign-off. The laptop collector's D3 audit runs in a Docker container: in bundle mode
+it checks first that Docker Desktop answers and otherwise stops with exit code 3, writing nothing;
+a bundle whose D3.1, or whose requested D6.3, is `could-not-check` is written but ends with exit
+code 4 (`--access-digest` keeps its exit code 2 for every failure). Its docstring and BRING-UP's
+laptop collection step list every exit code, 0 to 4. A trial collection is read through `bin/summarize-review-bundle.py`, which lists every item with its status and prints counts, times and short words only. The collection is run with `sudo`. The box keeps 35 days of journal by a settings file of its own (`deploy/journald-hermes-retention.conf`, finding F58; `deploy/BRING-UP.md`, "The journal's retention"); review item D2.4 reports how far back the journal reaches. Raw bundles live in the gitignored `security-reviews/`; only the report
 is committed. A PASS binds to a box fingerprint; any trigger (§5) voids it.
 
 App code reaches the box as a **package**: the registry allow-lists' files plus

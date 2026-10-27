@@ -10,6 +10,30 @@ D3: runs audit-credential-access.sh --all --customer, keeps the AUDIT's own exit
 pipe would hide it — found 2026-09-26), and DISCARDS stderr, where the Google Ads SDK logs
 raw account ids (a D9 item). D6: rebuilds the package from the verified commit and reports
 its hash. Customer ids are redacted from everything printed.
+
+The audit runs in a Docker container ON THE LAPTOP. Before it, a pre-flight asks the Docker
+daemon (`docker info`, its output discarded, at most DOCKER_INFO_TIMEOUT seconds). Found
+2026-10-14: with Docker Desktop off the collector used to exit 0 with D3.1 could-not-check.
+
+The three --package-* arguments go together: all three (D6.3 is built and hashed) or none.
+With none, D6.3 is could-not-check ("no --package-* arguments") and the exit code stays 0, so
+the exit code alone does not show it: a review collection always passes all three. One or two
+of them is a usage error.
+
+Exit codes, bundle mode:
+  exit 0  the bundle is written, D3.1 is observed, and D6.3 is observed or was not asked for
+  exit 1  --customer is not digits; nothing written
+  exit 2  a usage error (argparse's own, or one or two of the --package-* arguments), the
+          review key cannot be used, or the output file cannot be made owner-only; nothing
+          written
+  exit 3  Docker is not reachable: one stderr line names the cause and the fix; the audit
+          does not run and nothing is written
+  exit 4  the bundle IS written, but an item is could-not-check: D3.1 (the audit gave no
+          document) or D6.3 (the package build failed, with the --package-* arguments given).
+          One stderr line per such item, fixed words only; do not use that bundle
+--access-digest: exit 0 with the digest on stdout; otherwise exit 2 with `could-not-check` (or
+the digest of an audit that did not exit 0) on stdout and one stderr line saying why — Docker
+not reachable, no audit document, or the audit's own non-zero exit code.
 """
 import argparse, hashlib, importlib.util, json, os, stat, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +41,47 @@ sys.path.insert(0, HERE)
 import review_lib as R
 
 AUDIT_SH = os.path.join(os.path.dirname(HERE), "audit-credential-access.sh")
+PROG = "collect-review-evidence-laptop"
+DOCKER_INFO_TIMEOUT = 15            # seconds; Docker Desktop answers in well under that once up
+EXIT_DOCKER_DOWN = 3                # nothing written
+EXIT_INCOMPLETE = 4                 # bundle written, an item could-not-check
+PACKAGE_ARGS = ("package_project", "package_repo", "package_commit")
+# A failed package build's message carries the repository's path, git's own stderr, or the
+# names of files: never printed, never put in the bundle (it goes to the reviewer). Each known
+# message maps to fixed words; anything else is the last, generic reason.
+PACKAGE_GIT_FAILED = "a git command in the package repository failed"     # build-app-package._git
+PACKAGE_REASONS = (
+    ("--commit must be a full 40-hex commit sha", "--package-commit is not a full 40-hex commit sha"),
+    (" HEAD is ", "the package repository is not checked out at --package-commit"),
+    ("tracked files are modified", "tracked files are modified in the package repository"),
+    ("customer-id-shaped number", "a packaged doc holds a customer-id-shaped number"),
+)
+PACKAGE_FAILED = "the package build failed"
+
+
+def package_reason(exc):
+    """Fixed words for a failed package build; never the exception's own text."""
+    if not isinstance(exc, ValueError):
+        return PACKAGE_FAILED
+    text = str(exc)
+    if text.startswith("git ") and " failed: " in text:
+        return PACKAGE_GIT_FAILED
+    return next((reason for marker, reason in PACKAGE_REASONS if marker in text), PACKAGE_FAILED)
+
+
+def docker_problem(timeout=DOCKER_INFO_TIMEOUT):
+    """None when the Docker daemon answers `docker info`; otherwise a fixed reason. Docker's own
+    output is discarded, never relayed: only these fixed words are ever printed."""
+    try:
+        p = subprocess.run(["docker", "info"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=timeout)
+    except FileNotFoundError:
+        return "the docker command was not found"
+    except subprocess.TimeoutExpired:
+        return f"Docker did not answer within {timeout}s"
+    except OSError:
+        return "the docker command could not be started"
+    return None if p.returncode == 0 else "Docker is not running"
 
 
 def parse_audit(stdout):
@@ -85,8 +150,11 @@ def main(argv=None):
     ap.add_argument("--package-project"); ap.add_argument("--package-repo"); ap.add_argument("--package-commit")
     ap.add_argument("--fp-key-file", default=os.path.expanduser("~/.config/hermes-review/fp.key"))
     a = ap.parse_args(argv)
+    given = [n for n in PACKAGE_ARGS if getattr(a, n)]
+    if given and len(given) != len(PACKAGE_ARGS):            # review round 1, LC-R-1: all or none
+        ap.error("--package-project, --package-repo and --package-commit go together: give all three, or none")
     if not a.customer.isdigit():
-        print("collect-review-evidence-laptop: --customer must be digits", file=sys.stderr)
+        print(f"{PROG}: --customer must be digits", file=sys.stderr)
         return 1
     key = None
     if not a.access_digest:                                  # the digest carries no cids
@@ -98,28 +166,56 @@ def main(argv=None):
                                      "(no group or other access): chmod 600 it")
                 key = R.load_fp_key(f.read())
         except (OSError, ValueError) as e:
-            print(f"collect-review-evidence-laptop: cannot use the review key: {e}", file=sys.stderr)
+            print(f"{PROG}: cannot use the review key: {e}", file=sys.stderr)
             return 2
+    problem = docker_problem()
+    if problem:
+        print(f"{PROG}: {problem}: start Docker Desktop, then re-run (D3.1 runs the credential audit "
+              f"in a Docker container); the audit did not run"
+              + ("" if a.access_digest else ", nothing written"), file=sys.stderr)
+        if a.access_digest:
+            print(R.COULD_NOT_CHECK)                         # stdout as before: a digest or this word
+            return 2
+        return EXIT_DOCKER_DOWN
     audit = run_audit(a.customer, key)
     if a.access_digest:
         print(audit.get("digest", R.COULD_NOT_CHECK))
-        return 0 if "digest" in audit and audit["rc"] == 0 else 2
+        if "digest" not in audit:
+            print(f"{PROG}: no access digest: D3.1 could not be checked: {audit[R.COULD_NOT_CHECK]} "
+                  f"(the audit exited {audit['rc']})", file=sys.stderr)
+            return 2
+        if audit["rc"] != 0:
+            print(f"{PROG}: the audit exited {audit['rc']}, not 0: this digest does not certify the access "
+                  "(3 = a declared role and its measured access disagree)", file=sys.stderr)
+            return 2
+        return 0
     items = {"D3.1": {"status": R.OBSERVED if "digest" in audit else R.COULD_NOT_CHECK, "data": audit}}
-    if a.package_project and a.package_repo and a.package_commit:
+    incomplete = []                                          # fixed words only, one line per item
+    if "digest" not in audit:
+        incomplete.append(f"D3.1 could not be checked: {audit[R.COULD_NOT_CHECK]} (the audit exited "
+                          f"{audit['rc']}); the bundle is incomplete: do not use it; Docker answered, so check "
+                          "that .env.ga (and .env.gaw, if it is authorised) is next to audit-credential-access.sh "
+                          "and that `docker compose` works, then collect again")
+    if given:
         try:
             items["D6.3"] = {"status": R.OBSERVED,
                              "data": package_hash(a.package_project, a.package_repo, a.package_commit)}
         except (ValueError, OSError) as e:
-            items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": str(e)}
-    else:
+            reason = package_reason(e)                       # never str(e): paths, git stderr, file names
+            items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": reason}
+            incomplete.append(f"D6.3 could not be checked: {PACKAGE_FAILED}: {reason}; the bundle is incomplete: "
+                              "do not use it; python3 bin/build-app-package.py for the same project, repository and "
+                              "commit shows why; fix the cause and collect again")
+    else:                                                    # documented: not asked for, exit 0
         items["D6.3"] = {"status": R.COULD_NOT_CHECK, "reason": "no --package-* arguments"}
     if not R.restrict_output(sys.stdout):
-        print("collect-review-evidence-laptop: the output file could not be made owner-only: nothing written",
-              file=sys.stderr)
+        print(f"{PROG}: the output file could not be made owner-only: nothing written", file=sys.stderr)
         return 2
     print(json.dumps({"schema": 1, "kind": "laptop", "collected_at": R.utc_now(),
                       "cid_fingerprint": "hmac-sha256/12", "cid_key_id": R.key_id(key), "items": items}, indent=2, sort_keys=True))
-    return 0
+    for line in incomplete:                                  # written, as the evidence; but never quietly
+        print(f"{PROG}: {line}", file=sys.stderr)
+    return EXIT_INCOMPLETE if incomplete else 0
 
 
 if __name__ == "__main__":
