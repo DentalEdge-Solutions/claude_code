@@ -70,6 +70,10 @@ class TestMain(unittest.TestCase):
         with open(self.keyfile, "w") as f:
             f.write(KEY_HEX + "\n")
         os.chmod(self.keyfile, 0o600)                            # as review-fp-key.py creates it
+        # Docker is up for every test of this class: the pre-flight has its own class below.
+        docker = mock.patch.object(L, "docker_problem", return_value=None)
+        docker.start()
+        self.addCleanup(docker.stop)
 
     def test_key_file_sets_cid_key_id(self):
         fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
@@ -262,6 +266,178 @@ projects:
 
         self.assertIn("path", captured)                          # control: it was used
         self.assertFalse(os.path.exists(captured["path"]))
+
+
+CID = "1234567890"
+# What the audit leaves with Docker Desktop off (audit-credential-access.sh --all): its own
+# separator lines on stdout, no document, and `docker compose`'s refusal on stderr. The stderr
+# here carries a customer id on purpose: nothing of it may reach any output.
+NO_DOCS_STDOUT = "===== .env.ga =====\n===== .env.gaw =====\n"
+NO_DOCS_STDERR = (f"Cannot connect to the Docker daemon at unix:///x/docker.sock. Is the docker daemon running?\n"
+                  f"Request made: ClientCustomerId: {CID} STDERR-MARKER\n")
+
+
+class TestDockerProblem(unittest.TestCase):
+    """docker_problem(): the pre-flight itself, with subprocess faked (no real Docker)."""
+
+    def test_reachable_daemon_is_no_problem_and_the_check_prints_nothing(self):
+        with mock.patch.object(L.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+            self.assertIsNone(L.docker_problem())
+        run.assert_called_once()
+        args, kw = run.call_args
+        self.assertEqual(args[0], ["docker", "info"])
+        for stream in ("stdin", "stdout", "stderr"):           # nothing of Docker's own output is shown
+            self.assertIs(kw.get(stream), L.subprocess.DEVNULL, stream)
+        self.assertEqual(kw.get("timeout"), L.DOCKER_INFO_TIMEOUT)
+        self.assertLessEqual(L.DOCKER_INFO_TIMEOUT, 30)          # short: the pre-flight must not hang
+
+    def test_unreachable_daemon_says_docker_is_not_running(self):
+        with mock.patch.object(L.subprocess, "run", return_value=mock.Mock(returncode=1)):
+            self.assertEqual(L.docker_problem(), "Docker is not running")
+
+    def test_missing_docker_command_and_a_hang_are_problems(self):
+        with mock.patch.object(L.subprocess, "run", side_effect=FileNotFoundError("docker")):
+            self.assertIn("not found", L.docker_problem())
+        with mock.patch.object(L.subprocess, "run",
+                               side_effect=L.subprocess.TimeoutExpired(["docker", "info"], L.DOCKER_INFO_TIMEOUT)):
+            self.assertIn("did not answer", L.docker_problem())
+        with mock.patch.object(L.subprocess, "run", side_effect=PermissionError("docker")):
+            self.assertIsNotNone(L.docker_problem())
+
+
+class TestLoudFailures(unittest.TestCase):
+    """The 2026-10-14 trap: Docker Desktop off, D3.1 could-not-check, and the collector exited 0."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.keyfile = os.path.join(self.tmp.name, "fp.key")
+        with open(self.keyfile, "w") as f:
+            f.write(KEY_HEX + "\n")
+        os.chmod(self.keyfile, 0o600)
+
+    def _main(self, argv, docker=None, audit=None):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(L, "docker_problem", return_value=docker) as dp, \
+                mock.patch.object(L.subprocess, "run", return_value=audit) as run, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = L.main(argv)
+        return rc, out.getvalue(), err.getvalue(), dp, run
+
+    def _assert_nothing_sensitive(self, *texts):
+        for text in texts:
+            self.assertNotIn(CID, text)
+            self.assertNotIn("STDERR-MARKER", text)
+            self.assertNotIn("Cannot connect", text)               # the audit's stderr is never relayed
+            self.assertNotIn(KEY_HEX, text)
+
+    def test_exit_codes_are_distinct_from_the_existing_ones(self):
+        codes = {L.EXIT_DOCKER_DOWN, L.EXIT_D31_INCOMPLETE}
+        self.assertEqual(len(codes), 2)
+        self.assertFalse(codes & {0, 1, 2})                      # 1 bad --customer, 2 key/output/argparse
+
+    def test_docker_down_refuses_before_the_audit_and_writes_no_bundle(self):
+        rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file", self.keyfile],
+                                           docker="Docker is not running")
+        self.assertEqual(rc, L.EXIT_DOCKER_DOWN)
+        self.assertEqual(out, "")                                # no bundle: nothing to set aside
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("collect-review-evidence-laptop:", err)
+        self.assertIn("Docker is not running: start Docker Desktop, then re-run", err)
+        dp.assert_called_once()
+        run.assert_not_called()                                  # the audit never ran
+        self._assert_nothing_sensitive(out, err)
+
+    def test_the_review_key_is_checked_before_docker(self):
+        rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file",
+                                            os.path.join(self.tmp.name, "absent.key")],
+                                           docker="Docker is not running")
+        self.assertEqual(rc, 2)
+        dp.assert_not_called()
+
+    def test_docker_up_but_no_audit_documents_writes_the_bundle_and_fails_loudly(self):
+        fake = mock.Mock(returncode=1, stdout=NO_DOCS_STDOUT, stderr=NO_DOCS_STDERR)
+        rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file", self.keyfile], audit=fake)
+        self.assertEqual(rc, L.EXIT_D31_INCOMPLETE)
+        bundle = json.loads(out)                                 # still written: it is the evidence
+        self.assertEqual(bundle["items"]["D3.1"]["status"], R.COULD_NOT_CHECK)
+        self.assertEqual(bundle["items"]["D3.1"]["data"]["rc"], 1)
+        self.assertEqual(bundle["items"]["D3.1"]["data"]["stderr_lines_discarded"], 2)
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("D3.1 could not be checked: no audit documents in the output", err)
+        self.assertIn("the bundle is incomplete", err)
+        self.assertIn("exited 1", err)
+        self._assert_nothing_sensitive(out, err)
+
+    def test_normal_path_is_unchanged(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr=f"Request made: ClientCustomerId: {CID} STDERR-MARKER\n")
+        rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file", self.keyfile], audit=fake)
+        self.assertEqual((rc, err), (0, ""))
+        bundle = json.loads(out)
+        self.assertEqual(bundle["items"]["D3.1"]["status"], R.OBSERVED)
+        self.assertEqual(bundle["items"]["D3.1"]["data"]["digest"], L.access_digest(L.parse_audit(AUDIT)))
+        # D6.3 without --package-* stays could-not-check and does NOT fail the run.
+        self.assertEqual(bundle["items"]["D6.3"], {"status": R.COULD_NOT_CHECK, "reason": "no --package-* arguments"})
+        dp.assert_called_once()
+        run.assert_called_once()
+        self._assert_nothing_sensitive(out, err)
+
+    def test_access_digest_docker_down(self):
+        rc, out, err, dp, run = self._main(["--customer", CID, "--access-digest"], docker="Docker is not running")
+        self.assertEqual(rc, 2)                                  # the digest mode's contract: 0 or 2
+        self.assertEqual(out.strip(), R.COULD_NOT_CHECK)
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("Docker is not running: start Docker Desktop, then re-run", err)
+        run.assert_not_called()
+        self._assert_nothing_sensitive(out, err)
+
+    def test_access_digest_docker_up_but_no_documents(self):
+        fake = mock.Mock(returncode=1, stdout=NO_DOCS_STDOUT, stderr=NO_DOCS_STDERR)
+        rc, out, err, dp, run = self._main(["--customer", CID, "--access-digest"], audit=fake)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out.strip(), R.COULD_NOT_CHECK)
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("no access digest", err)
+        self.assertIn("D3.1 could not be checked: no audit documents in the output", err)
+        self._assert_nothing_sensitive(out, err)
+
+    def test_access_digest_nonzero_audit_rc_says_why(self):
+        fake = mock.Mock(returncode=3, stdout=AUDIT, stderr=NO_DOCS_STDERR)
+        rc, out, err, dp, run = self._main(["--customer", CID, "--access-digest"], audit=fake)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out.strip(), L.access_digest(L.parse_audit(AUDIT)))   # stdout as before
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("exited 3", err)
+        self._assert_nothing_sensitive(out, err)
+
+    def test_access_digest_normal_path_prints_nothing_on_stderr(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr=NO_DOCS_STDERR)
+        rc, out, err, dp, run = self._main(["--customer", CID, "--access-digest"], audit=fake)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(out.strip(), L.access_digest(L.parse_audit(AUDIT)))
+
+
+class TestRunbookNamesTheExitCodes(unittest.TestCase):
+    """BRING-UP's laptop collection step and the module docstring must state what the code does:
+    the 2026-10-14 runbook text said the collector 'still ends with exit code 0'."""
+
+    def _laptop_step(self):
+        with open(os.path.join(os.path.dirname(HERE), "deploy", "BRING-UP.md"), encoding="utf-8") as f:
+            text = f.read()
+        anchor = "D3.1 runs the credential audit in a Docker container ON THE LAPTOP"
+        self.assertIn(anchor, text)
+        start = text.index(anchor)
+        return text[start:text.index("\n", start)]
+
+    def test_bring_up_laptop_step(self):
+        step = self._laptop_step()
+        self.assertNotIn("still ends with exit code 0", step)
+        self.assertIn(f"exit code {L.EXIT_DOCKER_DOWN}", step)
+        self.assertIn(f"exit code {L.EXIT_D31_INCOMPLETE}", step)
+
+    def test_module_docstring(self):
+        self.assertIn(f"exit {L.EXIT_DOCKER_DOWN}", L.__doc__)
+        self.assertIn(f"exit {L.EXIT_D31_INCOMPLETE}", L.__doc__)
 
 
 if __name__ == "__main__":
