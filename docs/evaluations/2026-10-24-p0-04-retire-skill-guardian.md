@@ -176,7 +176,9 @@ has to name the agent, so the acceptance test failed on CI (run 40430562749, com
   reference to use the agent: an independent review read every line and found no guidance to use it. Like canon, the
   file changes only through `brain-promote --approve` (a local hook, not enforced by CI).
 - **Pinned, like the README line:** the test requires the file to stay tracked and to name the agent on exactly 5
-  lines (review BR-R-1). A line added later, a line removed, or the file moved or renamed fails the test.
+  lines (review BR-R-1). A line added later, a line removed, or the file moved or renamed fails the test. Known
+  limit (BR-R-6): a rewording that keeps 5 lines naming the agent is not caught; the file changes only through
+  `brain-promote`, where a human reviews each change.
 - **Not excluded:** every other brain file. The narrowness test asserts that another active decision, a candidate, a
   superseded file and `BRAIN.md` are still checked; superseded files also reach agents through `brain-context-pack.js`.
 - **Rejected alternatives:** rewording the decision without the name (it would no longer be found by the agent's name,
