@@ -169,14 +169,24 @@ class TestMain(unittest.TestCase):
         self.assertRegex(json.loads(buf.getvalue())["collected_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
     def test_package_items_need_all_three_args(self):
+        # Review round 1, LC-R-1: one or two of the three is a usage error (exit 2), never a
+        # bundle with D6.3 quietly could-not-check.
         fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
-        with mock.patch.object(L.subprocess, "run", return_value=fake):
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                rc = L.main(["--customer", "1234567890", "--package-project", "p", "--fp-key-file", self.keyfile])
-            bundle = json.loads(buf.getvalue())
-            self.assertEqual(bundle["items"]["D6.3"]["status"], R.COULD_NOT_CHECK)
-            self.assertIn("no --package-* arguments", bundle["items"]["D6.3"]["reason"])
+        given = {"--package-project": "p", "--package-repo": "/r", "--package-commit": "a" * 40}
+        import itertools
+        for n in (1, 2):
+            for names in itertools.combinations(given, n):
+                args = [x for name in names for x in (name, given[name])]
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(L.subprocess, "run", return_value=fake) as run, \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                        self.assertRaises(SystemExit) as cm:
+                    L.main(["--customer", "1234567890", "--fp-key-file", self.keyfile, *args])
+                with self.subTest(names=names):
+                    self.assertEqual(cm.exception.code, 2)
+                    self.assertEqual(out.getvalue(), "")
+                    self.assertIn("--package-project, --package-repo and --package-commit", err.getvalue())
+                    run.assert_not_called()
 
     def test_package_hash_reports_build_output(self):
         # Create a real temp git repo with registry
@@ -332,7 +342,7 @@ class TestLoudFailures(unittest.TestCase):
             self.assertNotIn(KEY_HEX, text)
 
     def test_exit_codes_are_distinct_from_the_existing_ones(self):
-        codes = {L.EXIT_DOCKER_DOWN, L.EXIT_D31_INCOMPLETE}
+        codes = {L.EXIT_DOCKER_DOWN, L.EXIT_INCOMPLETE}
         self.assertEqual(len(codes), 2)
         self.assertFalse(codes & {0, 1, 2})                      # 1 bad --customer, 2 key/output/argparse
 
@@ -358,7 +368,7 @@ class TestLoudFailures(unittest.TestCase):
     def test_docker_up_but_no_audit_documents_writes_the_bundle_and_fails_loudly(self):
         fake = mock.Mock(returncode=1, stdout=NO_DOCS_STDOUT, stderr=NO_DOCS_STDERR)
         rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file", self.keyfile], audit=fake)
-        self.assertEqual(rc, L.EXIT_D31_INCOMPLETE)
+        self.assertEqual(rc, L.EXIT_INCOMPLETE)
         bundle = json.loads(out)                                 # still written: it is the evidence
         self.assertEqual(bundle["items"]["D3.1"]["status"], R.COULD_NOT_CHECK)
         self.assertEqual(bundle["items"]["D3.1"]["data"]["rc"], 1)
@@ -367,7 +377,76 @@ class TestLoudFailures(unittest.TestCase):
         self.assertIn("D3.1 could not be checked: no audit documents in the output", err)
         self.assertIn("the bundle is incomplete", err)
         self.assertIn("exited 1", err)
+        # LC-R-4: the pre-flight just found Docker up, so the line points elsewhere.
+        self.assertNotIn("Docker Desktop", err)
+        self.assertIn(".env.ga", err)
+        self.assertIn("docker compose", err)
         self._assert_nothing_sensitive(out, err)
+
+    def _package_args(self):
+        return ["--package-project", "p", "--package-repo", "/Users/someone/Projects/ads-repo",
+                "--package-commit", "a" * 40]
+
+    def test_package_build_failure_writes_the_bundle_and_exits_incomplete(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
+        cases = (
+            (ValueError("/Users/someone/Projects/ads-repo HEAD is 0123456789ab, not aaaaaaaaaaaa — check out "
+                        "the verified commit first"), "the package repository is not checked out at --package-commit"),
+            (ValueError("git rev-parse HEAD failed: fatal: not a git repository: /Users/someone/Projects/ads-repo"),
+             "a git command in the package repository failed"),
+            (ValueError("tracked files are modified — refusing; the package must equal the commit"),
+             "tracked files are modified in the package repository"),
+            (ValueError("refusing to package docs holding a customer-id-shaped number: ['/Users/someone/x.md']"),
+             "a packaged doc holds a customer-id-shaped number"),
+            (ValueError("--commit must be a full 40-hex commit sha"),
+             "--package-commit is not a full 40-hex commit sha"),
+            (OSError("[Errno 2] No such file or directory: '/Users/someone/Projects/ads-repo/registry'"),
+             "the package build failed"),
+            (ValueError("something new about /Users/someone"), "the package build failed"),
+        )
+        for exc, reason in cases:
+            with self.subTest(exc=str(exc)), mock.patch.object(L, "package_hash", side_effect=exc):
+                rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file", self.keyfile,
+                                                    *self._package_args()], audit=fake)
+                self.assertEqual(rc, L.EXIT_INCOMPLETE)
+                bundle = json.loads(out)                         # written: D3.1 is good evidence
+                self.assertEqual(bundle["items"]["D3.1"]["status"], R.OBSERVED)
+                self.assertEqual(bundle["items"]["D6.3"], {"status": R.COULD_NOT_CHECK, "reason": reason})
+                self.assertEqual(len(err.splitlines()), 1, err)
+                self.assertIn(f"D6.3 could not be checked: the package build failed: {reason}", err)
+                self.assertIn("the bundle is incomplete", err)
+                for text in (out, err):                          # never str(e): no path reaches the reviewer
+                    self.assertNotIn("/Users/someone", text)
+                    self.assertNotIn("fatal:", text)
+                self._assert_nothing_sensitive(out, err)
+
+    def test_package_build_success_exits_zero(self):
+        fake = mock.Mock(returncode=0, stdout=AUDIT, stderr="")
+        data = {"project": "p", "commit": "a" * 40, "sha256": "f" * 64, "files": 2}
+        with mock.patch.object(L, "package_hash", return_value=data):
+            rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file", self.keyfile,
+                                                *self._package_args()], audit=fake)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(json.loads(out)["items"]["D6.3"], {"status": R.OBSERVED, "data": data})
+
+    def test_d3_1_and_d6_3_both_incomplete_say_both(self):
+        fake = mock.Mock(returncode=1, stdout=NO_DOCS_STDOUT, stderr=NO_DOCS_STDERR)
+        with mock.patch.object(L, "package_hash", side_effect=ValueError("tracked files are modified — refusing")):
+            rc, out, err, dp, run = self._main(["--customer", CID, "--fp-key-file", self.keyfile,
+                                                *self._package_args()], audit=fake)
+        self.assertEqual(rc, L.EXIT_INCOMPLETE)
+        self.assertEqual(len(err.splitlines()), 2, err)
+        self.assertIn("D3.1 could not be checked", err)
+        self.assertIn("D6.3 could not be checked", err)
+        self._assert_nothing_sensitive(out, err)
+
+    def test_every_message_names_the_program(self):
+        # LC-R-8: one spelling for the prefix, from PROG.
+        with open(os.path.join(HERE, "collect-review-evidence-laptop.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertEqual(L.PROG, "collect-review-evidence-laptop")
+        self.assertNotIn('"collect-review-evidence-laptop:', src)
+        self.assertNotIn("'collect-review-evidence-laptop:", src)
 
     def test_normal_path_is_unchanged(self):
         fake = mock.Mock(returncode=0, stdout=AUDIT, stderr=f"Request made: ClientCustomerId: {CID} STDERR-MARKER\n")
@@ -376,7 +455,8 @@ class TestLoudFailures(unittest.TestCase):
         bundle = json.loads(out)
         self.assertEqual(bundle["items"]["D3.1"]["status"], R.OBSERVED)
         self.assertEqual(bundle["items"]["D3.1"]["data"]["digest"], L.access_digest(L.parse_audit(AUDIT)))
-        # D6.3 without --package-* stays could-not-check and does NOT fail the run.
+        # D6.3 without ANY --package-* argument stays could-not-check and does NOT fail the run
+        # (a documented mode: the docstring and BRING-UP say so).
         self.assertEqual(bundle["items"]["D6.3"], {"status": R.COULD_NOT_CHECK, "reason": "no --package-* arguments"})
         dp.assert_called_once()
         run.assert_called_once()
@@ -422,22 +502,35 @@ class TestRunbookNamesTheExitCodes(unittest.TestCase):
     the 2026-10-14 runbook text said the collector 'still ends with exit code 0'."""
 
     def _laptop_step(self):
+        """Step 4 of the review collection: its "4. Laptop:" line and the D3.1 line after it."""
         with open(os.path.join(os.path.dirname(HERE), "deploy", "BRING-UP.md"), encoding="utf-8") as f:
             text = f.read()
         anchor = "D3.1 runs the credential audit in a Docker container ON THE LAPTOP"
         self.assertIn(anchor, text)
-        start = text.index(anchor)
-        return text[start:text.index("\n", start)]
+        at = text.index(anchor)
+        start = text.rindex("\n4. Laptop: ", 0, at) + 1
+        return text[start:text.index("\n", at)]
 
     def test_bring_up_laptop_step(self):
         step = self._laptop_step()
         self.assertNotIn("still ends with exit code 0", step)
-        self.assertIn(f"exit code {L.EXIT_DOCKER_DOWN}", step)
-        self.assertIn(f"exit code {L.EXIT_D31_INCOMPLETE}", step)
+        for code in (1, 2, L.EXIT_DOCKER_DOWN, L.EXIT_INCOMPLETE):
+            self.assertIn(f"exit code {code}", step)
+        self.assertIn("D6.3", step)
+
+    def test_bring_up_laptop_step_runs_the_collector_with_python3_and_shows_its_rc(self):
+        # LC-R-2: the file is 100644, so `bin/collect-review-evidence-laptop.py` alone is rc 126.
+        # LC-R-6: the step shows the collector's exit code in a fixed form.
+        step = self._laptop_step()
+        self.assertIn("`python3 bin/collect-review-evidence-laptop.py --customer", step)
+        self.assertNotRegex(step, r"(?<!python3 )bin/collect-review-evidence-laptop\.py")
+        self.assertIn('echo "collector_rc=$?"', step)
+        self.assertIn("`collector_rc=0`", step)
 
     def test_module_docstring(self):
-        self.assertIn(f"exit {L.EXIT_DOCKER_DOWN}", L.__doc__)
-        self.assertIn(f"exit {L.EXIT_D31_INCOMPLETE}", L.__doc__)
+        for code in (1, 2, L.EXIT_DOCKER_DOWN, L.EXIT_INCOMPLETE):
+            self.assertIn(f"exit {code}", L.__doc__)
+        self.assertIn("D6.3", L.__doc__)
 
 
 if __name__ == "__main__":
