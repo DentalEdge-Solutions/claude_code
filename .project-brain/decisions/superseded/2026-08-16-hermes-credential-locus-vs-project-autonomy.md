@@ -5,7 +5,9 @@ description: The charter says projects perform their full function; the shipped 
 tags: [hermes, architecture, credentials, mutation-tier, blast-radius, governance]
 timestamp: 2026-08-16T21:00:00
 sources: [docs/superpowers/specs/2026-08-12-hermes-mutation-tier-design.md, canon/2026-07-17-ai-os-charter.md, canon/2026-08-05-p6-ads-audit-pilot-validated.md]
-status: candidate
+status: retired
+retired_at: 2026-10-27
+retired_reason: Its durable parts are in canon (credential governance rules 2 and 3 and corollaries list it as a source); the ungoverned write path was closed 2026-08-17; the write question was settled by D3.2 (read-only). Not captured elsewhere: the standard project contract idea and opening the read path, to be re-proposed on the Hermes track if still wanted.
 ---
 
 ## The question
