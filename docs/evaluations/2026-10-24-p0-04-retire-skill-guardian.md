@@ -164,3 +164,24 @@ file's own lines are the second exception, and it cannot be avoided: a test that
 
 Restore the deleted files and revert the edits from git: `git revert` the commits of this branch. The CLAUDE.md
 amendment is a separate commit (`eb0c537`), so it can be kept or reverted on its own.
+
+## Addendum (2026-10-27): one pinned file exclusion for the brain's record of the retirement
+
+On 2026-10-27 the owner promoted the brain's record of this retirement to an active decision
+(`.project-brain/decisions/active/2026-10-24-p0-04-claude-md-evals-rule-amended-option-1-2026-10-24.md`, PR #183). It
+has to name the agent, so the acceptance test failed on CI (run 40430562749, commit `db9d772`): 5 lines naming
+`skill-guardian` or `PROJECT-SKILL-HEALTH` in that file, and no other hit.
+
+- **Exclusion added:** that file, by exact path (`EXCLUDED_FILES` in the test). It is a record of the retirement, not a
+  reference to use the agent: an independent review read every line and found no guidance to use it. Like canon, the
+  file changes only through `brain-promote --approve` (a local hook, not enforced by CI).
+- **Pinned, like the README line:** the test requires the file to stay tracked and to name the agent on exactly 5
+  lines (review BR-R-1). A line added later, a line removed, or the file moved or renamed fails the test.
+- **Not excluded:** every other brain file. The narrowness test asserts that another active decision, a candidate, a
+  superseded file and `BRAIN.md` are still checked; superseded files also reach agents through `brain-context-pack.js`.
+- **Rejected alternatives:** rewording the decision without the name (it would no longer be found by the agent's name,
+  and needs a re-promotion), and excluding `.project-brain/decisions/` or its superseded folder (too wide: active
+  decisions carry the second-highest authority, and both folders feed agent context).
+- **Evidence:** red on CI as above; green with `node scripts/run-all-tests.js` (47/47 suites) after the fix. Mutation
+  check in scratch trees: a line appended to the excluded file, a line removed from it, the file moved to superseded,
+  and a line added to a superseded file each fail the test; the unchanged tree passes.
