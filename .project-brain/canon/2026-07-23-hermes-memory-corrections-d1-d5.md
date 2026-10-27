@@ -13,14 +13,17 @@ originally_promoted_at: 2026-07-23
 
 # Memory corrections D-1…D-5 (decision)
 
-> **Status: canon** (promoted 2026-07-23). The record specifies corrections; they are applied through
-> `brain-promote --approve`, never by editing `canon/` or `decisions/active/` directly.
+> **Status: canon** (first promoted 2026-07-23; re-promoted 2026-10-27). The record specifies corrections; they are
+> applied through `brain-promote --approve`, never by editing `canon/` or `decisions/active/` directly. The
+> description above states the situation on 2026-07-23, when the record was written.
 >
-> **Reviewed 2026-10-27 (weekly review):** D-2 and D-3 are applied (the Eve decision and the custom-kernel
-> roadmap are in `decisions/superseded/`). The D-1 edits to the charter were not applied until now; they are
-> proposed in the charter's 2026-10-27 revision, with current facts (Hermes runs on the box, read-only by D3.2)
-> instead of the P0–P2 status written here. D-4 stands. D-5 (the commercial objective) stays recorded here and is
-> weighed in the owner's still-open app-scope decision (S6 D-28); it is not moved into the charter by that revision.
+> **Reviewed 2026-10-27 (weekly review):** D-1's charter edits are applied in the charter's 2026-10-27 revision,
+> with current facts (Hermes runs on the box and is read-only against the Google Ads accounts by D3.2) instead of
+> the P0–P2 status written here. D-2 was applied by superseding the Eve decision (2026-10-12) rather than reframing
+> it; the design-influence framing lives in the charter. D-3 is applied (the custom-kernel roadmap is in
+> `decisions/superseded/`). D-4 stands. D-5 (the commercial objective) stays recorded here; item 2 of "What
+> promotion should do" (moving it into the charter next to the north-star) is not executed, and S6 asks that the
+> owner's open app-scope decision D-28 weigh it (R-B-18).
 
 ## Why now
 

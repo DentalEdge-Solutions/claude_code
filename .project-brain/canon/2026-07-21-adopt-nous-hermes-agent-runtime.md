@@ -8,8 +8,8 @@ timestamp: 2026-07-21
 reviewed_at: 2026-10-27
 sources:
   - .project-brain/canon/2026-07-17-ai-os-charter.md
-  - .project-brain/decisions/active/vercel-eve-fs-architecture-adoption.md
-  - .project-brain/decisions/candidates/2026-07-21-hermes-definitive-roadmap.md
+  - .project-brain/decisions/superseded/vercel-eve-fs-architecture-adoption.md (was in decisions/active/)
+  - .project-brain/decisions/superseded/2026-07-21-hermes-definitive-roadmap.md (was in decisions/candidates/)
   - ~/.claude/plans/iterative-squishing-church.md (session plan of record)
   - "Session 2026-07-21 (Claude Opus 4.8): user clarification that 'Hermes' = Nous Research Hermes Agent; recon of NousResearch/hermes-agent"
   - https://hermes-agent.nousresearch.com/docs/
@@ -20,14 +20,16 @@ originally_promoted_at: 2026-08-05
 
 # Adopt Nous Hermes Agent as the AIOS runtime (decision)
 
-> **Status: canon** (promoted 2026-10-05; first promoted 2026-08-05). Corrects a prior misunderstanding baked
-> into memory (see "Supersedes / corrects").
+> **Status: canon** (first promoted 2026-08-05; re-promoted 2026-10-05 and 2026-10-27). Corrects a prior
+> misunderstanding baked into memory (see "Supersedes / corrects").
 >
 > **Reviewed 2026-10-27 (weekly review):** still the adopted runtime. It runs on the Hostinger box (canon: Phase 6
-> passed on the box, 2026-09-22) and is read-only with no write credential (canon: D3.2, 2026-09-29); under Track A
-> (active decision of 2026-10-22) it proposes improvements and the owner and Claude Code build them. The two items
-> under "Supersedes / corrects" are done for the Eve decision and the custom-kernel roadmap (both in
-> `decisions/superseded/`); the charter's correction is proposed in its 2026-10-27 revision.
+> passed on the box, 2026-09-22; security review #11, 2026-10-14). It is read-only against the Google Ads accounts,
+> with no write credential for them (canon: D3.2, 2026-09-29); its other write path, operator-run draft-PR delivery
+> (Track A), is dormant since its bot token lapsed on 2026-10-23. Under Track A (active decision of 2026-10-22) it
+> proposes improvements and the owner and Claude Code build them. The items under "Supersedes / corrects" are done:
+> the Eve decision and the custom-kernel roadmap are in `decisions/superseded/`, and the charter's correction is
+> applied in its 2026-10-27 revision.
 
 ## Decision
 

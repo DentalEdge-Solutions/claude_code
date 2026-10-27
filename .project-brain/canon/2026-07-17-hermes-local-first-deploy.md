@@ -8,7 +8,7 @@ timestamp: 2026-07-17
 reviewed_at: 2026-10-27
 sources:
   - .project-brain/canon/2026-07-17-ai-os-charter.md
-  - .project-brain/decisions/active/vercel-eve-fs-architecture-adoption.md
+  - .project-brain/decisions/superseded/vercel-eve-fs-architecture-adoption.md (was in decisions/active/)
   - docs/superpowers/specs/2026-07-17-domain-packs-design.md
   - "Session discussion 2026-07-17 (Claude Opus 4.8): local-first vs VPS-first for Hermes"
 promoted_at: 2026-10-27
@@ -17,12 +17,16 @@ originally_promoted_at: 2026-08-05
 
 # Decision — Hermes local-first, deploy to Hostinger
 
-> **Status: canon** (promoted 2026-10-05; first promoted 2026-08-05).
+> **Status: canon** (first promoted 2026-08-05; re-promoted 2026-10-05 and 2026-10-27).
 >
-> **Reviewed 2026-10-27 (weekly review):** the principle stands. Since then the box was provisioned and runs
-> Hermes (canon: Phase 6 passed on the box, 2026-09-22), and D3.2 (canon, 2026-09-29) made Hermes read-only with
-> no write credential, so the vault/HITL hardening for real write credentials in steps 1 and 4 below is deferred
-> with it. The Eve decision named in the sources is superseded (kept as a design influence, memory corrections D-2).
+> **Reviewed 2026-10-27 (weekly review):** the principle stands: develop locally in containers, deploy to the box,
+> the git repository is the source of truth. Since then the box was provisioned and runs Hermes (canon: Phase 6
+> passed on the box, 2026-09-22; security review #11, 2026-10-14). Steps 1–2 below describe designing a custom
+> runtime and a "discovery loader"; that framing is superseded by the adoption of the Nous Hermes Agent and the
+> memory corrections D-1 and D-2. Step 4 happened once (a real write credential was installed on the box on
+> 2026-09-25 after an audit) and was reversed by D3.2 (canon, 2026-09-29): Hermes now holds no write credential for
+> the Google Ads accounts, and any future write role needs a dedicated STANDARD account and a new security review.
+> The Eve decision named in the sources is superseded (kept as a design influence, D-2).
 
 ## Decision
 Build the Hermes runtime **locally, containerized (Docker/compose) from day one**. Treat the Hostinger
