@@ -63,10 +63,12 @@ returns the same article text as the HTML page; the URLs in §8 are the human-re
     classic rule per branch, layered with the rulesets).
   - **Candidate A** comes second, a "Restrict updates" ruleset in one of two variants. A-exempt: the owner (user)
     or the admin role is exempt, so merges are silent and leave no bypass entry. A-PR: "For pull requests only",
-    so every owner merge is a bypass and must be filtered out of the measure by ruleset. Either way, A leaves no
-    per-merge entry in the org audit log (which has only `repository_ruleset.create/destroy/update`); its bypasses
-    are visible only in rule insights and the rule-suites API, whose `time_period` is at most a `month`, so the
-    owner-bypass measure must then be harvested at least monthly.
+    so every owner merge is a bypass and must be filtered out of the measure by ruleset. No ruleset-named
+    per-merge event is documented in the org audit log (its ruleset events are
+    `repository_ruleset.create/destroy/update`). `protected_branch.policy_override` and `protected_branch.rejected_ref_update` carry a `rule_suite_id`
+    and may fire for rulesets [UNVERIFIED]. The documented place for A's bypasses is rule insights and the
+    rule-suites API, whose `time_period` is at most a `month`, so the owner-bypass measure must then be harvested
+    at least monthly.
   - Step 1b tests B, then A-exempt, then A-PR, one at a time. If none works without blocking the owner's normal
     merges, the OC-2 exception applies, with `allow_auto_merge` kept false (false today [Ver]).
 - **Token: fine-grained first**, as OC-1 already says: Contents read and write, Pull requests read and write,
@@ -143,11 +145,12 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 - **Logging** [Docs]: rule insights list "Actions where someone has bypassed one or more rulesets", filterable "by
   ruleset, branch, actor, and time period", and the rule-suites REST API returns the same data
   (`rule_suite_result` one of `pass`, `fail`, `bypass`, `all`; `time_period` "Can be one of: `hour`, `day`,
-  `week`, `month`", default `day`). The org audit log has only `repository_ruleset.create`, `.destroy` and
-  `.update` for rulesets, so **no per-merge bypass event** appears there [Docs: audit-log events list]. (The
-  classic `protected_branch.policy_override` event carries a `rule_suite_id` field; whether it ever fires for a
-  ruleset bypass is not documented, and the owner looks for it after T5 [UNVERIFIED].) A's
-  bypasses are visible only in rule insights and the rule-suites API. So the §3 owner-bypass measure can be counted
+  `week`, `month`", default `day`). The org audit log's ruleset events are only `repository_ruleset.create`,
+  `.destroy` and `.update`, so **no ruleset-named per-merge event is documented** [Docs: audit-log events list].
+  `protected_branch.policy_override` and `protected_branch.rejected_ref_update` carry a `rule_suite_id` field and
+  may fire for rulesets [UNVERIFIED]; T5 records whether either appears. The exempt mode is different: "a bypass
+  audit entry will not be created" [Docs, REST]. The documented place for A's bypasses is rule insights and the
+  rule-suites API. So the §3 owner-bypass measure can be counted
   per ruleset (count only bypasses of the **review** ruleset), and it must be harvested **at least monthly**,
   since the API's widest window is a month [Inf].
 
@@ -199,7 +202,7 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 |---|---|---|---|
 | PR merge covered | [UNVERIFIED] docs silent; [Comm] yes | same | [Docs] yes ("including merging a pull request") |
 | Owner's normal merge | bypass checkbox on every merge [Comm]; unreliable reports | normal [Docs: not evaluated] | normal [Docs: admins always] |
-| Owner merge logged | as a bypass in rule insights and the rule-suites API only (no per-merge org audit-log event) [Docs] | no bypass entry anywhere [Docs] | audit-log entry [UNVERIFIED] |
+| Owner merge logged | as a bypass in rule insights and the rule-suites API [Docs]; no ruleset-named per-merge audit-log event documented; `protected_branch.*` events with `rule_suite_id` may fire [UNVERIFIED] | "a bypass audit entry will not be created" [Docs] | audit-log entry [UNVERIFIED] |
 | Inflates owner-bypass measure | yes, unless counted per ruleset; harvest at least monthly (`time_period` max `month`) | no | no |
 | Can name the owner as a user | yes since 2026-05-07 [Docs] | user exemption [UNVERIFIED] (changelog names roles, teams, apps) | yes [Docs] |
 | Plan | rulesets in use here today [Ver] | same | public repo in any org [Docs] |
@@ -466,8 +469,10 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 - **Test tokens.** Mint them from `dentaledge-bot` with the shortest expiry offered (the creation link accepts
   `expires_in` from 1 day). Revoke them at the end and **prove each dead** by a use GitHub refuses ("prove death,
   never infer it", `credential-governance-lessons.md:136-137`).
-- **How the token enters the shell (DC-R-12).** Use a terminal that does not run `claude` and is not controlled by
-  any agent. Work in a subshell, `( read -rs GH_TOKEN; export GH_TOKEN; … probe commands … )`, so the value is
+- **No agent session on the laptop during step 1b (DC-R-17).** Not only a terminal without `claude`: no Claude or
+  other agent session runs on the laptop at all while a test token is in use, because processes of the same user
+  may be able to read each other's environments. The token is short-lived and revoked anyway.
+- **How the token enters the shell (DC-R-12).** Work in a subshell, `( read -rs GH_TOKEN; export GH_TOKEN; … probe commands … )`, so the value is
   typed or pasted at a silent prompt: it never appears on a command line or in shell history, it is never exported
   in a shell that later launches `claude`, and it ends with the subshell. Never `echo` it, and never use `set -x`,
   `GIT_TRACE_CURL` or `GIT_CURL_VERBOSE`. `gh` reads `GH_TOKEN` ahead of any stored login [Docs].
@@ -483,10 +488,19 @@ keys, any credential store, `~/.config/gh/hosts.yml`. Those are owner checks (§
 
   The helper text is single-quoted, so `$GH_TOKEN` is expanded only inside the helper process. `GIT_TRACE` prints
   the helper's command text, not the value [Inf]; the owner checks the first run's trace for that before keeping
-  it. A gh-backed helper (`!gh auth git-credential` with `GH_TOKEN` set) is an equivalent choice.
+  it. Use **this inline helper only**, not a gh-backed one (DC-R-14): with `GH_TOKEN` empty,
+  `gh auth git-credential` falls back to `gh`'s stored login, possibly the owner's, so the control below could succeed as
+  the owner.
+- **The reset is mandatory on every probe push, including the ones expected to fail** (coordinator addition, from
+  the reviewer's measurement). Without `credential.helper=`, a refused push makes git call `erase` on the
+  configured helpers; with the system `osxkeychain` helper, a plain refused probe push could **erase the owner's
+  keychain item**. With the reset, the test token is also never saved to the keychain (no helper but the inline
+  one is consulted for `store` or `erase`).
 - **Refusal control and identity, for every push probe.**
-  - Run the same command with the variable unset (`env -u GH_TOKEN …`) or with a revoked token. It must **fail**
-    (`GIT_TERMINAL_PROMPT=0` turns the password prompt into a failure).
+  - Run the same command with the variable unset (`env -u GH_TOKEN …`) or with a revoked token. It must **fail**.
+    With the variable unset the helper still answers, git sends an empty password, and the push fails because
+    GitHub refuses it (HTTP 401), not because of a prompt (DC-R-16). `GIT_TERMINAL_PROMPT=0` stays as a guard, so
+    git never falls back to asking at the terminal.
   - `GIT_TRACE=1` must show only that helper being run, never `git credential-osxkeychain`.
   - The pusher shown in the repository's activity view, and the author of any PR the token opens, must be
     `dentaledge-bot`; `gh api user --jq .login` run with the token gives the same check for `gh`.
@@ -581,7 +595,8 @@ only**. For each:
 - the bot merge is refused (UI, `merge` and `merge-async`; "The base branch does not allow updates" [Comm]);
 - the owner's merge succeeds, without the bypass checkbox in (i) and with it in (ii);
 - rule insights and the rule-suites API (`rule_suite_result=bypass`) show nothing in (i) and "Bypass" in (ii);
-- the org audit log shows no per-merge event in either [Docs; check `protected_branch.policy_override`].
+- in the org audit log, record whether `protected_branch.policy_override` or `protected_branch.rejected_ref_update`
+  (both carry `rule_suite_id`) appears for the bot's refusal or the owner's merge, in (i) and (ii) [UNVERIFIED].
 
 Also try `gh pr merge` from the owner's own terminal.
 
@@ -741,3 +756,15 @@ finding** (`docs/REVIEW_PROTOCOL.md`).
 | DC-R-11 | Q1 (B) quotes the custom-role exemption; owner check 5 lists custom roles with "bypass branch protections" |
 | DC-R-12 | Q6 and owner check 10 use `security find-internet-password -s github.com` without `-w`/`-g`; the helper `get` is no longer suggested. §4 rules say how the token enters (`read -rs` in a subshell, never on a command line, in history, or exported in a shell that launches `claude`) |
 | DC-R-13 | §1 token bullet: `repo` is the coordinator's OC-1 wording (S6:401-404); `public_repo` stays a recommendation; adopting it needs S5 step 2 (and S5 §2.3 item 1, S6 D-13/OC-1) amended. §7 fallback wording matches |
+
+## 11. Review round 2 (2026-10-27): the author's answers
+
+The reviewer closed DC-R-1 to DC-R-13 on `be2e106`. New findings and what changed; only the reviewer closes them.
+
+| ID | Change made |
+|---|---|
+| DC-R-14 | §4 rules: the gh-backed helper is removed as an alternative; the inline helper only, with the reason (an empty `GH_TOKEN` makes `gh auth git-credential` fall back to `gh`'s stored login, possibly the owner's) |
+| DC-R-15 | §1, Q1 logging, the comparison table and T5: "no ruleset-named per-merge event is documented"; `protected_branch.policy_override` and `protected_branch.rejected_ref_update` carry `rule_suite_id` and may fire for rulesets [UNVERIFIED]; T5 records whether either appears. The sourced exempt-mode sentence is kept |
+| DC-R-16 | §4 control: with the variable unset the helper still answers with an empty password and GitHub refuses it (401); `GIT_TERMINAL_PROMPT=0` is kept as a guard |
+| DC-R-17 | §4 rules: no Claude or other agent session runs on the laptop during step 1b, since processes of the same user may be able to read each other's environments; the token is short-lived and revoked anyway |
+| Coordinator addition | §4 rules: the helper reset is mandatory on every probe push, including those expected to fail, because a refused push calls `erase` on the configured helpers and could erase the owner's keychain item; with the reset the test token is also never saved to the keychain |
