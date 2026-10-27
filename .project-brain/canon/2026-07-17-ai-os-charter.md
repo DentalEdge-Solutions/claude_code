@@ -72,7 +72,7 @@ decisions below. This charter is a *direction to build toward*, not a claim of w
   2026-09-22; security review #11, 2026-10-14). D3.2 (canon, 2026-09-29) leaves it no write credential for the
   Google Ads accounts: the Ads mutation tier (human approval, kill switch, daily caps, undo) is built but parked,
   and any future write role needs a dedicated STANDARD account and a new security review. Its other write path,
-  operator-run draft-PR delivery (Track A), is dormant since its bot token lapsed on 2026-10-23. Under Track A it
+  operator-run draft-PR delivery (Track A), is dormant: its bot token was left to expire on 2026-10-23 and not renewed (refusal still to be proved, P0-10 step 2). Under Track A it
   proposes improvements while the owner and Claude Code build them (active decision of 2026-10-22). Broader write
   guardrails for other paid or client-facing systems are built with the first monetizable product that needs
   writes.

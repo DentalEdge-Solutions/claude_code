@@ -89,3 +89,5 @@ Append-only record of promotions and lifecycle events. Written by brain-promote.
 - 2026-10-27 promoted decisions/candidates/2026-10-21-pr-4-follow-ups-finished-p8-and-the-brain-guard-gaps-stay-op.md → decisions/active/2026-10-21-pr-4-follow-ups-finished-p8-and-the-brain-guard-gaps-stay-op.md
 - 2026-10-27 promoted decisions/candidates/2026-10-23-software-factory-p0-decisions-d-01-to-d-14-approved-2026-10-.md → decisions/active/2026-10-23-software-factory-p0-decisions-d-01-to-d-14-approved-2026-10-.md
 - 2026-10-27 promoted decisions/candidates/2026-10-23-software-factory-p0-decisions-d-01-to-d-14-approved-2026-10-.md → decisions/active/2026-10-23-software-factory-p0-decisions-d-01-to-d-14-approved-2026-10-.md
+- 2026-10-27 promoted decisions/candidates/2026-07-17-ai-os-charter.md → canon/2026-07-17-ai-os-charter.md
+- 2026-10-27 promoted decisions/candidates/2026-07-21-adopt-nous-hermes-agent-runtime.md → canon/2026-07-21-adopt-nous-hermes-agent-runtime.md

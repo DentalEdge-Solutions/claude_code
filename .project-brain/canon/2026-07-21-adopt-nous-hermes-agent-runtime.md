@@ -26,7 +26,7 @@ originally_promoted_at: 2026-08-05
 > **Reviewed 2026-10-27 (weekly review):** still the adopted runtime. It runs on the Hostinger box (canon: Phase 6
 > passed on the box, 2026-09-22; security review #11, 2026-10-14). It is read-only against the Google Ads accounts,
 > with no write credential for them (canon: D3.2, 2026-09-29); its other write path, operator-run draft-PR delivery
-> (Track A), is dormant since its bot token lapsed on 2026-10-23. Under Track A (active decision of 2026-10-22) it
+> (Track A), is dormant: its bot token was left to expire on 2026-10-23 and not renewed (refusal still to be proved, P0-10 step 2). Under Track A (active decision of 2026-10-22) it
 > proposes improvements and the owner and Claude Code build them. The items under "Supersedes / corrects" are done:
 > the Eve decision and the custom-kernel roadmap are in `decisions/superseded/`, and the charter's correction is
 > applied in its 2026-10-27 revision.
