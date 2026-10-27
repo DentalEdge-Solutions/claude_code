@@ -10,6 +10,24 @@ D3: runs audit-credential-access.sh --all --customer, keeps the AUDIT's own exit
 pipe would hide it — found 2026-09-26), and DISCARDS stderr, where the Google Ads SDK logs
 raw account ids (a D9 item). D6: rebuilds the package from the verified commit and reports
 its hash. Customer ids are redacted from everything printed.
+
+The audit runs in a Docker container ON THE LAPTOP. Before it, a pre-flight asks the Docker
+daemon (`docker info`, its output discarded, at most DOCKER_INFO_TIMEOUT seconds). Found
+2026-10-14: with Docker Desktop off the collector used to exit 0 with D3.1 could-not-check.
+
+Exit codes, bundle mode:
+  exit 0  the bundle is written and D3.1 is observed (D6.3 without --package-* arguments is
+          could-not-check and does not change the exit code)
+  exit 1  --customer is not digits
+  exit 2  the review key cannot be used, or the output file cannot be made owner-only;
+          nothing written (argparse's own usage errors are 2 as well)
+  exit 3  Docker is not reachable: one stderr line names the cause and the fix; the audit
+          does not run and nothing is written
+  exit 4  the bundle IS written, but D3.1 is could-not-check (the audit gave no document):
+          one stderr line says so; do not use that bundle
+--access-digest: exit 0 with the digest on stdout; otherwise exit 2 with `could-not-check` (or
+the digest of an audit that did not exit 0) on stdout and one stderr line saying why — Docker
+not reachable, no audit document, or the audit's own non-zero exit code.
 """
 import argparse, hashlib, importlib.util, json, os, stat, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +35,25 @@ sys.path.insert(0, HERE)
 import review_lib as R
 
 AUDIT_SH = os.path.join(os.path.dirname(HERE), "audit-credential-access.sh")
+PROG = "collect-review-evidence-laptop"
+DOCKER_INFO_TIMEOUT = 15            # seconds; Docker Desktop answers in well under that once up
+EXIT_DOCKER_DOWN = 3                # nothing written
+EXIT_D31_INCOMPLETE = 4             # bundle written, D3.1 could-not-check
+
+
+def docker_problem(timeout=DOCKER_INFO_TIMEOUT):
+    """None when the Docker daemon answers `docker info`; otherwise a fixed reason. Docker's own
+    output is discarded, never relayed: only these fixed words are ever printed."""
+    try:
+        p = subprocess.run(["docker", "info"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=timeout)
+    except FileNotFoundError:
+        return "the docker command was not found"
+    except subprocess.TimeoutExpired:
+        return f"Docker did not answer within {timeout}s"
+    except OSError:
+        return "the docker command could not be started"
+    return None if p.returncode == 0 else "Docker is not running"
 
 
 def parse_audit(stdout):
@@ -100,10 +137,27 @@ def main(argv=None):
         except (OSError, ValueError) as e:
             print(f"collect-review-evidence-laptop: cannot use the review key: {e}", file=sys.stderr)
             return 2
+    problem = docker_problem()
+    if problem:
+        print(f"{PROG}: {problem}: start Docker Desktop, then re-run (D3.1 runs the credential audit "
+              f"in a Docker container); the audit did not run"
+              + ("" if a.access_digest else ", nothing written"), file=sys.stderr)
+        if a.access_digest:
+            print(R.COULD_NOT_CHECK)                         # stdout as before: a digest or this word
+            return 2
+        return EXIT_DOCKER_DOWN
     audit = run_audit(a.customer, key)
     if a.access_digest:
         print(audit.get("digest", R.COULD_NOT_CHECK))
-        return 0 if "digest" in audit and audit["rc"] == 0 else 2
+        if "digest" not in audit:
+            print(f"{PROG}: no access digest: D3.1 could not be checked: {audit[R.COULD_NOT_CHECK]} "
+                  f"(the audit exited {audit['rc']})", file=sys.stderr)
+            return 2
+        if audit["rc"] != 0:
+            print(f"{PROG}: the audit exited {audit['rc']}, not 0: this digest does not certify the access "
+                  "(3 = a declared role and its measured access disagree)", file=sys.stderr)
+            return 2
+        return 0
     items = {"D3.1": {"status": R.OBSERVED if "digest" in audit else R.COULD_NOT_CHECK, "data": audit}}
     if a.package_project and a.package_repo and a.package_commit:
         try:
@@ -119,6 +173,11 @@ def main(argv=None):
         return 2
     print(json.dumps({"schema": 1, "kind": "laptop", "collected_at": R.utc_now(),
                       "cid_fingerprint": "hmac-sha256/12", "cid_key_id": R.key_id(key), "items": items}, indent=2, sort_keys=True))
+    if "digest" not in audit:                                # written, as the evidence; but never quietly
+        print(f"{PROG}: D3.1 could not be checked: {audit[R.COULD_NOT_CHECK]} (the audit exited {audit['rc']}); "
+              "the bundle is incomplete: do not use it; is Docker Desktop running? fix the cause and collect again",
+              file=sys.stderr)
+        return EXIT_D31_INCOMPLETE
     return 0
 
 
