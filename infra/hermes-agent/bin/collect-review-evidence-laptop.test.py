@@ -508,7 +508,7 @@ class TestRunbookNamesTheExitCodes(unittest.TestCase):
         anchor = "D3.1 runs the credential audit in a Docker container ON THE LAPTOP"
         self.assertIn(anchor, text)
         at = text.index(anchor)
-        start = text.rindex("\n4. Laptop: ", 0, at) + 1
+        start = text.rindex("\n4. Laptop", 0, at) + 1
         return text[start:text.index("\n", at)]
 
     def test_bring_up_laptop_step(self):
