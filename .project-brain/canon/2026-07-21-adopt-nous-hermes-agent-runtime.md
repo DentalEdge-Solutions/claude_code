@@ -5,6 +5,7 @@ title: "Adopt Nous Research's Hermes Agent as the AIOS runtime / control plane o
 description: "Adopt the real Nous Research Hermes Agent (official Docker image) as the persistent, model-agnostic control plane that connects to and operates Claude Code projects (via the bundled claude-code skill running `claude -p`), forming a 'Claude Code AIOS' for managing AI agents/workflows and, ultimately, monetization. Governed as a runtime dependency (adoption decision + security-audit gate), NOT via the reference-repo pattern-source model."
 tags: [hermes, nous-hermes-agent, runtime, control-plane, aios, adoption, governance, docker, claude-code, correction]
 timestamp: 2026-07-21
+reviewed_at: 2026-10-27
 sources:
   - .project-brain/canon/2026-07-17-ai-os-charter.md
   - .project-brain/decisions/active/vercel-eve-fs-architecture-adoption.md
@@ -13,14 +14,20 @@ sources:
   - "Session 2026-07-21 (Claude Opus 4.8): user clarification that 'Hermes' = Nous Research Hermes Agent; recon of NousResearch/hermes-agent"
   - https://hermes-agent.nousresearch.com/docs/
   - https://github.com/nousresearch/hermes-agent
-promoted_at: 2026-10-05
+promoted_at: 2026-10-27
 originally_promoted_at: 2026-08-05
 ---
 
-# Adopt Nous Hermes Agent as the AIOS runtime (decision candidate)
+# Adopt Nous Hermes Agent as the AIOS runtime (decision)
 
-> **Status: candidate** (awaiting `brain-promote --approve`). Corrects a prior misunderstanding baked
+> **Status: canon** (promoted 2026-10-05; first promoted 2026-08-05). Corrects a prior misunderstanding baked
 > into memory (see "Supersedes / corrects").
+>
+> **Reviewed 2026-10-27 (weekly review):** still the adopted runtime. It runs on the Hostinger box (canon: Phase 6
+> passed on the box, 2026-09-22) and is read-only with no write credential (canon: D3.2, 2026-09-29); under Track A
+> (active decision of 2026-10-22) it proposes improvements and the owner and Claude Code build them. The two items
+> under "Supersedes / corrects" are done for the Eve decision and the custom-kernel roadmap (both in
+> `decisions/superseded/`); the charter's correction is proposed in its 2026-10-27 revision.
 
 ## Decision
 

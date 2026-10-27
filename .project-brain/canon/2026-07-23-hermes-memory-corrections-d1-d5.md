@@ -5,16 +5,22 @@ title: "Memory corrections D-1…D-5 — 'Hermes' = adopted Nous Hermes Agent (c
 description: "Human-gated correction record. Canon (ai-os-charter) and the active Eve synthesis still frame 'Hermes' as a FUTURE, CUSTOM orchestrator layer to be built ('not yet implemented / not yet started'). The confirmed, now-implemented reality: Hermes = Nous Research's Hermes Agent, ADOPTED as the control plane that operates Claude Code projects via `claude -p`, running locally through P2. Specifies the exact canon/active edits, reframes the Eve pattern (D-2), disambiguates the term (D-4), and captures the previously-unrecorded commercial objective (D-5)."
 tags: [hermes, nous-hermes-agent, correction, canon-correction, aios, control-plane, commercial-objective, governance, eve-pattern]
 timestamp: 2026-07-23
+reviewed_at: 2026-10-27
 sources: 
-promoted_at: 2026-07-23
+promoted_at: 2026-10-27
+originally_promoted_at: 2026-07-23
 ---
 
-# Memory corrections D-1…D-5 (decision candidate)
+# Memory corrections D-1…D-5 (decision)
 
-> **Status: candidate** — awaiting `brain-promote --approve`. This record does NOT edit `canon/` or
-> `decisions/active/` itself (Hard Rule: promotion is human-gated). It specifies the corrections to
-> apply on approval. It **builds on** the adoption candidate `2026-07-21-adopt-nous-hermes-agent-runtime.md`
-> (the "what we adopt" decision) and adds the precise memory edits + the commercial objective.
+> **Status: canon** (promoted 2026-07-23). The record specifies corrections; they are applied through
+> `brain-promote --approve`, never by editing `canon/` or `decisions/active/` directly.
+>
+> **Reviewed 2026-10-27 (weekly review):** D-2 and D-3 are applied (the Eve decision and the custom-kernel
+> roadmap are in `decisions/superseded/`). The D-1 edits to the charter were not applied until now; they are
+> proposed in the charter's 2026-10-27 revision, with current facts (Hermes runs on the box, read-only by D3.2)
+> instead of the P0–P2 status written here. D-4 stands. D-5 (the commercial objective) stays recorded here and is
+> weighed in the owner's still-open app-scope decision (S6 D-28); it is not moved into the charter by that revision.
 
 ## Why now
 
