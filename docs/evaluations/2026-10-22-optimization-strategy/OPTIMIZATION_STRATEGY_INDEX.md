@@ -72,12 +72,20 @@ app-scope decision from S5 §1.5:
 - **Later:** D-23 … D-28.
 
 **Owner choices of 2026-10-23 (S6 §7):** OC-1, D-13: reuse `dentaledge-bot` as the laptop agent's account
-(a fine-grained token tested first on a scratch target, otherwise a classic PAT without `workflow` scope; access measured and re-run at every rotation). OC-2, D-12: check
+(a fine-grained token tested first on a scratch target, otherwise a classic PAT without `workflow` scope; token type superseded by OC-5; access measured and re-run at every rotation). OC-2, D-12: check
 first whether GitHub can restrict merging into `main` to the owner; otherwise the agent's merge of an owner-approved
 head is an owner-accepted exception to "Approve, don't merge". OC-3 (revised the same day, superseding the first
 OC-3 that moved D-15 into P0): P0-02 holds breach (d) for every scope through the required "Test suites" job, and
 D-15 stays before P1, covering only the general scan of packs and Hermes skills. OC-4, D-11: kept, and it
 explicitly supersedes the earlier fail-open policy (P11) and the non-adoption of `onFailure: "block"`.
+
+**Owner choices of 2026-10-29 (S6 §7), after the P0-10 step-1a and step-1b records returned**
+(`docs/evaluations/2026-10-27-p0-10-step-1a-github-docs-check.md`, `docs/evaluations/2026-10-29-p0-10-step-1b-results.md`):
+OC-5, D-13: the agent token is a classic PAT with `public_repo` only, no `workflow` scope, 90-day expiry (a
+fine-grained token could not be minted; it works only while the repository stays public). OC-6, D-12: candidate B,
+the classic "Restrict who can push" with nobody listed and admins not enforced, goes on `main` in P0-10 step 5a, with
+guards (the agent account never approves PRs, a monthly count of bot approvals on owner-authored PRs, probes re-run
+on `main`). OC-7 and OC-8: probes (d) and (a) are reworded to what step 1b showed can be checked.
 
 Several need the owner's own action (GitHub settings, a new token for the existing `dentaledge-bot` account, the
 dead-token check and `.env.pr` cleanup, the local allow list, credential storage, skill deploys from B1). Decisions
@@ -124,7 +132,9 @@ analyst renamed six references in S2 with a single `sed` command (disclosed in S
   two-ruleset bypass interaction and bypass-actor eligibility (user accounts UNVERIFIED), whether merging can be
   restricted to the owner (OC-2), `gh` multi-account behaviour, and whether the browser and desktop channels
   (Claude in Chrome, the desktop built-in browser pane, computer use) reach github.com (S5 and S6 Limits). Whether
-  the Hermes executor skips project settings is also unverified (P0-07, P0-09).
+  the Hermes executor skips project settings is also unverified (P0-07, P0-09). Both records have since returned
+  (2026-10-27, 2026-10-29); the token type and the merge restriction are settled by OC-5 and OC-6, as measured on a
+  probe branch, not on `main`.
 - Expected benefits are estimates; S5 §3 defines how each will be measured. Many baselines must be measured first:
   some in batch B0, others from the first P1-10 runs, the first 30 days after P1-03, the first 5 tasks after P1-04, or
   the first P1-14 project.
@@ -165,3 +175,7 @@ analyst renamed six references in S2 with a single `sed` command (disclosed in S
 ### Round 6 (2026-10-23, coordinator edits)
 
 - Verification record: added the rounds 2-6 row; the verification paragraph now says the round 2-6 edits were verified and closed by two independent verifiers.
+
+### Round 7 (2026-10-29, owner choices after P0-10 step 1b)
+
+- OC-5 … OC-8: an "Owner choices of 2026-10-29" paragraph is added under the decisions (token, merge restriction, probes (d) and (a)), citing the step-1a and step-1b records; the OC-1 summary says its token type is superseded by OC-5; Limits says both records have returned.
