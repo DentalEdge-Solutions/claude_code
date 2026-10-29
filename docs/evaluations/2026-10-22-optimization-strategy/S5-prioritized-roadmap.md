@@ -374,13 +374,14 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
        scope, 90-day expiry** (owner choice OC-5, 2026-10-29). Step 1b measured this token type: push, PR create and
        view, update-branch, approve and merge worked, and the push of a workflow file was refused (step-1b record
        §3.2, §3.3). A fine-grained token could not be minted, because the org was not offered as resource owner
-       (§3.2). The org allows classic PATs and does not restrict them (§4 check 1) [Owner-rep]. The token depends on
+       (§3.2). The token depends on
        the repository staying public (owner decision, 2026-10-28): if the repository were made private, the token
        would stop working (fail closed). A classic `public_repo` token is bounded by the bot's collaborator access
        only for this org repository: it also acts as the bot on any public GitHub repository (issues, comments,
        forks, PRs) and in the bot's own public repositories, and gains any public repository the bot is later added
-       to; the owner is responsible for the machine's actions (ToS §B.3) (V2-ID-7). If the org requires token
-       approval, the owner approves it;
+       to; the owner is responsible for the machine's actions (ToS §B.3) (V2-ID-7). The org's policy does not
+       restrict classic tokens or require their approval (step-1b record §4 check 1) [Owner-rep]; if that policy
+       changes, the token choice is re-checked;
      - store it only where the laptop agent's `gh` uses it.
      A token minted by the owner acts as the owner and is excluded (V-S5-3). Hermes draft-PR delivery stays dormant
      (the PAT is recorded to expire 2026-10-23 by the owner's decision of 2026-10-14,
@@ -857,8 +858,9 @@ flowchart LR
 1. Agent account (P0-10, OC-1): reuse `dentaledge-bot`. Review the step-1a docs record and the step-1b scratch-target test results first (R-B-9, V2-ID-1; both returned, 2026-10-27 and 2026-10-29). Then prove
    the expired `dentaledge-bot-pat` is refused without printing it, remove its value from
    `infra/hermes-agent/.env.pr`, mint the agent token from the bot account (a classic PAT with `public_repo` scope
-   only, no `workflow` scope, 90-day expiry, OC-5; it works only while the repository stays public; approve it if
-   the org requires approval),
+   only, no `workflow` scope, 90-day expiry, OC-5; it works only while the repository stays public; the org's
+   policy does not restrict classic tokens or require their approval, step-1b record §4 [Owner-rep], and if that
+   policy changes, the token choice is re-checked),
    store it only where the laptop agent's `gh` uses it, and re-run probe (g) at every rotation.
 2. Rulesets (P0-10): put candidate B on `main` as tested (step 5a, OC-6) and re-run probes (b), (d), (e) and (i)
    there; if probe (i) fails, remove B and record the OC-2 exception to
@@ -911,7 +913,7 @@ and query so the comparison is like for like.
 |---|---|---|
 | Write-capable agents reading untrusted text directly (S3 §2.4 inventory) | 10 (8 analysts, guardian, scout-agent) [Ver] | 0 named agents; orchestrator residuals listed (breach (b) narrowed, not closed) |
 | Unpinned runtime installs in shipped paths | at least 3 known; measured by P0-02's differential [Ver] | 0; closed for the known cases, held for `skills/`, `.claude/agents/`, `packs/` and `infra/hermes-agent/skills/` by the required "Test suites" job through `ci-scan-skills.test.js` from P0-02 (B1); no ruleset change needed |
-| PRs merged without the owner's code-owner approval of the merged head (last 10) | 10 [S1 L-03] | 0, with owner-bypass merges reported as a separate count (audit log); a normal owner merge after a bot approval would not be counted as a bypass merge [Inf, untested], so bot approvals on owner-authored PRs are counted monthly (§3 above, OC-6) |
+| PRs merged without the owner's code-owner approval covering the merged PR diff (last 10; a kept approval's `commit_id` is not evidence on its own, step-1b record §6, OC-8) | 10 [S1 L-03] | 0, with owner-bypass merges reported as a separate count (audit log); a normal owner merge after a bot approval would not be counted as a bypass merge [Inf, untested], so bot approvals on owner-authored PRs are counted monthly (§3 above, OC-6) |
 | Model-run deploy steps to `~/.claude/skills` in definitions | 3 steps + 1 sanction [Ver] | 0; other forms only prompted (residual) |
 | Guard fail-open entries per 14 days of use | 50 on 2026-10-15 [S1 §3.1] | 0 unguarded calls |
 | Definitions with a post-E12 eval report | 0 (25 pre-E12, 4 PENDING) | the P1-10 subset |
@@ -1100,5 +1102,6 @@ Four owner choices of 2026-10-29 on the step-1b record's open questions (`docs/e
 - OC-5 (token; step-1b record §3.2, §3.3, §4, §8 decision (1)): P0-10 step 2 now mints a classic PAT with `public_repo` scope only, no `workflow` scope and a 90-day expiry, in place of "fine-grained first, otherwise classic `repo` without `workflow`"; it cites the measured operations and the workflow refusal, the fine-grained token that could not be minted (the org was not offered as resource owner) and the org's unrestricted classic-PAT policy, and states the dependence on the repository staying public (fail closed if it went private). The ToS §B.3 caveat now describes a `public_repo` token. §0's owner-choice bullet, B5, §2.3 item 1 and Limits match.
 - OC-6 (merge restriction; step-1b record §3.5, §3.6, §3.9, §8 decision (2)): step 5a creates candidate B on `main` as tested (users, teams, apps [], `enforce_admins` false, no other classic settings, with the request body), cites its refusals of every agent-account merge, the owner's working normal and bypass merges, its `authorization` rule in the rule suites and the audit-log entries (owner-reported, 2026-10-29), and notes that "Restrict updates" was not tested; step 1b records the result, so the "if none works" exception is not needed for agent-account merges; rollback removes B. Guards: step 6's runbook rule "the agent account never approves PRs", a new monthly §3 measure counting bot approvals on owner-authored PRs (the approvals-per-PR instrument and the code-owner-approval indicator point to it), and a re-run of probes (b), (d), (e) and (i) on `main` after step 5a. The residual now states that even with B a bot approval satisfies the review rule on owner-authored PRs, so a normal owner merge after it would look reviewed and not count as a bypass merge [Inf, untested]. Team-based required reviewers in rulesets are noted as later and optional, after a docs check and a test. §0 (c), probe (i), step 6's OC-2 text, §2.3 item 2, B5, Trace and Rollback match.
 - OC-7 (probe (d); step-1b record §3.4, §8 (d) row): probe (d) now checks that an owner-authored PR approved by `dentaledge-bot` cannot be merged by the agent account (refused with the authorization message) while the owner's merge succeeds, and counts and reports any bot approval on owner-authored PRs; the reason the earlier wording failed (part 1, `REVIEW_REQUIRED`, is false on owner PRs) is stated. The round 2 OC-1 and round 3 V2-ID-4 entries above carry a "superseded by OC-7" pointer.
-- OC-8 (probe (a); step-1b record §6, §8 (a) row, decision (4)): probe (a) now checks that the PR diff the owner approved equals the merged PR diff, with the reason "approved commit = merged head" is dropped, and adds a test on `main` after step 5 that an update changing the PR's own diff dismisses the approval (untested in step 1b).
+- OC-8 (probe (a); step-1b record §6, §8 (a) row, decision (4)): probe (a) now checks that the PR diff the owner approved equals the merged PR diff, with the reason "approved commit = merged head" is dropped, and adds a test on `main` after step 5 that an update changing the PR's own diff dismisses the approval (untested in step 1b). The §3 code-owner-approval indicator now reads "approval covering the merged PR diff" and notes that a kept approval's `commit_id` is not evidence on its own.
+- OC-5 follow-up (step-1b record §4 check 1): step 2 and §2.3 item 1 replace "if the org requires token approval, the owner approves it" with the measured fact that the org's policy does not restrict classic tokens or require their approval [Owner-rep], and say the token choice is re-checked if that policy changes.
 - Step-1b record returned: P0-10's opening now says steps 1a and 1b are done and cites both dated records; B5, §2.3 item 1 and Limits match. The round 2 OC-1 and round 3 V2-ID-7 entries above carry a "token type superseded by OC-5" pointer.
