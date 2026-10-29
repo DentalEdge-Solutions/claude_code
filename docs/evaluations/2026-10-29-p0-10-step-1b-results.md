@@ -66,7 +66,7 @@ step 5 adds them [Inf].
 | Classic branch protection | none on the repository [Owner-rep]; `GET branches/main/protection` → 404 "Branch not protected" [Ver] | `branchProtectionRules` [] [Ver by the coordinator] |
 | `main` | `b3d3d58` | `b3d3d58` [Ver by the coordinator] |
 | Open PRs | none into `main` (phase A read) [Ver] | none [Ver by the coordinator] |
-| `allow_auto_merge` | false (1a §2); still false at step 4.14 [Ver] | false (the record reviewer's live read after cleanup, 2026-10-29) [Ver] |
+| `allow_auto_merge` | false (1a §2); still false at step 4.14 [Ver] | false (live read after cleanup) [Ver by the reviewer, 2026-10-29] |
 | `main-protection` bypass list | empty [Owner-rep] | none [Ver by the coordinator] |
 | Probe refs | none | none on GitHub; none locally after `fetch --prune` [Ver by the coordinator] |
 
@@ -211,7 +211,7 @@ teams and apps [], `enforce_admins` false, no required checks or reviews in the 
 
 Since 3.4 merged, 4.11 is unambiguous: B's refusal, not the review rule, stopped the bot on an owner PR. The
 differential 4.10 → 4.13 (same PR and head; the owner re-approved in between, in 4.11's conditional lines at
-13:27:14Z; B on, then off) proves B's effect on bot PRs.
+13:27:14Z [Ver by the reviewer, 2026-10-29]; B on, then off) proves B's effect on bot PRs.
 
 ### 3.6 T5 candidate A — not run
 
@@ -290,13 +290,14 @@ token, it is not in the table above, and its deletion is unconfirmed (§9).
    the audit log, not in rule insights". The rule-suites API does show them, as the classic `authorization` rule
    with `rule_source` `{"type":"protected_branch"}` (§3.9) [Ver by the reviewer]. Whether the audit log also has
    them is unchecked.
-5. **Owner-authored PRs do not need the owner's approval or the bypass.** Step 3.4 contradicts three 1a statements
+5. **Owner-authored PRs do not need the owner's approval; the bypass is probably not needed either.** Step 3.4 contradicts three 1a statements
    on owner-authored PRs:
    - 1a:25-26 (§1): "A code-owner rule with `* @<owner>` therefore means only the owner's approval can satisfy it,
      and an approval by `dentaledge-bot` cannot." This holds for others' PRs (#188). On the owner's own PRs the
      bot's approval satisfied the rule (#189, and #192 in the 09:26 rule suite) [Ver].
-   - 1a:180-181 (Q1, candidate B): "The owner's own PRs still need the review ruleset's PR-only bypass". They do
-     not, once the bot has approved them: `probe-review` passes (§3.4, §3.5 step 4.11) [Ver].
+   - 1a:180-181 (Q1, candidate B): "The owner's own PRs still need the review ruleset's PR-only bypass". After a
+     bot approval, `probe-review` passes (§3.4, §3.5 step 4.11) [Ver]; an owner merge without the bypass would then
+     probably pass [Inf, untested].
    - 1a:586 (the T4 row "owner-authored PR, status `success`, merged through the review ruleset's PR-only bypass"):
      the result held (4.6) [Ver], but the row assumed the bypass is the owner's only route. After a bot approval,
      a normal owner merge would probably pass as well [Inf, untested].
@@ -509,3 +510,12 @@ finding** (`docs/REVIEW_PROTOCOL.md`).
 | P1B-R-10 | [Comm] added to the tag legend, along with "by the reviewer" for [Ver]. §2: after-cleanup `allow_auto_merge` cites the reviewer's live read, and the bypass row reads "none [Ver by the coordinator]". §11: Claude closed in sittings 1 and 2 is [Owner-rep; runbook-required]. §3.4 row 3.2 cites rule suite 4779055958 (2026-10-28 16:15:42 -04:00) |
 | P1B-R-11 | §3.8: the 401 value in the first attempt's setup is stated as unknown (a bad paste or a separate token). §9 asks the owner to confirm whether it was a separate token and, if so, that it is deleted. §1's token sentence is adjusted |
 | P1B-R-12 | §1: the main finding and the decisions paragraph are scoped to the test branch with the planned review rules, expected to be the same on `main` once step 5 adds them [Inf]; today `main` requires no approvals |
+
+## 13. Review round 2 (2026-10-29): the author's answers
+
+Round 2 on `7c07fb5`: APPROVED; P1B-R-1 to P1B-R-12 closed by the reviewer. Two new notes:
+
+| ID | Change made |
+|---|---|
+| P1B-R-13 | §5 correction 5: the heading now reads "do not need the owner's approval; the bypass is probably not needed either". The 1a:180-181 bullet separates the measurement (`probe-review` passes after a bot approval [Ver]) from the untested owner merge without the bypass [Inf, untested] |
+| P1B-R-14 | §2 `allow_auto_merge` after cleanup and §3.5's 13:27:14Z re-approval now carry "[Ver by the reviewer, 2026-10-29]" |
