@@ -74,7 +74,8 @@ app-scope decision from S5 §1.5:
 **Owner choices of 2026-10-23 (S6 §7):** OC-1, D-13: reuse `dentaledge-bot` as the laptop agent's account
 (a fine-grained token tested first on a scratch target, otherwise a classic PAT without `workflow` scope; token type superseded by OC-5; access measured and re-run at every rotation). OC-2, D-12: check
 first whether GitHub can restrict merging into `main` to the owner; otherwise the agent's merge of an owner-approved
-head is an owner-accepted exception to "Approve, don't merge". OC-3 (revised the same day, superseding the first
+head is an owner-accepted exception to "Approve, don't merge" (superseded by OC-6: candidate B is adopted, and the
+exception applies only if B is removed). OC-3 (revised the same day, superseding the first
 OC-3 that moved D-15 into P0): P0-02 holds breach (d) for every scope through the required "Test suites" job, and
 D-15 stays before P1, covering only the general scan of packs and Hermes skills. OC-4, D-11: kept, and it
 explicitly supersedes the earlier fail-open policy (P11) and the non-adoption of `onFailure: "block"`.
@@ -85,7 +86,7 @@ OC-5, D-13: the agent token is a classic PAT with `public_repo` only, no `workfl
 fine-grained token could not be minted; it works only while the repository stays public). OC-6, D-12: candidate B,
 the classic "Restrict who can push" with nobody listed and admins not enforced, goes on `main` in P0-10 step 5a, with
 guards (the agent account never approves PRs, a monthly count of bot approvals on owner-authored PRs, probes re-run
-on `main`). OC-7 and OC-8: probes (d) and (a) are reworded to what step 1b showed can be checked.
+on `main`). OC-7 and OC-8: probes (d) and (a) are reworded after step 1b.
 
 Several need the owner's own action (GitHub settings, a new token for the existing `dentaledge-bot` account, the
 dead-token check and `.env.pr` cleanup, the local allow list, credential storage, skill deploys from B1). Decisions
@@ -109,6 +110,7 @@ Bash (P1-16 hardens the proposer and considers the Ads audits); Hermes API key r
 | S6 | independent verifier; repo citations re-checked | V-S6-1 … V-S6-16 | closed; accept |
 | This index | same verifier | V-IX-1 … V-IX-7 | closed; accept |
 | Rounds 2-6 (2026-10-23): D-01 … D-14 review and corrections to S1-S3, S5, S6 and this index | two independent reviewers of D-01 … D-14 (completeness and correctness; alignment with governing rules), then two independent verifiers of the edits (identity, credentials and GitHub; everything else); official GitHub and Claude Code docs re-read; live GitHub settings read-only | R-A-1 … R-A-19, R-B-1 … R-B-18; owner choices OC-1 … OC-4 (OC-3 revised); V2-ID-1 … V2-ID-9, V2-RS-1 … V2-RS-12, V3-ID-1 … V3-ID-5, V3-RS-1 … V3-RS-2, V4-ID-1 … V4-ID-3, V4-RS-1 … V4-RS-2, V5-RS-1 … V5-RS-2, V6-RS-1 | closed; both verifiers accept |
+| Round 7 (2026-10-29): owner choices OC-5 … OC-8 after the P0-10 step-1b record, applied to S5, S6 and this index | one independent reviewer (round 1) | OC-R-1 … OC-R-17 | review round 1 done; answers in this commit; re-review pending |
 
 Each deliverable, and this index, records its corrections in its own "Verification corrections (2026-10-22)" section. Claim counts
 and closures are from the verifiers' returns to the coordinator. Round 2 (2026-10-23): two independent reviews of
@@ -134,7 +136,8 @@ analyst renamed six references in S2 with a single `sed` command (disclosed in S
   (Claude in Chrome, the desktop built-in browser pane, computer use) reach github.com (S5 and S6 Limits). Whether
   the Hermes executor skips project settings is also unverified (P0-07, P0-09). Both records have since returned
   (2026-10-27, 2026-10-29); the token type and the merge restriction are settled by OC-5 and OC-6, as measured on a
-  probe branch, not on `main`.
+  probe branch, not on `main`. S2 OPP-08 and S3 §2.2 / DECISION-S3-1 still state the pre-OC-5 token type and the
+  old probe (d) premise; S6 §7 OC-5 … OC-8 take precedence; alignment in a follow-up.
 - Expected benefits are estimates; S5 §3 defines how each will be measured. Many baselines must be measured first:
   some in batch B0, others from the first P1-10 runs, the first 30 days after P1-03, the first 5 tasks after P1-04, or
   the first P1-14 project.
@@ -179,3 +182,5 @@ analyst renamed six references in S2 with a single `sed` command (disclosed in S
 ### Round 7 (2026-10-29, owner choices after P0-10 step 1b)
 
 - OC-5 … OC-8: an "Owner choices of 2026-10-29" paragraph is added under the decisions (token, merge restriction, probes (d) and (a)), citing the step-1a and step-1b records; the OC-1 summary says its token type is superseded by OC-5; Limits says both records have returned.
+- Verification (OC-R-13): independent review round 1 done; answers in this commit; re-review pending. The verification record adds a round-7 row.
+- Review round 1 answers: OC-R-9 (Limits adds the precedence note on S2 OPP-08 and S3 §2.2 / DECISION-S3-1; S2 and S3 not edited); OC-R-12 (the OC-2 summary carries an OC-6 pointer); OC-R-13 (the round-7 verification row); OC-R-14 (OC-7 and OC-8 "reworded after step 1b"). The other findings are answered in S5 and S6.

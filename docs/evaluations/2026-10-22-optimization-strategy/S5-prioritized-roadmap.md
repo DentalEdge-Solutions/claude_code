@@ -336,7 +336,7 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
   1a. **Docs check** (the R-B-9 gate), recorded under `docs/evaluations/` and returned to the owner: token semantics,
      including whether a fine-grained token works for `dentaledge-bot` as an outside/repository collaborator on a
      public org repository (a documented gap) and whether the org requires token approval; the org's classic-PAT
-     policy [Asm]; bypass-actor types (the REST `bypass_actors.actor_type` enum includes `User` and `DeployKey`,
+     policy [Asm; answered by the step-1b record §4 check 1, Owner-rep]; bypass-actor types (the REST `bypass_actors.actor_type` enum includes `User` and `DeployKey`,
      while the rulesets UI doc lists roles, teams and apps, so eligibility is UNVERIFIED, R-A-14); per-ruleset bypass
      and the two-ruleset interaction; last-push approval; `gh` multi-account behaviour; and **first**, the
      merge-restriction candidates (OC-2, V2-ID-3). Two candidates are compared: a ruleset "Restrict updates" with the repository
@@ -376,12 +376,16 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
        §3.2, §3.3). A fine-grained token could not be minted, because the org was not offered as resource owner
        (§3.2). The token depends on
        the repository staying public (owner decision, 2026-10-28): if the repository were made private, the token
-       would stop working (fail closed). A classic `public_repo` token is bounded by the bot's collaborator access
-       only for this org repository: it also acts as the bot on any public GitHub repository (issues, comments,
-       forks, PRs) and in the bot's own public repositories, and gains any public repository the bot is later added
-       to; the owner is responsible for the machine's actions (ToS §B.3) (V2-ID-7). The org's policy does not
+       would stop working (fail closed). Scopes "do not grant any additional permission beyond that which the user
+       already has", and `public_repo` "Limits access to public repositories", covering read/write to code, commit
+       statuses, repository projects, collaborators and deployment statuses "for public repositories and
+       organizations", and starring [Docs, scopes for OAuth apps, accessed 2026-10-29]. So the token is bounded by
+       the bot's own permissions everywhere; what is specific to this org repository is that it is the bot's only
+       collaborator grant. Within that bound it acts as the bot on any public GitHub repository (issues, comments,
+       forks, PRs [Inf]) and in the bot's own public repositories, and gains any public repository the bot is later
+       added to; the owner is responsible for the machine's actions (ToS §B.3) (V2-ID-7). The org's policy does not
        restrict classic tokens or require their approval (step-1b record §4 check 1) [Owner-rep]; if that policy
-       changes, the token choice is re-checked;
+       changes, the token choice is re-checked (editor's wording, not the owner's);
      - store it only where the laptop agent's `gh` uses it.
      A token minted by the owner acts as the owner and is excluded (V-S5-3). Hermes draft-PR delivery stays dormant
      (the PAT is recorded to expire 2026-10-23 by the owner's decision of 2026-10-14,
@@ -416,12 +420,14 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
      On the probe branch it refused every agent-account merge (`merge` and `merge-async`; bot PRs and bot-approved
      owner PRs), while the owner's normal and bypass merges worked; its refusals appear in the rule suites as the
      `authorization` rule (`rule_source` type `protected_branch`) (step-1b record §3.5, §3.9), and the org audit log
-     shows B being turned on and off (owner-reported, 2026-10-29). After step 5a, probes (b), (d) as reworded (OC-7),
+     shows B being turned on and off (owner-reported, 2026-10-29). Open: the UI merge button and `gh pr merge` by the
+     bot under B were not tested (step-1b record §9). After step 5a, probes (b), (d) as reworded (OC-7),
      (e) and (i) are re-run on `main`. Rollback: remove B. Later and optional: GitHub's team-based required reviewers
      in rulesets, which needs a docs check and a test before any use.
   6. Runbook in `docs/REVIEW_PROTOCOL.md` and `CLAUDE.md`: who holds which identity; approve agent PRs rather than
      bypass; **the agent account never approves PRs** (OC-6: a bot approval satisfies the review rule on
-     owner-authored PRs, step-1b record §3.4); the owner never pushes to agent branches (R-A-15); CI changes
+     owner-authored PRs, step-1b record §3.4); probe (d)'s bot approval is an owner-run test made outside agent
+     sessions, not an agent approval; the owner never pushes to agent branches (R-A-15); CI changes
      (`.github/workflows/`) travel as owner-authored PRs made outside agent sessions and merged through the PR-only
      bypass, which skips review (V2-ID-9); the OC-2 exception text (including `allow_auto_merge` kept false) only if
      B is removed (probe (i) fails or rollback); rotation, with probe (g) re-run at every rotation.
@@ -436,15 +442,20 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
     PR diff the owner approved equals the merged PR diff (OC-8). "Approved commit = merged head" is not used: after an
     update-branch with an unchanged diff, a kept approval reports the new head as `commit_id`, so it cannot tell that
     approval from one given on the merged head (step-1b record §6). On `main` after step 5, a test shows that an
-    update which changes the PR's own diff dismisses the approval (untested in step 1b, §6, §9);
+    update which changes the PR's own diff dismisses the approval (untested in step 1b, §6, §9). Method for "the
+    approved PR diff" open: to be defined and recorded before the first probe (a) run (candidate signals in the
+    step-1b record §8 decision (4): the review's `submitted_at` against the time the head was pushed, or the PR's
+    timeline events [Inf]);
   - (b) the agent account cannot approve its own PR, and cannot merge it before the owner approves;
   - (c) a push by the agent account **after** the owner's approval dismisses it, and the PR cannot merge until the
     owner approves again; branch updates are probed too: the owner clicking "Update branch" becomes the last pusher,
     and an agent update may dismiss the approval (R-A-15);
   - (d) an owner-authored PR approved by `dentaledge-bot` cannot be merged by the agent account (refused with
     GitHub's authorization message, "You're not authorized to push to this branch"), and the owner's merge succeeds
-    (OC-7; what B provides, step-1b record §3.5 step 4.11). The probe also counts and reports any bot approval on
-    owner-authored PRs, matching the monthly measure in §3 (OC-6). The earlier wording (`reviewDecision:
+    (OC-7; the bot's refusal is what B provides, step-1b record §3.5 step 4.11; the owner's merge is [Inf, untested
+    in step 1b; first measured by this probe on `main`], and the probe records which route it took, a normal merge
+    or the PR-only bypass). The probe also counts and reports any bot approval on owner-authored PRs (editor's
+    wording, not the owner's), matching the monthly measure in §3 (OC-6). The earlier wording (`reviewDecision:
     REVIEW_REQUIRED`, only the owner's PR-only bypass can merge it) failed as written: on the owner's own PR the
     author is the only code owner, so no code-owner review is required and the bot's approval satisfies the review
     rule (step-1b record §3.4) (no extra account needed, OC-1; V2-ID-4);
@@ -466,7 +477,9 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
     `credential-governance-lessons.md`);
   - (h) the step-3 path inventory is recorded, each path with its measured exposure;
   - (i) with B adopted in step 5a (OC-6): the agent account cannot merge an owner-approved head; the
-    owner's merge succeeds; record whether it is logged as a bypass (V2-ID-3). If (i) fails, the owner removes the step-5a restriction at once and records the OC-2 exception (`allow_auto_merge` false) (V3-ID-2).
+    owner's merge succeeds; record whether it is logged as a bypass (V2-ID-3). In step 1b the owner's merge under
+    B showed rule suite `pass` (4.3), and per-merge audit-log events were not reported (only B's on/off entries), so
+    whether the audit log records such a merge as a bypass stays open. If (i) fails, the owner removes the step-5a restriction at once and records the OC-2 exception (`allow_auto_merge` false) (V3-ID-2).
 - Residual (stated): with B on `main` (step 5a, OC-6) the agent account cannot merge, as measured on the probe branch
   (step-1b record §3.5). If B is removed (rollback, or a failed probe (i)), with Contents write the agent account can
   again merge an **approved** head; only the P0-07 ask rule prompts for it, as an owner-accepted exception with
@@ -862,13 +875,14 @@ flowchart LR
    policy does not restrict classic tokens or require their approval, step-1b record §4 [Owner-rep], and if that
    policy changes, the token choice is re-checked),
    store it only where the laptop agent's `gh` uses it, and re-run probe (g) at every rotation.
-2. Rulesets (P0-10): put candidate B on `main` as tested (step 5a, OC-6) and re-run probes (b), (d), (e) and (i)
-   there; if probe (i) fails, remove B and record the OC-2 exception to
-   `REVIEW_PROTOCOL.md:22`, keeping `allow_auto_merge` false (V2-ID-3, V3-ID-2); create the review ruleset (`required_approving_review_count: 1`,
+2. Rulesets (P0-10): first create the review ruleset (`required_approving_review_count: 1`,
    `require_code_owner_review`, `require_last_push_approval`, `dismiss_stale_reviews_on_push` true) with a "For pull
    requests only" bypass for the repository admin role (owner the only admin) or an owner-only team (V-S2-16;
    user eligibility UNVERIFIED, R-A-14); confirm the agent account has no admin role and is in no bypass team; keep
-   `main-protection` without bypass; run the probes with a test PR; never push to agent branches. Add "Static scan
+   `main-protection` without bypass; then put candidate B on `main` as tested (step 5a, OC-6) and re-run probes
+   (b), (d), (e) and (i) there; if probe (i) fails, remove B and record the OC-2 exception to
+   `REVIEW_PROTOCOL.md:22`, keeping `allow_auto_merge` false (V2-ID-3, V3-ID-2); run the probes with a test PR;
+   never push to agent branches. Add "Static scan
    all skills" as required later, with P1-06 under D-15 (before P1; OC-3, revised). Breach (d) needs no ruleset change.
 3. Remove `Bash(git push *)`, `Bash(gh pr *)` and `Bash(git *)`, and review `Bash(python3 *)`, in the gitignored
    `.claude/settings.local.json` (P0-07); remove the old local fail-open guard registration there (P0-09, OC-4); keep
@@ -901,7 +915,7 @@ and query so the comparison is like for like.
 | Defect / rework frequency | post-merge `fix(...)` commits within 7 days (10-14 proxy) and 30 days; false completions caught by independent tests (P1-09) | B0 (P1-01); false completions: first pilot | monthly; per pilot | falls; false completions counted, not assumed 0 |
 | Time from specification to verified delivery | first commit of spec/plan → merge of implementing PR (slug match; ID match after P1-08) | B0 (38 specs, 51 plans) | monthly | stable or falling while acceptance holds |
 | Human interventions per task | P1-03 prompts per PR-producing session; review rounds per PR; validated correction flag (P1-02); approvals per PR (by construction 1 after P0-10, except owner-bypass merges, counted separately; an owner PR merged normally after a bot approval would look reviewed and escape the bypass count [Inf, untested], hence the bot-approval count below) | none for prompts (first 30 days after P1-03); review rounds B0 | monthly | falls for routine tasks; approvals at decision points stay (deliberate) |
-| Bot approvals on owner-authored PRs (OC-6) | count of approving reviews by `dentaledge-bot` on owner-authored PRs, reported by PR (step-1b record §3.4, §8) | none: starts after P0-10 step 5a | monthly | 0, matching the runbook rule that the agent account never approves PRs; any approval is reported |
+| Bot approvals on owner-authored PRs (OC-6) | count of approving reviews by `dentaledge-bot` on owner-authored PRs into `main`, reported by PR number; owner-run probe approvals (probe (d)) listed separately by PR number (step-1b record §3.4, §8) | none: starts after P0-10 step 5a | monthly | 0, matching the runbook rule that the agent account never approves PRs; any approval is reported |
 | Autonomous execution and recovery | agent-eval dispatch accuracy; team-eval Dispatch-Chain Accuracy and Handoff Integrity; resumed run-manifest iterations that complete; refine revert correctness (P1-12). Delivery-lane recovery: **unmeasured**, stated | P1-10 first runs; E16 record | per eval; per refine | thresholds held; recovery data exist at all |
 | Cost and tokens per accepted deliverable | tokens per accepted eval scenario (`timing.json`); tokens per merged task (PR line, P1-04) | first post-E12 runs; first 5 tasks after P1-04 | per run; monthly | per-accepted cost falls or holds as acceptance rises; triggers OPP-28 if over budget |
 | Integration complexity and maintenance burden | files/lines per PR; follow-up `fix(...)` on the same paths within 30 days; definition count (dynamic `find`/`ls`); footprint metric | B0 | monthly | fewer follow-ups; definition count not rising without a measured need |
@@ -913,7 +927,7 @@ and query so the comparison is like for like.
 |---|---|---|
 | Write-capable agents reading untrusted text directly (S3 §2.4 inventory) | 10 (8 analysts, guardian, scout-agent) [Ver] | 0 named agents; orchestrator residuals listed (breach (b) narrowed, not closed) |
 | Unpinned runtime installs in shipped paths | at least 3 known; measured by P0-02's differential [Ver] | 0; closed for the known cases, held for `skills/`, `.claude/agents/`, `packs/` and `infra/hermes-agent/skills/` by the required "Test suites" job through `ci-scan-skills.test.js` from P0-02 (B1); no ruleset change needed |
-| PRs merged without the owner's code-owner approval covering the merged PR diff (last 10; a kept approval's `commit_id` is not evidence on its own, step-1b record §6, OC-8) | 10 [S1 L-03] | 0, with owner-bypass merges reported as a separate count (audit log); a normal owner merge after a bot approval would not be counted as a bypass merge [Inf, untested], so bot approvals on owner-authored PRs are counted monthly (§3 above, OC-6) |
+| PRs merged without the owner's code-owner approval covering the merged PR diff (last 10; a kept approval's `commit_id` is not evidence on its own, step-1b record §6, OC-8; method for "the approved PR diff" open: to be defined and recorded before the first probe (a) run) | 10 [S1 L-03] | 0, with owner-bypass merges reported as a separate count (audit log); a normal owner merge after a bot approval would not be counted as a bypass merge [Inf, untested], so bot approvals on owner-authored PRs are counted monthly (§3 above, OC-6) |
 | Model-run deploy steps to `~/.claude/skills` in definitions | 3 steps + 1 sanction [Ver] | 0; other forms only prompted (residual) |
 | Guard fail-open entries per 14 days of use | 50 on 2026-10-15 [S1 §3.1] | 0 unguarded calls |
 | Definitions with a post-E12 eval report | 0 (25 pre-E12, 4 PENDING) | the P1-10 subset |
@@ -967,6 +981,11 @@ decision with new evidence.
   measured on a probe branch, not on `main`, and the org allows classic PATs without restriction (step-1b record §4
   check 1) [Owner-rep]. Outside-collaborator billing is [Asm]. Whether the Hermes executor skips project settings
   is UNVERIFIED (P0-07, P0-09).
+- Round 7 source [Docs] (fetched by the round-7 reviewer, accessed 2026-10-29): GitHub "Scopes for OAuth apps",
+  https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps: verified that `public_repo` "Limits access to public repositories" and
+  covers read/write to code, commit statuses, repository projects, collaborators and deployment statuses "for public
+  repositories and organizations", that it is also required for starring, and that scopes "do not grant any
+  additional permission beyond that which the user already has" (P0-10 step 2, OC-5).
 - Round 2 sources (read by the coordinator, accessed 2026-10-23; full list in S6 Limits): GitHub Terms of Service
   §B.3 (one free machine account per person; the account owner is responsible for the machine's actions); GitHub
   "Managing personal access tokens" (fine-grained token gaps for outside and repository collaborators; classic PATs
@@ -1005,7 +1024,7 @@ accepted; none is disputed. The coordinator's V-S2-16 note (bypass actors are ro
   merging an approved head is stated.
 - **V-S5-3** (confirmed: `.env.pr.example:2`, `README.md:315-318`, `review-11-rollout.md:144`): P0-10 requires a
   separate machine account, a token minted from it, a `dentaledge-bot` reuse choice (DECISION-S3-1), and CODEOWNERS
-  `*` against bot-to-bot approval (probe (d)).
+  `*` against bot-to-bot approval (probe (d)) (superseded by OC-7, round 7).
 - **V-S5-4** (confirmed by grep): P0-04's reference list is complete (tests, project-audit, codex-eval, docs, README,
   USER-GUIDE), canon and dated records are excluded from the grep, and the charter line goes to new DECISION-S3-5.
   Effort S → S-M (S2 OPP-30).
@@ -1097,7 +1116,7 @@ accepted; none is disputed. The coordinator's V-S2-16 note (bypass actors are ro
 
 ### Round 7 (2026-10-29, owner choices after P0-10 step 1b)
 
-Four owner choices of 2026-10-29 on the step-1b record's open questions (`docs/evaluations/2026-10-29-p0-10-step-1b-results.md` §8).
+Four owner choices of 2026-10-29 on the step-1b record's open questions (`docs/evaluations/2026-10-29-p0-10-step-1b-results.md` §8). Verification: independent review round 1 done; answers in this commit; re-review pending.
 
 - OC-5 (token; step-1b record §3.2, §3.3, §4, §8 decision (1)): P0-10 step 2 now mints a classic PAT with `public_repo` scope only, no `workflow` scope and a 90-day expiry, in place of "fine-grained first, otherwise classic `repo` without `workflow`"; it cites the measured operations and the workflow refusal, the fine-grained token that could not be minted (the org was not offered as resource owner) and the org's unrestricted classic-PAT policy, and states the dependence on the repository staying public (fail closed if it went private). The ToS §B.3 caveat now describes a `public_repo` token. §0's owner-choice bullet, B5, §2.3 item 1 and Limits match.
 - OC-6 (merge restriction; step-1b record §3.5, §3.6, §3.9, §8 decision (2)): step 5a creates candidate B on `main` as tested (users, teams, apps [], `enforce_admins` false, no other classic settings, with the request body), cites its refusals of every agent-account merge, the owner's working normal and bypass merges, its `authorization` rule in the rule suites and the audit-log entries (owner-reported, 2026-10-29), and notes that "Restrict updates" was not tested; step 1b records the result, so the "if none works" exception is not needed for agent-account merges; rollback removes B. Guards: step 6's runbook rule "the agent account never approves PRs", a new monthly §3 measure counting bot approvals on owner-authored PRs (the approvals-per-PR instrument and the code-owner-approval indicator point to it), and a re-run of probes (b), (d), (e) and (i) on `main` after step 5a. The residual now states that even with B a bot approval satisfies the review rule on owner-authored PRs, so a normal owner merge after it would look reviewed and not count as a bypass merge [Inf, untested]. Team-based required reviewers in rulesets are noted as later and optional, after a docs check and a test. §0 (c), probe (i), step 6's OC-2 text, §2.3 item 2, B5, Trace and Rollback match.
@@ -1105,3 +1124,23 @@ Four owner choices of 2026-10-29 on the step-1b record's open questions (`docs/e
 - OC-8 (probe (a); step-1b record §6, §8 (a) row, decision (4)): probe (a) now checks that the PR diff the owner approved equals the merged PR diff, with the reason "approved commit = merged head" is dropped, and adds a test on `main` after step 5 that an update changing the PR's own diff dismisses the approval (untested in step 1b). The §3 code-owner-approval indicator now reads "approval covering the merged PR diff" and notes that a kept approval's `commit_id` is not evidence on its own.
 - OC-5 follow-up (step-1b record §4 check 1): step 2 and §2.3 item 1 replace "if the org requires token approval, the owner approves it" with the measured fact that the org's policy does not restrict classic tokens or require their approval [Owner-rep], and say the token choice is re-checked if that policy changes.
 - Step-1b record returned: P0-10's opening now says steps 1a and 1b are done and cites both dated records; B5, §2.3 item 1 and Limits match. The round 2 OC-1 and round 3 V2-ID-7 entries above carry a "token type superseded by OC-5" pointer.
+
+Review round 1 (2026-10-29), the editor's answers to OC-R-1 … OC-R-17; only the reviewer closes a finding:
+
+- OC-R-1: probe (d) tags the owner's merge [Inf, untested in step 1b; first measured by this probe on `main`] and records the route it took (normal merge or PR-only bypass); the OC-7 wording is kept.
+- OC-R-2: S6 only (§4 "Any autonomous merge path" row).
+- OC-R-3: S6 only ("Decisions requiring approval").
+- OC-R-4: S6 only (D-01 pointer).
+- OC-R-5: step 2's `public_repo` reach text cites GitHub "Scopes for OAuth apps" [Docs, accessed 2026-10-29], states that the permission bound applies everywhere and that this repository is the bot's only collaborator grant, and tags "issues, comments, forks, PRs" [Inf]; Limits adds the source.
+- OC-R-6: §2.3 item 2 now creates the review ruleset first, then candidate B (step 5a), then re-runs probes (b), (d), (e) and (i).
+- OC-R-7: the §3 bot-approval count is scoped to PRs into `main` and lists owner-run probe approvals separately by PR number; step 6 says probe (d)'s bot approval is an owner-run test outside agent sessions, not an agent approval.
+- OC-R-8: probe (a) and the §3 code-owner-approval indicator say the method for "the approved PR diff" is open, to be defined and recorded before the first probe (a) run; probe (a) cites the step-1b record's §8 decision (4) signals as [Inf].
+- OC-R-9: S6 CN-1 and the index Limits only; S2 and S3 are not edited.
+- OC-R-10: "if that policy changes, the token choice is re-checked" (step 2) and probe (d)'s "also counts and reports any bot approval" are marked as the editor's wording.
+- OC-R-11: probe (i) says per-merge audit-log events were not reported in step 1b, so "logged as a bypass" stays open.
+- OC-R-12: V-S5-3 above carries "(superseded by OC-7, round 7)".
+- OC-R-13: this round's header states the review status; the index adds a round-7 row.
+- OC-R-14: index only.
+- OC-R-15: step 1a's "classic-PAT policy [Asm]" points to its answer (step-1b record §4 check 1, Owner-rep).
+- OC-R-16: step 5a records the untested UI merge button and `gh pr merge` by the bot under B as open (step-1b record §9); no probe step added.
+- OC-R-17: nothing to do.
