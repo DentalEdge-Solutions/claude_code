@@ -10,10 +10,10 @@ RECIPE (the owner; about two minutes)
   4. Paste stdout only (the lines the command printed) into the session. Nothing else.
   5. Hashed paths (PREFIX/<12 hex>) change between runs. To find which file one is, re-run it
      yourself on that folder alone (--root <folder>, no --preset), and do not paste that output.
-  6. VPS: copy this file and review_lib.py into one folder there, then run
-     python3 scan-github-tokens.py --root ~ --root <HERMES_INSTALL> --hash-paths-under <HERMES_DATA> --try
-     where <HERMES_INSTALL> is the folder Hermes is installed in and <HERMES_DATA> is its data
-     folder (file names there hold customer IDs). Then  echo $?  as on the laptop.
+  6. VPS: copy this file and review_lib.py into one folder there (<DIR> below), then run
+     sudo python3 <DIR>/scan-github-tokens.py --preset vps --try    and then  echo $?
+     <DIR> is any folder you choose, for example /tmp/scan. sudo is needed to read /root,
+     other users' homes and Docker's volumes. The Hermes data folders are hashed by itself.
 
 WHY THIS EXISTS
     Step 3 measures where GitHub tokens are lying around (transcripts, histories, configs,
@@ -24,10 +24,17 @@ WHY THIS EXISTS
 
 WHAT IT DOES
     Walks every --root (file or folder) recursively, read-only. Inside a walk a symlink is
-    skipped, never followed; a --root that is itself a symlink is resolved once and its target
-    scanned, with a "resolved" line. Every regular file is read as BYTES (binary, leveldb and
-    sqlite files included), in chunks with an overlap, so a token across a chunk boundary is
-    found exactly once. Files are opened with O_NOFOLLOW and checked with fstat.
+    skipped, never followed. A --root that is itself a symlink is followed once and walked under
+    its own name, with a "resolved" line, unless its target is the home folder or above it,
+    contains another root, or lies inside a pruned folder: then it is skipped as
+    "symlink (target ...)". Each file is scanned once, by identity (device and inode), and read
+    as BYTES (binary, leveldb and sqlite files included). Files are opened with O_NOFOLLOW and
+    O_NONBLOCK and checked with fstat.
+
+    The result never depends on the read size. No match can contain a byte outside
+    [A-Za-z0-9_+/= \\t\\x00], so such bytes split a file into independent segments; complete
+    segments are searched together, and a segment longer than 64 KiB is cut into windows at
+    positions fixed by the data, not by the reads.
 
     Each file is searched for the repo's two GitHub patterns (scripts/telemetry/
     secret-patterns.js, pinned by a test) as plain ASCII, as UTF-16LE and as UTF-16BE (Windows
@@ -43,6 +50,12 @@ WHAT IT DOES
     PARTIAL: it is listed with its type, fingerprint and length for the owner to judge, and
     never tried. A match is capped at 256 characters: a longer one is a partial shown as
     len>256 and fingerprinted over its first 256 characters.
+
+    --preset vps (the box; run it with sudo) scans /home, /root, /var/lib/docker/volumes, the
+    Hermes install /opt/hermes-agent (with data/ and its .env files), Hermes state
+    /var/lib/hermes, the checkouts /opt/projects, /etc/environment and /etc/systemd/system
+    (layout from infra/hermes-agent/deploy). It hashes, by itself, /opt/hermes-agent/data,
+    /var/lib/hermes, /opt/projects and every home's .hermes and .claude/projects.
 
     --preset laptop expands to the include list of the step-3 plan (§3), plus every
     .git/config and .git/modules/*/config (submodule remotes) under ~/Projects and
@@ -79,9 +92,11 @@ NOT COVERED (exit 0 does not mean "no token anywhere")
     Authorization value; gzip and zlib data, including git objects and packfiles;
     Snappy-compressed leveldb blocks; a token wrapped across lines; JSON \\u escapes
     ("\\u0067hp_..."); UTF-32; a UTF-16BE PARTIAL right before a non-ASCII character may be
-    read one character short (full tokens are read right in both UTF-16 orders); encrypted stores (the keychain, browser cookie and password
-    stores, encrypted app databases); files over --max-bytes, unreadable or dataless files,
-    symlinks inside a walk, and every folder outside the roots. Each skipped, pruned and absent
+    read one character short (a full-shape token is read whole in either UTF-16 order, and the
+    result never depends on where the reads cut the file: both are tested); encrypted stores
+    (the keychain, browser cookie and password stores, encrypted app databases); files over
+    --max-bytes, unreadable or dataless files, symlinks inside a walk, and every folder outside
+    the roots. Each skipped, pruned and absent
     path is listed so you can see what was not read.
 
 OUTPUT (stdout, tab-separated, sorted within each section)
@@ -174,7 +189,8 @@ def build_pattern(atoms, enc, cap=None):
 
 
 def _unit_run(fam, enc):
-    """A run of body characters of a family (used to consume the rest of a long match)."""
+    """A run of body characters of a family (the rest of a long match). A plain character class
+    for plain text: Python's regex engine repeats it without a stack that grows with the run."""
     unit = {"plain": "%s", "le": "(?:%s\\x00)", "be": "(?:\\x00%s)"}[enc] % BODY[fam]
     return re.compile((unit + "*").encode())
 
@@ -185,6 +201,26 @@ def _unit_run(fam, enc):
 PATTERNS = [(fam, enc, re.compile(build_pattern(atoms, enc, CAP).encode()))
             for enc in ("plain", "le", "be") for fam, atoms in (("pat", PAT_ATOMS), ("gh", GH_ATOMS))]
 SKIP_RE = {(fam, enc): _unit_run(fam, enc) for fam in BODY for enc in UNIT}
+PAT_PREFIX_RE = {enc: re.compile(build_pattern(PAT_ATOMS[:-1], enc).encode()) for enc in UNIT}
+
+
+def _run_end(fam, enc, buf, start, end):
+    """Where the run of a long match ends, from start, within end. A classic run stops where a
+    github_pat_ starts inside it ("...AAAgithub_pat_..."), so that fine-grained token is still
+    found; a fine-grained run swallows a ghp_ inside it, as the pattern does."""
+    rx, e = SKIP_RE[fam, enc], start
+    while True:                    # in 4 KiB steps: a repeated group keeps a stack as long as
+        stop = min(e + 4096, end)  # its match, and a long UTF-16 run would grow it without bound
+        q = rx.match(buf, e, stop).end()
+        if q < stop or stop == end:
+            e = q
+            break
+        e = q
+    if fam == "gh":
+        p = PAT_PREFIX_RE[enc].search(buf, start, min(e + 2 * 11, end))
+        if p and p.start() < e:
+            e = start + (p.start() - start) // UNIT[enc] * UNIT[enc]
+    return e
 BASIC_RE = re.compile(rb"[Bb]asic[ \t]{1,8}([A-Za-z0-9+/]{16,512}={0,2})")
 DECODE = {"plain": "ascii", "le": "utf-16-le", "be": "utf-16-be"}
 
@@ -196,8 +232,20 @@ TOKEN_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 BODY_CHAR_RE = {fam: re.compile(cls) for fam, cls in BODY.items()}
 
 CHUNK = 1 << 20          # bytes read at a time
-OVERLAP = 128            # bytes kept from the previous chunk; more than the longest pattern
-                         # prefix plus its minimum body in UTF-16 (2 x 31 = 62 bytes)
+WINDOW = 64 << 10        # longest separator-free stretch processed in one piece (see iter_matches)
+OVERLAP = 128            # in a window, a match must end this far before the window's end; more
+                         # than the longest prefix plus minimum body in UTF-16 (2 x 31 = 62 bytes)
+SEP_SET = rb"A-Za-z0-9_+/= \t\x00"
+SEP_RE = re.compile(b"[^" + SEP_SET + b"]")        # a byte no match can contain
+LAST_SEP_RE = re.compile(b"(?s).*[^" + SEP_SET + b"]")
+GUARD = 32               # a long run stops this far before a window's end (prefix look-ahead room)
+
+
+def _check_window(window):
+    """A window must hold the longest match (CAP UTF-16 units) plus OVERLAP and GUARD, or a
+    window could never decide its first match and the scan would make no progress."""
+    if 2 * CAP + 2 * 12 + OVERLAP + GUARD >= window:
+        raise ValueError("WINDOW too small for CAP, OVERLAP and GUARD")
 
 
 def classify(text, after, long=False):
@@ -229,7 +277,7 @@ def _after(buf, b, enc):
 RX = {(fam, enc): rx for fam, enc, rx in PATTERNS}
 
 
-def _utf16(buf, pos, fam):
+def _utf16(buf, pos, end, fam):
     """UTF-16LE and BE matches of one family, with overlapping readings resolved. ASCII text in
     UTF-16LE is also valid UTF-16BE shifted by one byte, so both patterns match, one byte
     apart. The readings agree inside and differ only at the end, next to a non-ASCII character:
@@ -240,7 +288,7 @@ def _utf16(buf, pos, fam):
         a, b, fam, enc = c
         return (classify(buf[a:b].decode(DECODE[enc]), _after(buf, b, enc))[1], enc == "le")
     out = []
-    for c in sorted((m.start(), m.end(), fam, enc) for enc in ("le", "be") for m in RX[fam, enc].finditer(buf, pos)):
+    for c in sorted((m.start(), m.end(), fam, enc) for enc in ("le", "be") for m in RX[fam, enc].finditer(buf, pos, end)):
         if out and c[0] < out[-1][1]:
             if key(c) > key(out[-1]):
                 out[-1] = c
@@ -249,27 +297,32 @@ def _utf16(buf, pos, fam):
     return out
 
 
-def _find(buf, pos):
-    """Candidate matches in buf from pos, sorted by start, never overlapping, then Basic values.
-    Groups in order: plain fine-grained, plain classic, UTF-16 fine-grained, UTF-16 classic,
-    Basic; a candidate that overlaps a kept one is dropped. Kept spans are non-overlapping, so
-    a bisect finds overlaps."""
+def _find(buf, pos, end):
+    """Candidate matches in buf[pos:end), sorted by start, never overlapping. Groups in order:
+    plain fine-grained, plain classic, UTF-16 fine-grained, UTF-16 classic, Basic. A candidate
+    whose start lies inside a kept one is dropped; a classic candidate that a kept fine-grained
+    one starts inside is cut where that one starts (reported as a partial, not dropped). Kept
+    spans are non-overlapping, so a bisect finds them."""
     starts, ends, cands = [], [], []
-    groups = [[(m.start(), m.end(), fam, "plain") for m in RX[fam, "plain"].finditer(buf, pos)]
+    groups = [[(m.start(), m.end(), fam, "plain") for m in RX[fam, "plain"].finditer(buf, pos, end)]
               for fam in ("pat", "gh")]
-    groups += [_utf16(buf, pos, fam) for fam in ("pat", "gh")]
-    groups.append([(m.start(), m.end(), "basic", "plain") for m in BASIC_RE.finditer(buf, pos)])
+    groups += [_utf16(buf, pos, end, fam) for fam in ("pat", "gh")]
+    groups.append([(m.start(), m.end(), "basic", "plain") for m in BASIC_RE.finditer(buf, pos, end)])
     for group in groups:
         new = []
         for a, b, fam, enc in group:
-            i = bisect.bisect_left(starts, b)
-            if i and ends[i - 1] > a:
-                continue
+            k = bisect.bisect_right(starts, a)          # the first kept span starting after a
+            if k and ends[k - 1] > a:
+                continue                                 # a lies inside a kept span
+            if k < len(starts) and starts[k] < b:        # a kept span starts inside this one
+                if fam != "gh":
+                    continue
+                b = a + (starts[k] - a) // UNIT[enc] * UNIT[enc]
             new.append((a, b, fam, enc))
         if new:
             cands += new
             spans = sorted(list(zip(starts, ends)) + [(a, b) for a, b, _, _ in new])
-            starts, ends = [s for s, _ in spans], [e for _, e in spans]
+            starts, ends = [x for x, _ in spans], [y for _, y in spans]
     return sorted(cands)
 
 
@@ -281,64 +334,93 @@ def _basic(raw):
         data = base64.b64decode(b64, validate=False)
     except (binascii.Error, ValueError):
         return
-    for a, b, fam, enc in _find(data, 0):
+    for a, b, fam, enc in _find(data, 0, len(data)):
         if enc == "plain" and fam in BODY:
             text = data[a:b].decode("ascii")
             after = _after(data, b, "plain")
             yield text, after, len(text) >= CAP and bool(after) and bool(BODY_CHAR_RE[fam].fullmatch(after))
 
 
+def _region(buf, o, end, window, skip):
+    """Matches in buf[o:end). Returns (matches, where the next region starts, skip).
+
+    window=False: buf[o:end) is a union of complete segments (end is a separator byte, or the
+    end of the data); everything in it is decided here, reading at most 2 bytes past end for
+    the character after a match. window=True: buf[o:end) is a fixed stretch of one long
+    segment; a match is decided only if it ends at least OVERLAP bytes before end, and the
+    next region starts at the first undecided match (one byte earlier for UTF-16, so the other
+    UTF-16 reading is seen again) or OVERLAP bytes before end. `skip` is the rest of a long run
+    still to consume, carried between windows."""
+    out, pos = [], o
+    limit = end - OVERLAP if window else end
+    if skip is not None:
+        e = _run_end(skip[0], skip[1], buf, o, end)
+        if window and e >= end - GUARD:
+            return out, o + (end - GUARD - o) // 2 * 2, skip
+        pos = e
+    for a, b, fam, enc in _find(buf, pos, end):
+        if a < pos:
+            continue                               # inside a long run consumed below
+        if window and b + UNIT[enc] > limit:
+            return out, max(a - (UNIT[enc] - 1), pos), None
+        if fam == "basic":
+            out += _basic(buf[a:b])
+            pos = b
+            continue
+        text = buf[a:b].decode(DECODE[enc])
+        after = _after(buf, b, enc)
+        long = len(text) >= CAP and bool(after) and bool(BODY_CHAR_RE[fam].fullmatch(after))
+        out.append((text, after, long))
+        pos = b
+        if long:
+            e = _run_end(fam, enc, buf, b, end)
+            if window and e >= end - GUARD:
+                return out, b + (end - GUARD - b) // UNIT[enc] * UNIT[enc], (fam, enc)
+            pos = e                                # candidates with a < pos are dropped above
+    return out, (max(limit, pos) if window else end), None
+
+
 def iter_matches(f, chunk_size=CHUNK):
     """Yield (decoded text, decoded character after, long) for every match in a binary stream,
-    each exactly once, in bounded memory. A match that touches the end of the buffer, or
-    starts in its last OVERLAP bytes, is carried into the next round with everything after it;
-    a carried match is at most CAP characters long, so the carry stays small. After a long
-    (> CAP) match the rest of its run is consumed as it streams past, never carried."""
-    carry, skip = b"", None
+    each exactly once, in bounded memory, and the SAME whatever the read size.
+
+    No match can contain a byte outside [A-Za-z0-9_+/= \\t\\x00], so those bytes split the
+    stream into segments that are independent of each other. Complete segments are processed
+    together, up to WINDOW bytes at a time, with 2 bytes of look-ahead. A segment longer than
+    WINDOW is cut into fixed windows at positions that depend only on the data. Either way,
+    where the reads happened to cut the stream changes nothing."""
+    _check_window(WINDOW)
+    data, o, eof, skip = b"", 0, False, None
     while True:
-        chunk = f.read(chunk_size)
-        eof = not chunk
-        buf = carry + chunk
-        pos = 0
-        if skip is not None:
-            pos = skip.match(buf, 0).end()
-            if not eof and pos >= len(buf) - 1:     # the run may go on (or half a UTF-16 unit)
-                carry = buf[pos:]
-                continue
-            skip = None
-        safe_end = len(buf) - OVERLAP
-        next_start = None
-        restart = True
-        while restart and next_start is None:
-            restart = False
-            for a, b, fam, enc in _find(buf, pos):
-                if a < pos:
+        if not eof:
+            chunk = f.read(chunk_size)
+            eof = not chunk
+            data = data[o:] + chunk
+            o = 0
+        while o < len(data):
+            n = len(data)
+            stop = min(o + WINDOW, n)
+            if SEP_RE.search(data, o, stop) is None:
+                if n - o >= WINDOW:
+                    out, o, skip = _region(data, o, o + WINDOW, True, skip)
+                    yield from out
                     continue
-                if not eof and (b + UNIT[enc] > len(buf) or a >= safe_end):
-                    next_start = a
-                    break
-                if fam == "basic":
-                    yield from _basic(buf[a:b])
-                    pos = b
-                    continue
-                text = buf[a:b].decode(DECODE[enc])
-                after = _after(buf, b, enc)
-                long = len(text) >= CAP and bool(after) and bool(BODY_CHAR_RE[fam].fullmatch(after))
-                yield text, after, long
-                pos = b
-                if long:
-                    end = SKIP_RE[fam, enc].match(buf, b).end()
-                    if not eof and end >= len(buf) - 1:
-                        skip, next_start = SKIP_RE[fam, enc], end
-                        break
-                    pos = end
-                    restart = True          # candidates inside the run are void; search again
-                    break
-        if eof:
+                if not eof:
+                    break                          # need more data to decide
+                out, o, skip = _region(data, o, n, False, skip)
+                yield from out
+                break
+            m = LAST_SEP_RE.match(data, o, stop if eof else min(stop, n - 1))
+            if m is None:
+                if not eof:
+                    break                          # the only separator lacks its look-ahead
+                m = LAST_SEP_RE.match(data, o, stop)
+            last = m.end() - 1
+            out, _, skip = _region(data, o, last, False, skip)
+            yield from out
+            o = last + 1
+        if eof and o >= len(data):
             return
-        if next_start is None:
-            next_start = max(safe_end, pos)
-        carry = buf[next_start:]
 
 
 # ---- walking -------------------------------------------------------------------------------
@@ -355,7 +437,10 @@ class Scan:
         self.absent = set()
         self.pruned = set()
         self.resolved = {}    # target -> the --root symlink it was resolved from
-        self.seen = set()     # files already scanned, so overlapping roots count once
+        self.seen = set()     # (st_dev, st_ino) of files already scanned: each file once
+        self.tops = []        # every top-level root, for the symlinked-root limits
+        self.protected = []   # home folders: a symlinked root may not resolve to one or above
+        self.prune_ids = set()  # identities of pruned folders: a root may not resolve into one
         self.files_scanned = 0
         self.errors = 0
 
@@ -364,12 +449,13 @@ def _dataless(st):
     return bool(getattr(st, "st_flags", 0) & SF_DATALESS)
 
 
-def scan_file(path, max_bytes, res, chunk_size=CHUNK):
-    """Open with O_NOFOLLOW (a symlink swapped in after the walk is refused), then decide from
-    fstat on the open file, not from an earlier lstat."""
+def scan_file(path, max_bytes, res, chunk_size=CHUNK, open_path=None):
+    """Open with O_NOFOLLOW (a symlink swapped in after the walk is refused) and O_NONBLOCK (a
+    FIFO swapped in cannot block), then decide from fstat on the open file, not from an earlier
+    lstat. open_path is the resolved target of a top-level root that is a symlink to a file."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        fd = os.open(path, flags)
+        fd = os.open(open_path or path, flags)
     except OSError as e:
         res.skipped[path] = "symlink" if e.errno in (errno.ELOOP, errno.EMLINK) else "unreadable"
         return
@@ -408,10 +494,53 @@ def scan_file(path, max_bytes, res, chunk_size=CHUNK):
         res.counts[key] = res.counts.get(key, 0) + 1
 
 
+def _ident(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _contains(anc, path):
+    """True if the folder with identity `anc` is `path` or one of its ancestor folders."""
+    p = path
+    while True:
+        if _ident(p) == anc:
+            return True
+        q = os.path.dirname(p)
+        if q == p:
+            return False
+        p = q
+
+
+def _refusal(root, target, res):
+    """Why a symlinked top-level root is not followed (plain words, no path), or None. A planted
+    link (~/.codex -> ~) must not turn a narrow root into the whole home folder, a second walk of
+    another root, or a way into a folder the preset leaves out."""
+    tid = _ident(target)
+    if tid is None:
+        return None
+    if any(_contains(tid, h) for h in res.protected):
+        return "is the home folder or above it"
+    if any(r != root and _contains(tid, r) for r in res.tops):
+        return "contains another root"
+    p = target
+    while True:
+        if _ident(p) in res.prune_ids:
+            return "is inside a pruned folder"
+        q = os.path.dirname(p)
+        if q == p:
+            return None
+        p = q
+
+
 def scan_path(root, max_bytes, res, chunk_size=CHUNK, top=True):
-    """Scan one root, file or folder, read-only. Inside the walk a symlink is skipped; a
-    top-level root that is a symlink is resolved once. Iterative, so a deep tree cannot
-    exhaust Python's recursion limit."""
+    """Scan one root, file or folder, read-only. Inside the walk a symlink is skipped. A
+    top-level root that is a symlink is followed once, within limits (see _refusal), and walked
+    under its own name, so every path shown is one the owner asked for. Each file is scanned
+    once, by identity. Iterative, so a deep tree cannot exhaust Python's recursion limit."""
+    follow = False
     if top:
         try:
             st = os.lstat(root)
@@ -426,13 +555,23 @@ def scan_path(root, max_bytes, res, chunk_size=CHUNK, top=True):
             if not os.path.exists(target):
                 res.skipped[root] = "symlink"
                 return
+            why = _refusal(root, target, res)
+            if why:
+                res.skipped[root] = "symlink (target %s)" % why
+                return
             res.resolved[target] = root
-            root = target
+            if not os.path.isdir(target):
+                tst = os.stat(target)
+                if (tst.st_dev, tst.st_ino) not in res.seen:
+                    res.seen.add((tst.st_dev, tst.st_ino))
+                    scan_file(root, max_bytes, res, chunk_size, open_path=target)
+                return
+            follow = True
     stack = [(root, True)]
     while stack:
         path, is_root = stack.pop()
         try:
-            st = os.lstat(path)
+            st = os.stat(path) if (is_root and follow) else os.lstat(path)
         except FileNotFoundError:
             if is_root:
                 res.absent.add(path)
@@ -441,7 +580,7 @@ def scan_path(root, max_bytes, res, chunk_size=CHUNK, top=True):
             res.skipped[path] = "unreadable"
             continue
         if stat.S_ISLNK(st.st_mode):
-            res.skipped[path] = "symlink"
+            res.skipped.setdefault(path, "symlink")    # keep a refused root's reason
         elif _dataless(st):
             res.skipped[path] = "dataless"
         elif stat.S_ISDIR(st.st_mode):
@@ -454,8 +593,8 @@ def scan_path(root, max_bytes, res, chunk_size=CHUNK, top=True):
             stack += [(os.path.join(path, n), False) for n in sorted(names, reverse=True)]
         elif not stat.S_ISREG(st.st_mode):
             res.skipped[path] = "not-a-regular-file"
-        elif path not in res.seen:
-            res.seen.add(path)
+        elif (st.st_dev, st.st_ino) not in res.seen:
+            res.seen.add((st.st_dev, st.st_ino))
             scan_file(path, max_bytes, res, chunk_size)
 
 
@@ -520,6 +659,30 @@ def preset_laptop(home, repo_root):
     pruned = [p for p in prune if os.path.isdir(p) and not os.path.islink(p)]
     prefixes = [os.path.join(repo_root, "infra", "hermes-agent", "data"), h(".hermes"), h(".claude", "projects")]
     return paths, unreadable, pruned, prefixes, found_all
+
+
+def preset_vps(base="/"):
+    """The box (P15): every home folder under /home, /root, Docker's volumes (needs sudo), the
+    Hermes install (/opt/hermes-agent, with its data/ and .env files), Hermes state
+    (/var/lib/hermes), the project checkouts (/opt/projects), and the systemd units and
+    /etc/environment (Environment= lines). Layout from infra/hermes-agent/deploy. `base` is a
+    test seam: a fake file-system root. Returns (paths, unreadable folders, prefixes to hash)."""
+    b = lambda *p: os.path.join(base, *p)
+    paths = [b("home"), b("root"), b("var", "lib", "docker", "volumes"), b("opt", "hermes-agent"),
+             b("var", "lib", "hermes"), b("opt", "projects"), b("etc", "environment"),
+             b("etc", "systemd", "system")]
+    homes, unreadable = [b("root")], []
+    try:
+        with os.scandir(b("home")) as it:
+            homes += sorted(e.path for e in it if e.is_dir(follow_symlinks=False))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        unreadable.append(b("home"))
+    prefixes = [b("opt", "hermes-agent", "data"), b("var", "lib", "hermes"), b("opt", "projects")]
+    for h in homes:
+        prefixes += [os.path.join(h, ".hermes"), os.path.join(h, ".claude", "projects")]
+    return paths, unreadable, prefixes
 
 
 # ---- output --------------------------------------------------------------------------------
@@ -616,15 +779,6 @@ class HashPrefixes:
             child = parent
 
 
-def _unresolve(path, resolved):
-    """A path under the target of a resolved --root, mapped back onto that root: the owner sees
-    the path asked for. The most specific root wins."""
-    for t in sorted(resolved, key=len, reverse=True):
-        if path == t or path.startswith(t.rstrip("/") + "/"):
-            return resolved[t] + path[len(t):]
-    return path
-
-
 def _hidden(path, prefixes, key):
     """PREFIX/<tag> when path is under a hash prefix (by identity), else None. The prefix is
     printed as the owner gave it; the tag covers everything below the matched folder."""
@@ -637,12 +791,11 @@ def _hidden(path, prefixes, key):
     return redact(printable(raw if raw.endswith("/") else raw + "/") + path_tag(key, rest))
 
 
-def display_path(path, prefixes, key, resolved=None):
+def display_path(path, prefixes, key):
     if not isinstance(prefixes, HashPrefixes):
         prefixes = HashPrefixes(prefixes)
-    p = _unresolve(path, resolved or {})
-    hidden = _hidden(p, prefixes, key)
-    return hidden if hidden is not None else redact(printable(p))
+    hidden = _hidden(path, prefixes, key)
+    return hidden if hidden is not None else redact(printable(path))
 
 
 def _resolved_row(target, root, prefixes, key):
@@ -689,7 +842,7 @@ def render(res, prefixes, tries, key, notices=(), error=None):
     if error:
         rows.append(["error", f"internal error {error}; this report is incomplete"])
     rows += [["notice", n] for n in notices]
-    disp = lambda p: display_path(p, prefixes, key, res.resolved)
+    disp = lambda p: display_path(p, prefixes, key)
     fl, per_token = [], {}
     for (path, kind, fp, full, n), c in res.counts.items():
         fl.append(["finding", disp(path), kind, fp, f"count={c}", "full" if full else "partial", n])
@@ -855,7 +1008,8 @@ def _parser():
                 description="Find GitHub tokens in files; print fingerprints only.")
     p.add_argument("--root", action="append", default=[], metavar="PATH",
                    help="a file or folder to scan; repeatable; ~ is expanded")
-    p.add_argument("--preset", choices=["laptop"], help="the laptop include list of the step-3 plan")
+    p.add_argument("--preset", choices=["laptop", "vps"],
+                   help="laptop: the include list of the step-3 plan; vps: the box (run with sudo)")
     p.add_argument("--max-bytes", type=_positive_int, default=DEFAULT_MAX_BYTES,
                    help="skip files larger than this (default 512 MiB)")
     p.add_argument("--hash-paths-under", action="append", default=[], metavar="PREFIX",
@@ -870,14 +1024,14 @@ def _norm(path):
 
 
 def main(argv=None, http=None, home=None, repo_root=None, stdout=None, stderr=None, path_key=None,
-         environ=None):
+         environ=None, fs_base=None):
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
     parser = _parser()
     try:
         args = parser.parse_args(sys.argv[1:] if argv is None else argv)
         if not args.root and not args.preset:
-            raise _Usage("give at least one --root PATH or --preset laptop; there are no default roots")
+            raise _Usage("give at least one --root PATH or a --preset; there are no default roots")
     except _Usage as e:
         stderr.write(redact(parser.format_usage()) + "scan-github-tokens.py: error: "
                      + redact(printable(str(e))) + "\n")
@@ -885,7 +1039,7 @@ def main(argv=None, http=None, home=None, repo_root=None, stdout=None, stderr=No
     state = {}
     try:
         return _run(args, http or github_get, home, repo_root, stdout, path_key,
-                    os.environ if environ is None else environ, state)
+                    os.environ if environ is None else environ, state, fs_base or "/")
     except Exception as e:   # never print the message: it could hold a path or token text
         name = type(e).__name__
         if "res" in state:
@@ -899,7 +1053,7 @@ def main(argv=None, http=None, home=None, repo_root=None, stdout=None, stderr=No
         return 3
 
 
-def _run(args, http, home, repo_root, stdout, path_key, environ, state):
+def _run(args, http, home, repo_root, stdout, path_key, environ, state, fs_base="/"):
     # Per-run key for --hash-paths-under tags; never printed, never stored. path_key is a test seam.
     state["key"] = path_key if path_key is not None else secrets.token_bytes(32)
     state["notices"] = env_notice(environ)
@@ -909,14 +1063,22 @@ def _run(args, http, home, repo_root, stdout, path_key, environ, state):
     state["res"] = res = Scan()
     tops = [_norm(r) for r in args.root]
     found = []
+    home = _norm(home or "~")
+    res.protected = [home]
     if args.preset == "laptop":
-        paths, unreadable, pruned, hash_prefixes, found = preset_laptop(_norm(home or "~"),
-                                                                        _norm(repo_root or REPO_ROOT))
-        prefixes += [p for p in hash_prefixes if p not in prefixes]
+        paths, unreadable, pruned, hash_prefixes, found = preset_laptop(home, _norm(repo_root or REPO_ROOT))
         res.pruned.update(pruned)
-        for p in unreadable:
-            res.skipped[p] = "unreadable"
-        tops += paths
+        res.prune_ids = {i for i in map(_ident, pruned) if i}
+    elif args.preset == "vps":
+        paths, unreadable, hash_prefixes = preset_vps(fs_base)
+        res.protected = [fs_base]
+    else:
+        paths, unreadable, hash_prefixes = [], [], []
+    prefixes += [p for p in hash_prefixes if p not in prefixes]
+    for p in unreadable:
+        res.skipped[p] = "unreadable"
+    tops += paths
+    res.tops = tops
     # Record each prefix's identity at start-up, before anything is scanned.
     state["prefixes"] = prefixes = HashPrefixes(prefixes)
     for r in tops:

@@ -191,12 +191,14 @@ class TestByteScanner(unittest.TestCase):
                 with self.subTest(chunk=chunk, off=off):
                     self.assertEqual([t for t, _ in matches_in(data, chunk)], [pat])
 
-    def test_a_fine_grained_token_wins_over_a_classic_shape_running_into_it(self):
-        fg = fake_fg()
-        data = (" ghp_" + rnd(20) + fg + " ").encode()
-        got = matches_in(data, S.CHUNK)
-        self.assertEqual([t for t, _ in got], [fg])
-        self.assertTrue(S.classify(got[0][0], got[0][1])[1])
+    def test_a_classic_run_cut_off_by_a_fine_grained_token_is_a_partial_and_both_are_reported(self):
+        # TS-R-14: the classic-shape run is cut where github_pat_ starts; it is not dropped.
+        fg, head = fake_fg(), "ghp_" + rnd(20)
+        for enc in ("ascii", "utf-16-le", "utf-16-be"):
+            with self.subTest(enc=enc):
+                got = matches_in((" " + head + fg + " ").encode(enc), S.CHUNK)
+                self.assertEqual([t for t, _ in got], [head, fg])
+                self.assertEqual([S.classify(t, a)[1] for t, a in got], [False, True])
 
     def test_a_classic_shape_inside_a_fine_grained_body_is_not_a_second_match(self):
         tok = "github_pat_" + rnd(19) + "ghp_" + rnd(59)
@@ -215,10 +217,14 @@ class TestByteScanner(unittest.TestCase):
         self.assertEqual([(t, l) for t, _, l in got], [(tok[:256], True)])
 
 
-def run(argv, http=None, home=None, repo_root=None, path_key=None, environ=None):
+NO_HOME = "/nonexistent-scan-github-tokens-test-home"     # never the real home, even for a stat
+
+
+def run(argv, http=None, home=None, repo_root=None, path_key=None, environ=None, fs_base=None):
     out, err = io.StringIO(), io.StringIO()
-    code = S.main(argv, http=http or NoNetwork(), home=home, repo_root=repo_root, stdout=out, stderr=err,
-                  path_key=path_key, environ={} if environ is None else environ)
+    code = S.main(argv, http=http or NoNetwork(), home=home or NO_HOME, repo_root=repo_root, stdout=out,
+                  stderr=err, path_key=path_key, environ={} if environ is None else environ,
+                  fs_base=fs_base or NO_HOME)
     return code, out.getvalue(), err.getvalue()
 
 
@@ -351,12 +357,13 @@ class TestWalk(TempCase):
         os.symlink(self.p("root"), self.p("root-link"))
         code, out, _ = run(["--root", self.p("root"), "--root", self.p("root-link")])
         self.assertEqual(lines(out, "finding"), [])
-        # Inside a walk a symlink is skipped; a top-level root that is a symlink is resolved once,
-        # and paths under its target are shown under the root as given.
+        # Inside a walk a symlink is skipped; a top-level root that is a symlink to another root
+        # is not followed (TS-R-16).
         self.assertEqual(sorted(lines(out, "skipped")),
-                         sorted([["skipped", self.p("root-link", "dir-link"), "symlink"],
-                                 ["skipped", self.p("root-link", "file-link"), "symlink"]]))
-        self.assertEqual(lines(out, "resolved"), [["resolved", self.p("root"), "(resolved from " + self.p("root-link") + ")"]])
+                         sorted([["skipped", self.p("root", "dir-link"), "symlink"],
+                                 ["skipped", self.p("root", "file-link"), "symlink"],
+                                 ["skipped", self.p("root-link"), "symlink (target contains another root)"]]))
+        self.assertEqual(lines(out, "resolved"), [])
         self.assertEqual(code, 0)
 
     def test_binary_files_are_scanned(self):
@@ -1173,8 +1180,9 @@ class TestWalkDetails(TempCase):
         os.symlink(os.path.join(target, "f.txt"), self.p("file-link"))
         os.symlink(self.p("nowhere"), self.p("dangling"))
         code, out, _ = run(["--root", self.p("root-link"), "--root", self.p("file-link"), "--root", self.p("dangling")])
-        # Shown under the root the owner gave; the most specific root wins (file-link names the file).
-        self.assertEqual(lines(out, "finding"), [["finding", self.p("file-link"), "classic", R.sha12(tok),
+        # The followed root is walked under its own name; file-link reaches the same file, which is
+        # scanned once (by identity), so it shows under root-link.
+        self.assertEqual(lines(out, "finding"), [["finding", self.p("root-link", "f.txt"), "classic", R.sha12(tok),
                                                   "count=1", "full", "len=40"]])
         self.assertEqual(sorted(lines(out, "resolved")), sorted([
             ["resolved", target, "(resolved from " + self.p("root-link") + ")"],
@@ -1274,6 +1282,302 @@ class TestLoginCheck(LeakMixin, unittest.TestCase):
         tok = fake("ghp_")
         r = S.try_token("classic", tok, FakeHttp({tok: (200, gh_json(login=tok[4:24]))}))
         self.assertEqual(r, "ALIVE login=?")
+
+
+def gen_mixed(rng):
+    """Random mixed input: plain, UTF-16LE and UTF-16BE tokens of every shape, Basic values,
+    glued or separated by ASCII, non-ASCII and long letter runs (the reviewer's diff3 mix)."""
+    import base64
+    al = string.ascii_letters + string.digits
+    r = lambda n: "".join(rng.choice(al) for _ in range(n))
+    parts = []
+    for _ in range(rng.randint(1, 6)):
+        k = rng.random()
+        if k < .4:
+            t = "gh" + rng.choice("pousr") + "_" + r(rng.choice([20, 35, 36, 37, 300]))
+        elif k < .7:
+            t = "github_pat_" + r(22) + "_" + r(59)
+        else:
+            t = "Basic " + base64.b64encode(("x:ghs_" + r(36)).encode()).decode()
+        sep = rng.choice(["", " ", "x", "-", "_", "\\n", "é", "☃", "a" * rng.randint(0, 200)])
+        enc = rng.choice(["plain", "plain", "le", "be"])
+        codec = {"plain": "utf-8", "le": "utf-16-le", "be": "utf-16-be"}[enc]
+        parts.append(sep.encode(codec if rng.random() < .5 else "utf-8"))
+        parts.append(t.encode(codec))
+    return b"".join(parts)
+
+
+def scan_all(data, chunk):
+    return list(S.iter_matches(io.BytesIO(data), chunk))
+
+
+class TestChunkIndependence(unittest.TestCase):
+    """TS-R-14: the result never depends on where the reads cut the stream."""
+
+    def test_random_mixed_inputs_give_the_same_result_at_every_chunk_size(self):
+        rng = random.Random(14)
+        diffs = []
+        for n in range(1500):
+            data = gen_mixed(rng)
+            ref = scan_all(data, 1 << 20)
+            for cs in (rng.randint(1, 300), 129, 130, 256, 257, 4096):
+                if scan_all(data, cs) != ref:
+                    diffs.append((n, cs))
+        self.assertEqual(diffs, [])
+
+    def test_the_window_path_is_chunk_independent_and_agrees_with_whole_segments(self):
+        # Long separator-free inputs force the fixed-window path; a small WINDOW makes it common.
+        rng = random.Random(15)
+        diffs, whole = [], []
+        for n in range(300):
+            data = b"".join(gen_mixed(rng).replace(b"-", b"a").replace(b"\\", b"a") for _ in range(3))
+            big = scan_all(data, 1 << 20)
+            with mock.patch.object(S, "WINDOW", 1024):
+                ref = scan_all(data, 1 << 20)
+                for cs in (rng.randint(1, 300), 129, 1000, 1025, 4096):
+                    if scan_all(data, cs) != ref:
+                        diffs.append((n, cs))
+            if ref != big:
+                whole.append(n)
+        self.assertEqual(diffs, [])
+        self.assertEqual(whole, [])
+
+    def test_utf16be_tokens_near_a_4096_boundary_with_non_ascii_neighbours(self):
+        # The reviewer's boundary.py case: 15 of 256 classic and 61 of 256 fine-grained lost.
+        rng = random.Random(9)
+        for kind in ("gh", "pat"):
+            for ctx, tail in (('{"note":"x ', '" ok"}'), ('{"note":"☃ ', '" ☃"}'), ('{"n":"☃ ', '☃"}')):
+                for enc, unit in (("utf-8", 1), ("utf-16-le", 2), ("utf-16-be", 2)):
+                    lost = []
+                    for p in range(0, 2400):
+                        start = (p + len(ctx)) * unit
+                        if not (4096 - 450 <= start <= 4096 + 60):
+                            continue
+                        t = fake("ghp_") if kind == "gh" else fake_fg()
+                        got = scan_all((" " * p + ctx + t + tail).encode(enc), 4096)
+                        if not any(x[0] == t and S.classify(x[0], x[1])[1] for x in got):
+                            lost.append(p)
+                    with self.subTest(kind=kind, ctx=ctx, enc=enc):
+                        self.assertEqual(lost, [])
+
+
+class TestWindowInvariant(unittest.TestCase):
+    def test_a_window_too_small_for_the_longest_match_is_refused_not_looped(self):
+        S._check_window(S.WINDOW)
+        S._check_window(1024)
+        with self.assertRaises(ValueError):
+            S._check_window(2 * S.CAP + S.OVERLAP)
+        with mock.patch.object(S, "WINDOW", 600), self.assertRaises(ValueError):
+            scan_all(b"x", 1)
+
+
+class TestManyLongRuns(unittest.TestCase):
+    def test_many_long_runs_scan_in_linear_time(self):
+        # TS-R-15: 4 MiB of ghp_ + 300-character runs took 53.7 s.
+        import time
+        run_ = "ghp_" + "A1b" * 100
+        data = ((run_ + " ") * ((4 << 20) // (len(run_) + 1))).encode()
+        t0 = time.monotonic()
+        got = scan_all(data, S.CHUNK)
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertEqual(len(got), (4 << 20) // (len(run_) + 1))
+        self.assertTrue(all(l for _, _, l in got))
+        glued = ((run_ + "_") * 20000).encode()     # no separator byte at all: the window path
+        t0 = time.monotonic()
+        got = scan_all(glued, S.CHUNK)
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertEqual(len(got), 20000)
+
+
+class TestSymlinkRootLimits(TempCase):
+    """TS-R-16: a symlinked root is not resolved to the home folder, above a root, or into a
+    pruned folder."""
+
+    def test_a_planted_codex_link_to_home_reads_nothing_under_library(self):
+        home, repo = self.p("home"), self.p("repo")
+        secret = fake("ghp_")
+        write(os.path.join(home, "Library", "Secret", "x"), secret)
+        os.symlink(home, os.path.join(home, ".codex"))
+        out = run(["--preset", "laptop"], home=home, repo_root=repo)[1]
+        self.assertNotIn(R.sha12(secret), out)
+        self.assertIn(["skipped", os.path.join(home, ".codex"), "symlink (target is the home folder or above it)"],
+                      lines(out, "skipped"))
+        for l in lines(out, "finding") + lines(out, "skipped"):
+            self.assertFalse(l[1].startswith(os.path.join(home, ".codex") + "/"), l)
+
+    def test_a_link_to_an_ancestor_of_another_root_is_refused(self):
+        tok = fake("ghp_")
+        write(self.p("a", "f"), tok)
+        os.symlink(self.tmp, self.p("up"))
+        out = run(["--root", self.p("a"), "--root", self.p("up")])[1]
+        self.assertIn(["skipped", self.p("up"), "symlink (target contains another root)"], lines(out, "skipped"))
+        self.assertEqual([l[1] for l in lines(out, "finding")], [self.p("a", "f")])
+
+    def test_a_link_into_a_pruned_folder_is_refused(self):
+        home, repo = self.p("home"), self.p("repo")
+        tok = fake("ghp_")
+        write(os.path.join(home, "Library", "Mobile Documents", "docs", "f"), tok)
+        os.symlink(os.path.join(home, "Library", "Mobile Documents", "docs"), os.path.join(home, "Documents"))
+        out = run(["--preset", "laptop"], home=home, repo_root=repo)[1]
+        self.assertNotIn(R.sha12(tok), out)
+        self.assertIn(["skipped", os.path.join(home, "Documents"), "symlink (target is inside a pruned folder)"],
+                      lines(out, "skipped"))
+
+    def test_a_refused_link_under_a_prefix_is_shown_hashed(self):
+        data = self.p("data")
+        os.makedirs(data)
+        os.symlink(self.tmp, os.path.join(data, "client-1234567890"))
+        out = run(["--root", os.path.join(data, "client-1234567890"), "--root", data, "--hash-paths-under", data],
+                  path_key=b"\x01" * 32)[1]
+        self.assertNotIn("1234567890", out)
+        self.assertIn(["skipped", data + "/" + S.path_tag(b"\x01" * 32, "client-1234567890"),
+                       "symlink (target contains another root)"], lines(out, "skipped"))
+
+    def test_a_file_reached_by_two_roots_shows_under_the_root_that_reached_it_first(self):
+        tok = fake("ghp_")
+        write(self.p("a", "sub", "f"), tok)
+        os.symlink(self.p("a", "sub"), self.p("link"))
+        out = run(["--root", self.p("a"), "--root", self.p("link")])[1]
+        self.assertEqual([l[1] for l in lines(out, "finding")], [self.p("a", "sub", "f")])
+        out = run(["--root", self.p("link")])[1]
+        self.assertEqual([l[1] for l in lines(out, "finding")], [self.p("link", "f")])
+
+
+class TestPresetVps(TempCase):
+    """TS-R-17: the box preset, against a fake file-system base."""
+    CID = "1234567890"
+
+    def test_vps_preset_paths_and_hashing(self):
+        base = self.p("box")
+        t = {}
+
+        def put(key, *parts):
+            t[key] = fake("ghp_")
+            write(os.path.join(base, *parts), t[key])
+        put("alice", "home", "alice", ".bash_history")
+        put("bob_hermes", "home", "bob", ".hermes", "clients", self.CID, "x")
+        put("root", "root", ".git-credentials")
+        put("docker", "var", "lib", "docker", "volumes", "v1", "_data", "f")
+        put("install", "opt", "hermes-agent", ".env.gaw")
+        put("data", "opt", "hermes-agent", "data", "clients", self.CID, "y")
+        put("state", "var", "lib", "hermes", "vaults", "acme-" + self.CID, "z")
+        put("projects", "opt", "projects", "claude_code", ".git", "config")
+        put("unit", "etc", "systemd", "system", "hermes-broker.service")
+        put("outside", "srv", "other", "f")
+        key = b"\x02" * 32
+        code, out, _ = run(["--preset", "vps"], fs_base=base, path_key=key)
+        found = {l[3] for l in lines(out, "finding")}
+        for k in t:
+            with self.subTest(k=k):
+                if k == "outside":
+                    self.assertNotIn(R.sha12(t[k]), found)
+                else:
+                    self.assertIn(R.sha12(t[k]), found)
+        self.assertNotIn(self.CID, out)
+        shown = [l[1] for l in lines(out, "finding")]
+        self.assertIn(os.path.join(base, "home", "alice", ".bash_history"), shown)
+        for pre in (os.path.join(base, "opt", "hermes-agent", "data"), os.path.join(base, "var", "lib", "hermes"),
+                    os.path.join(base, "home", "bob", ".hermes")):
+            self.assertTrue(any(re.fullmatch(re.escape(pre) + "/[0-9a-f]{12}", s) for s in shown), pre)
+        self.assertNoLeak(out, t.values())
+
+    def test_vps_preset_reports_missing_places_as_absent(self):
+        base = self.p("box")
+        os.makedirs(os.path.join(base, "home"))
+        out = run(["--preset", "vps"], fs_base=base)[1]
+        absent = [l[1] for l in lines(out, "absent")]
+        for want in (("root",), ("var", "lib", "docker", "volumes"), ("opt", "hermes-agent"), ("var", "lib", "hermes")):
+            self.assertIn(os.path.join(base, *want), absent)
+
+
+class TestRound2Nits(TempCase):
+    """TS-R-18."""
+
+    def test_a_long_token_inside_a_basic_value_is_len_gt_256(self):
+        import base64
+        tok = "ghp_" + rnd(300)
+        write(self.p("f"), "Authorization: Basic " + base64.b64encode(("x:" + tok).encode()).decode() + "\n")
+        out = run(["--root", self.tmp])[1]
+        self.assertEqual([(l[3], l[5], l[6]) for l in lines(out, "finding")],
+                         [(R.sha12(tok[:256]), "partial", "len>256")])
+
+    def test_a_classic_shape_inside_a_fine_grained_token_in_a_basic_value_is_not_reported(self):
+        import base64
+        fg = "github_pat_" + rnd(19) + "ghp_" + rnd(59)      # a valid full shape holding "ghp_"
+        write(self.p("f"), "Authorization: Basic " + base64.b64encode(("x:" + fg).encode()).decode() + "\n")
+        out = run(["--root", self.tmp])[1]
+        self.assertEqual([(l[2], l[3], l[5]) for l in lines(out, "finding")], [("fine-grained", R.sha12(fg), "full")])
+
+    def test_a_long_classic_run_running_into_a_fine_grained_token_keeps_the_token(self):
+        fg = fake_fg()
+        head = "ghp_" + rnd(300)
+        for enc in ("ascii", "utf-16-le", "utf-16-be"):
+            for chunk in (S.CHUNK, 64):
+                with self.subTest(enc=enc, chunk=chunk):
+                    got = scan_all((" " + head + fg + " ").encode(enc), chunk)
+                    self.assertEqual([(t, l) for t, _, l in got], [(head[:256], True), (fg, False)])
+                    self.assertTrue(S.classify(got[1][0], got[1][1])[1])
+        long_head = "ghp_" + rnd(5000)                      # crosses several windows
+        with mock.patch.object(S, "WINDOW", 1024):
+            for enc in ("ascii", "utf-16-le", "utf-16-be"):
+                for pad in range(0, 40, 7):
+                    with self.subTest(enc=enc, pad=pad, window=True):
+                        got = scan_all(("x" * pad + " " + long_head + fg + " ").encode(enc), 100)
+                        self.assertEqual([(t, l) for t, _, l in got], [(long_head[:256], True), (fg, False)])
+
+    def test_a_fifo_swapped_in_after_the_walk_does_not_block(self):
+        import threading
+        fifo = self.p("pipe")
+        os.mkfifo(fifo)
+        res = S.Scan()
+        t = threading.Thread(target=S.scan_file, args=(fifo, S.DEFAULT_MAX_BYTES, res), daemon=True)
+        t.start()
+        t.join(10)
+        if t.is_alive():                    # release the blocked reader before failing
+            fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            os.close(fd)
+            t.join(5)
+            self.fail("opening a FIFO blocked")
+        self.assertEqual(res.skipped, {fifo: "not-a-regular-file"})
+
+    def test_a_file_that_turns_dataless_after_the_walk_is_skipped_by_fstat(self):
+        tok = fake("ghp_")
+        write(self.p("f"), tok)
+        real_fstat = os.fstat
+
+        class FakeStat:
+            def __init__(self, st):
+                self._st, self.st_flags = st, 0x40000000
+
+            def __getattr__(self, name):
+                return getattr(self._st, name)
+        with mock.patch.object(S.os, "fstat", lambda fd: FakeStat(real_fstat(fd))), \
+                mock.patch.object(S, "iter_matches", side_effect=AssertionError("read a dataless file")):
+            out = run(["--root", self.tmp])[1]
+        self.assertEqual(lines(out, "skipped"), [["skipped", self.p("f"), "dataless"]])
+
+    def test_two_prefixes_naming_one_folder_show_the_first_given(self):
+        real, link = self.p("real"), self.p("link")
+        write(os.path.join(real, "1234567890", "x"), fake("ghp_"))
+        os.symlink(real, link)
+        os.symlink(real, self.p("third"))
+        out = run(["--root", self.p("third"), "--hash-paths-under", link, "--hash-paths-under", real],
+                  path_key=b"\x03" * 32)[1]
+        self.assertEqual([l[1] for l in lines(out, "finding")], [link + "/" + S.path_tag(b"\x03" * 32, "1234567890/x")])
+
+    def test_files_are_deduplicated_by_identity(self):
+        tok = fake("ghp_")
+        write(self.p("a", "f"), tok)
+        os.makedirs(self.p("b"))
+        os.link(self.p("a", "f"), self.p("b", "hardlink"))
+        out = run(["--root", self.tmp])[1]
+        self.assertEqual(len(lines(out, "finding")), 1)
+        self.assertIn("files_scanned=1", lines(out, "totals")[0])
+
+    def test_docstring_lines_fit_100_characters(self):
+        for i, line in enumerate(S.__doc__.splitlines(), 1):
+            with self.subTest(line=i):
+                self.assertLessEqual(len(line), 100)
 
 
 class TestDefaultHttp(LeakMixin, unittest.TestCase):
