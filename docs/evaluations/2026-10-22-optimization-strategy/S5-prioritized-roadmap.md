@@ -386,7 +386,11 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
        added to; the owner is responsible for the machine's actions (ToS §B.3) (V2-ID-7). The org's policy does not
        restrict classic tokens or require their approval (step-1b record §4 check 1) [Owner-rep]; if that policy
        changes, the token choice is re-checked (editor's wording, not the owner's);
-     - store it only where the laptop agent's `gh` uses it.
+     - store it only where the laptop agent's `gh` uses it. `gh auth login --with-token` documents its minimum
+       scopes as `repo`, `read:org` and `gist` (`gh auth login --help`, gh 2.92.0, read 2026-10-29) [Docs], so it
+       may refuse to store a `public_repo` token; that is untested (step-1b record §9). Step 1b measured `gh`
+       working with the token supplied through `GH_TOKEN` (§3.2) [Ver]. The storage mechanism is settled and
+       measured in steps 2-3 (the owner's choice if `gh` refuses).
      A token minted by the owner acts as the owner and is excluded (V-S5-3). Hermes draft-PR delivery stays dormant
      (the PAT is recorded to expire 2026-10-23 by the owner's decision of 2026-10-14,
      `sessions/daily/2026-10-14.md:35-37`; its refusal is proved by the owner in this step, V2-ID-5);
@@ -874,7 +878,8 @@ flowchart LR
    only, no `workflow` scope, 90-day expiry, OC-5; it works only while the repository stays public; the org's
    policy does not restrict classic tokens or require their approval, step-1b record §4 [Owner-rep], and if that
    policy changes, the token choice is re-checked),
-   store it only where the laptop agent's `gh` uses it, and re-run probe (g) at every rotation.
+   store it only where the laptop agent's `gh` uses it (`gh auth login --with-token` may refuse a `public_repo`
+   token, see P0-10 step 2), and re-run probe (g) at every rotation.
 2. Rulesets (P0-10): first create the review ruleset (`required_approving_review_count: 1`,
    `require_code_owner_review`, `require_last_push_approval`, `dismiss_stale_reviews_on_push` true) with a "For pull
    requests only" bypass for the repository admin role (owner the only admin) or an owner-only team (V-S2-16;
@@ -1144,3 +1149,5 @@ Review round 1 (2026-10-29), the editor's answers to OC-R-1 … OC-R-17; only th
 - OC-R-15: step 1a's "classic-PAT policy [Asm]" points to its answer (step-1b record §4 check 1, Owner-rep).
 - OC-R-16: step 5a records the untested UI merge button and `gh pr merge` by the bot under B as open (step-1b record §9); no probe step added.
 - OC-R-17: nothing to do.
+
+Coordinator addition (2026-10-29, after review round 1): step 2 and §2.3 item 1 note that `gh auth login --with-token` documents minimum scopes `repo`, `read:org` and `gist` (`gh auth login --help`, gh 2.92.0) [Docs], so it may refuse a `public_repo` token (untested, step-1b record §9); step 1b measured `gh` working through `GH_TOKEN`; the storage mechanism is settled in steps 2-3.
