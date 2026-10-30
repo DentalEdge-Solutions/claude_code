@@ -190,9 +190,10 @@ class TestByteScanner(unittest.TestCase):
         self.assertEqual([m for m, _ in got], [tok])
 
 
-def run(argv, http=None, home=None, repo_root=None):
+def run(argv, http=None, home=None, repo_root=None, path_key=None):
     out, err = io.StringIO(), io.StringIO()
-    code = S.main(argv, http=http or NoNetwork(), home=home, repo_root=repo_root, stdout=out, stderr=err)
+    code = S.main(argv, http=http or NoNetwork(), home=home, repo_root=repo_root, stdout=out, stderr=err,
+                  path_key=path_key)
     return code, out.getvalue(), err.getvalue()
 
 
@@ -446,16 +447,143 @@ class TestOutput(TempCase):
         write(os.path.join(data, "clients", "1234567890", "run.log"), tok)
         os.symlink(os.path.join(data, "clients"), os.path.join(data, "link-9876543210"))
         argv = ["--root", data, "--root", os.path.join(data, "5555555555"), "--hash-paths-under", data + "/"]
-        code, out, _ = run(argv)
+        key = bytes(range(32))
+        code, out, _ = run(argv, path_key=key)
         for cid in ("1234567890", "9876543210", "5555555555"):
             self.assertNotIn(cid, out)
-        self.assertEqual(lines(out, "finding")[0][1], data + "/" + R.sha12("clients/1234567890/run.log"))
-        self.assertEqual(lines(out, "skipped")[0][1], data + "/" + R.sha12("link-9876543210"))
-        self.assertEqual(lines(out, "absent")[0][1], data + "/" + R.sha12("5555555555"))
+        self.assertEqual(lines(out, "finding")[0][1], data + "/" + S.path_tag(key, "clients/1234567890/run.log"))
+        self.assertEqual(lines(out, "skipped")[0][1], data + "/" + S.path_tag(key, "link-9876543210"))
+        self.assertEqual(lines(out, "absent")[0][1], data + "/" + S.path_tag(key, "5555555555"))
         # Paths outside the prefix are printed as they are.
         write(self.p("other.txt"), tok)
         out2 = run(["--root", self.tmp, "--hash-paths-under", data])[1]
         self.assertIn(self.p("other.txt"), [l[1] for l in lines(out2, "finding")])
+
+
+class TestKeyedPathTags(TempCase):
+    """--hash-paths-under uses HMAC-SHA256 with a per-run random key: a bare sha12 of a
+    10-digit customer ID is reversed by trying all 10^10 IDs."""
+
+    def tags(self, out):
+        return sorted(l[1] for l in lines(out, "finding"))
+
+    def setUp(self):
+        super().setUp()
+        self.tok = fake("ghp_")
+        for d in ("d1", "d2"):
+            write(self.p(d, "clients", "1234567890", "run.log"), self.tok)
+        self.argv = ["--root", self.tmp, "--hash-paths-under", self.p("d1"), "--hash-paths-under", self.p("d2")]
+
+    def test_same_rest_same_tag_within_a_run(self):
+        out = run(self.argv)[1]
+        t1, t2 = self.tags(out)
+        self.assertEqual(t1[len(self.p("d1")):], t2[len(self.p("d2")):])
+        key = os.urandom(32)
+        self.assertEqual(S.path_tag(key, "clients/1"), S.path_tag(key, "clients/1"))
+
+    def test_different_runs_give_different_tags(self):
+        a = self.tags(run(self.argv, path_key=b"\x01" * 32)[1])
+        b = self.tags(run(self.argv, path_key=b"\x02" * 32)[1])
+        self.assertNotEqual(a, b)
+        # And with no key injected, each run makes its own.
+        self.assertNotEqual(self.tags(run(self.argv)[1]), self.tags(run(self.argv)[1]))
+
+    def test_default_key_is_32_random_bytes(self):
+        with mock.patch.object(S.secrets, "token_bytes", return_value=b"\x07" * 32) as tb:
+            out = run(self.argv)[1]
+        tb.assert_called_once_with(32)
+        self.assertEqual(self.tags(out)[0], self.p("d1") + "/" + S.path_tag(b"\x07" * 32, "clients/1234567890/run.log"))
+
+    def test_tag_is_keyed_hmac_not_a_bare_hash(self):
+        import hmac
+        rest = "clients/1234567890/run.log"
+        key = b"\x05" * 32
+        tag = S.path_tag(key, rest)
+        self.assertRegex(tag, r"^[0-9a-f]{12}$")
+        self.assertEqual(tag, hmac.new(key, rest.encode(), hashlib.sha256).hexdigest()[:12])
+        self.assertNotEqual(tag, R.sha12(rest))
+        self.assertNotIn(tag, hashlib.sha1(rest.encode()).hexdigest())
+        self.assertNotIn(tag, hashlib.sha256(rest.encode()).hexdigest())
+        out = run(self.argv, path_key=key)[1]
+        self.assertNotIn(R.sha12(rest), out)
+
+    def test_the_key_never_appears_in_the_output(self):
+        key = bytes(range(100, 132))
+        code, out, err = run(self.argv + ["--try"], path_key=key,
+                             http=FakeHttp({self.tok: (401, gh_json(message="Bad credentials"))}))
+        text = out + err
+        h = key.hex()
+        for i in range(len(h) - 15):
+            self.assertNotIn(h[i:i + 16], text)
+        self.assertNotIn(key.decode("latin-1"), text)
+
+    def test_token_fingerprints_stay_sha12(self):
+        out = run(self.argv, path_key=b"\x09" * 32)[1]
+        self.assertEqual([l[3] for l in lines(out, "finding")], [R.sha12(self.tok)] * 2)
+
+
+PRINTABLE_LINE = re.compile(r"^[\x20-\x7e\t]*$")
+
+
+class TestEscaping(TempCase):
+    NAMES = {"esc": "x\x1b[31mred\x1b[0m", "bel": "bell\x07", "ctl": "c\x01\x1f\x7fz",
+             "nl": "two\nlines", "tab": "a\tb", "uni": "café-日本"}
+    WANT = {"esc": "x\\x1b[31mred\\x1b[0m", "bel": "bell\\x07", "ctl": "c\\x01\\x1f\\x7fz",
+            "nl": "two\\x0alines", "tab": "a\\x09b", "uni": "caf\\u00e9-\\u65e5\\u672c"}
+
+    def assertPrintable(self, text):
+        for line in text.splitlines():
+            self.assertRegex(line, PRINTABLE_LINE)
+
+    def test_file_names_print_as_escapes_only(self):
+        toks = []
+        for k, name in self.NAMES.items():
+            toks.append(fake("ghp_"))
+            write(self.p("f-" + name), toks[-1])
+            os.symlink(self.p("f-" + name), self.p("l-" + name))
+        argv = ["--root", self.tmp] + [x for n in self.NAMES.values() for x in ("--root", self.p("gone-" + n))]
+        code, out, err = run(argv)
+        self.assertPrintable(out + err)
+        found = [l[1] for l in lines(out, "finding")]
+        skipped = [l[1] for l in lines(out, "skipped")]
+        absent = [l[1] for l in lines(out, "absent")]
+        for k, want in self.WANT.items():
+            with self.subTest(k=k):
+                self.assertIn(self.p("f-" + want), found)
+                self.assertIn(self.p("l-" + want), skipped)
+                self.assertIn(self.p("gone-" + want), absent)
+        self.assertNoLeak(out + err, toks)
+
+    def test_the_unhashed_prefix_is_escaped_too(self):
+        tok = fake("ghp_")
+        data = self.p("da\x1bta")
+        write(os.path.join(data, "123"), tok)
+        out = run(["--root", self.tmp, "--hash-paths-under", data], path_key=b"\x01" * 32)[1]
+        self.assertPrintable(out)
+        self.assertEqual(lines(out, "finding")[0][1], self.p("da\\x1bta") + "/" + S.path_tag(b"\x01" * 32, "123"))
+
+    def test_github_messages_are_escaped(self):
+        tok = fake("ghp_")
+        msg = "bad\x1b[2J\x07thingé\nend"
+        self.assertEqual(S.try_token("classic", tok, FakeHttp({tok: (403, gh_json(message=msg))})),
+                         "UNKNOWN 403 bad\\x1b[2J\\x07thing\\u00e9\\x0aend")
+        long = "\x1b" * 100
+        r = S.try_token("classic", tok, FakeHttp({tok: (403, gh_json(message=long))}))
+        self.assertLessEqual(len(r) - len("UNKNOWN 403 "), 80)
+        self.assertRegex(r, r"^UNKNOWN 403 (\\x1b)+$")
+
+    def test_every_line_is_printable_ascii_with_try(self):
+        tok = fake("gho_")
+        write(self.p("f-\x1b]0;title\x07"), tok)
+        http = FakeHttp({tok: (500, gh_json(message="\x1b[31mboom"))})
+        code, out, err = run(["--root", self.tmp, "--try", "--root", self.p("\x1b[2J")], http=http)
+        self.assertPrintable(out + err)
+        self.assertIn("UNKNOWN 500 \\x1b[31mboom", out)
+
+    def test_usage_errors_are_escaped(self):
+        code, out, err = run(["--root", self.tmp, "--max-bytes", "\x1b[2J"])
+        self.assertEqual(code, 2)
+        self.assertPrintable(err)
 
 
 class TestExitWithoutTry(TempCase):

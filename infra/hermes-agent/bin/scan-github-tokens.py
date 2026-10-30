@@ -48,10 +48,18 @@ OUTPUT (stdout, tab-separated, sorted within each section)
     skipped  <path> symlink|size|unreadable|not-a-regular-file
     absent   <path>
     totals   files_scanned= findings= full_tokens= partial_tokens= skipped= absent=
-    --hash-paths-under PREFIX prints a path under PREFIX as PREFIX/<sha12 of the rest>, for
-    folders whose file names hold customer IDs (the Hermes data folders). Token-like text in a
-    path is replaced, and a final guard withholds any line holding 8 or more consecutive
-    characters of any matched text.
+    --hash-paths-under PREFIX prints a path under PREFIX as PREFIX/<tag>, for folders whose
+    file names hold customer IDs (the Hermes data folders). The tag is NOT a fingerprint like
+    sha12: it is HMAC-SHA256 of the rest of the path with a random key made for this run
+    (secrets.token_bytes(32)), never printed and never stored, first 12 hex. A bare hash of a
+    10-digit ID is reversed by trying every ID; a keyed one is not. The same path gives the
+    same tag within one run and a different tag in the next, so tags cannot be compared across
+    runs. Token fingerprints stay review_lib.sha12, comparable across runs and with the rest
+    of the repo: tokens are high-entropy, so a bare hash of one cannot be reversed.
+    Every printed path (prefix included), skip and absent entry and GitHub message has each
+    character outside 0x20-0x7E escaped (\\xNN, \\uNNNN), so nothing can drive the terminal or
+    break the columns. Token-like text in a path is replaced, and a final guard withholds any
+    line holding 8 or more consecutive characters of any matched text.
 
 EXIT CODES
     0  no full-shape token found, or (with --try) every full-shape token proved DEAD
@@ -71,7 +79,7 @@ HOW THE OWNER RUNS IT
     Missing paths are listed as absent; there are no default roots. If a token is ALIVE and
     it is yours, revoke it in the browser at once, then re-run with --try.
 """
-import argparse, json, os, re, stat, sys, urllib.parse, urllib.request, urllib.error
+import argparse, hashlib, hmac, json, os, re, secrets, stat, sys, urllib.parse, urllib.request, urllib.error
 from http.client import HTTPException
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -271,14 +279,43 @@ def redact(text):
     return TOKENISH_RE.sub("[token-like-text]", text)
 
 
-def display_path(path, prefixes):
+def printable(text):
+    """Every character outside 0x20-0x7E as a deterministic escape, so nothing from the file
+    system or from GitHub can drive the terminal (ESC sequences, BEL, newlines) or break the
+    tab-separated columns: ASCII controls and DEL as \\xNN, an undecodable file-name byte
+    (surrogateescape) as \\xNN of that byte, other characters as \\uNNNN or \\UNNNNNNNN."""
+    out = []
+    for c in text:
+        o = ord(c)
+        if 0x20 <= o <= 0x7E:
+            out.append(c)
+        elif o < 0x80:
+            out.append("\\x%02x" % o)
+        elif 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif o <= 0xFFFF:
+            out.append("\\u%04x" % o)
+        else:
+            out.append("\\U%08x" % o)
+    return "".join(out)
+
+
+def path_tag(key, rest):
+    """Keyed tag of the part of a path under a --hash-paths-under prefix: HMAC-SHA256 with the
+    per-run random key, first 12 hex. Not review_lib.sha12: a bare hash of a 10-digit customer
+    ID is reversed by trying every ID. Not review_lib.hmac12 either: that one encodes with
+    str.encode(), which fails on a file name that is not valid UTF-8."""
+    return hmac.new(key, os.fsencode(rest), hashlib.sha256).hexdigest()[:12]
+
+
+def display_path(path, prefixes, key):
     for pre in prefixes:
+        base = pre if pre.endswith("/") else pre + "/"
         if path == pre:
-            return redact(pre)
-        if path.startswith(pre + "/"):
-            return redact(pre + "/" + R.sha12(path[len(pre) + 1:]))
-    return redact(path.encode("utf-8", "backslashreplace").decode("ascii", "backslashreplace")
-                  .replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r"))
+            return redact(printable(pre))
+        if path.startswith(base):
+            return redact(printable(base) + path_tag(key, path[len(base):]))
+    return redact(printable(path))
 
 
 def guard(lines, secrets):
@@ -298,20 +335,20 @@ HEADER = ("# scan-github-tokens: fingerprints only (sha12 = first 12 hex of sha1
           "no token value is printed")
 
 
-def render(res, prefixes, tries):
+def render(res, prefixes, tries, key):
     out = [HEADER]
     fl = []
     per_token = {}
     for (path, kind, fp, full, n), c in res.counts.items():
-        fl.append(["finding", display_path(path, prefixes), kind, fp, f"count={c}",
+        fl.append(["finding", display_path(path, prefixes, key), kind, fp, f"count={c}",
                    "full" if full else "partial", f"len={n}"])
         per_token.setdefault((fp, kind, full, n), set()).add(path)
     out += ["\t".join(l) for l in sorted(fl)]
     out += sorted("\t".join(["token", fp, kind, f"files={len(paths)}", "full" if full else "partial",
                              f"len={n}"]) for (fp, kind, full, n), paths in per_token.items())
     out += ["\t".join(["try", fp, kind, result]) for fp, kind, result in tries]
-    out += sorted(f"skipped\t{display_path(p, prefixes)}\t{r}" for p, r in res.skipped.items())
-    out += sorted(f"absent\t{display_path(p, prefixes)}" for p in res.absent)
+    out += sorted(f"skipped\t{display_path(p, prefixes, key)}\t{r}" for p, r in res.skipped.items())
+    out += sorted(f"absent\t{display_path(p, prefixes, key)}" for p in res.absent)
     fulls = {k[0] for k in per_token if k[2]}
     parts = {k[0] for k in per_token if not k[2]}
     out.append("\t".join(["totals", f"files_scanned={res.files_scanned}", f"findings={len(fl)}",
@@ -379,10 +416,17 @@ def _message(body, token):
     msg = _json(body).get("message")
     if not isinstance(msg, str):
         return ""
-    msg = "".join(c if " " <= c <= "~" else " " for c in msg).strip()
+    msg = msg.strip()
     if _holds_token_text(msg, token):
         return "[message withheld: token text]"
-    return msg[:80]
+    out, n = [], 0
+    for c in msg:                  # escaped, then cut at 80 characters without splitting an escape
+        e = printable(c)
+        if n + len(e) > 80:
+            break
+        out.append(e)
+        n += len(e)
+    return "".join(out)
 
 
 def try_token(kind, token, http):
@@ -439,7 +483,7 @@ def _parser():
     p.add_argument("--max-bytes", type=_positive_int, default=DEFAULT_MAX_BYTES,
                    help="skip files larger than this (default 512 MiB)")
     p.add_argument("--hash-paths-under", action="append", default=[], metavar="PREFIX",
-                   help="print paths under PREFIX as PREFIX/<sha12 of the rest>; repeatable")
+                   help="print paths under PREFIX as PREFIX/<keyed per-run tag of the rest>; repeatable")
     p.add_argument("--try", dest="try_", action="store_true",
                    help="prove each full-shape token dead or alive with one request to api.github.com")
     return p
@@ -449,7 +493,7 @@ def _norm(path):
     return os.path.abspath(os.path.expanduser(path))
 
 
-def main(argv=None, http=None, home=None, repo_root=None, stdout=None, stderr=None):
+def main(argv=None, http=None, home=None, repo_root=None, stdout=None, stderr=None, path_key=None):
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
     parser = _parser()
@@ -458,16 +502,17 @@ def main(argv=None, http=None, home=None, repo_root=None, stdout=None, stderr=No
         if not args.root and not args.preset:
             raise _Usage("give at least one --root PATH or --preset laptop; there are no default roots")
     except _Usage as e:
-        stderr.write(redact(parser.format_usage()) + "scan-github-tokens.py: error: " + redact(str(e)) + "\n")
+        stderr.write(redact(parser.format_usage()) + "scan-github-tokens.py: error: "
+                     + redact(printable(str(e))) + "\n")
         return 2
     try:
-        return _run(args, http or github_get, home, repo_root, stdout)
+        return _run(args, http or github_get, home, repo_root, stdout, path_key)
     except Exception as e:   # never print the message: it could hold a path or token text
         stderr.write(f"scan-github-tokens.py: internal error {type(e).__name__}; nothing printed is complete\n")
         return 1
 
 
-def _run(args, http, home, repo_root, stdout):
+def _run(args, http, home, repo_root, stdout, path_key=None):
     roots = [_norm(r) for r in args.root]
     res = Scan()
     if args.preset == "laptop":
@@ -483,7 +528,9 @@ def _run(args, http, home, repo_root, stdout):
             kind, value = res.values[fp]
             tries.append((fp, kind, try_token(kind, value, http)))
     prefixes = [_norm(p).rstrip("/") or "/" for p in args.hash_paths_under]
-    out = render(res, prefixes, tries)
+    # Per-run key for --hash-paths-under tags; never printed, never stored. path_key is a test seam.
+    key = path_key if path_key is not None else secrets.token_bytes(32)
+    out = render(res, prefixes, tries, key)
     stdout.write("".join(line + "\n" for line in out))
     if not args.try_:
         return 1 if res.values else 0
