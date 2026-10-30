@@ -32,6 +32,8 @@ V-S4-n and V-S5-n. This version follows the corrected S1, S2 and S4.
   - Owner choices of 2026-10-29, after the P0-10 step-1b record (OC-5 … OC-8, S6 §7), are applied: the agent token
     is a classic PAT with `public_repo` only (OC-5), candidate B is the step-5a merge restriction, with guards (OC-6),
     and probes (d) and (a) are reworded (OC-7, OC-8).
+  - Owner choice of 2026-10-30, for P0-10 step 2 (OC-9, S6 §7), is applied: step 2 measured with a 1-day test token,
+    and the real 90-day agent token is minted in step 3, at the moment it is stored.
 - **17 P1 items**: measurement first (P1-01 … P1-04, read-only or count-only), judge and scan gates, the reviewer
   agent, requirement IDs and the independent-acceptance pilot, E12 re-baseline, the first supervised refine, the
   reference-driven trial (S4 Increment 1, corrected, with the `reference-analyst` agent), Hermes residuals, gstack
@@ -382,30 +384,31 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
        create and view, update-branch, approve and merge worked, and the push of a workflow file was refused
        (step-1b record §3.2, §3.3). A fine-grained token could not be minted, because the org was not offered as
        resource owner (§3.2). The token depends on the repository staying public (owner decision, 2026-10-28): if
-       the repository were made private, the token would stop working (fail closed). Scopes "do not grant any additional permission beyond that which the user
-       already has", and `public_repo` "Limits access to public repositories", covering read/write to code, commit
-       statuses, repository projects, collaborators and deployment statuses "for public repositories and
-       organizations", and starring [Docs, scopes for OAuth apps, accessed 2026-10-29]. So the token is bounded by
-       the bot's own permissions everywhere; what is specific to this org repository is that it is the bot's only
-       collaborator grant. Within that bound it acts as the bot on any public GitHub repository (issues, comments,
-       forks, PRs [Inf]) and in the bot's own public repositories, and gains any public repository the bot is later
-       added to; the owner is responsible for the machine's actions (ToS §B.3) (V2-ID-7). The org's policy does not
-       restrict classic tokens or require their approval (step-1b record §4 check 1) [Owner-rep]; if that policy
-       changes, the token choice is re-checked (editor's wording, not the owner's);
+       the repository were made private, the token would stop working (fail closed). Scopes "do not grant any
+       additional permission beyond that which the user already has", and `public_repo` "Limits access to public
+       repositories", covering read/write to code, commit statuses, repository projects, collaborators and
+       deployment statuses "for public repositories and organizations", and starring [Docs, scopes for OAuth apps,
+       accessed 2026-10-29]. So the token is bounded by the bot's own permissions everywhere; what is specific to
+       this org repository is that it is the bot's only collaborator grant. Within that bound it acts as the bot on
+       any public GitHub repository (issues, comments, forks, PRs [Inf]) and in the bot's own public repositories,
+       and gains any public repository the bot is later added to; the owner is responsible for the machine's actions
+       (ToS §B.3) (V2-ID-7). The org's policy does not restrict classic tokens or require their approval (step-1b
+       record §4 check 1) [Owner-rep]; if that policy changes, the token choice is re-checked (editor's wording, not
+       the owner's);
      - in step 3, store it only where the laptop agent's `gh` uses it. `gh auth login --with-token` **refused** the
        `public_repo` test token in step 2: "error validating token: missing required scopes 'repo', 'read:org'",
        exit 1, matching gh 2.92.0's source, which checks the scopes before it stores anything (step-2 record §3.4)
        [Ver]. So the token cannot be stored that way. Step 1b measured `gh` working with the token supplied through
        `GH_TOKEN` (step-1b record §3.2) [Ver]. The storage mechanism is the owner's choice, measured in step 3.
      **Result (step-2 record):** `.env.pr` held the variable with an empty value, so the expired token could not be
-     tried: its death is **not** proved by use. It is listed in neither of the bot's token lists [Owner-rep], and it
-     is recorded as an exception to "prove death, never infer it" (step-2 record §4). Removing the value changed no
-     content (§3.3). The test token reported `x-oauth-scopes: public_repo` and login `dentaledge-bot`, `gh` refused
-     to store it, and it was deleted and proved dead by a refused use (§3.4).
+     tried. It is listed in neither of the bot's token lists [Owner-rep]; its death is **not** proved by use and is
+     recorded as an exception (step-2 record §4), which the owner accepted on 2026-10-30 [Owner-rep]. Part B, run on
+     the empty value, changed no content (§3.3). The test token reported `x-oauth-scopes: public_repo` and login
+     `dentaledge-bot`, `gh` refused to store it, and it was deleted and proved dead by a refused use (§3.4).
      A token minted by the owner acts as the owner and is excluded (V-S5-3). Hermes draft-PR delivery stays dormant
      (the PAT is recorded to expire 2026-10-23 by the owner's decision of 2026-10-14,
      `sessions/daily/2026-10-14.md:35-37`; its refusal was to be proved by the owner in this step, V2-ID-5; the file
-     held no value to try, so its death is an exception, step-2 record §4);
+     held no value to try, so its death is not proved by use and is recorded as an exception (step-2 record §4));
      restoring it is a separate Track A decision with its own identity, because the account stays single-consumer
      (credential canon rule 1, `credential-governance-lessons.md:49-52`).
   3. **Enumerate every path to the owner's GitHub authority and measure its exposure before declaring it out of
@@ -415,13 +418,13 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
      scan, never printing values); `infra/hermes-agent/.env.pr` (its value found empty in step 2, step-2 record §3.2;
      mode 644, §3.3); every agent-driven browser or desktop channel where the owner is signed in to github.com:
      Claude in Chrome, the Claude desktop built-in browser pane (persistent sign-ins) and desktop computer use. Then
-     mint the agent token (the type set in step 2, OC-5) at the moment it is stored (OC-9) and configure the
+     mint the agent token (the type in step 2's text (OC-5)) at the moment it is stored (OC-9) and configure the
      laptop's `gh`/git credential store with the agent account only (not through `gh auth login --with-token`, which
      refuses a `public_repo` token, step-2 record §3.4); the owner approves and merges in the browser or mobile app
      outside agent control; no other write-capable token reachable from sessions; extend the committed secret-read
-     deny rules to the new token's location (tested in `claude-settings.test.js`). Note: the committed deny rules on `.env.pr` cover
-     Read/Edit, not Bash readers such as the locally pre-approved `python3 *` (a rule "isn't a security boundary
-     around the program" [Docs via S2]).
+     deny rules to the new token's location (tested in `claude-settings.test.js`). Note: the committed deny rules on
+     `.env.pr` cover Read/Edit, not Bash readers such as the locally pre-approved `python3 *` (a rule "isn't a
+     security boundary around the program" [Docs via S2]).
   4. Commit `.github/CODEOWNERS` with `* @<owner account>` (no CODEOWNERS exists [Ver]); afterwards
      `GET /repos/{o}/{r}/codeowners/errors` must return no errors (R-A-8).
   5. Create a second ruleset ("review") on `main`: pull-request rule with `required_approving_review_count: 1`
@@ -450,7 +453,7 @@ only by the owner after merge, then `node scripts/check-skill-deploy.js`. Evals 
      bypass, which skips review (V2-ID-9); the OC-2 exception text (including `allow_auto_merge` kept false) only if
      B is removed (probe (i) fails or rollback); rotation, with probe (g) re-run at every rotation.
 - Trace: OPP-08, OPP-13 (the `*` code owner) · GAP-03 (closure), GAP-05 · breach (c) · DECISION-S2-1 (c),
-  DECISION-S3-1 · OC-1, OC-2, OC-5 … OC-8.
+  DECISION-S3-1 · OC-1, OC-2, OC-5 … OC-9.
 - Deps: P0-07. **Order:** agent PRs come from the agent account (`dentaledge-bot`) and the review ruleset with its
   bypass exists before the review rule is enforced; otherwise every owner-authored merge blocks (authors cannot
   approve their own PRs [Docs via S2]). Effort: M. Risk: token handling and rotation; a CI change now needs an owner
@@ -878,7 +881,7 @@ flowchart LR
 | **B2** | PR-3: P0-03 + P0-06 · PR-4: P0-04 · PR-5: P0-05 | 3 PRs; agent-audit and evals per PR | narrows breach (b) for the named agents; P0-05 after P0-04 |
 | **B3** | PR-6: P0-07 + P0-08 (+ all of `CLAUDE.md:75`; `install.sh` ask rule) · owner trims `settings.local.json` | 1 PR + owner | prompts and staging before the identity change |
 | **B4** | PR-7: P0-09 (with the Hermes probe or evidenced exclusion, subdirectory coverage, brain-weekly-review route) · owner removes the old local registration | 1 PR (M; differential + timing) + owner | guard change isolated for review |
-| **B5** | owner: step-1a docs check (including the merge-restriction candidates and the org classic-PAT policy), record back to the owner (R-B-9) · owner: step-1b tests on a `p0-10-probe/**` branch pattern with a short-lived test token (fine-grained first) minted and used outside agent sessions and revoked after, test rulesets and probe branches deleted after the test, results back to the owner, never on `main` (V2-ID-1) (steps 1a and 1b done: records of 2026-10-27 and 2026-10-29) · owner: prove the expired `dentaledge-bot-pat` dead, remove it from `.env.pr`, measure the token type and `gh` storage with a 1-day test token (step 2 done: record of 2026-10-30; the old token's death is an exception, not proved by use) · owner: path inventory, then mint the agent token for `dentaledge-bot` at storage (OC-1; classic `public_repo`, no `workflow`, 90-day expiry, OC-5; minted in step 3, OC-9) and credential placement · PR-8: CODEOWNERS `*` + runbook (P0-10 steps 4, 6; step 6's runbook may ship with step 4 in PR-8; it takes effect after step 5a, V3-ID-4) · owner: review ruleset with the role- or team-based PR-only bypass, last-push and stale-review flags, then candidate B (step 5a, OC-6) and the P0-10 probes (a)-(i), with (b), (d), (e) and (i) re-run on `main` after step 5a · PR-9: P1-05 judge-path lines | owner + 2 PRs | closes breach (c) at the GitHub boundary as far as the credential condition holds; strict order inside P0-10. PR-10 (P1-06 + the owner adding the required check) is no longer here: it returns to P1 under D-15 (OC-3, revised) |
+| **B5** | owner: step-1a docs check (including the merge-restriction candidates and the org classic-PAT policy), record back to the owner (R-B-9) · owner: step-1b tests on a `p0-10-probe/**` branch pattern with a short-lived test token (fine-grained first) minted and used outside agent sessions and revoked after, test rulesets and probe branches deleted after the test, results back to the owner, never on `main` (V2-ID-1) (steps 1a and 1b done: records of 2026-10-27 and 2026-10-29) · owner: prove the expired `dentaledge-bot-pat` dead, remove it from `.env.pr`, measure the token type and `gh` storage with a 1-day test token (step 2 done: record of 2026-10-30; the old token's death is not proved by use and is recorded as an exception (step-2 record §4)) · owner: path inventory, then mint the agent token for `dentaledge-bot` at storage (OC-1; classic `public_repo`, no `workflow`, 90-day expiry, OC-5; minted in step 3, OC-9) and credential placement · PR-8: CODEOWNERS `*` + runbook (P0-10 steps 4, 6; step 6's runbook may ship with step 4 in PR-8; it takes effect after step 5a, V3-ID-4) · owner: review ruleset with the role- or team-based PR-only bypass, last-push and stale-review flags, then candidate B (step 5a, OC-6) and the P0-10 probes (a)-(i), with (b), (d), (e) and (i) re-run on `main` after step 5a · PR-9: P1-05 judge-path lines | owner + 2 PRs | closes breach (c) at the GitHub boundary as far as the credential condition holds; strict order inside P0-10. PR-10 (P1-06 + the owner adding the required check) is no longer here: it returns to P1 under D-15 (OC-3, revised) |
 | **B6** | P1-10 tiers 1-4, P1-11, P1-04, P1-03, P1-13, P1-06 + the owner adding the required check (D-15, returned to P1 by OC-3, revised). P0 is declared done after the P1-10 runs that measure P0-01's, P0-03's and P0-06's acceptance (R-A-19) | evals + 4-5 PRs | evaluator pinned, gates in place |
 | **B7** | P1-07 (+ its agent-eval, P1-10 tier 5), P1-08 → P1-09 pilot (5 tasks) · P1-12 supervised refine | PRs + pilot record | delivery-lane assurance; first refine after staging and pin |
 | **B8** | P1-14 (with the `reference-analyst` agent, its agent-eval in P1-10 tier 5 before first use, and the installer change) + P1-15 at the next real project with references · P1-17 (any time) · P1-16 (separate Hermes track with review #12) | trigger-driven | external trigger or separate review |
@@ -1177,3 +1180,10 @@ The P0-10 step-2 record (`docs/evaluations/2026-10-30-p0-10-step-2-results.md`) 
 
 - OC-9 (order; step-2 record §2): before the step-2 sitting, the owner chose that step 2 measures with a 1-day classic `public_repo` test token (the scopes GitHub reports and whether `gh auth login --with-token` stores it; then deleted and proved dead), and that the real 90-day token is minted in step 3, at the moment it is stored, so it is never parked in a temporary place. The token type is unchanged (OC-5). P0-10 step 2 replaces "mint the new token" with the test-token step and moves minting to step 3; step 3 mints at storage; B5 and §2.3 item 1 match.
 - Step-2 record returned: P0-10's opening says step 2 is done and cites the record. Step 2 adds a "Result (step-2 record)" paragraph; its storage text replaces "may refuse … untested" with the measured refusal ("missing required scopes 'repo', 'read:org'", exit 1, matching gh 2.92.0's source, step-2 record §3.4); its dormant-delivery sentence, B5 and §2.3 item 1 record that the expired `dentaledge-bot-pat` could not be tried (the file held no value), so its death is not proved by use and is an exception (step-2 record §4). Step 3's `.env.pr` item says its value was found empty (mode 644), and step 3 does not store through `gh auth login --with-token`. The round-7 "Coordinator addition" above is superseded on the refusal by this entry.
+
+Review round 1 (2026-10-30), the editor's answers to SR2-R-1 … SR2-R-11 for S5; only the reviewer closes a finding:
+
+- SR2-R-1: §0 adds an OC-9 owner-choice bullet (pointing to S6 §7, which now records OC-9), and P0-10's Trace reads OC-5 … OC-9.
+- SR2-R-2: step 2's Result and dormant-delivery sentence and B5 read "its death is not proved by use and is recorded as an exception (step-2 record §4)"; the Result adds that the owner accepted the exception on 2026-10-30 [Owner-rep].
+- SR2-R-8: two step-2 and step-3 lines are re-wrapped; wording unchanged.
+- SR2-R-10: the Result reads "Part B, run on the empty value, changed no content"; step 3 reads "the type in step 2's text (OC-5)".
