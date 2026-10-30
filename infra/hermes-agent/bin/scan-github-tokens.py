@@ -15,11 +15,12 @@ WHAT IT DOES
     patterns are the repo's own (scripts/telemetry/secret-patterns.js, pinned by a test).
 
     A match is FULL when it has the exact shape (gh[pousr]_ + 36 alphanumerics = 40
-    characters; github_pat_ + 22 + "_" + 59 = 93 characters) and no token character
-    [A-Za-z0-9_] touches it on either side. Any other match is PARTIAL: it is listed with its
-    type, fingerprint and length for the owner to judge, and never tried. Note: a token
-    written right after a letter or digit (for example after a JSON "\\n" escape) is reported
-    as partial; its fingerprint is still the token's own.
+    characters; github_pat_ + 22 + "_" + 59 = 93 characters) and the character right AFTER it
+    is not a token character [A-Za-z0-9_]. There is no condition on the character BEFORE it:
+    JSONL transcripts escape a newline as "\\n", so a token at the start of a line sits right
+    after an "n" and must still count as full (decision of 2026-10-30). Any other match is
+    PARTIAL: it is listed with its type, fingerprint and length for the owner to judge, and
+    never tried.
 
     --preset laptop expands to the include list of the step-3 plan (§3), plus every
     .git/config under ~/Projects and ~/Documents and every .env* file under the home folder.
@@ -93,15 +94,15 @@ CHUNK = 1 << 20          # bytes read at a time
 OVERLAP = 128            # bytes kept from the previous chunk; longer than any pattern's prefix + minimum
 
 
-def classify(match, before, after):
-    """(type label, full) for one match. `before`/`after` are the single bytes around it
-    (b"" at the start or end of a file). Full = the exact shape AND no token character
-    touching it on either side; anything else is a partial, never tried."""
+def classify(match, after):
+    """(type label, full) for one match. `after` is the single byte right after it (b"" at
+    the end of a file). Full = the exact shape AND no token character right after it; anything
+    else is a partial, never tried. There is deliberately no condition on the byte BEFORE:
+    JSONL escapes a newline as "\\n", so a token at the start of a line sits right after an
+    "n" (decision of 2026-10-30)."""
     kind = "fine-grained" if match.startswith(b"github_pat_") else TYPES[match[:4]]
     shape = FULL_PAT_RE if kind == "fine-grained" else FULL_GH_RE
-    full = (shape.fullmatch(match) is not None
-            and not (before and TOKEN_CHAR_RE.fullmatch(before))
-            and not (after and TOKEN_CHAR_RE.fullmatch(after)))
+    full = shape.fullmatch(match) is not None and not (after and TOKEN_CHAR_RE.fullmatch(after))
     return kind, full
 
 
@@ -115,31 +116,29 @@ def _find(buf, start):
 
 
 def iter_matches(f, chunk_size=CHUNK):
-    """Yield (match bytes, byte before, byte after) for every match in a binary stream, each
-    exactly once. Reads in chunks; a match that touches the end of the buffer, or starts in
-    its last OVERLAP bytes, is carried into the next round with everything after it, together
-    with the one byte before it (for the boundary check)."""
-    carry, skip = b"", 0          # skip = 1 when carry[0] is only the "byte before"
+    """Yield (match bytes, byte after) for every match in a binary stream, each exactly once.
+    Reads in chunks; a match that touches the end of the buffer, or starts in its last OVERLAP
+    bytes, is carried into the next round with everything after it. A match that was yielded
+    is never carried, so it cannot be found twice."""
+    carry = b""
     while True:
         chunk = f.read(chunk_size)
         buf = carry + chunk
         eof = not chunk
         safe_end = len(buf) - OVERLAP
         next_start = None
-        last_end = skip
-        for a, b in _find(buf, skip):
+        last_end = 0
+        for a, b in _find(buf, 0):
             if not eof and (b >= len(buf) or a >= safe_end):
                 next_start = a
                 break
-            yield buf[a:b], buf[a - 1:a], buf[b:b + 1]
+            yield buf[a:b], buf[b:b + 1]
             last_end = b
         if eof:
             return
         if next_start is None:
-            next_start = max(safe_end, last_end, skip)
-        keep = max(next_start - 1, 0)
-        skip = next_start - keep
-        carry = buf[keep:]
+            next_start = max(safe_end, last_end, 0)
+        carry = buf[next_start:]
 
 
 # ---- walking -------------------------------------------------------------------------------
@@ -166,8 +165,8 @@ def scan_file(path, st, max_bytes, res, chunk_size=CHUNK):
         res.skipped[path] = "unreadable"
         return
     res.files_scanned += 1
-    for m, before, after in found:
-        kind, full = classify(m, before, after)
+    for m, after in found:
+        kind, full = classify(m, after)
         text = m.decode("ascii")
         fp = R.sha12(text)
         res.secrets.add(text)

@@ -91,30 +91,40 @@ class TestClassify(unittest.TestCase):
         for prefix, label in (("ghp_", "classic"), ("gho_", "oauth"), ("ghu_", "user-to-server"),
                               ("ghs_", "installation"), ("ghr_", "refresh")):
             with self.subTest(prefix=prefix):
-                self.assertEqual(S.classify(fake(prefix).encode(), b" ", b" ")[0], label)
-        self.assertEqual(S.classify(fake_fg().encode(), b" ", b" ")[0], "fine-grained")
+                self.assertEqual(S.classify(fake(prefix).encode(), b" ")[0], label)
+        self.assertEqual(S.classify(fake_fg().encode(), b" ")[0], "fine-grained")
 
     def test_full_shapes(self):
         for tok in [fake(p) for p in ("ghp_", "gho_", "ghu_", "ghs_", "ghr_")] + [fake_fg()]:
             with self.subTest(tok=tok[:4]):
-                self.assertTrue(S.classify(tok.encode(), b"", b"")[1])
-                self.assertTrue(S.classify(tok.encode(), b"\"", b"\n")[1])
+                self.assertTrue(S.classify(tok.encode(), b"")[1])
+                self.assertTrue(S.classify(tok.encode(), b"\n")[1])
 
     def test_wrong_lengths_are_partial(self):
         for tok in (fake("ghp_", 35), fake("ghp_", 37), fake("ghp_", 20), fake_fg(21, 59),
                     fake_fg(22, 58), fake_fg(22, 60), "github_pat_" + rnd(82)):
             with self.subTest(n=len(tok)):
-                self.assertFalse(S.classify(tok.encode(), b" ", b" ")[1])
+                self.assertFalse(S.classify(tok.encode(), b" ")[1])
 
-    def test_token_character_before_or_after_makes_it_partial(self):
-        tok = fake("ghp_").encode()
-        for before, after in ((b"x", b" "), (b"7", b" "), (b"_", b" "), (b" ", b"_"), (b" ", b"a")):
-            with self.subTest(before=before, after=after):
-                self.assertFalse(S.classify(tok, before, after)[1])
+    def test_c_token_character_after_makes_it_partial(self):
+        for tok in (fake("ghp_").encode(), fake_fg().encode()):
+            for after in (b"_", b"a", b"Z", b"7"):
+                with self.subTest(tok=tok[:4], after=after):
+                    self.assertFalse(S.classify(tok, after)[1])
+
+    def test_b_any_character_before_is_allowed(self):
+        # Decision 2026-10-30: no condition on the character before. JSONL escapes a newline
+        # as "\n", so a token at the start of a line sits right after an "n".
+        for before in (b"x", b"n", b"7", b"_", b"\\n", b" "):
+            data = b"{" + before + fake("ghp_").encode() + b"}"
+            with self.subTest(before=before):
+                got = matches_in(data, S.CHUNK)
+                self.assertEqual(len(got), 1)
+                self.assertTrue(S.classify(got[0][0].encode(), got[0][1])[1])
 
 
 def matches_in(data, chunk_size):
-    return [(m.decode(), b, a) for m, b, a in S.iter_matches(io.BytesIO(data), chunk_size)]
+    return [(m.decode(), a) for m, a in S.iter_matches(io.BytesIO(data), chunk_size)]
 
 
 class TestByteScanner(unittest.TestCase):
@@ -124,7 +134,7 @@ class TestByteScanner(unittest.TestCase):
     def test_finds_tokens_in_binary_data(self):
         tok = fake("gho_")
         data = b"\x00\xff\x01SQLite format 3\x00" + tok.encode() + b"\x00\x9c\xfe"
-        self.assertEqual([m for m, _, _ in matches_in(data, S.CHUNK)], [tok])
+        self.assertEqual([m for m, _ in matches_in(data, S.CHUNK)], [tok])
 
     def test_a_match_across_a_chunk_boundary_is_found_once(self):
         tok = fake("ghp_")
@@ -133,40 +143,51 @@ class TestByteScanner(unittest.TestCase):
                 data = (b"-" * off) + tok.encode() + b"-" * 50
                 with self.subTest(chunk=chunk, off=off):
                     got = matches_in(data, chunk)
-                    self.assertEqual([m for m, _, _ in got], [tok])
-                    self.assertTrue(S.classify(got[0][0].encode(), got[0][1], got[0][2])[1])
+                    self.assertEqual([m for m, _ in got], [tok])
+                    self.assertTrue(S.classify(got[0][0].encode(), got[0][1])[1])
 
-    def test_before_character_is_seen_across_a_chunk_boundary(self):
-        tok = fake("ghp_")
-        for off in range(150, 260):
-            data = b"-" * off + b"x" + tok.encode() + b"-"
-            with self.subTest(off=off):
-                got = matches_in(data, 200)
-                self.assertEqual(len(got), 1)
-                self.assertFalse(S.classify(got[0][0].encode(), got[0][1], got[0][2])[1])
+    def test_d_prefix_just_after_a_chunk_boundary_is_found_once_and_full(self):
+        # Every offset around two boundaries, a letter right before the prefix, for each type,
+        # and the after-character check across the boundary too.
+        for tok in (fake("ghp_"), fake("ghs_"), fake_fg()):
+            for chunk in (7, 200):
+                for off in range(chunk - 120 if chunk > 120 else 0, 2 * chunk + 3):
+                    data = b"-" * off + b"x" + tok.encode() + b"-"
+                    with self.subTest(tok=tok[:4], chunk=chunk, off=off):
+                        got = matches_in(data, chunk)
+                        self.assertEqual([m for m, _ in got], [tok])
+                        self.assertTrue(S.classify(got[0][0].encode(), got[0][1])[1])
+                    data = b"-" * off + tok.encode() + b"_" + b"-" * 3
+                    with self.subTest(tok=tok[:4], chunk=chunk, off=off, after="_"):
+                        got = matches_in(data, chunk)
+                        if tok.startswith("github_pat_"):     # "_" is a body character there
+                            self.assertEqual([m for m, _ in got], [tok + "_"])
+                        else:
+                            self.assertEqual([m for m, _ in got], [tok])
+                        self.assertFalse(S.classify(got[0][0].encode(), got[0][1])[1])
 
     def test_fine_grained_across_a_boundary_and_no_inner_classic_match(self):
         tok = fake_fg()
         for off in range(100, 400, 5):
             data = b" " * off + tok.encode() + b" "
             with self.subTest(off=off):
-                self.assertEqual([m for m, _, _ in matches_in(data, 128)], [tok])
+                self.assertEqual([m for m, _ in matches_in(data, 128)], [tok])
 
     def test_a_classic_shape_inside_a_fine_grained_body_is_not_a_second_match(self):
         tok = "github_pat_" + rnd(19) + "ghp_" + rnd(59)
-        self.assertEqual([m for m, _, _ in matches_in(tok.encode(), S.CHUNK)], [tok])
+        self.assertEqual([m for m, _ in matches_in(tok.encode(), S.CHUNK)], [tok])
 
     def test_adjacent_tokens_across_a_boundary_each_once(self):
         a, b = fake("ghp_"), fake("ghs_")
         for off in range(0, 300, 7):
             data = b"." * off + a.encode() + b"\n" + b.encode() + b"\n"
             with self.subTest(off=off):
-                self.assertEqual([m for m, _, _ in matches_in(data, 100)], [a, b])
+                self.assertEqual([m for m, _ in matches_in(data, 100)], [a, b])
 
     def test_long_run_is_one_match(self):
         tok = fake("ghp_", 500)
         got = matches_in(b" " + tok.encode() + b" ", 64)
-        self.assertEqual([m for m, _, _ in got], [tok])
+        self.assertEqual([m for m, _ in got], [tok])
 
 
 def run(argv, http=None, home=None, repo_root=None):
@@ -443,7 +464,7 @@ class TestExitWithoutTry(TempCase):
         self.assertEqual(run(["--root", self.tmp])[0], 0)
 
     def test_partials_only_is_0_and_never_tried(self):
-        write(self.p("f"), fake("ghp_", 25) + " x" + fake("ghp_"))
+        write(self.p("f"), fake("ghp_", 25) + " " + fake("ghp_") + "_x")
         code, out, _ = run(["--root", self.tmp, "--try"])
         self.assertEqual(code, 0)
         self.assertEqual(NoNetwork.calls, 0)
@@ -612,6 +633,17 @@ class TestTryCli(TempCase):
             ["try", R.sha12(r), "refresh", "CANNOT BE PROVED BY USE (refresh token)"]]))
         self.assertNoLeak(out + err, [a, b, r, part])
         self.assertEqual(code, 1)   # the refresh token is not proved dead
+
+    def test_a_token_after_a_jsonl_newline_escape_is_full_and_tried(self):
+        tok = fake("gho_")
+        write(self.p("session.jsonl"), '{"type":"user","content":"line one\\n' + tok + '\\nmore"}\n')
+        http = FakeHttp({tok: (401, gh_json(message="Bad credentials"))})
+        code, out, err = run(["--root", self.tmp, "--try"], http=http)
+        self.assertEqual([l[5] for l in lines(out, "finding")], ["full"])
+        self.assertEqual(http.calls, [(USER, tok)])
+        self.assertEqual(lines(out, "try"), [["try", R.sha12(tok), "oauth", "DEAD (Bad credentials, 401)"]])
+        self.assertEqual(code, 0)
+        self.assertNoLeak(out + err, [tok])
 
     def test_all_dead_is_0(self):
         a, fg = fake("gho_"), fake_fg()
