@@ -351,10 +351,11 @@ class TestWalk(TempCase):
         os.symlink(self.p("root"), self.p("root-link"))
         code, out, _ = run(["--root", self.p("root"), "--root", self.p("root-link")])
         self.assertEqual(lines(out, "finding"), [])
-        # Inside a walk a symlink is skipped; a top-level root that is a symlink is resolved once.
+        # Inside a walk a symlink is skipped; a top-level root that is a symlink is resolved once,
+        # and paths under its target are shown under the root as given.
         self.assertEqual(sorted(lines(out, "skipped")),
-                         sorted([["skipped", self.p("root", "dir-link"), "symlink"],
-                                 ["skipped", self.p("root", "file-link"), "symlink"]]))
+                         sorted([["skipped", self.p("root-link", "dir-link"), "symlink"],
+                                 ["skipped", self.p("root-link", "file-link"), "symlink"]]))
         self.assertEqual(lines(out, "resolved"), [["resolved", self.p("root"), "(resolved from " + self.p("root-link") + ")"]])
         self.assertEqual(code, 0)
 
@@ -459,7 +460,7 @@ class TestOutput(TempCase):
         row = ["finding", "/a/x" + tok[9:17] + "y", "classic", "0123456789ab", "count=1", "full", "len=40"]
         self.assertEqual(S.guard([["totals", "ok"], row], {tok}),
                          [["totals", "ok"], ["finding", "[path withheld]"] + row[2:]])
-        short = ["finding", "/a/x" + tok[9:16] + "y", "classic"]
+        short = ["finding", "/a/-" + tok[9:16] + "-", "classic"]     # "-" is never a token character
         self.assertEqual(S.guard([short], {tok}), [short])
 
     def test_guard_catches_a_path_holding_a_slice_of_a_found_token(self):
@@ -758,6 +759,72 @@ class TestPresetHashing(TempCase):
                           os.path.join(home, ".claude", "projects")])
 
 
+class TestHashingThroughSymlinks(TempCase):
+    """A hash prefix, or a root, reached through a symlink must still hide what is under it."""
+    CID = "1234567890"
+
+    def assertHidden(self, out):
+        for line in out.splitlines():
+            self.assertNotIn(self.CID, line)
+
+    def test_a_symlinked_hermes_home_under_the_preset(self):
+        home, repo = self.p("home"), self.p("repo")
+        real = self.p("elsewhere", "hermes-real")
+        tok = fake("ghp_")
+        write(os.path.join(real, "clients", self.CID, "x"), tok)
+        os.makedirs(home)
+        os.symlink(real, os.path.join(home, ".hermes"))
+        key = b"\x04" * 32
+        out = run(["--preset", "laptop"], home=home, repo_root=repo, path_key=key)[1]
+        self.assertHidden(out)
+        self.assertEqual([l[1] for l in lines(out, "finding")],
+                         [os.path.join(home, ".hermes") + "/" + S.path_tag(key, "clients/" + self.CID + "/x")])
+        self.assertNoLeak(out, [tok])
+
+    def test_a_symlinked_prefix_given_with_hash_paths_under(self):
+        real, link = self.p("real-data"), self.p("link-data")
+        tok = fake("ghp_")
+        write(os.path.join(real, "clients", self.CID, "x"), tok)
+        os.symlink(real, link)
+        key = b"\x05" * 32
+        want = link + "/" + S.path_tag(key, "clients/" + self.CID + "/x")
+        for roots in (["--root", link], ["--root", real], ["--root", self.tmp]):
+            with self.subTest(roots=roots[1][len(self.tmp):]):
+                out = run(roots + ["--hash-paths-under", link], path_key=key)[1]
+                self.assertHidden(out)
+                self.assertEqual([l[1] for l in lines(out, "finding")], [want])
+
+    def test_a_prefix_reached_through_a_symlinked_parent(self):
+        preal, plink = self.p("preal"), self.p("plink")
+        tok = fake("ghp_")
+        write(os.path.join(preal, "data", self.CID, "x"), tok)
+        os.symlink(preal, plink)
+        key = b"\x06" * 32
+        for root, prefix in ((os.path.join(preal, "data"), os.path.join(plink, "data")),
+                             (os.path.join(plink, "data"), os.path.join(preal, "data")),
+                             (os.path.join(plink, "data"), os.path.join(plink, "data"))):
+            with self.subTest(root=root[len(self.tmp):], prefix=prefix[len(self.tmp):]):
+                out = run(["--root", root, "--hash-paths-under", prefix], path_key=key)[1]
+                self.assertHidden(out)
+                self.assertEqual([l[1] for l in lines(out, "finding")],
+                                 [prefix + "/" + S.path_tag(key, self.CID + "/x")])
+
+    def test_the_resolved_line_does_not_reveal_the_hidden_part(self):
+        data = self.p("data")
+        target = self.p("outside", "client-" + self.CID)
+        tok = fake("ghp_")
+        write(os.path.join(target, "x"), tok)
+        os.makedirs(data)
+        os.symlink(target, os.path.join(data, "link"))
+        key = b"\x07" * 32
+        out = run(["--root", os.path.join(data, "link"), "--hash-paths-under", data], path_key=key)[1]
+        self.assertHidden(out)
+        resolved = lines(out, "resolved")
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0][2], "(resolved from " + data + "/" + S.path_tag(key, "link") + ")")
+        self.assertEqual([l[1] for l in lines(out, "finding")], [data + "/" + S.path_tag(key, "link/x")])
+
+
 class TestUtf16(TempCase):
     """TS-R-2: Windows and Electron apps store strings as UTF-16."""
 
@@ -1021,13 +1088,14 @@ class TestWalkDetails(TempCase):
         os.symlink(os.path.join(target, "f.txt"), self.p("file-link"))
         os.symlink(self.p("nowhere"), self.p("dangling"))
         code, out, _ = run(["--root", self.p("root-link"), "--root", self.p("file-link"), "--root", self.p("dangling")])
-        self.assertEqual(lines(out, "finding"), [["finding", os.path.join(target, "f.txt"), "classic", R.sha12(tok),
+        # Shown under the root the owner gave; the most specific root wins (file-link names the file).
+        self.assertEqual(lines(out, "finding"), [["finding", self.p("file-link"), "classic", R.sha12(tok),
                                                   "count=1", "full", "len=40"]])
         self.assertEqual(sorted(lines(out, "resolved")), sorted([
             ["resolved", target, "(resolved from " + self.p("root-link") + ")"],
             ["resolved", os.path.join(target, "f.txt"), "(resolved from " + self.p("file-link") + ")"]]))
         self.assertEqual(sorted(lines(out, "skipped")), sorted([
-            ["skipped", os.path.join(target, "inner-link"), "symlink"],
+            ["skipped", self.p("root-link", "inner-link"), "symlink"],
             ["skipped", self.p("dangling"), "symlink"]]))
 
     def test_dataless_files_are_skipped_without_being_opened(self):

@@ -107,6 +107,10 @@ OUTPUT (stdout, tab-separated, sorted within each section)
     same tag within one run and a different tag in the next, so tags cannot be compared across
     runs. Token fingerprints stay review_lib.sha12, comparable across runs and with the rest
     of the repo: tokens are high-entropy, so a bare hash of one cannot be reversed.
+    Symlinks cannot route around the hashing: a prefix counts both as given and resolved, a
+    path counts both as printed and with its parent folder resolved, paths under a resolved
+    --root are shown under that root as given, and a "resolved" line is hashed when either
+    side is under a prefix (a target outside every prefix is then shown only as a tag).
     Every printed path (prefix included), skip and absent entry and GitHub message has each
     character outside 0x20-0x7E escaped (\\xNN, \\uNNNN), so nothing can drive the terminal or
     break the columns. Token-like text in a path is replaced, and a final guard replaces any
@@ -129,7 +133,7 @@ HOW THE OWNER RUNS IT
     paths are listed as absent; there are no default roots. If a token is ALIVE and it is
     yours, revoke it in the browser at once, then re-run with --try.
 """
-import argparse, base64, binascii, bisect, errno, hashlib, hmac, json, os, re, secrets, stat, sys
+import argparse, base64, binascii, bisect, errno, functools, hashlib, hmac, json, os, re, secrets, stat, sys
 import urllib.parse, urllib.request, urllib.error
 from http.client import HTTPException
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -552,14 +556,56 @@ def path_tag(key, rest):
     return hmac.new(key, os.fsencode(rest), hashlib.sha256).hexdigest()[:12]
 
 
-def display_path(path, prefixes, key):
-    for pre in prefixes:
-        base = pre if pre.endswith("/") else pre + "/"
-        if path == pre:
-            return redact(printable(pre))
-        if path.startswith(base):
-            return redact(printable(base) + path_tag(key, path[len(base):]))
-    return redact(printable(path))
+@functools.lru_cache(maxsize=None)
+def _real(path):
+    return os.path.realpath(path)
+
+
+def _unresolve(path, resolved):
+    """A path under the target of a resolved --root, mapped back onto that root: the owner sees
+    the path asked for, and a hash prefix on that path applies. The most specific root wins."""
+    for t in sorted(resolved, key=len, reverse=True):
+        if path == t or path.startswith(t.rstrip("/") + "/"):
+            return resolved[t] + path[len(t):]
+    return path
+
+
+def _hidden(path, prefixes, key):
+    """PREFIX/<tag> when path is under a hash prefix, else None. A prefix counts in its given
+    form and resolved (os.path.realpath), and the path as given and with its parent folder
+    resolved, so a symlinked prefix, root or parent folder cannot route around the hashing.
+    The prefix is always printed as the owner gave it."""
+    cands = [path]
+    if prefixes and os.path.dirname(path):
+        cands.append(os.path.join(_real(os.path.dirname(path)), os.path.basename(path)))
+    for cand in cands:
+        for raw in prefixes:
+            rawbase = raw if raw.endswith("/") else raw + "/"
+            for pre in (raw, _real(raw)):
+                base = pre if pre.endswith("/") else pre + "/"
+                if cand == pre:
+                    return redact(printable(raw))
+                if cand.startswith(base):
+                    return redact(printable(rawbase) + path_tag(key, cand[len(base):]))
+    return None
+
+
+def display_path(path, prefixes, key, resolved=None):
+    p = _unresolve(path, resolved or {})
+    hidden = _hidden(p, prefixes, key)
+    return hidden if hidden is not None else redact(printable(p))
+
+
+def _resolved_row(target, root, prefixes, key):
+    """The resolved line, hashed when either side is under a prefix: a target outside every
+    prefix is then shown only as a tag, since its name may be the hidden part."""
+    r = _hidden(root, prefixes, key)
+    t = _hidden(target, prefixes, key)
+    if t is None:
+        t = "[hashed " + path_tag(key, target) + "]" if r is not None else redact(printable(target))
+    if r is None:
+        r = redact(printable(root))
+    return ["resolved", t, f"(resolved from {r})"]
 
 
 PATH_ROWS = {"finding", "skipped", "pruned", "resolved", "absent"}
@@ -592,7 +638,7 @@ def render(res, prefixes, tries, key, notices=(), error=None):
     if error:
         rows.append(["error", f"internal error {error}; this report is incomplete"])
     rows += [["notice", n] for n in notices]
-    disp = lambda p: display_path(p, prefixes, key)
+    disp = lambda p: display_path(p, prefixes, key, res.resolved)
     fl, per_token = [], {}
     for (path, kind, fp, full, n), c in res.counts.items():
         fl.append(["finding", disp(path), kind, fp, f"count={c}", "full" if full else "partial", n])
@@ -603,7 +649,7 @@ def render(res, prefixes, tries, key, notices=(), error=None):
     rows += [["try", fp, kind, result] for fp, kind, result in tries]
     rows += sorted(["skipped", disp(p), printable(r)] for p, r in res.skipped.items())
     rows += sorted(["pruned", disp(p), "not searched for .env* names"] for p in res.pruned)
-    rows += sorted(["resolved", disp(t), f"(resolved from {disp(r)})"] for t, r in res.resolved.items())
+    rows += sorted(_resolved_row(t, r, prefixes, key) for t, r in res.resolved.items())
     rows += sorted(["absent", disp(p)] for p in res.absent)
     fulls = {k[0] for k in per_token if k[2]}
     parts = {k[0] for k in per_token if not k[2]}
