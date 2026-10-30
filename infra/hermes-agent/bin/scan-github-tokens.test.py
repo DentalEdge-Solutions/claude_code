@@ -1580,6 +1580,135 @@ class TestRound2Nits(TempCase):
                 self.assertLessEqual(len(line), 100)
 
 
+class FakeStat:
+    def __init__(self, mode, uid=0):
+        self.st_mode, self.st_uid = mode, uid
+
+
+class TestRootSafeLoading(TempCase):
+    """Run as root, the script must not load code anyone else can change. The checks run on fake
+    stat results; no test runs as root."""
+    HERE_ = "/root/scan-github-tokens"
+
+    def layout(self, **over):
+        """A safe layout: /, /root and the folder root-owned 0755/0700, both files root 0644."""
+        fs = {"/": FakeStat(stat.S_IFDIR | 0o755), "/root": FakeStat(stat.S_IFDIR | 0o700),
+              self.HERE_: FakeStat(stat.S_IFDIR | 0o700),
+              self.HERE_ + "/scan-github-tokens.py": FakeStat(stat.S_IFREG | 0o644),
+              self.HERE_ + "/review_lib.py": FakeStat(stat.S_IFREG | 0o644)}
+        fs.update(over)
+
+        def lstat(p):
+            if p not in fs:
+                raise FileNotFoundError(p)
+            return fs[p]
+        return lstat
+
+    def problem(self, euid=0, **over):
+        return S._layout_problem(self.HERE_, self.HERE_ + "/scan-github-tokens.py", self.layout(**over))
+
+    def test_a_correct_layout_has_no_problem(self):
+        self.assertIsNone(self.problem())
+
+    def test_a_writable_folder_or_file_is_refused(self):
+        for key, st in ((self.HERE_, FakeStat(stat.S_IFDIR | 0o777)),
+                        (self.HERE_, FakeStat(stat.S_IFDIR | 0o770)),
+                        ("/root", FakeStat(stat.S_IFDIR | 0o757)),
+                        ("/", FakeStat(stat.S_IFDIR | 0o1777)),           # sticky does not help
+                        (self.HERE_ + "/review_lib.py", FakeStat(stat.S_IFREG | 0o664)),
+                        (self.HERE_ + "/scan-github-tokens.py", FakeStat(stat.S_IFREG | 0o646))):
+            with self.subTest(key=key, mode=oct(st.st_mode)):
+                self.assertIsNotNone(self.problem(**{key: st}))
+
+    def test_a_non_root_owner_is_refused(self):
+        for key in (self.HERE_, "/root", self.HERE_ + "/review_lib.py", self.HERE_ + "/scan-github-tokens.py"):
+            st = self.layout()(key)
+            with self.subTest(key=key):
+                self.assertIsNotNone(self.problem(**{key: FakeStat(st.st_mode, uid=1000)}))
+
+    def test_a_symlinked_file_or_folder_is_refused(self):
+        # Root-owned and with no write bits (a macOS symlink can be 0755), so only the type check
+        # can refuse it.
+        for key in (self.HERE_ + "/review_lib.py", self.HERE_ + "/scan-github-tokens.py", self.HERE_, "/root"):
+            for mode in (0o755, 0o777):
+                with self.subTest(key=key, mode=oct(mode)):
+                    self.assertIsNotNone(self.problem(**{key: FakeStat(stat.S_IFLNK | mode)}))
+
+    def test_a_missing_file_is_refused(self):
+        lstat = self.layout()
+
+        def missing(p):
+            if p.endswith("review_lib.py"):
+                raise FileNotFoundError(p)
+            return lstat(p)
+        self.assertIsNotNone(S._layout_problem(self.HERE_, self.HERE_ + "/scan-github-tokens.py", missing))
+
+    def test_root_with_a_bad_layout_raises_before_loading_anything(self):
+        loads = []
+        with mock.patch.object(S, "_load_review_lib", side_effect=lambda here: loads.append(here)):
+            with self.assertRaises(S._Unsafe) as cm:
+                S._guard_and_load(self.HERE_, self.HERE_ + "/scan-github-tokens.py", euid=0,
+                                  lstat=self.layout(**{self.HERE_: FakeStat(stat.S_IFDIR | 0o777)}))
+        self.assertEqual(loads, [])
+        self.assertNotIn("/root\n", str(cm.exception))
+
+    def test_root_with_a_correct_layout_runs(self):
+        lstat = self.layout(**{HERE: FakeStat(stat.S_IFDIR | 0o755),
+                               os.path.join(HERE, "scan-github-tokens.py"): FakeStat(stat.S_IFREG | 0o644),
+                               os.path.join(HERE, "review_lib.py"): FakeStat(stat.S_IFREG | 0o644)})
+        parents, p = {}, HERE
+        while os.path.dirname(p) != p:
+            p = os.path.dirname(p)
+            parents[p] = FakeStat(stat.S_IFDIR | 0o755)
+        fs_lstat = lambda q: parents[q] if q in parents else lstat(q)
+        mod = S._guard_and_load(HERE, SCRIPT, euid=0, lstat=fs_lstat)
+        self.assertEqual(mod.sha12("abc"), hashlib.sha1(b"abc").hexdigest()[:12])
+
+    def test_non_root_runs_without_the_layout_checks(self):
+        def no_stat(p):
+            raise AssertionError("checked the layout while not root")
+        mod = S._guard_and_load(HERE, SCRIPT, euid=1000, lstat=no_stat)
+        self.assertEqual(mod.sha12("abc"), hashlib.sha1(b"abc").hexdigest()[:12])
+
+    def test_review_lib_comes_from_the_script_folder_not_sys_path(self):
+        decoy = self.p("decoy")
+        write(os.path.join(decoy, "review_lib.py"), "DECOY = True\ndef sha12(v):\n    return 'decoy'\n")
+        sys.path.insert(0, decoy)
+        saved = sys.modules.pop("review_lib", None)
+        try:
+            mod = S._guard_and_load(HERE, SCRIPT, euid=1000)
+            self.assertFalse(hasattr(mod, "DECOY"))
+            self.assertEqual(os.path.realpath(mod.__file__), os.path.realpath(os.path.join(HERE, "review_lib.py")))
+            # The module under test was loaded the same way.
+            self.assertFalse(hasattr(S.R, "DECOY"))
+        finally:
+            sys.path.remove(decoy)
+            sys.modules.pop("review_lib", None)
+            if saved is not None:
+                sys.modules["review_lib"] = saved
+
+    def test_the_module_does_not_touch_sys_path(self):
+        src = open(SCRIPT, encoding="utf-8").read()
+        self.assertNotIn("sys.path.insert", src)
+        self.assertNotIn("import review_lib", src)
+
+    def test_the_command_line_refuses_as_root_with_exit_2(self):
+        # Run the real entry point in a child with geteuid faked to 0 through the seam module
+        # attribute: the child's own layout (a temp copy, user-owned) must be refused.
+        d = self.p("copy")
+        os.makedirs(d)
+        for name in ("scan-github-tokens.py", "review_lib.py"):
+            with open(os.path.join(HERE, name), "rb") as src, open(os.path.join(d, name), "wb") as dst:
+                dst.write(src.read())
+        code = ("import os, runpy, sys; os.geteuid = lambda: 0; sys.argv = ['x', '--root', %r]; "
+                "runpy.run_path(%r, run_name='__main__')" % (d, os.path.join(d, "scan-github-tokens.py")))
+        r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        self.assertIn("refusing to run as root", r.stderr)
+
+
 class TestDefaultHttp(LeakMixin, unittest.TestCase):
     """The real seam, exercised against a fake opener: no socket is ever opened."""
 
@@ -1800,6 +1929,14 @@ class TestDocstring(unittest.TestCase):
                      "Mobile Documents", "~/.claude/projects"):
             with self.subTest(want=want):
                 self.assertIn(want, doc)
+
+    def test_the_recipe_never_uses_tmp_and_runs_python_isolated(self):
+        doc = S.__doc__
+        self.assertNotIn("/tmp", doc)
+        head = doc[:2000]
+        self.assertIn("sudo install -d -m 700 -o root -g root /root/scan-github-tokens", head)
+        self.assertIn("sudo python3 -I /root/scan-github-tokens/scan-github-tokens.py --preset vps", head)
+        self.assertIn("python3 -I infra/hermes-agent/bin/scan-github-tokens.py --preset laptop", head)
 
     def test_the_recipe_comes_first(self):
         head = S.__doc__[:1600]

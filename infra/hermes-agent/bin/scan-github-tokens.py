@@ -4,16 +4,20 @@
 RECIPE (the owner; about two minutes)
   1. Run it with every agent closed (Claude, Codex, Cursor, Hermes, ...), from Terminal at
      the repo root:   cd ~/Projects/claude_code
-  2. Laptop:  python3 infra/hermes-agent/bin/scan-github-tokens.py --preset laptop --try
+  2. Laptop:  python3 -I infra/hermes-agent/bin/scan-github-tokens.py --preset laptop --try
   3. Then type  echo $?  and note the number (0 nothing to act on, 1 read the report,
      2 typing mistake, 3 internal error: the report is incomplete).
   4. Paste stdout only (the lines the command printed) into the session. Nothing else.
   5. Hashed paths (PREFIX/<12 hex>) change between runs. To find which file one is, re-run it
      yourself on that folder alone (--root <folder>, no --preset), and do not paste that output.
-  6. VPS: copy this file and review_lib.py into one folder there (<DIR> below), then run
-     sudo python3 <DIR>/scan-github-tokens.py --preset vps --try    and then  echo $?
-     <DIR> is any folder you choose, for example /tmp/scan. sudo is needed to read /root,
-     other users' homes and Docker's volumes. The Hermes data folders are hashed by itself.
+  6. VPS: copy this file and review_lib.py to your home folder on the box (scp), then, there:
+       sudo install -d -m 700 -o root -g root /root/scan-github-tokens
+       sudo install -m 644 -o root -g root scan-github-tokens.py review_lib.py \\
+           /root/scan-github-tokens/
+       sudo python3 -I /root/scan-github-tokens/scan-github-tokens.py --preset vps --try
+     and then  echo $?  . sudo reads /root, other users' homes and Docker's volumes; the Hermes
+     data folders are hashed by itself. Run as root, the script refuses to start unless its
+     folder, the folders above it and both files are owned by root and writable only by root.
 
 WHY THIS EXISTS
     Step 3 measures where GitHub tokens are lying around (transcripts, histories, configs,
@@ -142,7 +146,8 @@ EXIT CODES
     0  no full-shape token found, or (with --try) every full-shape token proved DEAD
     1  a full-shape token found without --try; or with --try any token ALIVE, UNKNOWN or
        CANNOT BE PROVED (refresh)
-    2  usage error (no --root and no --preset, a bad value); nothing is scanned
+    2  usage error (no --root and no --preset, a bad value), or, run as root, a layout someone
+       other than root could change (one stderr line); nothing is scanned
     3  internal error: a file could not be processed (listed as "skipped ... error <class>")
        or the run stopped (an "error" line first). The report printed is incomplete; read it.
 
@@ -153,12 +158,81 @@ HOW THE OWNER RUNS IT
     paths are listed as absent; there are no default roots. If a token is ALIVE and it is
     yours, revoke it in the browser at once, then re-run with --try.
 """
-import argparse, base64, binascii, bisect, errno, hashlib, hmac, json, os, re, secrets, stat, sys
-import urllib.parse, urllib.request, urllib.error
+import argparse, base64, binascii, bisect, errno, hashlib, hmac, importlib.util, json, os, re, secrets
+import stat, sys, urllib.parse, urllib.request, urllib.error
 from http.client import HTTPException
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-import review_lib as R
+SCRIPT = os.path.abspath(__file__)
+HERE = os.path.dirname(SCRIPT)
+
+
+# ---- loading review_lib safely -------------------------------------------------------------
+# review_lib is loaded from an explicit path next to this file, never through sys.path: run with
+# sudo, a review_lib.py planted earlier on sys.path (the script's folder comes first) would run as
+# root. Run as root, the script also refuses a layout that anyone but root could change.
+
+class _Unsafe(Exception):
+    pass
+
+
+def _layout_problem(here, script, lstat=os.lstat):
+    """None when the script, review_lib.py, their folder and every folder above it up to / are
+    owned by root and writable by nobody else, and the two files are regular files (not
+    symlinks); otherwise a plain reason, naming no path. A world-writable sticky folder (the
+    shared temporary folder) is refused as well: the sticky bit stops renames by others, not a planted file of theirs."""
+    for f in (script, os.path.join(here, "review_lib.py")):
+        try:
+            st = lstat(f)
+        except OSError:
+            return "the script or review_lib.py could not be checked"
+        if not stat.S_ISREG(st.st_mode):
+            return "the script or review_lib.py is a symlink or not a regular file"
+        if st.st_uid != 0:
+            return "the script or review_lib.py is not owned by root"
+        if st.st_mode & 0o022:
+            return "the script or review_lib.py can be written by others than root"
+    p = here
+    while True:
+        try:
+            st = lstat(p)
+        except OSError:
+            return "the script's folder or a folder above it could not be checked"
+        if not stat.S_ISDIR(st.st_mode):
+            return "the script's folder or a folder above it is a symlink"
+        if st.st_uid != 0:
+            return "the script's folder or a folder above it is not owned by root"
+        if st.st_mode & 0o022:
+            return "the script's folder or a folder above it can be written by others than root"
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+
+
+def _load_review_lib(here):
+    path = os.path.join(here, "review_lib.py")
+    spec = importlib.util.spec_from_file_location("_scan_github_tokens_review_lib", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _guard_and_load(here=HERE, script=SCRIPT, euid=None, lstat=os.lstat):
+    """Check the layout when running as root (euid and lstat are test seams), then load."""
+    if euid is None:
+        euid = os.geteuid() if hasattr(os, "geteuid") else -1
+    if euid == 0:
+        problem = _layout_problem(here, script, lstat)
+        if problem:
+            raise _Unsafe(problem)
+    return _load_review_lib(here)
+
+
+try:
+    R = _guard_and_load()
+except _Unsafe as e:
+    sys.stderr.write("scan-github-tokens.py: refusing to run as root: %s. Put both files in a "
+                     "folder only root can write, as the recipe does (folder: %s)\n" % (e, HERE))
+    sys.exit(2)
 
 # The one pattern source is scripts/telemetry/secret-patterns.js:22-23. Python cannot import it,
 # so the two bodies are copied here and pinned by a parity test in scan-github-tokens.test.py.
