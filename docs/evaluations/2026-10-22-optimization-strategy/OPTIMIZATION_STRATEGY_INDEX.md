@@ -88,6 +88,11 @@ the classic "Restrict who can push" with nobody listed and admins not enforced, 
 guards (the agent account never approves PRs, a monthly count of bot approvals on owner-authored PRs, probes re-run
 on `main`). OC-7 and OC-8: probes (d) and (a) are reworded after step 1b.
 
+**Owner choice of 2026-10-30 (S6 §7), for P0-10 step 2** (`docs/evaluations/2026-10-30-p0-10-step-2-results.md`):
+OC-9, D-13: step 2 measured with a 1-day test token, and the real 90-day agent token is minted in step 3, at the
+moment it is stored. `gh auth login --with-token` refused the test token, so storage needs another mechanism (the
+owner's choice in step 3).
+
 Several need the owner's own action (GitHub settings, a new token for the existing `dentaledge-bot` account, the
 dead-token check and `.env.pr` cleanup, the local allow list, credential storage, skill deploys from B1). Decisions
 that change governance or touch canon are marked in S6 §7.
@@ -95,7 +100,8 @@ that change governance or touch canon are marked in S6 §7.
 **Time-sensitive (S6 §6):** the Hermes `dentaledge-bot-pat` expires 2026-10-23; the owner decided on 2026-10-14 to
 let it expire, not renewed, so Hermes draft-PR delivery is dormant from that date and the bot becomes the laptop
 agent's account (OC-1); before a new token is minted the owner proves the old one is refused and removes its value
-from `infra/hermes-agent/.env.pr`. The Hermes proposer and Ads audit runs pre-approve read tools but do not remove
+from `infra/hermes-agent/.env.pr` (step 2, 2026-10-30: the file held no value; death not proved by use, an accepted
+exception, step-2 record §4). The Hermes proposer and Ads audit runs pre-approve read tools but do not remove
 Bash (P1-16 hardens the proposer and considers the Ads audits); Hermes API key rotation is still open.
 
 ## Verification record
@@ -111,6 +117,7 @@ Bash (P1-16 hardens the proposer and considers the Ads audits); Hermes API key r
 | This index | same verifier | V-IX-1 … V-IX-7 | closed; accept |
 | Rounds 2-6 (2026-10-23): D-01 … D-14 review and corrections to S1-S3, S5, S6 and this index | two independent reviewers of D-01 … D-14 (completeness and correctness; alignment with governing rules), then two independent verifiers of the edits (identity, credentials and GitHub; everything else); official GitHub and Claude Code docs re-read; live GitHub settings read-only | R-A-1 … R-A-19, R-B-1 … R-B-18; owner choices OC-1 … OC-4 (OC-3 revised); V2-ID-1 … V2-ID-9, V2-RS-1 … V2-RS-12, V3-ID-1 … V3-ID-5, V3-RS-1 … V3-RS-2, V4-ID-1 … V4-ID-3, V4-RS-1 … V4-RS-2, V5-RS-1 … V5-RS-2, V6-RS-1 | closed; both verifiers accept |
 | Round 7 (2026-10-29): owner choices OC-5 … OC-8 after the P0-10 step-1b record, applied to S5, S6 and this index | one independent reviewer (rounds 1-2) | OC-R-1 … OC-R-19 | APPROVED; all findings closed by the reviewer |
+| Round 8 (2026-10-30): the P0-10 step-2 record and owner choice OC-9, applied to S5, S6 and this index | one independent reviewer | SR2-R-1 … SR2-R-11 (round 1: changes requested) | open; under review |
 
 Each deliverable, and this index, records its corrections in its own "Verification corrections (2026-10-22)" section. Claim counts
 and closures are from the verifiers' returns to the coordinator. Round 2 (2026-10-23): two independent reviews of
@@ -184,3 +191,8 @@ analyst renamed six references in S2 with a single `sed` command (disclosed in S
 - OC-5 … OC-8: an "Owner choices of 2026-10-29" paragraph is added under the decisions (token, merge restriction, probes (d) and (a)), citing the step-1a and step-1b records; the OC-1 summary says its token type is superseded by OC-5; Limits says both records have returned.
 - Verification (OC-R-13): independent review rounds 1-2, OC-R-1 … OC-R-19, closed by the reviewer on 2026-10-29. The verification record adds a round-7 row.
 - Review round 1 answers: OC-R-9 (Limits adds the precedence note on S2 OPP-08 and S3 §2.2 / DECISION-S3-1; S2 and S3 not edited); OC-R-12 (the OC-2 summary carries an OC-6 pointer); OC-R-13 (the round-7 verification row); OC-R-14 (OC-7 and OC-8 "reworded after step 1b"). The other findings are answered in S5 and S6.
+
+### Round 8 (2026-10-30, P0-10 step 2 results and the order choice)
+
+- OC-9 (SR2-R-1): an "Owner choice of 2026-10-30" paragraph is added under the decisions, citing the step-2 record; the verification record adds a round-8 row (under review).
+- SR2-R-5: the time-sensitive paragraph points to the step-2 result (the file held no value; death not proved by use, an accepted exception, step-2 record §4).
