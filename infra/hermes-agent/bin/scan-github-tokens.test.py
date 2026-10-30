@@ -825,6 +825,91 @@ class TestHashingThroughSymlinks(TempCase):
         self.assertEqual([l[1] for l in lines(out, "finding")], [data + "/" + S.path_tag(key, "link/x")])
 
 
+class TestHashingByIdentity(TempCase):
+    """A prefix matches the same folder however the path is spelled (case, Unicode form)."""
+    CID = "1234567890"
+
+    def same_folder(self, a, b):
+        try:
+            return os.path.samefile(a, b)
+        except OSError:
+            return False
+
+    def check(self, made, given_root, given_prefix):
+        tok = fake("ghp_")
+        write(os.path.join(made, "clients", self.CID, "x"), tok)
+        key = b"\x08" * 32
+        out = run(["--root", given_root, "--hash-paths-under", given_prefix], path_key=key)[1]
+        for line in out.splitlines():
+            self.assertNotIn(self.CID, line)
+        found = [l[1] for l in lines(out, "finding")]
+        self.assertEqual(len(found), 1)
+        shown = S.printable(given_prefix)                                    # escaped, as every path is
+        self.assertTrue(found[0].startswith(shown + "/"), found[0])           # shown as the owner gave it
+        self.assertRegex(found[0][len(shown) + 1:], r"^[0-9a-f]{12}$")
+        self.assertNoLeak(out, [tok])
+
+    def test_a_case_difference_between_root_and_prefix(self):
+        made = self.p("hermes-data")
+        os.makedirs(made)
+        upper = self.p("HERMES-DATA")
+        if not self.same_folder(made, upper):
+            self.skipTest("the temp volume is case-sensitive")
+        self.check(made, upper, made)
+        self.check(made, made, upper)
+
+    def test_nfc_and_nfd_spellings(self):
+        import unicodedata
+        nfc = self.p(unicodedata.normalize("NFC", "café-data"))
+        nfd = self.p(unicodedata.normalize("NFD", "café-data"))
+        os.makedirs(nfc)
+        if nfc == nfd or not self.same_folder(nfc, nfd):
+            self.skipTest("the temp volume is normalisation-sensitive")
+        self.check(nfc, nfd, nfc)
+        self.check(nfc, nfc, nfd)
+
+    def test_a_path_outside_every_prefix_is_shown_in_clear(self):
+        tok = fake("ghp_")
+        write(self.p("data", "clients", "x"), fake("gho_"))
+        write(self.p("other", "notes", "f.txt"), tok)
+        out = run(["--root", self.tmp, "--hash-paths-under", self.p("data")], path_key=b"\x09" * 32)[1]
+        self.assertIn(self.p("other", "notes", "f.txt"), [l[1] for l in lines(out, "finding")])
+
+    def test_a_missing_prefix_gets_a_note_and_is_still_hashed_by_spelling(self):
+        tok = fake("ghp_")
+        write(self.p("f"), tok)
+        out = run(["--root", self.tmp, "--hash-paths-under", self.p("nope", self.CID)])[1]
+        self.assertEqual(lines(out, "note"), [["note", "hash prefix not found: " + self.p("nope", self.CID)]])
+        out = run(["--root", self.p("nope", self.CID, "deeper"), "--hash-paths-under", self.p("nope")])[1]
+        self.assertEqual(lines(out, "absent")[0][1][:len(self.p("nope")) + 1], self.p("nope") + "/")
+        self.assertNotIn(self.CID, "".join(l[1] for l in lines(out, "absent")))
+
+    def test_the_stat_results_are_cached_per_folder(self):
+        for i in range(30):
+            write(self.p("big", "d", "f%d" % i), fake("ghp_"))
+        calls = []
+        real_stat = os.stat
+
+        def counting(path, *a, **k):
+            calls.append(str(path))
+            return real_stat(path, *a, **k)
+        os.makedirs(self.p("elsewhere"))               # exists, so identity matching runs
+        with mock.patch.object(S.os, "stat", counting):
+            out = run(["--root", self.p("big"), "--hash-paths-under", self.p("elsewhere")])[1]
+        self.assertEqual(len(lines(out, "finding")), 30)
+        self.assertEqual(calls.count(self.p("big", "d")), 1)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads everything")
+    def test_the_prefix_folder_itself_under_another_spelling_is_shown_as_given(self):
+        real, link = self.p("real-" + self.CID), self.p("link-data")
+        os.makedirs(real)
+        os.symlink(real, link)
+        os.chmod(real, 0)
+        out = run(["--root", real, "--hash-paths-under", link])[1]
+        self.assertEqual(lines(out, "skipped"), [["skipped", link, "unreadable"]])
+        self.assertNotIn(self.CID, out)
+
+
 class TestUtf16(TempCase):
     """TS-R-2: Windows and Electron apps store strings as UTF-16."""
 

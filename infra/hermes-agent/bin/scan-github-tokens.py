@@ -97,6 +97,7 @@ OUTPUT (stdout, tab-separated, sorted within each section)
     pruned   <path> not searched for .env* names
     resolved <target> (resolved from <root>)
     absent   <path>
+    note     hash prefix not found: <prefix>                        (one per missing prefix)
     note     partials found: check the partials one by one; they are never tried
     totals   files_scanned= findings= full_tokens= partial_tokens= skipped= pruned= absent=
     --hash-paths-under PREFIX prints a path under PREFIX as PREFIX/<tag>, for folders whose
@@ -107,10 +108,14 @@ OUTPUT (stdout, tab-separated, sorted within each section)
     same tag within one run and a different tag in the next, so tags cannot be compared across
     runs. Token fingerprints stay review_lib.sha12, comparable across runs and with the rest
     of the repo: tokens are high-entropy, so a bare hash of one cannot be reversed.
-    Symlinks cannot route around the hashing: a prefix counts both as given and resolved, a
-    path counts both as printed and with its parent folder resolved, paths under a resolved
-    --root are shown under that root as given, and a "resolved" line is hashed when either
-    side is under a prefix (a target outside every prefix is then shown only as a tag).
+    Prefixes match by identity, not spelling: each prefix's (st_dev, st_ino) is recorded at
+    start-up (symlinks followed), and a path is under a prefix when it, or any folder above it,
+    is that folder. So a symlink, a case difference on a case-insensitive volume or another
+    Unicode form (NFC/NFD) cannot route around the hashing. The tag covers everything below the
+    matched folder and the prefix is shown as you gave it. A prefix that does not exist gets a
+    "note" line. Paths under a resolved --root are shown under that root as given, and a
+    "resolved" line is hashed when either side is under a prefix (a target outside every
+    prefix is then shown only as a tag).
     Every printed path (prefix included), skip and absent entry and GitHub message has each
     character outside 0x20-0x7E escaped (\\xNN, \\uNNNN), so nothing can drive the terminal or
     break the columns. Token-like text in a path is replaced, and a final guard replaces any
@@ -133,7 +138,7 @@ HOW THE OWNER RUNS IT
     paths are listed as absent; there are no default roots. If a token is ALIVE and it is
     yours, revoke it in the browser at once, then re-run with --try.
 """
-import argparse, base64, binascii, bisect, errno, functools, hashlib, hmac, json, os, re, secrets, stat, sys
+import argparse, base64, binascii, bisect, errno, hashlib, hmac, json, os, re, secrets, stat, sys
 import urllib.parse, urllib.request, urllib.error
 from http.client import HTTPException
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -556,14 +561,64 @@ def path_tag(key, rest):
     return hmac.new(key, os.fsencode(rest), hashlib.sha256).hexdigest()[:12]
 
 
-@functools.lru_cache(maxsize=None)
-def _real(path):
-    return os.path.realpath(path)
+class HashPrefixes:
+    """The --hash-paths-under prefixes, matched by IDENTITY, not spelling. A case-insensitive
+    volume, a different Unicode normalisation (NFC/NFD) or a symlink can spell the same folder
+    in another way; (st_dev, st_ino) cannot. Each prefix is recorded at start-up with os.stat
+    (symlinks followed); a path is under a prefix when the path itself or one of its ancestor
+    folders is that folder. The spelling the owner gave is a fast path only: it can hash, never
+    reveal. A prefix that does not exist is not in the set and gets a note."""
+
+    def __init__(self, raws):
+        self.raws = list(raws)
+        self.ids, self.missing, self._cache = {}, [], {}
+        for raw in self.raws:
+            try:
+                st = os.stat(raw)
+            except OSError:
+                self.missing.append(raw)
+                continue
+            self.ids.setdefault((st.st_dev, st.st_ino), raw)
+
+    def _id(self, path, follow=True):
+        """(st_dev, st_ino) of a folder, cached per folder so each is stat-ed once a run."""
+        k = (path, follow)
+        if k not in self._cache:
+            try:
+                st = os.stat(path) if follow else os.lstat(path)
+                self._cache[k] = (st.st_dev, st.st_ino)
+            except OSError:
+                self._cache[k] = None
+        return self._cache[k]
+
+    def match(self, path):
+        """(the prefix as the owner gave it, the rest of path below it), or None."""
+        for raw in self.raws:
+            base = raw if raw.endswith("/") else raw + "/"
+            if path == raw:
+                return raw, ""
+            if path.startswith(base):
+                return raw, path[len(base):]
+        if not self.ids:
+            return None
+        own = self._id(path, follow=False)
+        if own in self.ids:
+            return self.ids[own], ""
+        child = path
+        while True:
+            parent = os.path.dirname(child)
+            if parent == child:
+                return None
+            i = self._id(parent)
+            if i in self.ids:
+                base = parent if parent.endswith("/") else parent + "/"
+                return self.ids[i], path[len(base):]
+            child = parent
 
 
 def _unresolve(path, resolved):
     """A path under the target of a resolved --root, mapped back onto that root: the owner sees
-    the path asked for, and a hash prefix on that path applies. The most specific root wins."""
+    the path asked for. The most specific root wins."""
     for t in sorted(resolved, key=len, reverse=True):
         if path == t or path.startswith(t.rstrip("/") + "/"):
             return resolved[t] + path[len(t):]
@@ -571,26 +626,20 @@ def _unresolve(path, resolved):
 
 
 def _hidden(path, prefixes, key):
-    """PREFIX/<tag> when path is under a hash prefix, else None. A prefix counts in its given
-    form and resolved (os.path.realpath), and the path as given and with its parent folder
-    resolved, so a symlinked prefix, root or parent folder cannot route around the hashing.
-    The prefix is always printed as the owner gave it."""
-    cands = [path]
-    if prefixes and os.path.dirname(path):
-        cands.append(os.path.join(_real(os.path.dirname(path)), os.path.basename(path)))
-    for cand in cands:
-        for raw in prefixes:
-            rawbase = raw if raw.endswith("/") else raw + "/"
-            for pre in (raw, _real(raw)):
-                base = pre if pre.endswith("/") else pre + "/"
-                if cand == pre:
-                    return redact(printable(raw))
-                if cand.startswith(base):
-                    return redact(printable(rawbase) + path_tag(key, cand[len(base):]))
-    return None
+    """PREFIX/<tag> when path is under a hash prefix (by identity), else None. The prefix is
+    printed as the owner gave it; the tag covers everything below the matched folder."""
+    m = prefixes.match(path)
+    if m is None:
+        return None
+    raw, rest = m
+    if not rest:
+        return redact(printable(raw))
+    return redact(printable(raw if raw.endswith("/") else raw + "/") + path_tag(key, rest))
 
 
 def display_path(path, prefixes, key, resolved=None):
+    if not isinstance(prefixes, HashPrefixes):
+        prefixes = HashPrefixes(prefixes)
     p = _unresolve(path, resolved or {})
     hidden = _hidden(p, prefixes, key)
     return hidden if hidden is not None else redact(printable(p))
@@ -634,6 +683,8 @@ NOTE_PARTIALS = "partials found: check the partials one by one; they are never t
 
 
 def render(res, prefixes, tries, key, notices=(), error=None):
+    if not isinstance(prefixes, HashPrefixes):
+        prefixes = HashPrefixes(prefixes)
     rows = [[HEADER]]
     if error:
         rows.append(["error", f"internal error {error}; this report is incomplete"])
@@ -653,6 +704,7 @@ def render(res, prefixes, tries, key, notices=(), error=None):
     rows += sorted(["absent", disp(p)] for p in res.absent)
     fulls = {k[0] for k in per_token if k[2]}
     parts = {k[0] for k in per_token if not k[2]}
+    rows += [["note", "hash prefix not found: " + redact(printable(p))] for p in prefixes.missing]
     if parts:
         rows.append(["note", NOTE_PARTIALS])
     rows.append(["totals", f"files_scanned={res.files_scanned}", f"findings={len(fl)}",
@@ -865,6 +917,8 @@ def _run(args, http, home, repo_root, stdout, path_key, environ, state):
         for p in unreadable:
             res.skipped[p] = "unreadable"
         tops += paths
+    # Record each prefix's identity at start-up, before anything is scanned.
+    state["prefixes"] = prefixes = HashPrefixes(prefixes)
     for r in tops:
         scan_path(r, args.max_bytes, res)
     for r in found:
