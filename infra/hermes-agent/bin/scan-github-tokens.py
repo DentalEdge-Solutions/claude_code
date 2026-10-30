@@ -10,14 +10,19 @@ RECIPE (the owner; about two minutes)
   4. Paste stdout only (the lines the command printed) into the session. Nothing else.
   5. Hashed paths (PREFIX/<12 hex>) change between runs. To find which file one is, re-run it
      yourself on that folder alone (--root <folder>, no --preset), and do not paste that output.
-  6. VPS: copy this file and review_lib.py to your home folder on the box (scp), then, there:
+  6. VPS. On the laptop, at the repo root, note the two hashes:
+       shasum -a 256 infra/hermes-agent/bin/scan-github-tokens.py \\
+           infra/hermes-agent/bin/review_lib.py
+     Copy both files to your home folder on the box (scp). There, check they are the same:
+       sha256sum scan-github-tokens.py review_lib.py
+     Only if both hashes match the laptop's, install them where only root can write, and run:
        sudo install -d -m 700 -o root -g root /root/scan-github-tokens
        sudo install -m 644 -o root -g root scan-github-tokens.py review_lib.py \\
            /root/scan-github-tokens/
        sudo python3 -I /root/scan-github-tokens/scan-github-tokens.py --preset vps --try
      and then  echo $?  . sudo reads /root, other users' homes and Docker's volumes; the Hermes
-     data folders are hashed by itself. Run as root, the script refuses to start unless its
-     folder, the folders above it and both files are owned by root and writable only by root.
+     data folders are hashed by itself. Run as root, the script refuses to start without -I, or
+     unless its folder, the folders above it and both files are owned and writable only by root.
 
 WHY THIS EXISTS
     Step 3 measures where GitHub tokens are lying around (transcripts, histories, configs,
@@ -59,7 +64,8 @@ WHAT IT DOES
     Hermes install /opt/hermes-agent (with data/ and its .env files), Hermes state
     /var/lib/hermes, the checkouts /opt/projects, /etc/environment and /etc/systemd/system
     (layout from infra/hermes-agent/deploy). It hashes, by itself, /opt/hermes-agent/data,
-    /var/lib/hermes, /opt/projects and every home's .hermes and .claude/projects.
+    /var/lib/hermes, /opt/projects, /var/lib/docker/volumes (Hermes data lives in named volumes,
+    whose folder names can carry customer IDs) and every home's .hermes and .claude/projects.
 
     --preset laptop expands to the include list of the step-3 plan (§3), plus every
     .git/config and .git/modules/*/config (submodule remotes) under ~/Projects and
@@ -129,8 +135,11 @@ OUTPUT (stdout, tab-separated, sorted within each section)
     of the repo: tokens are high-entropy, so a bare hash of one cannot be reversed.
     Prefixes match by identity, not spelling: each prefix's (st_dev, st_ino) is recorded at
     start-up (symlinks followed), and a path is under a prefix when it, or any folder above it,
-    is that folder. So a symlink, a case difference on a case-insensitive volume or another
-    Unicode form (NFC/NFD) cannot route around the hashing. The tag covers everything below the
+    is that folder, so a case difference on a case-insensitive volume, another Unicode form
+    (NFC/NFD) or a symlinked prefix still matches. A symlink INTO a prefix is handled twice: a
+    --root that is a symlink to a place inside another root or inside a prefix is refused, and
+    any path whose real location (os.path.realpath) is under a prefix is shown up to its last
+    symlink, with everything below that link hashed. The tag covers everything below the
     matched folder and the prefix is shown as you gave it. A prefix that does not exist gets a
     "note" line. Paths under a resolved --root are shown under that root as given, and a
     "resolved" line is hashed when either side is under a prefix (a target outside every
@@ -158,27 +167,37 @@ HOW THE OWNER RUNS IT
     paths are listed as absent; there are no default roots. If a token is ALIVE and it is
     yours, revoke it in the browser at once, then re-run with --try.
 """
-import argparse, base64, binascii, bisect, errno, hashlib, hmac, importlib.util, json, os, re, secrets
-import stat, sys, urllib.parse, urllib.request, urllib.error
-from http.client import HTTPException
+import os, stat, sys
+# ---- the root guard: before any other import ------------------------------------------------
+# Run with sudo, every import is a chance for a planted file to run as root: without -I, Python
+# puts the script's folder first on sys.path, so an argparse.py there would be imported in place
+# of the real one. So, as root, the script first insists on isolated mode (python3 -I) and on a
+# layout only root can change, using only os, stat and sys (loaded by Python itself at start-up),
+# and refuses before importing anything else. review_lib is then loaded from an explicit path next
+# to this file, never through sys.path.
 SCRIPT = os.path.abspath(__file__)
 HERE = os.path.dirname(SCRIPT)
+FAKE_ROOT_ENV = "SCAN_GITHUB_TOKENS_TEST_FAKE_ROOT"
 
-
-# ---- loading review_lib safely -------------------------------------------------------------
-# review_lib is loaded from an explicit path next to this file, never through sys.path: run with
-# sudo, a review_lib.py planted earlier on sys.path (the script's folder comes first) would run as
-# root. Run as root, the script also refuses a layout that anyone but root could change.
 
 class _Unsafe(Exception):
     pass
+
+
+def _effective_uid():
+    """The effective uid. The test seam can only make the script stricter: FAKE_ROOT_ENV=1
+    makes it act as root (every check on); no value can make root look like another user."""
+    if os.environ.get(FAKE_ROOT_ENV) == "1":
+        return 0
+    return os.geteuid() if hasattr(os, "geteuid") else -1
 
 
 def _layout_problem(here, script, lstat=os.lstat):
     """None when the script, review_lib.py, their folder and every folder above it up to / are
     owned by root and writable by nobody else, and the two files are regular files (not
     symlinks); otherwise a plain reason, naming no path. A world-writable sticky folder (the
-    shared temporary folder) is refused as well: the sticky bit stops renames by others, not a planted file of theirs."""
+    shared temporary folder) is refused as well: the sticky bit stops renames by others, not a
+    file of theirs planted next to ours."""
     for f in (script, os.path.join(here, "review_lib.py")):
         try:
             st = lstat(f)
@@ -208,6 +227,32 @@ def _layout_problem(here, script, lstat=os.lstat):
         p = parent
 
 
+def _root_guard(euid=None, isolated=None, lstat=os.lstat, here=HERE, script=SCRIPT):
+    """None, or why the script refuses to run as root (euid, isolated and lstat are seams)."""
+    if euid is None:
+        euid = _effective_uid()
+    if euid != 0:
+        return None
+    if not (sys.flags.isolated if isolated is None else isolated):
+        return ("run it with python3 -I (isolated mode), as the recipe does, so no file next to "
+                "the script can stand in for a Python module")
+    problem = _layout_problem(here, script, lstat)
+    if problem:
+        return ("%s. Put both files in a folder only root can write, as the recipe does "
+                "(folder: %s)" % (problem, here))
+    return None
+
+
+_ROOT_REFUSAL = _root_guard()
+if _ROOT_REFUSAL:
+    sys.stderr.write("scan-github-tokens.py: refusing to run as root: %s\n" % _ROOT_REFUSAL)
+    sys.exit(2)
+
+import argparse, base64, binascii, bisect, errno, hashlib, hmac, importlib.util, json, re, secrets
+import urllib.parse, urllib.request, urllib.error
+from http.client import HTTPException
+
+
 def _load_review_lib(here):
     path = os.path.join(here, "review_lib.py")
     spec = importlib.util.spec_from_file_location("_scan_github_tokens_review_lib", path)
@@ -219,7 +264,7 @@ def _load_review_lib(here):
 def _guard_and_load(here=HERE, script=SCRIPT, euid=None, lstat=os.lstat):
     """Check the layout when running as root (euid and lstat are test seams), then load."""
     if euid is None:
-        euid = os.geteuid() if hasattr(os, "geteuid") else -1
+        euid = _effective_uid()
     if euid == 0:
         problem = _layout_problem(here, script, lstat)
         if problem:
@@ -227,12 +272,7 @@ def _guard_and_load(here=HERE, script=SCRIPT, euid=None, lstat=os.lstat):
     return _load_review_lib(here)
 
 
-try:
-    R = _guard_and_load()
-except _Unsafe as e:
-    sys.stderr.write("scan-github-tokens.py: refusing to run as root: %s. Put both files in a "
-                     "folder only root can write, as the recipe does (folder: %s)\n" % (e, HERE))
-    sys.exit(2)
+R = _guard_and_load()       # the layout was checked above as root; checked again, cheaply
 
 # The one pattern source is scripts/telemetry/secret-patterns.js:22-23. Python cannot import it,
 # so the two bodies are copied here and pinned by a parity test in scan-github-tokens.test.py.
@@ -515,6 +555,7 @@ class Scan:
         self.tops = []        # every top-level root, for the symlinked-root limits
         self.protected = []   # home folders: a symlinked root may not resolve to one or above
         self.prune_ids = set()  # identities of pruned folders: a root may not resolve into one
+        self.hash_ids = set()   # identities of the hash prefixes: a root may not resolve into one
         self.files_scanned = 0
         self.errors = 0
 
@@ -599,6 +640,17 @@ def _refusal(root, target, res):
         return "is the home folder or above it"
     if any(r != root and _contains(tid, r) for r in res.tops):
         return "contains another root"
+    # Symmetric: a target inside another root (read there already) or inside a hash prefix (but
+    # not the prefix itself), so a link can never walk a prefix's content under another name.
+    inside = {i for i in (_ident(r) for r in res.tops if r != root) if i} | res.hash_ids
+    p = os.path.dirname(target)
+    while True:
+        if _ident(p) in inside:
+            return "is inside another root"
+        q = os.path.dirname(p)
+        if q == p:
+            break
+        p = q
     p = target
     while True:
         if _ident(p) in res.prune_ids:
@@ -753,7 +805,10 @@ def preset_vps(base="/"):
         pass
     except OSError:
         unreadable.append(b("home"))
-    prefixes = [b("opt", "hermes-agent", "data"), b("var", "lib", "hermes"), b("opt", "projects")]
+    # Docker's volumes are hashed too: Hermes keeps its data in named volumes on the box, so the
+    # folder names under them can carry customer IDs just as /opt/hermes-agent/data does.
+    prefixes = [b("opt", "hermes-agent", "data"), b("var", "lib", "hermes"), b("opt", "projects"),
+                b("var", "lib", "docker", "volumes")]
     for h in homes:
         prefixes += [os.path.join(h, ".hermes"), os.path.join(h, ".claude", "projects")]
     return paths, unreadable, prefixes
@@ -828,6 +883,23 @@ class HashPrefixes:
                 self._cache[k] = None
         return self._cache[k]
 
+    def last_symlink(self, path):
+        """The deepest ancestor-or-self of path that is a symlink (lstat, cached), or None."""
+        p = path
+        while True:
+            k = (p, "link")
+            if k not in self._cache:
+                try:
+                    self._cache[k] = stat.S_ISLNK(os.lstat(p).st_mode)
+                except OSError:
+                    self._cache[k] = False
+            if self._cache[k]:
+                return p
+            q = os.path.dirname(p)
+            if q == p:
+                return None
+            p = q
+
     def match(self, path):
         """(the prefix as the owner gave it, the rest of path below it), or None."""
         for raw in self.raws:
@@ -855,14 +927,28 @@ class HashPrefixes:
 
 def _hidden(path, prefixes, key):
     """PREFIX/<tag> when path is under a hash prefix (by identity), else None. The prefix is
-    printed as the owner gave it; the tag covers everything below the matched folder."""
+    printed as the owner gave it; the tag covers everything below the matched folder.
+
+    When only the REAL location of the path is under a prefix (it is reached through a symlink
+    pointing inside one), the path is shown up to its last symlink and everything below that
+    link is hashed, so nothing under the link appears in clear text."""
     m = prefixes.match(path)
-    if m is None:
+    if m is not None:
+        raw, rest = m
+        if not rest:
+            return redact(printable(raw))
+        return redact(printable(raw if raw.endswith("/") else raw + "/") + path_tag(key, rest))
+    if not prefixes.raws:
         return None
-    raw, rest = m
-    if not rest:
-        return redact(printable(raw))
-    return redact(printable(raw if raw.endswith("/") else raw + "/") + path_tag(key, rest))
+    real = os.path.realpath(path)
+    if real == path or prefixes.match(real) is None:
+        return None
+    link = prefixes.last_symlink(path)
+    if link is None:
+        return "[hashed " + path_tag(key, path) + "]"
+    if link == path:
+        return redact(printable(link))
+    return redact(printable(link + "/") + path_tag(key, path[len(link) + 1:]))
 
 
 def display_path(path, prefixes, key):
@@ -1155,6 +1241,7 @@ def _run(args, http, home, repo_root, stdout, path_key, environ, state, fs_base=
     res.tops = tops
     # Record each prefix's identity at start-up, before anything is scanned.
     state["prefixes"] = prefixes = HashPrefixes(prefixes)
+    res.hash_ids = set(prefixes.ids)
     for r in tops:
         scan_path(r, args.max_bytes, res)
     for r in found:

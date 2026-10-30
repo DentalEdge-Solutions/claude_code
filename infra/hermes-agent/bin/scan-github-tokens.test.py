@@ -1184,11 +1184,11 @@ class TestWalkDetails(TempCase):
         # scanned once (by identity), so it shows under root-link.
         self.assertEqual(lines(out, "finding"), [["finding", self.p("root-link", "f.txt"), "classic", R.sha12(tok),
                                                   "count=1", "full", "len=40"]])
-        self.assertEqual(sorted(lines(out, "resolved")), sorted([
-            ["resolved", target, "(resolved from " + self.p("root-link") + ")"],
-            ["resolved", os.path.join(target, "f.txt"), "(resolved from " + self.p("file-link") + ")"]]))
+        # file-link points inside root-link, another root: refused (TS-R-19), read there already.
+        self.assertEqual(lines(out, "resolved"), [["resolved", target, "(resolved from " + self.p("root-link") + ")"]])
         self.assertEqual(sorted(lines(out, "skipped")), sorted([
             ["skipped", self.p("root-link", "inner-link"), "symlink"],
+            ["skipped", self.p("file-link"), "symlink (target is inside another root)"],
             ["skipped", self.p("dangling"), "symlink"]]))
 
     def test_dataless_files_are_skipped_without_being_opened(self):
@@ -1457,7 +1457,7 @@ class TestPresetVps(TempCase):
         put("alice", "home", "alice", ".bash_history")
         put("bob_hermes", "home", "bob", ".hermes", "clients", self.CID, "x")
         put("root", "root", ".git-credentials")
-        put("docker", "var", "lib", "docker", "volumes", "v1", "_data", "f")
+        put("docker", "var", "lib", "docker", "volumes", "hermes-data", "_data", "clients", self.CID, "f")
         put("install", "opt", "hermes-agent", ".env.gaw")
         put("data", "opt", "hermes-agent", "data", "clients", self.CID, "y")
         put("state", "var", "lib", "hermes", "vaults", "acme-" + self.CID, "z")
@@ -1477,7 +1477,7 @@ class TestPresetVps(TempCase):
         shown = [l[1] for l in lines(out, "finding")]
         self.assertIn(os.path.join(base, "home", "alice", ".bash_history"), shown)
         for pre in (os.path.join(base, "opt", "hermes-agent", "data"), os.path.join(base, "var", "lib", "hermes"),
-                    os.path.join(base, "home", "bob", ".hermes")):
+                    os.path.join(base, "home", "bob", ".hermes"), os.path.join(base, "var", "lib", "docker", "volumes")):
             self.assertTrue(any(re.fullmatch(re.escape(pre) + "/[0-9a-f]{12}", s) for s in shown), pre)
         self.assertNoLeak(out, t.values())
 
@@ -1707,6 +1707,142 @@ class TestRootSafeLoading(TempCase):
         self.assertEqual(r.stdout, "")
         self.assertEqual(len(r.stderr.strip().splitlines()), 1)
         self.assertIn("refusing to run as root", r.stderr)
+
+
+class TestSymlinkIntoAPrefix(TempCase):
+    """TS-R-19: a symlink pointing INSIDE a hash prefix must not print what is below it."""
+    CID = "1234567890"
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.p("HermesData")
+        self.tok = fake("ghp_")
+        write(os.path.join(self.data, "clients", self.CID, "x"), self.tok)
+
+    def assertHidden(self, out):
+        for line in out.splitlines():
+            self.assertNotIn(self.CID, line)
+        self.assertNoLeak(out, [self.tok])
+
+    def test_a_root_link_to_a_prefix_subfolder_is_refused(self):
+        os.symlink(os.path.join(self.data, "clients"), self.p("sub-alias"))
+        out = run(["--root", self.p("sub-alias"), "--hash-paths-under", self.data])[1]
+        self.assertHidden(out)
+        self.assertIn(["skipped", self.p("sub-alias"), "symlink (target is inside another root)"], lines(out, "skipped"))
+
+    def test_a_root_spelled_through_a_symlinked_parent_is_hashed_below_the_link(self):
+        os.symlink(os.path.join(self.data, "clients"), self.p("alias"))
+        key = b"\x0a" * 32
+        out = run(["--root", self.p("alias", self.CID), "--hash-paths-under", self.data], path_key=key)[1]
+        self.assertHidden(out)
+        self.assertEqual([l[1] for l in lines(out, "finding")], [self.p("alias") + "/" + S.path_tag(key, self.CID + "/x")])
+
+    def test_a_planted_codex_link_into_the_hermes_home_under_the_preset(self):
+        home, repo = self.p("home"), self.p("repo")
+        tok = fake("gho_")
+        write(os.path.join(home, ".hermes", "sessions", self.CID, "s.json"), tok)
+        os.symlink(os.path.join(home, ".hermes", "sessions"), os.path.join(home, ".codex"))
+        out = run(["--preset", "laptop"], home=home, repo_root=repo, path_key=b"\x0b" * 32)[1]
+        self.assertHidden(out)
+        self.assertNoLeak(out, [tok])
+        self.assertIn(["skipped", os.path.join(home, ".codex"), "symlink (target is inside another root)"],
+                      lines(out, "skipped"))
+        self.assertEqual(len(lines(out, "finding")), 1)            # once, under the hashed ~/.hermes
+
+    def test_a_link_inside_a_walk_is_still_skipped(self):
+        os.symlink(os.path.join(self.data, "clients", self.CID), self.p("inner-alias"))
+        out = run(["--root", self.tmp, "--hash-paths-under", self.data])[1]
+        self.assertHidden(out)
+        self.assertIn(["skipped", self.p("inner-alias"), "symlink"], lines(out, "skipped"))
+        self.assertEqual(len(lines(out, "finding")), 1)
+
+    def test_the_target_being_the_prefix_itself_is_still_followed(self):
+        os.symlink(self.data, self.p("data-link"))
+        key = b"\x0c" * 32
+        out = run(["--root", self.p("data-link"), "--hash-paths-under", self.p("data-link")], path_key=key)[1]
+        self.assertHidden(out)
+        self.assertEqual([l[1] for l in lines(out, "finding")],
+                         [self.p("data-link") + "/" + S.path_tag(key, "clients/" + self.CID + "/x")])
+
+    def test_the_docstring_no_longer_claims_symlinks_cannot_route_around(self):
+        self.assertNotIn("cannot route around", S.__doc__)
+
+
+def copy_scanner(dest):
+    os.makedirs(dest, exist_ok=True)
+    for name in ("scan-github-tokens.py", "review_lib.py"):
+        with open(os.path.join(HERE, name), "rb") as src, open(os.path.join(dest, name), "wb") as dst:
+            dst.write(src.read())
+    return os.path.join(dest, "scan-github-tokens.py")
+
+
+class TestRootGuardFirst(TempCase):
+    """TS-R-20: as root, refuse before any import a planted file could shadow."""
+
+    def child(self, script, isolated, fake_root=True, extra=()):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+        if fake_root:
+            env["SCAN_GITHUB_TOKENS_TEST_FAKE_ROOT"] = "1"
+        cmd = [sys.executable] + (["-I"] if isolated else []) + [script, "--root", self.p("nothing")] + list(extra)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env, cwd=self.tmp)
+
+    def plant_decoys(self, folder):
+        marker = self.p("decoy-imported")
+        for mod in ("argparse", "base64", "json", "importlib", "hmac", "re"):
+            write(os.path.join(folder, mod + ".py"), "open(%r, 'a').write(%r)\n" % (marker, mod))
+        return marker
+
+    def test_root_without_isolated_mode_is_refused_before_any_planted_import(self):
+        script = copy_scanner(self.p("copy"))
+        marker = self.plant_decoys(self.p("copy"))
+        r = self.child(script, isolated=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertIn("python3 -I", r.stderr)
+        self.assertFalse(os.path.exists(marker), "a planted module was imported as root")
+
+    def test_root_in_isolated_mode_with_a_bad_layout_is_refused_and_imports_nothing_planted(self):
+        script = copy_scanner(self.p("copy"))
+        marker = self.plant_decoys(self.p("copy"))
+        r = self.child(script, isolated=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("refusing to run as root", r.stderr)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_not_root_runs_as_before(self):
+        script = copy_scanner(self.p("copy"))
+        r = self.child(script, isolated=True, fake_root=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_seam_can_only_make_the_script_stricter(self):
+        for value in ("0", "", "no", "1000"):
+            with mock.patch.dict(os.environ, {"SCAN_GITHUB_TOKENS_TEST_FAKE_ROOT": value}):
+                self.assertEqual(S._effective_uid(), os.geteuid())
+        with mock.patch.dict(os.environ, {"SCAN_GITHUB_TOKENS_TEST_FAKE_ROOT": "1"}):
+            self.assertEqual(S._effective_uid(), 0)
+
+    def test_root_guard_in_process(self):
+        good = TestRootSafeLoading.layout(TestRootSafeLoading("test_a_correct_layout_has_no_problem"))
+        here, script = TestRootSafeLoading.HERE_, TestRootSafeLoading.HERE_ + "/scan-github-tokens.py"
+        self.assertIn("python3 -I", S._root_guard(euid=0, isolated=False, lstat=good, here=here, script=script))
+        self.assertIsNone(S._root_guard(euid=0, isolated=True, lstat=good, here=here, script=script))
+        self.assertIsNone(S._root_guard(euid=1000, isolated=False))
+
+    def test_the_guard_runs_before_every_other_import(self):
+        src = open(SCRIPT, encoding="utf-8").read()
+        guard = src.index("_ROOT_REFUSAL = _root_guard()")
+        imports = [m.start() for m in re.finditer(r"^(?:import|from) (?!os, stat, sys$)", src, re.M)]
+        self.assertTrue(imports)
+        self.assertLess(guard, min(imports))
+        self.assertEqual(src.count("\nimport os, stat, sys\n"), 1)
+
+    def test_the_recipe_compares_hashes_before_installing(self):
+        head = S.__doc__[:2600]
+        self.assertIn("shasum -a 256", head)
+        self.assertIn("sha256sum", head)
+        self.assertLess(head.index("sha256sum"), head.index("sudo install -m 644"))
 
 
 class TestDefaultHttp(LeakMixin, unittest.TestCase):
