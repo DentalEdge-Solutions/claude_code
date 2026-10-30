@@ -1764,6 +1764,30 @@ class TestSymlinkIntoAPrefix(TempCase):
         self.assertEqual([l[1] for l in lines(out, "finding")],
                          [self.p("data-link") + "/" + S.path_tag(key, "clients/" + self.CID + "/x")])
 
+    def test_a_symlink_found_below_a_symlinked_parent_does_not_show_the_id(self):
+        # TS-R-23: alias -> P/clients, P/clients/<ID>/link-out -> ../out; the skipped line for
+        # link-out must not show the ID (its last part is not followed, the link is not "itself").
+        os.makedirs(os.path.join(self.data, "clients", "out"))
+        os.symlink("../out", os.path.join(self.data, "clients", self.CID, "link-out"))
+        os.symlink(os.path.join(self.data, "clients"), self.p("alias"))
+        key = b"\x0d" * 32
+        out = run(["--root", self.p("alias", self.CID), "--hash-paths-under", self.data], path_key=key)[1]
+        self.assertHidden(out)
+        self.assertIn(["skipped", self.p("alias") + "/" + S.path_tag(key, self.CID + "/link-out"), "symlink"],
+                      lines(out, "skipped"))
+        self.assertEqual([l[1] for l in lines(out, "finding")], [self.p("alias") + "/" + S.path_tag(key, self.CID + "/x")])
+
+    def test_the_fail_safe_branch_hides_the_whole_path(self):
+        # Reached only if the real location is under a prefix but no symlinked ancestor is found
+        # (a race, or an ancestor that cannot be lstat-ed): the whole path is then a tag.
+        os.symlink(os.path.join(self.data, "clients"), self.p("alias"))
+        pre = S.HashPrefixes([self.data])
+        path = self.p("alias", self.CID, "x")
+        with mock.patch.object(S.HashPrefixes, "last_symlink", return_value=None):
+            shown = S._hidden(path, pre, b"\x0e" * 32)
+        self.assertEqual(shown, "[hashed " + S.path_tag(b"\x0e" * 32, path) + "]")
+        self.assertNotIn(self.CID, shown)
+
     def test_the_docstring_no_longer_claims_symlinks_cannot_route_around(self):
         self.assertNotIn("cannot route around", S.__doc__)
 

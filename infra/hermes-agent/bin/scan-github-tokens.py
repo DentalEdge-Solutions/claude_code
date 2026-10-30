@@ -64,8 +64,9 @@ WHAT IT DOES
     Hermes install /opt/hermes-agent (with data/ and its .env files), Hermes state
     /var/lib/hermes, the checkouts /opt/projects, /etc/environment and /etc/systemd/system
     (layout from infra/hermes-agent/deploy). It hashes, by itself, /opt/hermes-agent/data,
-    /var/lib/hermes, /opt/projects, /var/lib/docker/volumes (Hermes data lives in named volumes,
-    whose folder names can carry customer IDs) and every home's .hermes and .claude/projects.
+    /var/lib/hermes, /opt/projects, /var/lib/docker/volumes (a precaution: Hermes's own data is a
+    bind mount, but a volume could hold customer data) and every home's .hermes and
+    .claude/projects.
 
     --preset laptop expands to the include list of the step-3 plan (§3), plus every
     .git/config and .git/modules/*/config (submodule remotes) under ~/Projects and
@@ -805,8 +806,9 @@ def preset_vps(base="/"):
         pass
     except OSError:
         unreadable.append(b("home"))
-    # Docker's volumes are hashed too: Hermes keeps its data in named volumes on the box, so the
-    # folder names under them can carry customer IDs just as /opt/hermes-agent/data does.
+    # Docker's volumes are hashed as a precaution: Hermes's own data is a bind mount
+    # (docker-compose.yml: ./data:/opt/data, i.e. /opt/hermes-agent/data, hashed above), but a
+    # named volume on the box could still hold customer data whose folder names carry IDs.
     prefixes = [b("opt", "hermes-agent", "data"), b("var", "lib", "hermes"), b("opt", "projects"),
                 b("var", "lib", "docker", "volumes")]
     for h in homes:
@@ -884,8 +886,11 @@ class HashPrefixes:
         return self._cache[k]
 
     def last_symlink(self, path):
-        """The deepest ancestor-or-self of path that is a symlink (lstat, cached), or None."""
-        p = path
+        """The deepest ANCESTOR of path that is a symlink (lstat, cached), or None. Never the path
+        itself: everything below the link is hashed, and the path's own name is below it."""
+        p = os.path.dirname(path)
+        if p == path:
+            return None
         while True:
             k = (p, "link")
             if k not in self._cache:
@@ -940,14 +945,18 @@ def _hidden(path, prefixes, key):
         return redact(printable(raw if raw.endswith("/") else raw + "/") + path_tag(key, rest))
     if not prefixes.raws:
         return None
-    real = os.path.realpath(path)
+    # The real location without following the last part: a symlink shown in a "skipped" line is
+    # placed where it lies, not where it points.
+    real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
     if real == path or prefixes.match(real) is None:
         return None
     link = prefixes.last_symlink(path)
     if link is None:
+        # Fail-safe. real != path means a folder above the path resolved differently, which for
+        # an absolute, normalised path means one of them is a symlink, so last_symlink finds it.
+        # This is reached only if that changes between the two calls (a race) or an ancestor
+        # cannot be lstat-ed; the whole path is then shown as a tag.
         return "[hashed " + path_tag(key, path) + "]"
-    if link == path:
-        return redact(printable(link))
     return redact(printable(link + "/") + path_tag(key, path[len(link) + 1:]))
 
 
