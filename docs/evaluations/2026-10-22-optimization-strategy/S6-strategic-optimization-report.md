@@ -15,9 +15,9 @@
 - **Numbering.** Decisions in this report are **D-01 … D-28** (two digits, §7). They are not the same as S2's DEFER
   list "D-1 … D-12" (cited here as "S2 §4.2 D-n"), the 2026-10-14 decisions "D1 … D6", or Hermes "D3.2". Roadmap IDs
   (P0-nn … P3-nn, batches B0 … B9) are S5's; gap IDs (GAP-nn) are S1's; opportunity IDs (OPP-nn) are S2's.
-  **OC-1 … OC-4** are the owner choices made on 2026-10-23 (§7, "Owner choices, 2026-10-23"), and **OC-5 … OC-8**
-  the owner choices made on 2026-10-29 after the P0-10 step-1b record (§7, "Owner choices, 2026-10-29"), and
-  **OC-9** the owner choice made on 2026-10-30 for P0-10 step 2 (§7, "Owner choices, 2026-10-30"); round 2
+  **OC-1 … OC-4** are the owner choices made on 2026-10-23 (§7, "Owner choices, 2026-10-23"); **OC-5 … OC-8**
+  the owner choices made on 2026-10-29 after the P0-10 step-1b record (§7, "Owner choices, 2026-10-29"); and
+  **OC-9** the owner choice made on 2026-10-30 for P0-10 step 2 (§7, "Owner choices, 2026-10-30"). Round 2
   review findings are cited as R-A-n and R-B-n.
 - **Checked for this report** [Ver, read-only, 2026-10-22]: `docs/superpowers/plans/2026-10-14-review-11-rollout.md:144`
   and `:187` (PAT expiry); `infra/hermes-agent/skills/claude-code-proposer/SKILL.md:42`,
@@ -343,8 +343,9 @@ decisions travel with it: D-07 (the charter still names skill-guardian) and D-26
      - remove the dead value from `infra/hermes-agent/.env.pr` (the owner does this; the agent never reads that
        file);
      - mint the new agent token and store it only where the laptop agent's `gh` uses it.
-     - (Step 2, 2026-10-30: the file held no value; death not proved by use, an accepted exception, step-2 record
-       §4. The token is minted in step 3, at storage, OC-9.)
+
+     Step 2 was run on 2026-10-30: the file held no value, so the old token's death is not proved by use and is an
+     accepted exception (step-2 record §4). The token is minted in step 3, at storage (OC-9).
    - How it bears on the plan:
      - D-13 now **reuses** this bot as the laptop agent's account (OC-1). The earlier "one blast radius" objection
        does not apply while Hermes delivery stays dormant.
@@ -891,3 +892,4 @@ The P0-10 step-2 record (`docs/evaluations/2026-10-30-p0-10-step-2-results.md`) 
 - **OC-9**: §7 adds "Owner choices, 2026-10-30" with the OC-9 bullet; §0's numbering note, §1's decide paragraph and "Decisions requiring approval" name OC-9 (SR2-R-1).
 - **D-13**: the owner steps replace "`gh auth login --with-token` may refuse a `public_repo` token, untested" with the measured refusal (step-2 record §3.4), point to S5 P0-10 steps 2-3 for the storage mechanism (the owner's choice), and say the real token is minted in step 3 at storage (OC-9). The dormant-delivery sentence says the expired `dentaledge-bot-pat` could not be tried (the file held no value), so its death is not proved by use and is recorded as an exception (step-2 record §4) (SR2-R-2).
 - **§1 bot-token bullet and §6 item 1**: a pointer to the step-2 result (the file held no value; death not proved by use, an exception the owner accepted on 2026-10-30) (SR2-R-5). The OC-1 bullet and the "Existing owner items" PAT line are left as they are.
+- Review round 2 (SR2-R-13): §0's numbering note uses semicolons between the three OC groups, and §6 item 1's step-2 pointer is a plain sentence after the owner-steps list.
