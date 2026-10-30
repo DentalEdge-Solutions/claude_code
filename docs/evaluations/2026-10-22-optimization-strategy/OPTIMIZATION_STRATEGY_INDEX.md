@@ -110,7 +110,7 @@ Bash (P1-16 hardens the proposer and considers the Ads audits); Hermes API key r
 | S6 | independent verifier; repo citations re-checked | V-S6-1 … V-S6-16 | closed; accept |
 | This index | same verifier | V-IX-1 … V-IX-7 | closed; accept |
 | Rounds 2-6 (2026-10-23): D-01 … D-14 review and corrections to S1-S3, S5, S6 and this index | two independent reviewers of D-01 … D-14 (completeness and correctness; alignment with governing rules), then two independent verifiers of the edits (identity, credentials and GitHub; everything else); official GitHub and Claude Code docs re-read; live GitHub settings read-only | R-A-1 … R-A-19, R-B-1 … R-B-18; owner choices OC-1 … OC-4 (OC-3 revised); V2-ID-1 … V2-ID-9, V2-RS-1 … V2-RS-12, V3-ID-1 … V3-ID-5, V3-RS-1 … V3-RS-2, V4-ID-1 … V4-ID-3, V4-RS-1 … V4-RS-2, V5-RS-1 … V5-RS-2, V6-RS-1 | closed; both verifiers accept |
-| Round 7 (2026-10-29): owner choices OC-5 … OC-8 after the P0-10 step-1b record, applied to S5, S6 and this index | one independent reviewer (round 1) | OC-R-1 … OC-R-17 | review round 1 done; answers in this commit; re-review pending |
+| Round 7 (2026-10-29): owner choices OC-5 … OC-8 after the P0-10 step-1b record, applied to S5, S6 and this index | one independent reviewer (rounds 1-2) | OC-R-1 … OC-R-19 | APPROVED; all findings closed by the reviewer |
 
 Each deliverable, and this index, records its corrections in its own "Verification corrections (2026-10-22)" section. Claim counts
 and closures are from the verifiers' returns to the coordinator. Round 2 (2026-10-23): two independent reviews of
@@ -182,5 +182,5 @@ analyst renamed six references in S2 with a single `sed` command (disclosed in S
 ### Round 7 (2026-10-29, owner choices after P0-10 step 1b)
 
 - OC-5 … OC-8: an "Owner choices of 2026-10-29" paragraph is added under the decisions (token, merge restriction, probes (d) and (a)), citing the step-1a and step-1b records; the OC-1 summary says its token type is superseded by OC-5; Limits says both records have returned.
-- Verification (OC-R-13): independent review round 1 done; answers in this commit; re-review pending. The verification record adds a round-7 row.
+- Verification (OC-R-13): independent review rounds 1-2, OC-R-1 … OC-R-19, closed by the reviewer on 2026-10-29. The verification record adds a round-7 row.
 - Review round 1 answers: OC-R-9 (Limits adds the precedence note on S2 OPP-08 and S3 §2.2 / DECISION-S3-1; S2 and S3 not edited); OC-R-12 (the OC-2 summary carries an OC-6 pointer); OC-R-13 (the round-7 verification row); OC-R-14 (OC-7 and OC-8 "reworded after step 1b"). The other findings are answered in S5 and S6.

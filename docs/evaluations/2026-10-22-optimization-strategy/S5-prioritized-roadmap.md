@@ -877,7 +877,7 @@ flowchart LR
    `infra/hermes-agent/.env.pr`, mint the agent token from the bot account (a classic PAT with `public_repo` scope
    only, no `workflow` scope, 90-day expiry, OC-5; it works only while the repository stays public; the org's
    policy does not restrict classic tokens or require their approval, step-1b record §4 [Owner-rep], and if that
-   policy changes, the token choice is re-checked),
+   policy changes, the token choice is re-checked (editor's wording, not the owner's)),
    store it only where the laptop agent's `gh` uses it (`gh auth login --with-token` may refuse a `public_repo`
    token, see P0-10 step 2), and re-run probe (g) at every rotation.
 2. Rulesets (P0-10): first create the review ruleset (`required_approving_review_count: 1`,
@@ -1121,7 +1121,7 @@ accepted; none is disputed. The coordinator's V-S2-16 note (bypass actors are ro
 
 ### Round 7 (2026-10-29, owner choices after P0-10 step 1b)
 
-Four owner choices of 2026-10-29 on the step-1b record's open questions (`docs/evaluations/2026-10-29-p0-10-step-1b-results.md` §8). Verification: independent review round 1 done; answers in this commit; re-review pending.
+Four owner choices of 2026-10-29 on the step-1b record's open questions (`docs/evaluations/2026-10-29-p0-10-step-1b-results.md` §8). Verification: independent review rounds 1-2 on 2026-10-29: OC-R-1 … OC-R-19, closed by the reviewer.
 
 - OC-5 (token; step-1b record §3.2, §3.3, §4, §8 decision (1)): P0-10 step 2 now mints a classic PAT with `public_repo` scope only, no `workflow` scope and a 90-day expiry, in place of "fine-grained first, otherwise classic `repo` without `workflow`"; it cites the measured operations and the workflow refusal, the fine-grained token that could not be minted (the org was not offered as resource owner) and the org's unrestricted classic-PAT policy, and states the dependence on the repository staying public (fail closed if it went private). The ToS §B.3 caveat now describes a `public_repo` token. §0's owner-choice bullet, B5, §2.3 item 1 and Limits match.
 - OC-6 (merge restriction; step-1b record §3.5, §3.6, §3.9, §8 decision (2)): step 5a creates candidate B on `main` as tested (users, teams, apps [], `enforce_admins` false, no other classic settings, with the request body), cites its refusals of every agent-account merge, the owner's working normal and bypass merges, its `authorization` rule in the rule suites and the audit-log entries (owner-reported, 2026-10-29), and notes that "Restrict updates" was not tested; step 1b records the result, so the "if none works" exception is not needed for agent-account merges; rollback removes B. Guards: step 6's runbook rule "the agent account never approves PRs", a new monthly §3 measure counting bot approvals on owner-authored PRs (the approvals-per-PR instrument and the code-owner-approval indicator point to it), and a re-run of probes (b), (d), (e) and (i) on `main` after step 5a. The residual now states that even with B a bot approval satisfies the review rule on owner-authored PRs, so a normal owner merge after it would look reviewed and not count as a bypass merge [Inf, untested]. Team-based required reviewers in rulesets are noted as later and optional, after a docs check and a test. §0 (c), probe (i), step 6's OC-2 text, §2.3 item 2, B5, Trace and Rollback match.
@@ -1151,3 +1151,4 @@ Review round 1 (2026-10-29), the editor's answers to OC-R-1 … OC-R-17; only th
 - OC-R-17: nothing to do.
 
 Coordinator addition (2026-10-29, after review round 1): step 2 and §2.3 item 1 note that `gh auth login --with-token` documents minimum scopes `repo`, `read:org` and `gist` (`gh auth login --help`, gh 2.92.0) [Docs], so it may refuse a `public_repo` token (untested, step-1b record §9); step 1b measured `gh` working through `GH_TOKEN`; the storage mechanism is settled in steps 2-3.
+- Round 2 notes (coordinator, 2026-10-29): OC-R-10 last instance (§2.3 item 1 marked as the editor's wording); OC-R-19 (round-7 status records the review outcome, no "this commit").
